@@ -10,6 +10,7 @@ channel = "stable-24_05"
 [env]
 PYTHONUNBUFFERED = "1"
 PIP_DISABLE_PIP_VERSION_CHECK = "1"
+PIP_USER = "0"
 PORT = "8000"
 
 [deployment]

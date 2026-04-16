@@ -9,6 +9,8 @@ echo "==> Installing backend deps"
 python -m venv backend/.venv
 # shellcheck disable=SC1091
 source backend/.venv/bin/activate
+# Replit sets PIP_USER=1 globally, which breaks pip inside a venv.
+export PIP_USER=0
 pip install --disable-pip-version-check --quiet -r backend/requirements.txt
 
 echo "==> Installing frontend deps"
