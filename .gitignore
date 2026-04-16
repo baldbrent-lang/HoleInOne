@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.local
+
+# Node
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# DB
+*.sqlite3
+*.db
+
+# Logs
+*.log
