@@ -45,7 +45,7 @@ export const api = {
       body: { action, reviewer, note },
       adminKey: key,
     }),
-  courseQrUrl: (id) => `${API_BASE}/api/admin/courses/${id}/qr.png`,
+  courseQrUrl: (token) => `${API_BASE}/api/public/courses/${token}/qr.png`,
   simulateRound: (key, teeTimeId, includeHio) =>
     request(`/api/webhooks/debug/simulate-round`, {
       method: "POST",

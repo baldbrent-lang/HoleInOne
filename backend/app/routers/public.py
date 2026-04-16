@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -16,6 +16,7 @@ from ..schemas import (
     TeeTimeOut,
 )
 from ..services import notifications
+from ..services.qr import generate_qr_png
 from ..services.stripe_service import create_registration_payment_intent
 from ..services.tee_sheet import list_available_tee_times
 from ..config import settings
@@ -33,6 +34,20 @@ def _get_course_by_token(db: Session, token: str) -> Course:
 @router.get("/courses/{course_token}", response_model=PublicCourseOut)
 def course_by_token(course_token: str, db: Session = Depends(get_db)):
     return _get_course_by_token(db, course_token)
+
+
+@router.get("/courses/{course_token}/qr.png")
+def course_qr_png(course_token: str, db: Session = Depends(get_db)):
+    # The QR payload is the public registration URL — no admin auth needed.
+    course = _get_course_by_token(db, course_token)
+    url = f"{settings.app_base_url}/r/{course.qr_token}"
+    png = generate_qr_png(url)
+    filename = f"parone-{course.name.replace(' ', '_')}.png"
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @router.get("/courses/{course_token}/tee-times", response_model=list[TeeTimeOut])

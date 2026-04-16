@@ -155,16 +155,28 @@ export default function Admin() {
                 <td className="muted small">{c.location}</td>
                 <td className="small">{(c.par3_holes || []).join(", ")}</td>
                 <td>
-                  <a href={api.courseQrUrl(c.id)} target="_blank" rel="noreferrer">
+                  <a href={api.courseQrUrl(c.qr_token)} target="_blank" rel="noreferrer">
                     <img
-                      src={`${api.courseQrUrl(c.id)}`}
+                      src={api.courseQrUrl(c.qr_token)}
                       alt="qr"
-                      width={64}
-                      height={64}
-                      onError={(e) => { e.target.style.display = "none"; }}
+                      width={72}
+                      height={72}
+                      style={{ background: "white", padding: 4, borderRadius: 6 }}
                     />
                   </a>
-                  <div className="small muted">/r/{c.qr_token.slice(0, 10)}…</div>
+                  <div style={{ marginTop: 6 }}>
+                    <a
+                      className="btn secondary small"
+                      href={api.courseQrUrl(c.qr_token)}
+                      download={`parone-${c.name.replace(/\s+/g, "_")}.png`}
+                      style={{ textAlign: "center", display: "block", padding: "6px 8px", fontSize: "0.8rem" }}
+                    >
+                      Download QR
+                    </a>
+                  </div>
+                  <div className="small muted" style={{ marginTop: 4 }}>
+                    /r/{c.qr_token.slice(0, 10)}…
+                  </div>
                 </td>
                 <td>
                   <button className="secondary small" onClick={() => simulate(c.qr_token)}>Simulate round</button>

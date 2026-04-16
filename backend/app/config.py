@@ -1,11 +1,22 @@
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_app_base_url() -> str:
+    # Replit sets REPLIT_DEV_DOMAIN automatically — use it so QR codes and
+    # outbound links point at the public URL without manual config.
+    replit_domain = os.environ.get("REPLIT_DEV_DOMAIN")
+    if replit_domain:
+        return f"https://{replit_domain}"
+    return "http://localhost:5173"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "sqlite:///./parone.db"
-    app_base_url: str = "http://localhost:5173"
+    app_base_url: str = _default_app_base_url()
     admin_api_key: str = "dev-admin-key"
 
     stripe_secret_key: str = ""
