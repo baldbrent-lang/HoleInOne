@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Replit entrypoint. Installs deps on first run, builds the frontend,
-# then starts FastAPI serving the API + the built SPA on a single port.
+# Replit entrypoint. Installs deps on first run, rebuilds the frontend on
+# every start (cheap ~1s vite build) so pulled code changes are picked up,
+# then starts FastAPI serving the API + SPA on a single port.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if [ ! -d backend/.venv ] || [ ! -d frontend/node_modules ] || [ ! -d frontend/dist ]; then
+# First-time deps install
+if [ ! -d backend/.venv ] || [ ! -d frontend/node_modules ]; then
   bash build.sh
 fi
 
 # shellcheck disable=SC1091
 source backend/.venv/bin/activate
+
+# Always rebuild the SPA so new JSX is served after `git pull`.
+echo "==> Rebuilding frontend"
+(cd frontend && npm run build --silent)
 
 : "${PORT:=8000}"
 
