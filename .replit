@@ -11,7 +11,7 @@ channel = "stable-24_05"
 PYTHONUNBUFFERED = "1"
 PIP_DISABLE_PIP_VERSION_CHECK = "1"
 PIP_USER = "0"
-PORT = "8000"
+PORT = "5000"
 
 [deployment]
 deploymentTarget = "cloudrun"
@@ -19,5 +19,5 @@ run = ["bash", "start.sh"]
 build = ["bash", "build.sh"]
 
 [[ports]]
-localPort = 8000
+localPort = 5000
 externalPort = 80
