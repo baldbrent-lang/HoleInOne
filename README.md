@@ -20,7 +20,32 @@ docker-compose.yml  Postgres + backend + frontend
 
 ## Running locally
 
-### Option A — docker compose
+### Option A — Replit (single Repl)
+
+1. Import this repo into Replit. `.replit` + `replit.nix` are already in
+   the project, so Replit will install Python 3.12 and Node 20.
+2. Click **Run**. `start.sh` will:
+   - `pip install` backend deps into `backend/.venv`
+   - `npm install` + `npm run build` the frontend into `frontend/dist`
+   - boot Uvicorn on `$PORT` (default 8000, mapped to port 80 publicly)
+   - serve the API **and** the built SPA on the same origin
+3. Open the webview URL. The SPA lives at `/`, the API at `/api/...`,
+   OpenAPI docs at `/docs`.
+
+Set Secrets (Replit → Tools → Secrets) for any external integrations
+you want to light up:
+
+- `DATABASE_URL` — e.g. Replit Postgres, Neon, Supabase. Omit to use
+  SQLite at `backend/parone.db`.
+- `APP_BASE_URL` — your Repl's public URL
+  (`https://<repl-name>.<user>.repl.co`)
+- `ADMIN_API_KEY`
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
+- `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`
+- `SHOT_TRACER_WEBHOOK_SECRET`
+
+### Option B — docker compose
 
 ```bash
 docker compose up --build
@@ -29,7 +54,7 @@ docker compose up --build
 - Backend: http://localhost:8000 (docs at `/docs`)
 - Frontend: http://localhost:5173
 
-### Option B — native
+### Option C — native
 
 ```bash
 # Backend

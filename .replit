@@ -1,0 +1,22 @@
+entrypoint = "start.sh"
+modules = ["python-3.12", "nodejs-20"]
+hidden = [".venv", "node_modules", "frontend/dist", "parone.db", "__pycache__"]
+
+run = "bash start.sh"
+
+[nix]
+channel = "stable-24_05"
+
+[env]
+PYTHONUNBUFFERED = "1"
+PIP_DISABLE_PIP_VERSION_CHECK = "1"
+PORT = "8000"
+
+[deployment]
+deploymentTarget = "cloudrun"
+run = ["bash", "start.sh"]
+build = ["bash", "build.sh"]
+
+[[ports]]
+localPort = 8000
+externalPort = 80

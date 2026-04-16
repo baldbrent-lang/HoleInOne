@@ -1,4 +1,8 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+// In a production build (e.g. Replit), the API is served from the same
+// origin as the SPA, so the base URL is empty. In local dev the Vite
+// server runs on a different port, so fall back to localhost:8000.
+const API_BASE =
+  import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "http://localhost:8000" : "");
 
 async function request(path, { method = "GET", body, adminKey } = {}) {
   const headers = { "Content-Type": "application/json" };
