@@ -10,6 +10,7 @@ class CourseCreate(BaseModel):
     name: str
     location: str = ""
     par3_holes: list[int] = Field(default_factory=list)
+    hole_yardages: dict[str, int] = Field(default_factory=dict)
     minutes_per_hole: int = 14
     tee_sheet_provider: str = "mock"
     tee_sheet_config: dict = Field(default_factory=dict)
@@ -20,6 +21,7 @@ class CourseUpdate(BaseModel):
     name: Optional[str] = None
     location: Optional[str] = None
     par3_holes: Optional[list[int]] = None
+    hole_yardages: Optional[dict[str, int]] = None
     minutes_per_hole: Optional[int] = None
     livestream_url: Optional[str] = None
 
@@ -29,6 +31,7 @@ class CourseOut(BaseModel):
     name: str
     location: str
     par3_holes: list[int]
+    hole_yardages: dict[str, int] = Field(default_factory=dict)
     minutes_per_hole: int
     qr_token: str
     tee_sheet_provider: str
@@ -43,6 +46,7 @@ class PublicCourseOut(BaseModel):
     name: str
     location: str
     livestream_url: Optional[str] = None
+    hole_yardages: dict[str, int] = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -86,7 +90,7 @@ class RegistrationResult(BaseModel):
 class ParticipantOut(BaseModel):
     id: int
     name: str
-    playing_order: int
+    playing_order: Optional[int] = None
     paid: bool
     gallery_token: str
 
@@ -115,6 +119,7 @@ class GalleryOut(BaseModel):
     participant: ParticipantOut
     course_name: str
     livestream_url: Optional[str] = None
+    hole_yardages: dict[str, int] = Field(default_factory=dict)
     clips: list[ClipOut]
 
 

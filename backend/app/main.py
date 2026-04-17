@@ -55,6 +55,8 @@ def _migrate() -> None:
         course_cols = {c["name"] for c in inspector.get_columns("courses")}
         if "livestream_url" not in course_cols:
             statements.append("ALTER TABLE courses ADD COLUMN livestream_url VARCHAR(500)")
+        if "hole_yardages" not in course_cols:
+            statements.append("ALTER TABLE courses ADD COLUMN hole_yardages JSON")
 
     if not statements:
         return

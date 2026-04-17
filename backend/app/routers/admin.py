@@ -43,6 +43,7 @@ def create_course(payload: CourseCreate, db: Session = Depends(get_db)):
         name=payload.name,
         location=payload.location,
         par3_holes=payload.par3_holes,
+        hole_yardages=payload.hole_yardages or {},
         minutes_per_hole=payload.minutes_per_hole,
         tee_sheet_provider=payload.tee_sheet_provider,
         tee_sheet_config=payload.tee_sheet_config,
@@ -215,28 +216,37 @@ def participant_clips(participant_id: int, db: Session = Depends(get_db)):
     p = db.get(Participant, participant_id)
     if not p:
         raise HTTPException(404, "participant not found")
+    course = db.get(Course, p.tee_time.course_id) if p.tee_time else None
     clips = (
         db.query(VideoClip)
         .filter(VideoClip.participant_id == p.id)
         .order_by(VideoClip.hole_number.asc(), VideoClip.captured_at.asc())
         .all()
     )
-    return [
-        {
-            "id": c.id,
-            "hole_number": c.hole_number,
-            "camera_type": c.camera_type,
-            "captured_at": c.captured_at,
-            "source_url": c.source_url,
-            "thumbnail_url": c.thumbnail_url,
-            "carry_yards": c.carry_yards,
-            "apex_feet": c.apex_feet,
-            "ball_speed_mph": c.ball_speed_mph,
-            "processing_status": c.processing_status,
-            "ball_in_cup": c.ball_in_cup,
-        }
-        for c in clips
-    ]
+    return {
+        "participant": {"id": p.id, "name": p.name},
+        "course": {
+            "id": course.id if course else None,
+            "name": course.name if course else "",
+            "hole_yardages": (course.hole_yardages or {}) if course else {},
+        },
+        "clips": [
+            {
+                "id": c.id,
+                "hole_number": c.hole_number,
+                "camera_type": c.camera_type,
+                "captured_at": c.captured_at,
+                "source_url": c.source_url,
+                "thumbnail_url": c.thumbnail_url,
+                "carry_yards": c.carry_yards,
+                "apex_feet": c.apex_feet,
+                "ball_speed_mph": c.ball_speed_mph,
+                "processing_status": c.processing_status,
+                "ball_in_cup": c.ball_in_cup,
+            }
+            for c in clips
+        ],
+    }
 
 
 @router.post("/participants/{participant_id}/resend-gallery")

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import ClipPlayer from "../components/ClipPlayer.jsx";
 
 export default function Gallery() {
   const { galleryToken } = useParams();
@@ -114,33 +115,37 @@ export default function Gallery() {
             <span className="hole-badge">{h}</span>
             Hole {h}
           </h3>
-          {byHole[h].map((c) => (
-            <div key={c.id} className="clip">
-              <div
-                className={`thumb ${c.ball_in_cup ? "hio" : ""}`}
-                style={c.thumbnail_url ? { backgroundImage: `url(${c.thumbnail_url})` } : {}}
-              />
-              <div className="meta">
-                <b style={{ textTransform: "capitalize" }}>{c.camera_type.replace("_", " ")}</b>
-                <div className="stats">
-                  {c.carry_yards ? `${c.carry_yards} yds` : null}
-                  {c.apex_feet ? `  ·  ${c.apex_feet} ft apex` : null}
-                  {c.ball_speed_mph ? `  ·  ${c.ball_speed_mph} mph` : null}
-                </div>
-                <div className="actions">
-                  <a className="btn small" href={c.source_url} download>
-                    <Icon name="download" size={14} /> Save
-                  </a>
-                  <button className="secondary small" onClick={() => share(c)}>
-                    <Icon name="share" size={14} /> Share
-                  </button>
-                  <button className="ghost small" onClick={() => flag(c.id)}>
-                    <Icon name="flag" size={14} /> Flag
-                  </button>
+          <div className="stack">
+            {byHole[h].map((c) => (
+              <div key={c.id}>
+                <ClipPlayer
+                  clip={c}
+                  courseName={data.course_name}
+                  golferName={data.participant.name}
+                  yardage={data.hole_yardages?.[String(c.hole_number)]}
+                />
+                <div className="inline" style={{ justifyContent: "space-between", marginTop: 8, flexWrap: "wrap", gap: 8 }}>
+                  <div className="small muted" style={{ textTransform: "capitalize" }}>
+                    {c.camera_type.replace("_", " ")}
+                    {c.carry_yards ? `  ·  ${c.carry_yards} yd carry` : ""}
+                    {c.apex_feet ? `  ·  ${c.apex_feet} ft apex` : ""}
+                    {c.ball_speed_mph ? `  ·  ${c.ball_speed_mph} mph` : ""}
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <a className="btn secondary small" href={c.source_url} download>
+                      <Icon name="download" size={14} /> Save
+                    </a>
+                    <button className="secondary small" onClick={() => share(c)}>
+                      <Icon name="share" size={14} /> Share
+                    </button>
+                    <button className="ghost small" onClick={() => flag(c.id)}>
+                      <Icon name="flag" size={14} /> Flag
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       ))}
 

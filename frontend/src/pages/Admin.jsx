@@ -21,7 +21,7 @@ export default function Admin() {
 
   const [newName, setNewName] = useState("");
   const [newLocation, setNewLocation] = useState("");
-  const [newPar3s, setNewPar3s] = useState("3,7,12,16");
+  const [newPar3s, setNewPar3s] = useState("3:173, 7:165, 12:205, 16:192");
   const [newMinutes, setNewMinutes] = useState(14);
   const [newLivestream, setNewLivestream] = useState("");
 
@@ -42,10 +42,12 @@ export default function Admin() {
   async function createCourse(e) {
     e.preventDefault();
     try {
+      const parsed = parseHolesAndYards(newPar3s);
       await api.createCourse(adminPassword, {
         name: newName,
         location: newLocation,
-        par3_holes: newPar3s.split(",").map((s) => Number(s.trim())).filter(Boolean),
+        par3_holes: parsed.holes,
+        hole_yardages: parsed.yardages,
         minutes_per_hole: Number(newMinutes),
         tee_sheet_provider: "mock",
         tee_sheet_config: {},
@@ -189,7 +191,9 @@ export default function Admin() {
                     <b>{c.name}</b>
                     <div className="small muted">{c.location || "—"}</div>
                   </td>
-                  <td className="small">{(c.par3_holes || []).join(", ")}</td>
+                  <td className="small">
+                    <ParThreeEditor course={c} adminPassword={adminPassword} onSaved={(msg) => { showToast(msg); load(); }} />
+                  </td>
                   <td>
                     <div className="qr-block">
                       <a href={api.courseQrUrl(c.qr_token)} target="_blank" rel="noreferrer">
@@ -237,7 +241,11 @@ export default function Admin() {
           <div className="field"><label>Location</label><input value={newLocation} onChange={(e) => setNewLocation(e.target.value)} placeholder="Pebble Beach, CA" /></div>
         </div>
         <div className="row">
-          <div className="field"><label>Par-3 holes</label><input value={newPar3s} onChange={(e) => setNewPar3s(e.target.value)} placeholder="3, 7, 12, 16" /></div>
+          <div className="field">
+            <label>Par-3 holes + yardages</label>
+            <input value={newPar3s} onChange={(e) => setNewPar3s(e.target.value)} placeholder="3:173, 7:165, 12:205, 16:192" />
+            <div className="hint small muted">Format: <code>hole:yards</code>, comma-separated. Yards optional.</div>
+          </div>
           <div className="field"><label>Minutes per hole</label><input type="number" value={newMinutes} onChange={(e) => setNewMinutes(e.target.value)} /></div>
         </div>
         <div className="field">
@@ -308,6 +316,88 @@ export default function Admin() {
       </div>
 
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+function parseHolesAndYards(text) {
+  const holes = [];
+  const yardages = {};
+  for (const raw of text.split(",")) {
+    const piece = raw.trim();
+    if (!piece) continue;
+    const [h, y] = piece.split(":").map((s) => s.trim());
+    const hole = Number(h);
+    if (!hole) continue;
+    holes.push(hole);
+    if (y) {
+      const yards = Number(y);
+      if (yards) yardages[String(hole)] = yards;
+    }
+  }
+  return { holes, yardages };
+}
+
+function formatHolesAndYards(holes = [], yardages = {}) {
+  return holes
+    .map((h) => {
+      const y = yardages[String(h)];
+      return y ? `${h}:${y}` : String(h);
+    })
+    .join(", ");
+}
+
+function ParThreeEditor({ course, adminPassword, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const initial = formatHolesAndYards(course.par3_holes, course.hole_yardages);
+  const [value, setValue] = useState(initial);
+  const [saving, setSaving] = useState(false);
+
+  if (!editing) {
+    return (
+      <button
+        className="ghost small"
+        onClick={() => { setValue(initial); setEditing(true); }}
+        style={{ width: "auto", padding: 0 }}
+        title="Edit par-3 holes and yardages"
+      >
+        {initial || <span className="muted">none</span>} ✎
+      </button>
+    );
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const parsed = parseHolesAndYards(value);
+      await api.updateCourse(adminPassword, course.id, {
+        par3_holes: parsed.holes,
+        hole_yardages: parsed.yardages,
+      });
+      setEditing(false);
+      onSaved?.("Par-3s updated");
+    } catch (e) {
+      onSaved?.(`Error: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="3:173, 7:165, 12:205"
+        style={{ fontSize: "0.8rem", padding: "6px 8px" }}
+        autoFocus
+      />
+      <div style={{ display: "flex", gap: 4 }}>
+        <button className="small" onClick={save} disabled={saving} style={{ flex: 1 }}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button className="ghost small" onClick={() => setEditing(false)}>Cancel</button>
+      </div>
     </div>
   );
 }

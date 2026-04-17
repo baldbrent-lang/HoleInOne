@@ -55,6 +55,7 @@ class Course(Base):
     name: Mapped[str] = mapped_column(String(200))
     location: Mapped[str] = mapped_column(String(200), default="")
     par3_holes: Mapped[list] = mapped_column(JSON, default=list)  # e.g. [3, 7, 12, 16]
+    hole_yardages: Mapped[dict] = mapped_column(JSON, default=dict)  # {"3": 173, "7": 165}
     minutes_per_hole: Mapped[int] = mapped_column(Integer, default=14)
     qr_token: Mapped[str] = mapped_column(String(64), unique=True, default=lambda: _token("c_"))
     tee_sheet_provider: Mapped[str] = mapped_column(String(40), default="mock")  # foreup|lightspeed|mock

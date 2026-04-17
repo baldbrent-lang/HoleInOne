@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import ClipPlayer from "../components/ClipPlayer.jsx";
 
 const ADMIN_PW_STORAGE = "parone.adminPassword";
 
@@ -13,7 +14,7 @@ export default function AdminParticipants() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState(null); // participant for clip drawer
-  const [clips, setClips] = useState(null);
+  const [clipData, setClipData] = useState(null); // {course, participant, clips}
   const [toast, setToast] = useState(null);
 
   const filters = useMemo(
@@ -70,12 +71,12 @@ export default function AdminParticipants() {
 
   async function openClips(p) {
     setSelected(p);
-    setClips(null);
+    setClipData(null);
     try {
-      const c = await api.participantClips(adminPassword, p.id);
-      setClips(c);
+      const data = await api.participantClips(adminPassword, p.id);
+      setClipData(data);
     } catch (e) {
-      setClips([]);
+      setClipData({ clips: [], course: {}, participant: {} });
       showToast(`Error: ${e.message}`);
     }
   }
@@ -273,35 +274,22 @@ export default function AdminParticipants() {
         <div className="card" style={{ marginTop: 18 }}>
           <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 12 }}>
             <h3>Clips for {selected.name}</h3>
-            <button className="ghost small" onClick={() => { setSelected(null); setClips(null); }}>Close</button>
+            <button className="ghost small" onClick={() => { setSelected(null); setClipData(null); }}>Close</button>
           </div>
-          {!clips ? (
+          {!clipData ? (
             <div className="shimmer" style={{ height: 80 }} />
-          ) : clips.length === 0 ? (
+          ) : clipData.clips.length === 0 ? (
             <div className="muted small">No clips yet for this golfer.</div>
           ) : (
-            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
-              {clips.map((c) => (
+            <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+              {clipData.clips.map((c) => (
                 <div key={c.id} className="card tight" style={{ margin: 0 }}>
-                  <div
-                    style={{
-                      aspectRatio: "16/9",
-                      background: c.thumbnail_url
-                        ? `url(${c.thumbnail_url}) center/cover`
-                        : "linear-gradient(135deg, var(--navy-800), var(--navy-600))",
-                      borderRadius: 8,
-                      position: "relative",
-                    }}
-                  >
-                    {c.ball_in_cup && (
-                      <span
-                        className="pill"
-                        style={{ position: "absolute", top: 6, right: 6, background: "var(--emerald-500)", color: "white" }}
-                      >
-                        ACE
-                      </span>
-                    )}
-                  </div>
+                  <ClipPlayer
+                    clip={c}
+                    courseName={clipData.course?.name}
+                    golferName={clipData.participant?.name}
+                    yardage={clipData.course?.hole_yardages?.[String(c.hole_number)]}
+                  />
                   <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginTop: 8 }}>
                     <b>Hole {c.hole_number}</b>
                     <span className={`pill ${c.processing_status === "assigned" ? "ok" : c.processing_status === "flagged" ? "err" : "warn"}`}>
@@ -310,16 +298,8 @@ export default function AdminParticipants() {
                   </div>
                   <div className="small muted" style={{ marginTop: 4 }}>
                     {c.camera_type.replace("_", " ")}
-                    {c.carry_yards ? ` · ${c.carry_yards} yds` : ""}
+                    {c.carry_yards ? ` · ${c.carry_yards} yd carry` : ""}
                     {c.ball_speed_mph ? ` · ${c.ball_speed_mph} mph` : ""}
-                  </div>
-                  <div className="row" style={{ marginTop: 8 }}>
-                    <a className="btn secondary small" href={c.source_url} target="_blank" rel="noreferrer">
-                      <Icon name="capture" size={12} /> Watch
-                    </a>
-                    <a className="btn ghost small" href={c.source_url} download>
-                      <Icon name="download" size={12} /> Save
-                    </a>
                   </div>
                 </div>
               ))}
