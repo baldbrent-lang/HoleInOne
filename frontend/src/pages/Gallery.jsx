@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api.js";
+import { Brand, Icon } from "../components/Brand.jsx";
 
 export default function Gallery() {
   const { galleryToken } = useParams();
@@ -18,6 +19,7 @@ export default function Gallery() {
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [galleryToken]);
 
   async function flag(clipId) {
@@ -25,12 +27,11 @@ export default function Gallery() {
     if (!note) return;
     try {
       await api.flagClip(galleryToken, clipId, note);
-      setToast("Flagged for review. Thanks.");
+      showToast("Flagged for review. Thanks.");
       load();
     } catch (e) {
-      setToast(`Error: ${e.message}`);
+      showToast(`Error: ${e.message}`);
     }
-    setTimeout(() => setToast(null), 2500);
   }
 
   function share(clip) {
@@ -39,18 +40,20 @@ export default function Gallery() {
       navigator.share({ title: "My Par One shot", url }).catch(() => {});
     } else {
       navigator.clipboard?.writeText(url);
-      setToast("Link copied to clipboard");
-      setTimeout(() => setToast(null), 2000);
+      showToast("Link copied to clipboard");
     }
+  }
+
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2200);
   }
 
   if (error) {
     return (
       <div className="wrap">
-        <div className="card">
-          <h1>Gallery not found</h1>
-          <p className="muted small">{error}</p>
-        </div>
+        <Brand />
+        <div className="card"><h2>Gallery not found</h2><p className="small muted">{error}</p></div>
       </div>
     );
   }
@@ -58,7 +61,9 @@ export default function Gallery() {
   if (!data) {
     return (
       <div className="wrap">
-        <div className="card muted">Loading your gallery…</div>
+        <Brand />
+        <div className="card"><div className="shimmer" style={{ height: 120 }} /></div>
+        <div className="card"><div className="shimmer" style={{ height: 120 }} /></div>
       </div>
     );
   }
@@ -69,27 +74,35 @@ export default function Gallery() {
     return acc;
   }, {});
   const holes = Object.keys(byHole).sort((a, b) => Number(a) - Number(b));
+  const hasHIO = data.clips.some((c) => c.ball_in_cup);
 
   return (
     <div className="wrap">
-      <div className="brand">
-        <div className="dot" />
-        <h1>Par One</h1>
-      </div>
-      <div className="card">
-        <h2>{data.participant.name}'s shots</h2>
-        <p className="muted small">{data.course_name}</p>
+      <Brand />
+
+      <div className="hero" style={{ padding: "28px 24px" }}>
+        <span className="eyebrow"><Icon name="flag" size={14} /> {data.course_name}</span>
+        <h1 style={{ fontSize: "clamp(1.6rem, 3.2vw, 2.2rem)" }}>
+          {data.participant.name}'s par-3s
+        </h1>
+        <p>{data.clips.length} clip{data.clips.length === 1 ? "" : "s"} · {holes.length} hole{holes.length === 1 ? "" : "s"}{hasHIO && " · possible ace under review"}</p>
       </div>
 
       {holes.length === 0 && (
-        <div className="card muted">
-          No clips yet — we'll text you the moment they're ready.
+        <div className="card center" style={{ padding: 28 }}>
+          <div className="muted inline" style={{ margin: "0 auto 8px" }}>
+            <Icon name="clock" size={18} /> Still processing
+          </div>
+          <p className="muted small">We'll text the moment your clips are ready.</p>
         </div>
       )}
 
       {holes.map((h) => (
-        <div key={h} className="card">
-          <h3>Hole {h}</h3>
+        <div key={h} className="gallery-hole">
+          <h3>
+            <span className="hole-badge">{h}</span>
+            Hole {h}
+          </h3>
           {byHole[h].map((c) => (
             <div key={c.id} className="clip">
               <div
@@ -97,19 +110,22 @@ export default function Gallery() {
                 style={c.thumbnail_url ? { backgroundImage: `url(${c.thumbnail_url})` } : {}}
               />
               <div className="meta">
-                <b>{c.camera_type.replace("_", " ")}</b>
-                {c.ball_in_cup && <span className="pill warn" style={{ marginLeft: 6 }}>HIO review</span>}
+                <b style={{ textTransform: "capitalize" }}>{c.camera_type.replace("_", " ")}</b>
                 <div className="stats">
-                  {c.carry_yards ? `${c.carry_yards} yds · ` : ""}
-                  {c.apex_feet ? `${c.apex_feet} ft apex · ` : ""}
-                  {c.ball_speed_mph ? `${c.ball_speed_mph} mph` : ""}
+                  {c.carry_yards ? `${c.carry_yards} yds` : null}
+                  {c.apex_feet ? `  ·  ${c.apex_feet} ft apex` : null}
+                  {c.ball_speed_mph ? `  ·  ${c.ball_speed_mph} mph` : null}
                 </div>
-                <div className="row" style={{ marginTop: 8 }}>
-                  <a className="btn" href={c.source_url} download style={{ textAlign: "center" }}>
-                    Download
+                <div className="actions">
+                  <a className="btn small" href={c.source_url} download>
+                    <Icon name="download" size={14} /> Save
                   </a>
-                  <button className="secondary" onClick={() => share(c)}>Share</button>
-                  <button className="secondary" onClick={() => flag(c.id)}>Flag</button>
+                  <button className="secondary small" onClick={() => share(c)}>
+                    <Icon name="share" size={14} /> Share
+                  </button>
+                  <button className="ghost small" onClick={() => flag(c.id)}>
+                    <Icon name="flag" size={14} /> Flag
+                  </button>
                 </div>
               </div>
             </div>

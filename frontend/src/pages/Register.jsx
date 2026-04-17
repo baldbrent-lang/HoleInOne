@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
+import { Brand, Icon } from "../components/Brand.jsx";
 import SelfieCamera from "../components/SelfieCamera.jsx";
 
 export default function Register() {
@@ -37,7 +38,7 @@ export default function Register() {
   function onSelfiePicked(file) {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      setError("Selfie must be an image.");
+      setError("That doesn't look like a photo. Try again?");
       return;
     }
     setError(null);
@@ -53,8 +54,8 @@ export default function Register() {
     setSubmitting(true);
     setError(null);
     try {
-      if (!mobile && !email) throw new Error("Enter a mobile number or an email.");
-      if (!selfieFile) throw new Error("Please take a selfie so we can match your shots.");
+      if (!mobile && !email) throw new Error("Enter a mobile number or an email so we can text you your clips.");
+      if (!selfieFile) throw new Error("Please take an outfit photo so we can match your shots.");
 
       const fd = new FormData();
       fd.append("course_token", courseToken);
@@ -77,9 +78,10 @@ export default function Register() {
   if (error && !course) {
     return (
       <div className="wrap">
+        <Brand />
         <div className="card">
-          <h1>Couldn't load course</h1>
-          <p className="muted">{error}</p>
+          <h2>Couldn't load this course</h2>
+          <p className="muted small">{error}</p>
         </div>
       </div>
     );
@@ -88,20 +90,20 @@ export default function Register() {
   if (!course) {
     return (
       <div className="wrap">
-        <div className="card muted">Loading…</div>
+        <Brand />
+        <div className="card"><div className="shimmer" style={{ height: 140 }} /></div>
       </div>
     );
   }
 
   return (
     <div className="wrap">
-      <div className="brand">
-        <div className="dot" />
-        <h1>Par One</h1>
-      </div>
-      <div className="card">
-        <h2>{course.name}</h2>
-        <p className="muted small">{course.location}</p>
+      <Brand />
+
+      <div className="hero" style={{ padding: "28px 24px" }}>
+        <span className="eyebrow"><Icon name="flag" size={14} /> {course.name}</span>
+        <h1 style={{ fontSize: "clamp(1.6rem, 3.2vw, 2.1rem)" }}>Let's get your shots on tape.</h1>
+        <p style={{ fontSize: "0.95rem" }}>{course.location}</p>
       </div>
 
       <form className="card" onSubmit={submit}>
@@ -119,22 +121,22 @@ export default function Register() {
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@email.com" />
           </div>
         </div>
+        <div className="hint small muted" style={{ margin: "-8px 0 14px" }}>
+          We'll text or email when your gallery's ready. At least one required.
+        </div>
 
         <div className="field">
           <label>Tee time</label>
           <select required value={teeTimeId} onChange={(e) => setTeeTimeId(e.target.value)}>
-            <option value="">Select a tee time…</option>
+            <option value="">Pick your tee time…</option>
             {teeTimes.map((tt) => {
               const full = tt.spots_taken >= tt.max_players;
               const label = new Date(tt.starts_at).toLocaleString([], {
-                month: "short",
-                day: "numeric",
-                hour: "numeric",
-                minute: "2-digit",
+                month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
               });
               return (
                 <option key={tt.id} value={tt.id} disabled={full}>
-                  {label} {full ? "(full)" : `(${tt.spots_taken}/${tt.max_players})`}
+                  {label} {full ? "(full)" : `· ${tt.spots_taken}/${tt.max_players}`}
                 </option>
               );
             })}
@@ -144,45 +146,45 @@ export default function Register() {
         <div className="field">
           <label>Group size</label>
           <select value={groupSize} onChange={(e) => setGroupSize(e.target.value)}>
-            {[1, 2, 3, 4].map((n) => (
-              <option key={n} value={n}>{n}</option>
-            ))}
+            {[1, 2, 3, 4].map((n) => (<option key={n} value={n}>{n}</option>))}
           </select>
         </div>
 
         <div className="field">
-          <label>Outfit photo (so we can match your shots)</label>
-          <p className="muted small" style={{ margin: "0 0 8px" }}>
-            Hand your phone to a friend (or use a mirror) — full outfit in frame
-            from head to toe. Hat, shirt, pants, shoes.
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Icon name="camera" size={16} /> Outfit photo
+          </label>
+          <p className="hint">
+            Hand your phone to a friend or use a mirror — head to toe, full outfit visible.
+            We use this to pick your shots out of the footage.
           </p>
           {cameraOpen ? (
-            <SelfieCamera
-              onCapture={onSelfiePicked}
-              onCancel={() => setCameraOpen(false)}
-            />
+            <SelfieCamera onCapture={onSelfiePicked} onCancel={() => setCameraOpen(false)} />
           ) : selfiePreview ? (
-            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-              <img
-                src={selfiePreview}
-                alt="outfit preview"
-                style={{ width: 96, height: 144, objectFit: "cover", borderRadius: 12, border: "1px solid #26543a" }}
-              />
-              <button type="button" className="secondary" onClick={() => setCameraOpen(true)}>
-                Retake
+            <div className="selfie-preview">
+              <img src={selfiePreview} alt="outfit preview" />
+              <div style={{ flex: 1 }}>
+                <div className="ok-text inline"><Icon name="check" size={16} /> Looks great</div>
+                <div className="small muted">We'll match clips to this outfit.</div>
+              </div>
+              <button type="button" className="secondary small" onClick={() => setCameraOpen(true)}>
+                <Icon name="retake" size={14} /> Retake
               </button>
             </div>
           ) : (
             <button type="button" onClick={() => setCameraOpen(true)}>
-              Open camera
+              <Icon name="camera" size={16} /> Open camera
             </button>
           )}
         </div>
 
-        <p className="muted small" style={{ marginBottom: 12 }}>
-          $20 registration — charged now. You'll get a text/email when your videos are ready.
-        </p>
-        {error && <p style={{ color: "var(--danger)" }} className="small">{error}</p>}
+        <div className="divider" />
+        <div className="inline" style={{ justifyContent: "space-between", marginBottom: 14, width: "100%" }}>
+          <span className="small muted"><Icon name="lock" size={14} /> Secure Stripe checkout</span>
+          <span className="inline" style={{ fontWeight: 600 }}>$20</span>
+        </div>
+
+        {error && <p className="err-text small">{error}</p>}
         <button disabled={submitting || !teeTimeId || !name || !selfieFile}>
           {submitting ? "Processing…" : "Pay $20 and register"}
         </button>

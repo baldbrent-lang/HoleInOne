@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Icon } from "./Brand.jsx";
 
 /**
  * In-page camera capture optimised for full-outfit golfer selfies.
@@ -143,10 +144,10 @@ export default function SelfieCamera({ onCapture, onCancel }) {
           className="secondary"
           title="Flip camera"
         >
-          Flip
+          <Icon name="flip" size={16} /> Flip
         </button>
         <button type="button" disabled={!ready} onClick={capture}>
-          {ready ? "Capture" : "Loading…"}
+          <Icon name="capture" size={16} /> {ready ? "Capture" : "Loading…"}
         </button>
       </div>
 
