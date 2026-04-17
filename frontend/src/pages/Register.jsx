@@ -106,6 +106,17 @@ export default function Register() {
         <p style={{ fontSize: "0.95rem" }}>{course.location}</p>
       </div>
 
+      {course.livestream_url && (
+        <a href={course.livestream_url} target="_blank" rel="noreferrer" className="live-banner" style={{ textDecoration: "none" }}>
+          <span className="dot" />
+          <div>
+            <div className="label">Live now</div>
+            <div className="small">Watch the course livestream while you wait.</div>
+          </div>
+          <span>Watch →</span>
+        </a>
+      )}
+
       <form className="card" onSubmit={submit}>
         <div className="field">
           <label>Your name</label>

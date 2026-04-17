@@ -13,6 +13,15 @@ class CourseCreate(BaseModel):
     minutes_per_hole: int = 14
     tee_sheet_provider: str = "mock"
     tee_sheet_config: dict = Field(default_factory=dict)
+    livestream_url: Optional[str] = None
+
+
+class CourseUpdate(BaseModel):
+    name: Optional[str] = None
+    location: Optional[str] = None
+    par3_holes: Optional[list[int]] = None
+    minutes_per_hole: Optional[int] = None
+    livestream_url: Optional[str] = None
 
 
 class CourseOut(BaseModel):
@@ -23,6 +32,7 @@ class CourseOut(BaseModel):
     minutes_per_hole: int
     qr_token: str
     tee_sheet_provider: str
+    livestream_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -32,6 +42,7 @@ class PublicCourseOut(BaseModel):
     id: int
     name: str
     location: str
+    livestream_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -103,6 +114,7 @@ class ClipOut(BaseModel):
 class GalleryOut(BaseModel):
     participant: ParticipantOut
     course_name: str
+    livestream_url: Optional[str] = None
     clips: list[ClipOut]
 
 

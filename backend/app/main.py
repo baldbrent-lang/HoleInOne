@@ -49,6 +49,13 @@ def _migrate() -> None:
         po = cols_info.get("playing_order")
         if po is not None and po.get("nullable") is False:
             statements.append("ALTER TABLE participants ALTER COLUMN playing_order DROP NOT NULL")
+
+    # Course additions
+    if "courses" in inspector.get_table_names():
+        course_cols = {c["name"] for c in inspector.get_columns("courses")}
+        if "livestream_url" not in course_cols:
+            statements.append("ALTER TABLE courses ADD COLUMN livestream_url VARCHAR(500)")
+
     if not statements:
         return
     with engine.begin() as conn:

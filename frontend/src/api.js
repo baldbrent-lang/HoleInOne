@@ -45,6 +45,7 @@ export const api = {
 
   listCourses: (key) => request(`/api/admin/courses`, { adminPassword: key }),
   createCourse: (key, payload) => request(`/api/admin/courses`, { method: "POST", body: payload, adminPassword: key }),
+  updateCourse: (key, id, payload) => request(`/api/admin/courses/${id}`, { method: "PATCH", body: payload, adminPassword: key }),
   stats: (key) => request(`/api/admin/stats`, { adminPassword: key }),
   flaggedClips: (key) => request(`/api/admin/flagged-clips`, { adminPassword: key }),
   listParticipants: (key, params = {}) => {

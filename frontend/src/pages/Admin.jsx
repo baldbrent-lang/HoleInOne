@@ -23,6 +23,7 @@ export default function Admin() {
   const [newLocation, setNewLocation] = useState("");
   const [newPar3s, setNewPar3s] = useState("3,7,12,16");
   const [newMinutes, setNewMinutes] = useState(14);
+  const [newLivestream, setNewLivestream] = useState("");
 
   async function load(key = adminPassword) {
     try {
@@ -48,8 +49,9 @@ export default function Admin() {
         minutes_per_hole: Number(newMinutes),
         tee_sheet_provider: "mock",
         tee_sheet_config: {},
+        livestream_url: newLivestream.trim() || null,
       });
-      setNewName(""); setNewLocation("");
+      setNewName(""); setNewLocation(""); setNewLivestream("");
       showToast("Course added");
       load();
     } catch (e) { setError(e.message); }
@@ -206,6 +208,7 @@ export default function Admin() {
                   </td>
                   <td>
                     <div className="stack" style={{ gap: 6 }}>
+                      <LivestreamEditor course={c} adminPassword={adminPassword} onSaved={(msg) => { showToast(msg); load(); }} />
                       <Link className="btn secondary small" to={`/admin/participants?course_id=${c.id}`} style={{ textAlign: "center" }}>
                         <Icon name="users" size={14} /> View participants
                       </Link>
@@ -236,6 +239,15 @@ export default function Admin() {
         <div className="row">
           <div className="field"><label>Par-3 holes</label><input value={newPar3s} onChange={(e) => setNewPar3s(e.target.value)} placeholder="3, 7, 12, 16" /></div>
           <div className="field"><label>Minutes per hole</label><input type="number" value={newMinutes} onChange={(e) => setNewMinutes(e.target.value)} /></div>
+        </div>
+        <div className="field">
+          <label>Livestream URL <span className="muted small">(optional)</span></label>
+          <input
+            type="url"
+            value={newLivestream}
+            onChange={(e) => setNewLivestream(e.target.value)}
+            placeholder="https://youtube.com/live/... or https://twitch.tv/..."
+          />
         </div>
         <button>Create course</button>
       </form>
@@ -297,6 +309,86 @@ export default function Admin() {
 
       {toast && <div className="toast">{toast}</div>}
     </div>
+  );
+}
+
+function LivestreamEditor({ course, adminPassword, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(course.livestream_url || "");
+  const [saving, setSaving] = useState(false);
+
+  if (!editing) {
+    if (course.livestream_url) {
+      return (
+        <div style={{ display: "flex", gap: 4 }}>
+          <a
+            className="btn secondary small"
+            href={course.livestream_url}
+            target="_blank"
+            rel="noreferrer"
+            style={{ flex: 1, textAlign: "center" }}
+          >
+            <LiveDot /> Watch live
+          </a>
+          <button className="ghost small" onClick={() => setEditing(true)} title="Edit livestream">
+            ✎
+          </button>
+        </div>
+      );
+    }
+    return (
+      <button className="ghost small" onClick={() => setEditing(true)}>
+        + Add livestream URL
+      </button>
+    );
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.updateCourse(adminPassword, course.id, { livestream_url: value.trim() || null });
+      setEditing(false);
+      onSaved?.(value.trim() ? "Livestream saved" : "Livestream cleared");
+    } catch (e) {
+      onSaved?.(`Error: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder="https://..."
+        style={{ fontSize: "0.8rem", padding: "6px 8px" }}
+        autoFocus
+      />
+      <div style={{ display: "flex", gap: 4 }}>
+        <button className="small" onClick={save} disabled={saving} style={{ flex: 1 }}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button className="ghost small" onClick={() => { setEditing(false); setValue(course.livestream_url || ""); }}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LiveDot() {
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        width: 8, height: 8, borderRadius: "50%",
+        background: "var(--red-500)",
+        marginRight: 6,
+        animation: "pulse 1.6s ease-in-out infinite",
+        boxShadow: "0 0 0 0 rgba(239, 68, 68, 0.4)",
+      }}
+    />
   );
 }
 

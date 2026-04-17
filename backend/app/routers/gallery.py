@@ -33,6 +33,7 @@ def get_gallery(gallery_token: str, db: Session = Depends(get_db)):
     return GalleryOut(
         participant=ParticipantOut.model_validate(participant),
         course_name=course.name if course else "",
+        livestream_url=course.livestream_url if course else None,
         clips=[ClipOut.model_validate(c) for c in clips],
     )
 

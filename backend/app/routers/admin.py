@@ -22,6 +22,7 @@ from ..models import (
 from ..schemas import (
     CourseCreate,
     CourseOut,
+    CourseUpdate,
     HIOEventOut,
     HIOReviewAction,
 )
@@ -45,8 +46,22 @@ def create_course(payload: CourseCreate, db: Session = Depends(get_db)):
         minutes_per_hole=payload.minutes_per_hole,
         tee_sheet_provider=payload.tee_sheet_provider,
         tee_sheet_config=payload.tee_sheet_config,
+        livestream_url=payload.livestream_url,
     )
     db.add(course)
+    db.commit()
+    db.refresh(course)
+    return course
+
+
+@router.patch("/courses/{course_id}", response_model=CourseOut)
+def update_course(course_id: int, payload: CourseUpdate, db: Session = Depends(get_db)):
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "course not found")
+    data = payload.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        setattr(course, field, value)
     db.commit()
     db.refresh(course)
     return course

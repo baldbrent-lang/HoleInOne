@@ -88,6 +88,17 @@ export default function Gallery() {
         <p>{data.clips.length} clip{data.clips.length === 1 ? "" : "s"} · {holes.length} hole{holes.length === 1 ? "" : "s"}{hasHIO && " · possible ace under review"}</p>
       </div>
 
+      {data.livestream_url && (
+        <a href={data.livestream_url} target="_blank" rel="noreferrer" className="live-banner" style={{ textDecoration: "none" }}>
+          <span className="dot" />
+          <div>
+            <div className="label">Live now</div>
+            <div className="small">Watch the course livestream.</div>
+          </div>
+          <span>Watch →</span>
+        </a>
+      )}
+
       {holes.length === 0 && (
         <div className="card center" style={{ padding: 28 }}>
           <div className="muted inline" style={{ margin: "0 auto 8px" }}>

@@ -59,6 +59,7 @@ class Course(Base):
     qr_token: Mapped[str] = mapped_column(String(64), unique=True, default=lambda: _token("c_"))
     tee_sheet_provider: Mapped[str] = mapped_column(String(40), default="mock")  # foreup|lightspeed|mock
     tee_sheet_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    livestream_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tee_times: Mapped[list[TeeTime]] = relationship(back_populates="course", cascade="all, delete-orphan")

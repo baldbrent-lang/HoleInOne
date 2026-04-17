@@ -507,3 +507,27 @@ tr:last-child td { border-bottom: none; }
   border-radius: var(--radius-sm);
 }
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  70%  { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+.live-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, #fff1f2, #ffe4e6);
+  border: 1px solid #fecdd3;
+  color: #881337;
+  margin-bottom: 14px;
+}
+.live-banner .dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--red-500);
+  animation: pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+.live-banner .label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.75rem; }
+.live-banner a { color: #881337; font-weight: 600; margin-left: auto; white-space: nowrap; }
