@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
+import SelfieCamera from "../components/SelfieCamera.jsx";
 
 export default function Register() {
   const { courseToken } = useParams();
@@ -14,9 +15,9 @@ export default function Register() {
   const [groupSize, setGroupSize] = useState(4);
   const [selfieFile, setSelfieFile] = useState(null);
   const [selfiePreview, setSelfiePreview] = useState(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
-  const fileInputRef = useRef();
 
   useEffect(() => {
     (async () => {
@@ -44,6 +45,7 @@ export default function Register() {
     const reader = new FileReader();
     reader.onload = () => setSelfiePreview(reader.result);
     reader.readAsDataURL(file);
+    setCameraOpen(false);
   }
 
   async function submit(e) {
@@ -149,33 +151,30 @@ export default function Register() {
         </div>
 
         <div className="field">
-          <label>Selfie (so we can match your shots)</label>
+          <label>Outfit photo (so we can match your shots)</label>
           <p className="muted small" style={{ margin: "0 0 8px" }}>
-            Stand back, full outfit visible — hat, shirt, pants, shoes. We use this
-            to identify you in each clip.
+            Hand your phone to a friend (or use a mirror) — full outfit in frame
+            from head to toe. Hat, shirt, pants, shoes.
           </p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            capture="user"
-            style={{ display: "none" }}
-            onChange={(e) => onSelfiePicked(e.target.files?.[0])}
-          />
-          {selfiePreview ? (
+          {cameraOpen ? (
+            <SelfieCamera
+              onCapture={onSelfiePicked}
+              onCancel={() => setCameraOpen(false)}
+            />
+          ) : selfiePreview ? (
             <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
               <img
                 src={selfiePreview}
-                alt="selfie preview"
-                style={{ width: 96, height: 96, objectFit: "cover", borderRadius: 12, border: "1px solid #26543a" }}
+                alt="outfit preview"
+                style={{ width: 96, height: 144, objectFit: "cover", borderRadius: 12, border: "1px solid #26543a" }}
               />
-              <button type="button" className="secondary" onClick={() => fileInputRef.current?.click()}>
+              <button type="button" className="secondary" onClick={() => setCameraOpen(true)}>
                 Retake
               </button>
             </div>
           ) : (
-            <button type="button" onClick={() => fileInputRef.current?.click()}>
-              Take selfie
+            <button type="button" onClick={() => setCameraOpen(true)}>
+              Open camera
             </button>
           )}
         </div>
