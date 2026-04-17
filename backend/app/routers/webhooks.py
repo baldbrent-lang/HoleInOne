@@ -94,7 +94,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 def simulate_round(
     payload: dict,
     db: Session = Depends(get_db),
-    x_admin_key: str | None = Header(default=None),
+    x_admin_password: str | None = Header(default=None),
 ):
     """Admin-only helper to inject synthetic clips for a tee_time_id.
 
@@ -103,8 +103,8 @@ def simulate_round(
     from datetime import timedelta
     from ..models import Course, TeeTime
 
-    if x_admin_key != settings.admin_api_key:
-        raise HTTPException(401, "admin key required")
+    if x_admin_password != settings.admin_password:
+        raise HTTPException(401, "admin password required")
 
     tt = db.get(TeeTime, payload.get("tee_time_id"))
     if not tt:

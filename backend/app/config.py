@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./parone.db"
     app_base_url: str = _default_app_base_url()
-    admin_api_key: str = "dev-admin-key"
+    admin_password: str = "holeinone123"
 
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""

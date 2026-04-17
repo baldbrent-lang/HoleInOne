@@ -4,9 +4,9 @@
 const API_BASE =
   import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "http://localhost:8000" : "");
 
-async function request(path, { method = "GET", body, adminKey } = {}) {
+async function request(path, { method = "GET", body, adminPassword } = {}) {
   const headers = { "Content-Type": "application/json" };
-  if (adminKey) headers["X-Admin-Key"] = adminKey;
+  if (adminPassword) headers["X-Admin-Password"] = adminPassword;
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers,
@@ -43,25 +43,25 @@ export const api = {
   flagClip: (token, clipId, note) =>
     request(`/api/gallery/${token}/clips/${clipId}/flag`, { method: "POST", body: { note } }),
 
-  listCourses: (key) => request(`/api/admin/courses`, { adminKey: key }),
-  createCourse: (key, payload) => request(`/api/admin/courses`, { method: "POST", body: payload, adminKey: key }),
-  stats: (key) => request(`/api/admin/stats`, { adminKey: key }),
-  flaggedClips: (key) => request(`/api/admin/flagged-clips`, { adminKey: key }),
+  listCourses: (key) => request(`/api/admin/courses`, { adminPassword: key }),
+  createCourse: (key, payload) => request(`/api/admin/courses`, { method: "POST", body: payload, adminPassword: key }),
+  stats: (key) => request(`/api/admin/stats`, { adminPassword: key }),
+  flaggedClips: (key) => request(`/api/admin/flagged-clips`, { adminPassword: key }),
   listHIO: (key, status) =>
-    request(`/api/admin/hio${status ? `?status=${status}` : ""}`, { adminKey: key }),
-  hioDetail: (key, id) => request(`/api/admin/hio/${id}`, { adminKey: key }),
+    request(`/api/admin/hio${status ? `?status=${status}` : ""}`, { adminPassword: key }),
+  hioDetail: (key, id) => request(`/api/admin/hio/${id}`, { adminPassword: key }),
   hioDecide: (key, id, action, reviewer, note) =>
     request(`/api/admin/hio/${id}/decision`, {
       method: "POST",
       body: { action, reviewer, note },
-      adminKey: key,
+      adminPassword: key,
     }),
   courseQrUrl: (token) => `${API_BASE}/api/public/courses/${token}/qr.png`,
   simulateRound: (key, teeTimeId, includeHio) =>
     request(`/api/webhooks/debug/simulate-round`, {
       method: "POST",
       body: { tee_time_id: teeTimeId, include_hio: includeHio },
-      adminKey: key,
+      adminPassword: key,
     }),
 };
 

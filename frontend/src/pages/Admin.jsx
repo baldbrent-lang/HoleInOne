@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, API_BASE } from "../api.js";
 
-const ADMIN_KEY_STORAGE = "parone.adminKey";
+const ADMIN_PW_STORAGE = "parone.adminPassword";
 
 export default function Admin() {
-  const [adminKey, setAdminKey] = useState(() => localStorage.getItem(ADMIN_KEY_STORAGE) || "");
+  const [adminPassword, setAdminPassword] = useState(() => localStorage.getItem(ADMIN_PW_STORAGE) || "");
   const [authed, setAuthed] = useState(false);
   const [courses, setCourses] = useState([]);
   const [stats, setStats] = useState(null);
@@ -18,14 +18,14 @@ export default function Admin() {
   const [newPar3s, setNewPar3s] = useState("3,7,12,16");
   const [newMinutes, setNewMinutes] = useState(14);
 
-  async function load(key = adminKey) {
+  async function load(key = adminPassword) {
     try {
       const [c, s, f] = await Promise.all([api.listCourses(key), api.stats(key), api.flaggedClips(key)]);
       setCourses(c);
       setStats(s);
       setFlagged(f);
       setAuthed(true);
-      localStorage.setItem(ADMIN_KEY_STORAGE, key);
+      localStorage.setItem(ADMIN_PW_STORAGE, key);
       setError(null);
     } catch (e) {
       setError(e.message);
@@ -34,14 +34,14 @@ export default function Admin() {
   }
 
   useEffect(() => {
-    if (adminKey) load(adminKey);
+    if (adminPassword) load(adminPassword);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function createCourse(e) {
     e.preventDefault();
     try {
-      await api.createCourse(adminKey, {
+      await api.createCourse(adminPassword, {
         name: newName,
         location: newLocation,
         par3_holes: newPar3s.split(",").map((s) => Number(s.trim())).filter(Boolean),
@@ -62,7 +62,7 @@ export default function Admin() {
       const tts = await api.teeTimes(courseToken);
       const first = tts[0];
       if (!first) throw new Error("no tee times for today");
-      await api.simulateRound(adminKey, first.id, false);
+      await api.simulateRound(adminPassword, first.id, false);
       setToast(`Injected synthetic round on tee time #${first.id}`);
       setTimeout(() => setToast(null), 2500);
       load();
@@ -77,7 +77,7 @@ export default function Admin() {
       const tts = await api.teeTimes(courseToken);
       const first = tts[0];
       if (!first) throw new Error("no tee times for today");
-      await api.simulateRound(adminKey, first.id, true);
+      await api.simulateRound(adminPassword, first.id, true);
       setToast(`Injected round with hole-in-one`);
       setTimeout(() => setToast(null), 2500);
       load();
@@ -93,16 +93,17 @@ export default function Admin() {
         <div className="brand"><div className="dot" /><h1>Par One — Admin</h1></div>
         <div className="card">
           <div className="field">
-            <label>Admin API key</label>
+            <label>Password</label>
             <input
               type="password"
-              value={adminKey}
-              onChange={(e) => setAdminKey(e.target.value)}
-              placeholder="paste admin key"
+              value={adminPassword}
+              onChange={(e) => setAdminPassword(e.target.value)}
+              placeholder="enter admin password"
+              autoFocus
             />
           </div>
           {error && <p className="small" style={{ color: "var(--danger)" }}>{error}</p>}
-          <button onClick={() => load(adminKey)}>Sign in</button>
+          <button onClick={() => load(adminPassword)}>Sign in</button>
         </div>
       </div>
     );
@@ -114,7 +115,7 @@ export default function Admin() {
       <div className="nav">
         <Link to="/admin" className="active">Dashboard</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
-        <a onClick={() => { localStorage.removeItem(ADMIN_KEY_STORAGE); window.location.reload(); }} href="#">Sign out</a>
+        <a onClick={() => { localStorage.removeItem(ADMIN_PW_STORAGE); window.location.reload(); }} href="#">Sign out</a>
       </div>
 
       {stats && (
@@ -234,7 +235,7 @@ export default function Admin() {
                           try {
                             await fetch(
                               `${import.meta.env.VITE_API_BASE || ""}/api/admin/clips/${c.id}/assign?participant_id=${cand.id}`,
-                              { method: "POST", headers: { "X-Admin-Key": adminKey } },
+                              { method: "POST", headers: { "X-Admin-Password": adminPassword } },
                             );
                             load();
                           } catch (e) {

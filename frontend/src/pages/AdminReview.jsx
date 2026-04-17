@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 
-const ADMIN_KEY_STORAGE = "parone.adminKey";
+const ADMIN_PW_STORAGE = "parone.adminPassword";
 
 export default function AdminReview() {
-  const adminKey = localStorage.getItem(ADMIN_KEY_STORAGE) || "";
+  const adminPassword = localStorage.getItem(ADMIN_PW_STORAGE) || "";
   const [events, setEvents] = useState([]);
   const [selected, setSelected] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -15,7 +15,7 @@ export default function AdminReview() {
 
   async function load() {
     try {
-      const list = await api.listHIO(adminKey);
+      const list = await api.listHIO(adminPassword);
       setEvents(list);
       if (list.length && !selected) setSelected(list[0].id);
     } catch (e) {
@@ -25,7 +25,7 @@ export default function AdminReview() {
 
   async function loadDetail(id) {
     try {
-      setDetail(await api.hioDetail(adminKey, id));
+      setDetail(await api.hioDetail(adminPassword, id));
     } catch (e) {
       setError(e.message);
     }
@@ -40,7 +40,7 @@ export default function AdminReview() {
       return;
     }
     try {
-      await api.hioDecide(adminKey, selected, action, reviewer, note);
+      await api.hioDecide(adminPassword, selected, action, reviewer, note);
       setNote("");
       await load();
       await loadDetail(selected);
@@ -49,11 +49,11 @@ export default function AdminReview() {
     }
   }
 
-  if (!adminKey) {
+  if (!adminPassword) {
     return (
       <div className="wrap">
         <div className="card">
-          <h1>Admin key required</h1>
+          <h1>Admin password required</h1>
           <Link to="/admin">Sign in first</Link>
         </div>
       </div>

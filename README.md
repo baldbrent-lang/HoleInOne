@@ -39,7 +39,7 @@ you want to light up:
   SQLite at `backend/parone.db`.
 - `APP_BASE_URL` — your Repl's public URL
   (`https://<repl-name>.<user>.repl.co`)
-- `ADMIN_API_KEY`
+- `ADMIN_PASSWORD` (default `holeinone123`)
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`
@@ -95,7 +95,7 @@ SENDGRID_API_KEY=             # empty -> no-op
 SENDGRID_FROM_EMAIL=
 SHOT_TRACER_WEBHOOK_SECRET=
 APP_BASE_URL=http://localhost:5173
-ADMIN_API_KEY=dev-admin-key
+ADMIN_PASSWORD=holeinone123
 ```
 
 ## Explicitly out of scope for V0

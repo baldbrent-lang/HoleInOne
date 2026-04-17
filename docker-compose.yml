@@ -20,7 +20,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://parone:parone@db:5432/parone
       APP_BASE_URL: http://localhost:5173
-      ADMIN_API_KEY: dev-admin-key
+      ADMIN_PASSWORD: holeinone123
     ports:
       - "8000:8000"
     depends_on:
