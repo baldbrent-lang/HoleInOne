@@ -47,6 +47,16 @@ export const api = {
   createCourse: (key, payload) => request(`/api/admin/courses`, { method: "POST", body: payload, adminPassword: key }),
   stats: (key) => request(`/api/admin/stats`, { adminPassword: key }),
   flaggedClips: (key) => request(`/api/admin/flagged-clips`, { adminPassword: key }),
+  listParticipants: (key, params = {}) => {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, v);
+    });
+    return request(`/api/admin/participants${qs.toString() ? `?${qs}` : ""}`, { adminPassword: key });
+  },
+  participantClips: (key, id) => request(`/api/admin/participants/${id}/clips`, { adminPassword: key }),
+  resendGallery: (key, id) =>
+    request(`/api/admin/participants/${id}/resend-gallery`, { method: "POST", adminPassword: key }),
   listHIO: (key, status) =>
     request(`/api/admin/hio${status ? `?status=${status}` : ""}`, { adminPassword: key }),
   hioDetail: (key, id) => request(`/api/admin/hio/${id}`, { adminPassword: key }),

@@ -57,6 +57,7 @@ export default function AdminReview() {
       <Brand subtitle="Operator Console" />
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
+        <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/review" className="active">Hole-in-one review</Link>
       </div>
 

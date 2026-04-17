@@ -3,6 +3,7 @@ import Register from "./pages/Register.jsx";
 import Confirmation from "./pages/Confirmation.jsx";
 import Gallery from "./pages/Gallery.jsx";
 import Admin from "./pages/Admin.jsx";
+import AdminParticipants from "./pages/AdminParticipants.jsx";
 import AdminReview from "./pages/AdminReview.jsx";
 import Home from "./pages/Home.jsx";
 
@@ -14,6 +15,7 @@ export default function App() {
       <Route path="/confirm/:participantId" element={<Confirmation />} />
       <Route path="/g/:galleryToken" element={<Gallery />} />
       <Route path="/admin" element={<Admin />} />
+      <Route path="/admin/participants" element={<AdminParticipants />} />
       <Route path="/admin/review" element={<AdminReview />} />
       <Route
         path="*"

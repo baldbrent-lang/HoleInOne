@@ -5,6 +5,11 @@ import { Brand, Icon } from "../components/Brand.jsx";
 
 const ADMIN_PW_STORAGE = "parone.adminPassword";
 
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 export default function Admin() {
   const [adminPassword, setAdminPassword] = useState(() => localStorage.getItem(ADMIN_PW_STORAGE) || "");
   const [authed, setAuthed] = useState(false);
@@ -102,6 +107,7 @@ export default function Admin() {
 
       <div className="nav">
         <Link to="/admin" className="active">Dashboard</Link>
+        <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
         <button
           className="ghost"
@@ -114,12 +120,17 @@ export default function Admin() {
 
       {stats && (
         <div className="stat-grid">
-          <div className="stat">
+          <Link to="/admin/participants" className="stat" style={{ textDecoration: "none", color: "inherit" }}>
             <div className="icon-bg"><Icon name="users" size={16} /></div>
             <div className="label">Participants</div>
             <div className="value">{stats.participants.total}</div>
-            <div className="sub">Today {stats.participants.day} · Week {stats.participants.week} · Month {stats.participants.month}</div>
-          </div>
+            <div className="sub">
+              <Link to={`/admin/participants?date=${today()}`}>Today {stats.participants.day}</Link>
+              {" · "}
+              <Link to={`/admin/participants`}>Week {stats.participants.week}</Link>
+              {" · Month "}{stats.participants.month}
+            </div>
+          </Link>
           <div className="stat">
             <div className="icon-bg"><Icon name="dollar" size={16} /></div>
             <div className="label">Revenue</div>
@@ -137,6 +148,26 @@ export default function Admin() {
                 ? "No clips yet"
                 : Object.entries(stats.clips_by_status).map(([k, v]) => `${k}:${v}`).join("  ·  ")}
             </div>
+          </div>
+        </div>
+      )}
+
+      {stats?.by_course?.length > 0 && (
+        <div className="card">
+          <h3 style={{ marginBottom: 10 }}>Participants by course</h3>
+          <div className="chip-row">
+            {stats.by_course.map((row) => {
+              const course = courses.find((c) => c.name === row.course);
+              return (
+                <Link
+                  key={row.course}
+                  to={course ? `/admin/participants?course_id=${course.id}` : "/admin/participants"}
+                  className="chip"
+                >
+                  {row.course} <b style={{ marginLeft: 6 }}>{row.participants}</b>
+                </Link>
+              );
+            })}
           </div>
         </div>
       )}
@@ -175,6 +206,9 @@ export default function Admin() {
                   </td>
                   <td>
                     <div className="stack" style={{ gap: 6 }}>
+                      <Link className="btn secondary small" to={`/admin/participants?course_id=${c.id}`} style={{ textAlign: "center" }}>
+                        <Icon name="users" size={14} /> View participants
+                      </Link>
                       <button className="secondary small" onClick={() => runSimulate(c.qr_token, false)}>
                         Simulate round
                       </button>

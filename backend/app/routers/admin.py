@@ -99,6 +99,80 @@ def stats(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/participants")
+def list_participants(
+    course_id: int | None = None,
+    date: str | None = None,  # YYYY-MM-DD (filters on tee_time.starts_at date)
+    q: str | None = None,  # substring on name/mobile/email
+    paid: bool | None = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    from datetime import date as date_cls, datetime as datetime_cls, timedelta
+
+    query = (
+        db.query(Participant, TeeTime, Course)
+        .join(TeeTime, Participant.tee_time_id == TeeTime.id)
+        .join(Course, TeeTime.course_id == Course.id)
+    )
+    if course_id is not None:
+        query = query.filter(Course.id == course_id)
+    if paid is not None:
+        query = query.filter(Participant.paid == paid)
+    if date:
+        try:
+            d = date_cls.fromisoformat(date)
+        except ValueError:
+            raise HTTPException(400, "date must be YYYY-MM-DD")
+        lo = datetime_cls.combine(d, datetime_cls.min.time())
+        hi = lo + timedelta(days=1)
+        query = query.filter(TeeTime.starts_at >= lo, TeeTime.starts_at < hi)
+    if q:
+        needle = f"%{q.strip()}%"
+        query = query.filter(
+            (Participant.name.ilike(needle))
+            | (Participant.mobile.ilike(needle))
+            | (Participant.email.ilike(needle))
+        )
+
+    rows = query.order_by(TeeTime.starts_at.desc(), Participant.id.desc()).limit(limit).all()
+
+    # Pre-fetch clip counts
+    ids = [p.id for (p, _tt, _c) in rows]
+    clip_counts: dict[int, dict] = {i: {"total": 0, "assigned": 0} for i in ids}
+    if ids:
+        assigned_status = ClipProcessingStatus.assigned.value
+        counts = (
+            db.query(VideoClip.participant_id, VideoClip.processing_status, func.count(VideoClip.id))
+            .filter(VideoClip.participant_id.in_(ids))
+            .group_by(VideoClip.participant_id, VideoClip.processing_status)
+            .all()
+        )
+        for pid, status_, n in counts:
+            bucket = clip_counts[pid]
+            bucket["total"] += n
+            if status_ == assigned_status:
+                bucket["assigned"] += n
+
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "mobile": p.mobile,
+            "email": p.email,
+            "paid": p.paid,
+            "selfie_url": f"/uploads/{p.selfie_path}" if p.selfie_path else None,
+            "gallery_token": p.gallery_token,
+            "gallery_url": f"{settings.app_base_url}/g/{p.gallery_token}",
+            "course": {"id": course.id, "name": course.name, "location": course.location},
+            "tee_time": {"id": tt.id, "starts_at": tt.starts_at},
+            "clips": clip_counts.get(p.id, {"total": 0, "assigned": 0}),
+            "created_at": p.created_at,
+        }
+        for (p, tt, course) in rows
+    ]
+
+
 @router.get("/participants/{participant_id}")
 def participant_detail(participant_id: int, db: Session = Depends(get_db)):
     p = db.get(Participant, participant_id)
@@ -119,6 +193,35 @@ def participant_detail(participant_id: int, db: Session = Depends(get_db)):
         },
         "clips": len(p.clips),
     }
+
+
+@router.get("/participants/{participant_id}/clips")
+def participant_clips(participant_id: int, db: Session = Depends(get_db)):
+    p = db.get(Participant, participant_id)
+    if not p:
+        raise HTTPException(404, "participant not found")
+    clips = (
+        db.query(VideoClip)
+        .filter(VideoClip.participant_id == p.id)
+        .order_by(VideoClip.hole_number.asc(), VideoClip.captured_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": c.id,
+            "hole_number": c.hole_number,
+            "camera_type": c.camera_type,
+            "captured_at": c.captured_at,
+            "source_url": c.source_url,
+            "thumbnail_url": c.thumbnail_url,
+            "carry_yards": c.carry_yards,
+            "apex_feet": c.apex_feet,
+            "ball_speed_mph": c.ball_speed_mph,
+            "processing_status": c.processing_status,
+            "ball_in_cup": c.ball_in_cup,
+        }
+        for c in clips
+    ]
 
 
 @router.post("/participants/{participant_id}/resend-gallery")
