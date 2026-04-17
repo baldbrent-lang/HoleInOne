@@ -34,13 +34,21 @@ def _migrate() -> None:
     inspector = inspect(engine)
     if "participants" not in inspector.get_table_names():
         return
-    cols = {c["name"] for c in inspector.get_columns("participants")}
+    cols_info = {c["name"]: c for c in inspector.get_columns("participants")}
+    cols = set(cols_info)
     statements = []
     if "selfie_path" not in cols:
         statements.append("ALTER TABLE participants ADD COLUMN selfie_path VARCHAR(500)")
     if "appearance_embedding" not in cols:
         # Both SQLite and Postgres accept JSON; SQLite stores as TEXT.
         statements.append("ALTER TABLE participants ADD COLUMN appearance_embedding JSON")
+    # Old schema had playing_order NOT NULL. The matcher no longer uses it,
+    # so drop the constraint on Postgres (SQLite can't ALTER nullability
+    # and enforces it loosely anyway).
+    if engine.dialect.name == "postgresql":
+        po = cols_info.get("playing_order")
+        if po is not None and po.get("nullable") is False:
+            statements.append("ALTER TABLE participants ALTER COLUMN playing_order DROP NOT NULL")
     if not statements:
         return
     with engine.begin() as conn:
