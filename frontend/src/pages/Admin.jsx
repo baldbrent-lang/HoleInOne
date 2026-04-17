@@ -155,7 +155,6 @@ export default function Admin() {
                   <td>
                     <b>{c.name}</b>
                     <div className="small muted">{c.location || "—"}</div>
-                    <div className="tiny upper muted" style={{ marginTop: 4 }}>/r/{c.qr_token.slice(0, 12)}…</div>
                   </td>
                   <td className="small">{(c.par3_holes || []).join(", ")}</td>
                   <td>
@@ -171,6 +170,7 @@ export default function Admin() {
                       >
                         <Icon name="download" size={14} /> Download
                       </a>
+                      <CopyLink url={`${window.location.origin}/r/${c.qr_token}`} onCopy={showToast} />
                     </div>
                   </td>
                   <td>
@@ -263,5 +263,39 @@ export default function Admin() {
 
       {toast && <div className="toast">{toast}</div>}
     </div>
+  );
+}
+
+function CopyLink({ url, onCopy }) {
+  // Display a compact version like "….replit.dev/r/c_9mDNc…" but copy the full URL.
+  const MAX = 28;
+  const noScheme = url.replace(/^https?:\/\//, "");
+  const slash = noScheme.indexOf("/r/");
+  const host = slash >= 0 ? noScheme.slice(0, slash) : noScheme;
+  const path = slash >= 0 ? noScheme.slice(slash) : "";
+  const compactHost = host.length > 14 ? `…${host.slice(-12)}` : host;
+  const compactPath = path.length > 14 ? `${path.slice(0, 6)}…${path.slice(-4)}` : path;
+  let label = `${compactHost}${compactPath}`;
+  if (label.length > MAX) label = label.slice(0, MAX - 1) + "…";
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      onCopy?.("Registration link copied");
+    } catch {
+      window.prompt("Copy the registration link:", url);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="secondary small"
+      onClick={copy}
+      title={`Copy ${url}`}
+      style={{ width: "100%", fontFamily: "JetBrains Mono, monospace", fontSize: "0.78rem" }}
+    >
+      <Icon name="share" size={13} /> {label}
+    </button>
   );
 }
