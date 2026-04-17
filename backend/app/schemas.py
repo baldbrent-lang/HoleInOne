@@ -48,12 +48,13 @@ class TeeTimeOut(BaseModel):
 
 
 class RegistrationCreate(BaseModel):
+    """Kept for OpenAPI documentation; the live endpoint uses multipart/form-data."""
+
     course_token: str
     tee_time_id: int
     name: str
     mobile: Optional[str] = None
     email: Optional[EmailStr] = None
-    playing_order: int = Field(ge=1, le=4)
     group_size: int = Field(ge=1, le=4)
 
     @field_validator("mobile", "email")

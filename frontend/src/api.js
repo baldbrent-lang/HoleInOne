@@ -26,7 +26,18 @@ export const api = {
   courseByToken: (token) => request(`/api/public/courses/${token}`),
   teeTimes: (token, date) =>
     request(`/api/public/courses/${token}/tee-times${date ? `?date=${date}` : ""}`),
-  register: (payload) => request(`/api/public/register`, { method: "POST", body: payload }),
+  register: async (formData) => {
+    const res = await fetch(`${API_BASE}/api/public/register`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status}: ${text}`);
+    }
+    return res.json();
+  },
+  selfieUrl: (path) => `${API_BASE}/uploads/${path}`,
 
   gallery: (token) => request(`/api/gallery/${token}`),
   flagClip: (token, clipId, note) =>

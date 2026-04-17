@@ -110,6 +110,7 @@ def participant_detail(participant_id: int, db: Session = Depends(get_db)):
         "mobile": p.mobile,
         "email": p.email,
         "paid": p.paid,
+        "selfie_url": f"/uploads/{p.selfie_path}" if p.selfie_path else None,
         "gallery_url": f"{settings.app_base_url}/g/{p.gallery_token}",
         "tee_time": {
             "id": p.tee_time.id,
@@ -143,20 +144,53 @@ def flagged_clips(db: Session = Depends(get_db)):
         .order_by(VideoClip.captured_at.desc())
         .all()
     )
-    return [
-        {
-            "id": c.id,
-            "course_id": c.course_id,
-            "hole_number": c.hole_number,
-            "camera_type": c.camera_type,
-            "captured_at": c.captured_at,
-            "status": c.processing_status,
-            "participant_id": c.participant_id,
-            "note": c.issue_note,
-            "source_url": c.source_url,
-        }
-        for c in clips
-    ]
+    out = []
+    for c in clips:
+        # Surface selfies of candidate participants in this hole/window so
+        # the reviewer can eyeball the right assignment.
+        candidates = []
+        if c.course_id:
+            from datetime import timedelta
+            course = db.get(Course, c.course_id)
+            if course:
+                mph = course.minutes_per_hole or 14
+                lo = c.captured_at - timedelta(minutes=mph * 19)
+                hi = c.captured_at
+                from ..models import TeeTime as _TT
+                tts = (
+                    db.query(_TT)
+                    .filter(
+                        _TT.course_id == course.id,
+                        _TT.starts_at <= hi,
+                        _TT.starts_at >= lo,
+                    )
+                    .all()
+                )
+                for tt in tts:
+                    for p in tt.participants:
+                        candidates.append(
+                            {
+                                "id": p.id,
+                                "name": p.name,
+                                "selfie_url": f"/uploads/{p.selfie_path}" if p.selfie_path else None,
+                            }
+                        )
+        out.append(
+            {
+                "id": c.id,
+                "course_id": c.course_id,
+                "hole_number": c.hole_number,
+                "camera_type": c.camera_type,
+                "captured_at": c.captured_at,
+                "status": c.processing_status,
+                "participant_id": c.participant_id,
+                "note": c.issue_note,
+                "source_url": c.source_url,
+                "thumbnail_url": c.thumbnail_url,
+                "candidates": candidates,
+            }
+        )
+    return out
 
 
 @router.post("/clips/{clip_id}/assign")

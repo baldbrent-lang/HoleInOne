@@ -113,11 +113,15 @@ def simulate_round(
     include_hio = bool(payload.get("include_hio"))
     par3_holes = course.par3_holes or [3, 7, 12, 16]
 
+    # Generate one clip per registered participant per par-3 hole. The
+    # appearance matcher picks who's who; in stub mode it round-robins.
+    n_shots = max(len(tt.participants), 1)
+
     counts: dict = defaultdict(int)
     for idx, hole in enumerate(par3_holes):
         offset = timedelta(minutes=course.minutes_per_hole * (hole - 1) + 3)
         captured = tt.starts_at + offset
-        for order in range(1, tt.max_players + 1):
+        for order in range(1, n_shots + 1):
             clip = VideoClip(
                 course_id=course.id,
                 hole_number=hole,

@@ -206,8 +206,11 @@ export default function Admin() {
         <h3>Flagged / unassigned clips</h3>
         {flagged.length === 0 && <div className="muted small">None 🎉</div>}
         {flagged.map((c) => (
-          <div key={c.id} className="clip">
-            <div className="thumb" />
+          <div key={c.id} className="clip" style={{ alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div
+              className="thumb"
+              style={c.thumbnail_url ? { backgroundImage: `url(${c.thumbnail_url})` } : {}}
+            />
             <div className="meta">
               <b>Hole {c.hole_number}</b> · {c.camera_type}
               <div className="stats">
@@ -215,6 +218,44 @@ export default function Admin() {
                 {" "}{new Date(c.captured_at).toLocaleString()}
               </div>
               <div className="small muted">{c.note || "—"}</div>
+              {c.candidates?.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div className="small muted" style={{ marginBottom: 4 }}>
+                    Candidates in window:
+                  </div>
+                  <div className="chip-row">
+                    {c.candidates.map((cand) => (
+                      <button
+                        key={cand.id}
+                        type="button"
+                        className="chip"
+                        title={`Assign to ${cand.name}`}
+                        onClick={async () => {
+                          try {
+                            await fetch(
+                              `${import.meta.env.VITE_API_BASE || ""}/api/admin/clips/${c.id}/assign?participant_id=${cand.id}`,
+                              { method: "POST", headers: { "X-Admin-Key": adminKey } },
+                            );
+                            load();
+                          } catch (e) {
+                            setToast(`Error: ${e.message}`);
+                            setTimeout(() => setToast(null), 3000);
+                          }
+                        }}
+                      >
+                        {cand.selfie_url && (
+                          <img
+                            src={cand.selfie_url}
+                            alt=""
+                            style={{ width: 24, height: 24, borderRadius: "50%", objectFit: "cover", verticalAlign: "middle", marginRight: 6 }}
+                          />
+                        )}
+                        {cand.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         ))}

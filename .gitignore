@@ -28,3 +28,6 @@ pnpm-debug.log*
 
 # Logs
 *.log
+
+# Uploads (selfies) — dev only
+backend/uploads/

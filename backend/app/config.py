@@ -34,5 +34,10 @@ class Settings(BaseSettings):
 
     default_minutes_per_hole: int = 14
 
+    # Appearance matching
+    embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
+    embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2
+    upload_dir: str = "uploads"
+
 
 settings = Settings()

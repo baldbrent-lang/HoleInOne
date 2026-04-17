@@ -85,8 +85,14 @@ class Participant(Base):
     name: Mapped[str] = mapped_column(String(200))
     mobile: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    playing_order: Mapped[int] = mapped_column(Integer)  # 1..4
+    # Legacy field. We now match by appearance, not declared hitting order.
+    playing_order: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     group_size: Mapped[int] = mapped_column(Integer, default=4)
+    # Path under backend/uploads/ for the registration selfie.
+    selfie_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Appearance embedding (CLIP/ReID-style). Stub mode stores a hash-derived
+    # vector; real mode populated by services/appearance.py.
+    appearance_embedding: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     stripe_payment_intent_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     paid: Mapped[bool] = mapped_column(Boolean, default=False)
     gallery_token: Mapped[str] = mapped_column(String(64), unique=True, default=lambda: _token("g_", 20))

@@ -7,8 +7,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import inspect, text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from .config import settings
 from .database import Base, engine
 from .routers import admin, gallery, public, webhooks
 
@@ -22,9 +24,34 @@ app.add_middleware(
 )
 
 
+def _migrate() -> None:
+    """Lightweight idempotent column additions for in-place upgrades.
+
+    SQLAlchemy's create_all only creates missing tables, not missing
+    columns on existing ones. Replit's hosted DB persists across deploys,
+    so we ALTER TABLE here for any new fields V0+ has added.
+    """
+    inspector = inspect(engine)
+    if "participants" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("participants")}
+    statements = []
+    if "selfie_path" not in cols:
+        statements.append("ALTER TABLE participants ADD COLUMN selfie_path VARCHAR(500)")
+    if "appearance_embedding" not in cols:
+        # Both SQLite and Postgres accept JSON; SQLite stores as TEXT.
+        statements.append("ALTER TABLE participants ADD COLUMN appearance_embedding JSON")
+    if not statements:
+        return
+    with engine.begin() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
+
+
 @app.on_event("startup")
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
+    _migrate()
 
 
 @app.get("/health")
@@ -38,6 +65,13 @@ app.include_router(webhooks.router)
 app.include_router(admin.router)
 
 
+# --- Uploads (selfies) -------------------------------------------------------
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+UPLOAD_ROOT = BACKEND_ROOT / settings.upload_dir
+UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
+
+
 # --- Static SPA hosting (Replit / single-port deploy) ------------------------
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -46,8 +80,7 @@ if os.environ.get("SERVE_FRONTEND") == "1" and FRONTEND_DIST.is_dir():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
-        # Do not hijack API / docs routes.
-        if full_path.startswith(("api/", "docs", "openapi.json", "redoc", "health")):
+        if full_path.startswith(("api/", "uploads/", "docs", "openapi.json", "redoc", "health")):
             raise StarletteHTTPException(status_code=404)
         candidate = FRONTEND_DIST / full_path
         if candidate.is_file():

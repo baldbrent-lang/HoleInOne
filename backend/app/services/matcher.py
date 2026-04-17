@@ -1,23 +1,24 @@
-"""Match incoming video clips to participants by tee time + playing order.
+"""Match incoming video clips to participants by visual appearance.
 
-Heuristic:
-- For a given hole, find all tee times at the course whose window plausibly
-  contains the clip timestamp.
-- The window for hole H starts at `tee_time.starts_at + (H-1) * minutes_per_hole`
-  and ends `minutes_per_hole * 2` later (generous tolerance for pace of play).
-- Within matching tee times, assign the clip to the participant whose
-  playing_order matches the shot's sequence in the window.
+Matching pipeline:
+- Find tee times whose hole window plausibly contains the clip timestamp.
+- Gather all participants from those tee times.
+- In real mode: embed the clip, compare cosine similarity against each
+  participant's selfie embedding, assign top match if margin > threshold.
+- In stub mode (no real embedder configured): round-robin assignment
+  across candidate participants on the same hole, so the demo flow
+  still produces sensible per-golfer galleries.
 
-If multiple candidates remain after ranking, the clip is left unassigned and
-flagged for human review.
+Ambiguous matches and out-of-window clips are flagged for human review.
 """
 from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..models import (
     ClipProcessingStatus,
     Course,
@@ -26,6 +27,7 @@ from ..models import (
     TeeTime,
     VideoClip,
 )
+from . import appearance
 
 
 def _hole_window(tt: TeeTime, hole_number: int, minutes_per_hole: int) -> tuple:
@@ -35,15 +37,9 @@ def _hole_window(tt: TeeTime, hole_number: int, minutes_per_hole: int) -> tuple:
     return window_start, window_end
 
 
-def match_clip(db: Session, clip: VideoClip) -> Participant | None:
-    course = db.get(Course, clip.course_id)
-    if not course:
-        clip.processing_status = ClipProcessingStatus.unassigned.value
-        return None
-
+def _candidates_in_window(db: Session, course: Course, clip: VideoClip) -> list[Participant]:
     mph = course.minutes_per_hole or 14
-
-    candidates = (
+    tee_times = (
         db.execute(
             select(TeeTime).where(
                 and_(
@@ -56,55 +52,34 @@ def match_clip(db: Session, clip: VideoClip) -> Participant | None:
         .scalars()
         .all()
     )
+    matching: list[Participant] = []
+    for tt in tee_times:
+        ws, we = _hole_window(tt, clip.hole_number, mph)
+        if ws <= clip.captured_at <= we:
+            matching.extend(tt.participants)
+    return matching
 
-    tee_time = None
-    for tt in candidates:
-        window_start, window_end = _hole_window(tt, clip.hole_number, mph)
-        if window_start <= clip.captured_at <= window_end:
-            if tee_time is not None:
-                clip.processing_status = ClipProcessingStatus.flagged.value
-                clip.issue_note = "ambiguous: multiple tee times overlap this window"
-                return None
-            tee_time = tt
 
-    if tee_time is None:
+def match_clip(db: Session, clip: VideoClip) -> Participant | None:
+    course = db.get(Course, clip.course_id)
+    if not course:
         clip.processing_status = ClipProcessingStatus.unassigned.value
         return None
 
-    existing_clips_on_hole = (
-        db.execute(
-            select(VideoClip).where(
-                and_(
-                    VideoClip.course_id == course.id,
-                    VideoClip.hole_number == clip.hole_number,
-                    VideoClip.captured_at >= tee_time.starts_at,
-                    VideoClip.captured_at < clip.captured_at,
-                    VideoClip.camera_type == clip.camera_type,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    shot_sequence = len(existing_clips_on_hole) + 1
-
-    participant = (
-        db.execute(
-            select(Participant).where(
-                and_(
-                    Participant.tee_time_id == tee_time.id,
-                    Participant.playing_order == shot_sequence,
-                )
-            )
-        )
-        .scalars()
-        .first()
-    )
-
-    if participant is None:
-        clip.processing_status = ClipProcessingStatus.flagged.value
-        clip.issue_note = f"no participant with playing_order={shot_sequence}"
+    candidates = _candidates_in_window(db, course, clip)
+    if not candidates:
+        clip.processing_status = ClipProcessingStatus.unassigned.value
+        clip.issue_note = "no registered participants in clip window"
         return None
+
+    if appearance.is_stub():
+        participant = _round_robin_pick(db, course, clip, candidates)
+    else:
+        participant = _appearance_pick(clip, candidates)
+        if participant is None:
+            clip.processing_status = ClipProcessingStatus.flagged.value
+            clip.issue_note = "ambiguous: top appearance matches too close"
+            return None
 
     clip.participant_id = participant.id
     clip.processing_status = ClipProcessingStatus.assigned.value
@@ -113,6 +88,44 @@ def match_clip(db: Session, clip: VideoClip) -> Participant | None:
         _ensure_hio_event(db, participant, clip)
 
     return participant
+
+
+def _round_robin_pick(
+    db: Session, course: Course, clip: VideoClip, candidates: list[Participant]
+) -> Participant:
+    """Stub mode: assign to candidate with fewest existing clips on this hole."""
+    candidate_ids = [p.id for p in candidates]
+    counts = {pid: 0 for pid in candidate_ids}
+    rows = (
+        db.execute(
+            select(VideoClip.participant_id, func.count(VideoClip.id))
+            .where(
+                VideoClip.course_id == course.id,
+                VideoClip.hole_number == clip.hole_number,
+                VideoClip.camera_type == clip.camera_type,
+                VideoClip.participant_id.in_(candidate_ids),
+            )
+            .group_by(VideoClip.participant_id)
+        )
+    ).all()
+    for pid, n in rows:
+        counts[pid] = n
+    return min(candidates, key=lambda p: (counts[p.id], p.id))
+
+
+def _appearance_pick(clip: VideoClip, candidates: list[Participant]) -> Participant | None:
+    """Real mode: cosine match clip embedding against participant embeddings."""
+    clip_emb = appearance.embed_clip_url(clip.source_url)
+    scored = []
+    for p in candidates:
+        emb = p.appearance_embedding or []
+        scored.append((p, appearance.cosine(clip_emb, emb)))
+    scored.sort(key=lambda x: -x[1])
+    if not scored:
+        return None
+    if len(scored) > 1 and (scored[0][1] - scored[1][1]) < settings.embedding_min_margin:
+        return None  # ambiguous
+    return scored[0][0]
 
 
 def _ensure_hio_event(db: Session, participant: Participant, clip: VideoClip) -> HoleInOneEvent:
