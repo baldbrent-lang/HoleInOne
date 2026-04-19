@@ -15,7 +15,7 @@ def _default_app_base_url() -> str:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "sqlite:///./parone.db"
+    database_url: str = "sqlite:///./golfreelz.db"
     app_base_url: str = _default_app_base_url()
     admin_password: str = "holeinone123"
 
@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     twilio_from_number: str = ""
 
     sendgrid_api_key: str = ""
-    sendgrid_from_email: str = "noreply@parone.test"
+    sendgrid_from_email: str = "noreply@golfreelz.test"
 
     shot_tracer_webhook_secret: str = ""
 

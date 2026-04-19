@@ -5,7 +5,7 @@ export function Brand({ subtitle }) {
         <FlagIcon />
       </div>
       <div>
-        <h1>Par One</h1>
+        <h1>GolfReelz</h1>
         {subtitle && <div className="tag">{subtitle}</div>}
       </div>
     </div>

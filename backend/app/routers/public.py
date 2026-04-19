@@ -46,7 +46,7 @@ def course_qr_png(course_token: str, db: Session = Depends(get_db)):
     course = _get_course_by_token(db, course_token)
     url = f"{settings.app_base_url}/r/{course.qr_token}"
     png = generate_qr_png(url)
-    filename = f"parone-{course.name.replace(' ', '_')}.png"
+    filename = f"golfreelz-{course.name.replace(' ', '_')}.png"
     return Response(
         content=png,
         media_type="image/png",

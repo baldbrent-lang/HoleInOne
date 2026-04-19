@@ -3,7 +3,20 @@ import { Link } from "react-router-dom";
 import { api, API_BASE } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 
-const ADMIN_PW_STORAGE = "parone.adminPassword";
+const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
+const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
+
+function readStoredPassword() {
+  const v = localStorage.getItem(ADMIN_PW_STORAGE);
+  if (v) return v;
+  const legacy = localStorage.getItem(LEGACY_ADMIN_PW_STORAGE);
+  if (legacy) {
+    localStorage.setItem(ADMIN_PW_STORAGE, legacy);
+    localStorage.removeItem(LEGACY_ADMIN_PW_STORAGE);
+    return legacy;
+  }
+  return "";
+}
 
 function today() {
   const d = new Date();
@@ -11,7 +24,7 @@ function today() {
 }
 
 export default function Admin() {
-  const [adminPassword, setAdminPassword] = useState(() => localStorage.getItem(ADMIN_PW_STORAGE) || "");
+  const [adminPassword, setAdminPassword] = useState(() => readStoredPassword());
   const [authed, setAuthed] = useState(false);
   const [courses, setCourses] = useState([]);
   const [stats, setStats] = useState(null);
@@ -103,7 +116,7 @@ export default function Admin() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div className="logo"><Icon name="flag" /></div>
           <div>
-            <h1>Par One</h1>
+            <h1>GolfReelz</h1>
             <div className="tag">Operator Console</div>
           </div>
         </div>
@@ -202,7 +215,7 @@ export default function Admin() {
                       <a
                         className="btn secondary small"
                         href={api.courseQrUrl(c.qr_token)}
-                        download={`parone-${c.name.replace(/\s+/g, "_")}.png`}
+                        download={`golfreelz-${c.name.replace(/\s+/g, "_")}.png`}
                         style={{ textAlign: "center" }}
                       >
                         <Icon name="download" size={14} /> Download

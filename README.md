@@ -1,9 +1,9 @@
-# Par One
+# GolfReelz
 
 Web platform that connects golfer self-registration to automatically processed
 shot-tracer videos, delivering a per-golfer video gallery after their round.
 
-Repo name: `HoleInOne`. Product name: **Par One**.
+Repo name: `HoleInOne`. Product name: **GolfReelz**.
 
 ## Status
 
@@ -36,7 +36,7 @@ Set Secrets (Replit → Tools → Secrets) for any external integrations
 you want to light up:
 
 - `DATABASE_URL` — e.g. Replit Postgres, Neon, Supabase. Omit to use
-  SQLite at `backend/parone.db`.
+  SQLite at `backend/golfreelz.db`.
 - `APP_BASE_URL` — your Repl's public URL
   (`https://<repl-name>.<user>.repl.co`)
 - `ADMIN_PASSWORD` (default `holeinone123`)
@@ -62,7 +62,7 @@ cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
-# defaults to SQLite at ./parone.db if DATABASE_URL unset
+# defaults to SQLite at ./golfreelz.db if DATABASE_URL unset
 
 # Frontend (separate shell)
 cd frontend
@@ -78,6 +78,7 @@ npm run dev
 | `/confirm/:participantId`  | Post-registration confirmation       |
 | `/g/:galleryToken`         | Golfer video gallery                 |
 | `/admin`                   | Admin dashboard                      |
+| `/admin/participants`      | Filterable participants view         |
 | `/admin/review`            | Hole-in-one verification queue       |
 
 ## Environment variables
@@ -85,7 +86,7 @@ npm run dev
 Place in `backend/.env` (see `backend/.env.example`):
 
 ```
-DATABASE_URL=postgresql+psycopg://parone:parone@db:5432/parone
+DATABASE_URL=postgresql+psycopg://golfreelz:golfreelz@db:5432/golfreelz
 STRIPE_SECRET_KEY=            # empty -> test/mock mode
 STRIPE_WEBHOOK_SECRET=
 TWILIO_ACCOUNT_SID=           # empty -> no-op

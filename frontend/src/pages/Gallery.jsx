@@ -38,7 +38,7 @@ export default function Gallery() {
   function share(clip) {
     const url = clip.source_url;
     if (navigator.share) {
-      navigator.share({ title: "My Par One shot", url }).catch(() => {});
+      navigator.share({ title: "My GolfReelz shot", url }).catch(() => {});
     } else {
       navigator.clipboard?.writeText(url);
       showToast("Link copied to clipboard");

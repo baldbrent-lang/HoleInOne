@@ -2,15 +2,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: parone
-      POSTGRES_PASSWORD: parone
-      POSTGRES_DB: parone
+      POSTGRES_USER: golfreelz
+      POSTGRES_PASSWORD: golfreelz
+      POSTGRES_DB: golfreelz
     ports:
       - "5432:5432"
     volumes:
-      - parone_pgdata:/var/lib/postgresql/data
+      - golfreelz_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U parone"]
+      test: ["CMD-SHELL", "pg_isready -U golfreelz"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -18,7 +18,7 @@ services:
   backend:
     build: ./backend
     environment:
-      DATABASE_URL: postgresql+psycopg://parone:parone@db:5432/parone
+      DATABASE_URL: postgresql+psycopg://golfreelz:golfreelz@db:5432/golfreelz
       APP_BASE_URL: http://localhost:5173
       ADMIN_PASSWORD: holeinone123
     ports:
@@ -42,4 +42,4 @@ services:
       - backend
 
 volumes:
-  parone_pgdata:
+  golfreelz_pgdata:

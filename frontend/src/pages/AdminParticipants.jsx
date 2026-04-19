@@ -4,10 +4,14 @@ import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 import ClipPlayer from "../components/ClipPlayer.jsx";
 
-const ADMIN_PW_STORAGE = "parone.adminPassword";
+const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
+const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
 
 export default function AdminParticipants() {
-  const adminPassword = localStorage.getItem(ADMIN_PW_STORAGE) || "";
+  const adminPassword =
+    localStorage.getItem(ADMIN_PW_STORAGE) ||
+    localStorage.getItem(LEGACY_ADMIN_PW_STORAGE) ||
+    "";
   const [params, setParams] = useSearchParams();
   const [courses, setCourses] = useState([]);
   const [rows, setRows] = useState([]);

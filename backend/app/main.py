@@ -14,7 +14,7 @@ from .config import settings
 from .database import Base, engine
 from .routers import admin, gallery, public, webhooks
 
-app = FastAPI(title="Par One API", version="0.1.0")
+app = FastAPI(title="GolfReelz API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,7 +73,7 @@ def _startup() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "app": "par-one"}
+    return {"ok": True, "app": "golfreelz"}
 
 
 app.include_router(public.router)
