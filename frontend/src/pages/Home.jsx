@@ -4,7 +4,7 @@ import { Brand, Icon } from "../components/Brand.jsx";
 export default function Home() {
   return (
     <div className="wrap">
-      <Brand subtitle="Golf shot videos, automatic" />
+      <Brand subtitle="Par 3 Videos and Hole In One Sweepstakes!" />
 
       <div className="hero">
         <span className="eyebrow">
