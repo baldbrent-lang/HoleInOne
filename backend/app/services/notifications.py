@@ -5,7 +5,7 @@ import logging
 
 from ..config import settings
 
-log = logging.getLogger("parone.notify")
+log = logging.getLogger("golfreelz.notify")
 
 
 def send_sms(to: str | None, body: str) -> None:
@@ -40,26 +40,26 @@ def send_email(to: str | None, subject: str, body: str) -> None:
 
 def notify_registration_confirmed(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:
     msg = (
-        f"You're registered for Par One, {name}! "
+        f"You're registered for GolfReelz, {name}! "
         f"We'll text you when your videos are ready. Your gallery: {gallery_url}"
     )
     send_sms(mobile, msg)
-    send_email(email, "You're registered with Par One", msg)
+    send_email(email, "You're registered with GolfReelz", msg)
 
 
 def notify_gallery_ready(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:
-    msg = f"Your Par One videos are ready, {name}! View + share: {gallery_url}"
+    msg = f"Your GolfReelz videos are ready, {name}! View + share: {gallery_url}"
     send_sms(mobile, msg)
-    send_email(email, "Your Par One videos are ready", msg)
+    send_email(email, "Your GolfReelz videos are ready", msg)
 
 
 def notify_hio_under_review(name: str, mobile: str | None, email: str | None) -> None:
-    msg = f"Par One flagged a possible hole-in-one for you, {name}! We're reviewing footage now."
+    msg = f"GolfReelz flagged a possible hole-in-one for you, {name}! We're reviewing footage now."
     send_sms(mobile, msg)
-    send_email(email, "Par One: possible hole-in-one under review", msg)
+    send_email(email, "GolfReelz: possible hole-in-one under review", msg)
 
 
 def notify_hio_confirmed(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:
     msg = f"HOLE IN ONE confirmed, {name}! Congrats. Clip + prize info: {gallery_url}"
     send_sms(mobile, msg)
-    send_email(email, "Par One: hole-in-one CONFIRMED", msg)
+    send_email(email, "GolfReelz: hole-in-one CONFIRMED", msg)

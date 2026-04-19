@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 import ClipPlayer from "../components/ClipPlayer.jsx";
 
-const ADMIN_PW_STORAGE = "parone.adminPassword";
+const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 
 export default function AdminParticipants() {
   const adminPassword = localStorage.getItem(ADMIN_PW_STORAGE) || "";

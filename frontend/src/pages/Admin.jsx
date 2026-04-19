@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { api, API_BASE } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 
-const ADMIN_PW_STORAGE = "parone.adminPassword";
+const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 
 function today() {
   const d = new Date();
@@ -103,7 +103,7 @@ export default function Admin() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div className="logo"><Icon name="flag" /></div>
           <div>
-            <h1>Par One</h1>
+            <h1>GolfReelz</h1>
             <div className="tag">Operator Console</div>
           </div>
         </div>
@@ -202,7 +202,7 @@ export default function Admin() {
                       <a
                         className="btn secondary small"
                         href={api.courseQrUrl(c.qr_token)}
-                        download={`parone-${c.name.replace(/\s+/g, "_")}.png`}
+                        download={`golfreelz-${c.name.replace(/\s+/g, "_")}.png`}
                         style={{ textAlign: "center" }}
                       >
                         <Icon name="download" size={14} /> Download

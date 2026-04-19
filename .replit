@@ -1,6 +1,6 @@
 entrypoint = "start.sh"
 modules = ["python-3.12", "nodejs-20"]
-hidden = [".venv", "node_modules", "frontend/dist", "parone.db", "__pycache__"]
+hidden = [".venv", "node_modules", "frontend/dist", "golfreelz.db", "__pycache__"]
 
 run = "bash start.sh"
 
