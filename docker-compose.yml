@@ -20,7 +20,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://golfreelz:golfreelz@db:5432/golfreelz
       APP_BASE_URL: http://localhost:5173
-      ADMIN_PASSWORD: holeinone123
+      ADMIN_PASSWORD: Baldy123
     ports:
       - "8000:8000"
     depends_on:

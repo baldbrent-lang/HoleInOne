@@ -39,7 +39,7 @@ you want to light up:
   SQLite at `backend/golfreelz.db`.
 - `APP_BASE_URL` — your Repl's public URL
   (`https://<repl-name>.<user>.repl.co`)
-- `ADMIN_PASSWORD` (default `holeinone123`)
+- `ADMIN_PASSWORD` (default `Baldy123`)
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
 - `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`
@@ -96,7 +96,7 @@ SENDGRID_API_KEY=             # empty -> no-op
 SENDGRID_FROM_EMAIL=
 SHOT_TRACER_WEBHOOK_SECRET=
 APP_BASE_URL=http://localhost:5173
-ADMIN_PASSWORD=holeinone123
+ADMIN_PASSWORD=Baldy123
 ```
 
 ## Explicitly out of scope for V0
