@@ -57,6 +57,10 @@ def _migrate() -> None:
             statements.append("ALTER TABLE courses ADD COLUMN livestream_url VARCHAR(500)")
         if "hole_yardages" not in course_cols:
             statements.append("ALTER TABLE courses ADD COLUMN hole_yardages JSON")
+            # Backfill existing rows so API responses don't surface NULL.
+            statements.append("UPDATE courses SET hole_yardages = '{}' WHERE hole_yardages IS NULL")
+        else:
+            statements.append("UPDATE courses SET hole_yardages = '{}' WHERE hole_yardages IS NULL")
 
     if not statements:
         return

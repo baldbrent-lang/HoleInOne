@@ -5,7 +5,6 @@ from typing import Optional
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-
 class CourseCreate(BaseModel):
     name: str
     location: str = ""
@@ -37,6 +36,16 @@ class CourseOut(BaseModel):
     tee_sheet_provider: str
     livestream_url: Optional[str] = None
 
+    @field_validator("hole_yardages", mode="before")
+    @classmethod
+    def _yardages_none_to_empty(cls, v):
+        return v or {}
+
+    @field_validator("par3_holes", mode="before")
+    @classmethod
+    def _holes_none_to_empty(cls, v):
+        return v or []
+
     class Config:
         from_attributes = True
 
@@ -47,6 +56,11 @@ class PublicCourseOut(BaseModel):
     location: str
     livestream_url: Optional[str] = None
     hole_yardages: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("hole_yardages", mode="before")
+    @classmethod
+    def _none_to_empty(cls, v):
+        return v or {}
 
     class Config:
         from_attributes = True
