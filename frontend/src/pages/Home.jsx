@@ -10,7 +10,7 @@ export default function Home() {
         <span className="eyebrow">
           <Icon name="sparkle" size={14} /> Now on course
         </span>
-        <h1>Every par-3 shot, tracked and delivered.</h1>
+        <h1>Hole in one on a par 3 to win $10,000.</h1>
         <p>
           Scan the QR code at your course, register in under a minute, and we
           text your personal gallery when your round is done — tracer overlays,
