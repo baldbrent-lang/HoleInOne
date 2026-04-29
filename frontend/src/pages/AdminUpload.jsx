@@ -32,6 +32,8 @@ export default function AdminUpload() {
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [overrideCandidates, setOverrideCandidates] = useState([]);
+  const [assigning, setAssigning] = useState(false);
 
   useEffect(() => {
     if (!adminPassword) return;
@@ -65,10 +67,40 @@ export default function AdminUpload() {
       const data = await api.uploadClip(adminPassword, fd, setProgress);
       setResult(data);
       setFile(null);
+      // If unmatched, load all of this course's recent registrants for quick-assign
+      if (data.status !== "assigned") {
+        try {
+          const list = await api.listParticipants(adminPassword, { course_id: courseId });
+          setOverrideCandidates(list);
+        } catch {
+          setOverrideCandidates([]);
+        }
+      } else {
+        setOverrideCandidates([]);
+      }
     } catch (e) {
       setError(e.message);
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function forceAssign(participantId, participantName) {
+    if (!result?.clip_id) return;
+    setAssigning(true);
+    try {
+      await api.assignClip(adminPassword, result.clip_id, participantId);
+      setResult({
+        ...result,
+        status: "assigned",
+        participant_id: participantId,
+        participant_name: participantName,
+        issue_note: null,
+      });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setAssigning(false);
     }
   }
 
@@ -210,8 +242,8 @@ export default function AdminUpload() {
         <div
           className="card"
           style={{
-            background: result.participant_id ? "var(--primary-soft)" : undefined,
-            border: result.participant_id ? "1px solid var(--emerald-200)" : undefined,
+            background: result.status === "assigned" ? "var(--primary-soft)" : undefined,
+            border: result.status === "assigned" ? "1px solid var(--emerald-200)" : undefined,
           }}
         >
           <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 10 }}>
@@ -236,6 +268,45 @@ export default function AdminUpload() {
             controls
             style={{ width: "100%", maxWidth: 640, marginTop: 10, borderRadius: 8, background: "#000" }}
           />
+
+          {result.status !== "assigned" && overrideCandidates.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div className="tiny upper muted" style={{ marginBottom: 8 }}>
+                Force-assign to a registered golfer
+              </div>
+              <p className="small muted" style={{ marginBottom: 10 }}>
+                The auto-matcher needs <code>captured_at</code> within 5 hours of a registered tee time.
+                If you're testing or back-filling, just pick a golfer below.
+              </p>
+              <div className="chip-row">
+                {overrideCandidates.map((cand) => (
+                  <button
+                    key={cand.id}
+                    type="button"
+                    className="chip"
+                    disabled={assigning}
+                    title={`Assign to ${cand.name}`}
+                    onClick={() => forceAssign(cand.id, cand.name)}
+                  >
+                    {cand.selfie_url && (
+                      <img
+                        src={cand.selfie_url}
+                        alt=""
+                        style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }}
+                      />
+                    )}
+                    {cand.name}
+                    <span className="small muted" style={{ marginLeft: 6 }}>
+                      · {new Date(cand.tee_time.starts_at).toLocaleString([], {
+                        month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+                      })}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {result.participant_id && (
             <div style={{ marginTop: 12 }}>
               <Link to={`/admin/participants?course_id=${courseId}`} className="btn secondary small" style={{ marginRight: 8 }}>

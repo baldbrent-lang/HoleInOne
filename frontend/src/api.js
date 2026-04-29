@@ -56,6 +56,11 @@ export const api = {
     return request(`/api/admin/participants${qs.toString() ? `?${qs}` : ""}`, { adminPassword: key });
   },
   participantClips: (key, id) => request(`/api/admin/participants/${id}/clips`, { adminPassword: key }),
+  assignClip: (key, clipId, participantId) =>
+    request(`/api/admin/clips/${clipId}/assign?participant_id=${participantId}`, {
+      method: "POST",
+      adminPassword: key,
+    }),
   uploadClip: (key, formData, onProgress) =>
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
