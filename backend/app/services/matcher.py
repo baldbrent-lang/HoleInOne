@@ -1,11 +1,12 @@
 """Match incoming video clips to participants by visual appearance.
 
 Matching pipeline:
-- Find tee times whose round window contains the clip's captured_at.
-  The window runs from tee_time.starts_at to + match_window_minutes
-  (default 5 hours) — generous on purpose, since real rounds run long
-  and clips can be back-filled hours after capture.
-- Gather all participants from those tee times.
+- Eligibility window is per-golfer, anchored to *registration time*:
+  a clip is eligible to match a participant if the clip's captured_at
+  is between participant.created_at and participant.created_at +
+  match_window_minutes (default 9 hours). Clips captured before a
+  golfer registers are never matched to them.
+- Gather all participants at this course inside that window.
 - In real mode: embed the clip, compare cosine similarity against each
   participant's selfie embedding, assign top match if margin > threshold.
 - In stub mode (no real embedder configured): round-robin assignment
@@ -34,25 +35,24 @@ from . import appearance
 
 
 def _candidates_in_window(db: Session, course: Course, clip: VideoClip) -> list[Participant]:
-    """Tee times whose round window contains the clip's captured_at."""
+    """Participants registered at this course within the match window."""
     window = timedelta(minutes=settings.match_window_minutes)
-    tee_times = (
+    participants = (
         db.execute(
-            select(TeeTime).where(
+            select(Participant)
+            .join(TeeTime, Participant.tee_time_id == TeeTime.id)
+            .where(
                 and_(
                     TeeTime.course_id == course.id,
-                    TeeTime.starts_at <= clip.captured_at,
-                    TeeTime.starts_at >= clip.captured_at - window,
+                    Participant.created_at <= clip.captured_at,
+                    Participant.created_at >= clip.captured_at - window,
                 )
             )
         )
         .scalars()
         .all()
     )
-    matching: list[Participant] = []
-    for tt in tee_times:
-        matching.extend(tt.participants)
-    return matching
+    return list(participants)
 
 
 def match_clip(db: Session, clip: VideoClip) -> Participant | None:
