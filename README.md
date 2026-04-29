@@ -99,6 +99,33 @@ APP_BASE_URL=http://localhost:5173
 ADMIN_PASSWORD=Baldy123
 ```
 
+## Email delivery (no third-party signup needed)
+
+Per-clip emails go out via SMTP if you set these Replit Secrets — works
+with any Gmail / Outlook / Yahoo account:
+
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your.email@gmail.com
+SMTP_PASSWORD=<16-char App Password>
+```
+
+For Gmail specifically, you need to:
+1. Enable 2-step verification on your Google Account
+2. Visit https://myaccount.google.com/apppasswords
+3. Generate an App Password named "GolfReelz" — copy the 16 chars
+4. Paste into Replit Secrets as `SMTP_PASSWORD`
+
+Restart the workflow, then admin → Dashboard → **Test email delivery**
+sends one message to confirm the wiring works. After that, every
+matched clip auto-emails to the golfer with subject
+`<Course Name> - Hole #<N>` and the MP4 attached.
+
+If SMTP secrets aren't set, the system falls back to SendGrid
+(`SENDGRID_API_KEY` if set), or mock-logs to the workflow console
+otherwise.
+
 ## Wiring up real video clips
 
 Two paths into the system:

@@ -245,6 +245,8 @@ export default function Admin() {
         )}
       </div>
 
+      <TestEmailCard adminPassword={adminPassword} onToast={showToast} />
+
       <form className="card" onSubmit={createCourse}>
         <h3>Add a course</h3>
         <p className="small muted" style={{ marginBottom: 14 }}>
@@ -493,6 +495,60 @@ function LiveDot() {
         boxShadow: "0 0 0 0 rgba(239, 68, 68, 0.4)",
       }}
     />
+  );
+}
+
+function TestEmailCard({ adminPassword, onToast }) {
+  const [to, setTo] = useState("");
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState(null);
+
+  async function send() {
+    setSending(true);
+    setResult(null);
+    try {
+      const r = await api.sendTestEmail(adminPassword, { to });
+      setResult({ ok: true, provider: r.provider, to: r.to });
+      onToast?.(`Test sent via ${r.provider}`);
+    } catch (e) {
+      setResult({ ok: false, error: e.message });
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <h3 style={{ marginBottom: 6 }}>Test email delivery</h3>
+      <p className="small muted" style={{ marginBottom: 10 }}>
+        Drops a single message at the address below. Uses SMTP if
+        <code> SMTP_HOST / SMTP_USER / SMTP_PASSWORD</code> are set in Secrets,
+        else SendGrid, else mock-log.
+      </p>
+      <div className="row">
+        <div className="field" style={{ flex: 2 }}>
+          <label>Send test to</label>
+          <input
+            type="email"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+            placeholder="you@example.com"
+          />
+        </div>
+        <div style={{ alignSelf: "end" }}>
+          <button type="button" disabled={sending || !to} onClick={send}>
+            {sending ? "Sending…" : "Send test"}
+          </button>
+        </div>
+      </div>
+      {result?.ok && (
+        <p className="small" style={{ color: "var(--emerald-700)" }}>
+          ✓ Sent via <b>{result.provider}</b> to {result.to}.
+          {result.provider === "mock" && " (Set SMTP secrets to actually deliver.)"}
+        </p>
+      )}
+      {result && !result.ok && <p className="err-text small">{result.error}</p>}
+    </div>
   );
 }
 

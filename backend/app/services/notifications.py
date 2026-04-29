@@ -43,8 +43,52 @@ def send_sms(to: str | None, body: str) -> None:
     client.messages.create(from_=settings.twilio_from_number, to=to, body=body)
 
 
+def _smtp_configured() -> bool:
+    return bool(settings.smtp_host and settings.smtp_user and settings.smtp_password)
+
+
+def _send_smtp(
+    to: str,
+    subject: str,
+    body: str,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> None:
+    """Plain-stdlib SMTP send with optional attachments. attachments is a list
+    of (filename, bytes, mime_type)."""
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["From"] = settings.smtp_from or settings.smtp_user
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    for fname, fbytes, mime in attachments or []:
+        maintype, _, subtype = mime.partition("/")
+        if not subtype:
+            maintype, subtype = "application", "octet-stream"
+        msg.add_attachment(fbytes, maintype=maintype, subtype=subtype, filename=fname)
+
+    context = ssl.create_default_context()
+    if settings.smtp_use_ssl or settings.smtp_port == 465:
+        with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=context, timeout=30) as s:
+            s.login(settings.smtp_user, settings.smtp_password)
+            s.send_message(msg)
+    else:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=30) as s:
+            s.ehlo()
+            s.starttls(context=context)
+            s.ehlo()
+            s.login(settings.smtp_user, settings.smtp_password)
+            s.send_message(msg)
+
+
 def send_email(to: str | None, subject: str, body: str) -> None:
     if not to:
+        return
+    if _smtp_configured():
+        _send_smtp(to, subject, body)
         return
     if not settings.sendgrid_api_key:
         log.info("EMAIL (mock) -> %s | %s | %s", to, subject, body)
@@ -70,6 +114,9 @@ def send_email_with_attachment(
     mime_type: str = "application/octet-stream",
 ) -> None:
     if not to:
+        return
+    if _smtp_configured():
+        _send_smtp(to, subject, body, attachments=[(file_name, file_bytes, mime_type)])
         return
     if not settings.sendgrid_api_key:
         log.info(

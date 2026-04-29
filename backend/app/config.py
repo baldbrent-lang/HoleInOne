@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     sendgrid_api_key: str = ""
     sendgrid_from_email: str = "noreply@golfreelz.test"
 
+    # SMTP (Gmail, Outlook, Yahoo, etc). Used in preference to SendGrid
+    # when set. Gmail wants smtp.gmail.com:587 + a 16-char App Password.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""  # defaults to smtp_user when empty
+    smtp_use_ssl: bool = False  # True for port 465; False for 587 STARTTLS
+
     shot_tracer_webhook_secret: str = ""
 
     default_minutes_per_hole: int = 14

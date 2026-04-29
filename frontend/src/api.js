@@ -81,6 +81,8 @@ export const api = {
     }),
   resendGallery: (key, id) =>
     request(`/api/admin/participants/${id}/resend-gallery`, { method: "POST", adminPassword: key }),
+  sendTestEmail: (key, payload) =>
+    request(`/api/admin/test-email`, { method: "POST", body: payload, adminPassword: key }),
   listHIO: (key, status) =>
     request(`/api/admin/hio${status ? `?status=${status}` : ""}`, { adminPassword: key }),
   hioDetail: (key, id) => request(`/api/admin/hio/${id}`, { adminPassword: key }),

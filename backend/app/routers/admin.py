@@ -253,6 +253,37 @@ def participant_clips(participant_id: int, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/test-email")
+def send_test_email(payload: dict, db: Session = Depends(get_db)):
+    """Fire a single test email to confirm SMTP / SendGrid wiring works.
+
+    Body: {"to": "you@example.com"} or {"participant_id": 5}
+    """
+    to = (payload or {}).get("to")
+    if not to and payload.get("participant_id"):
+        p = db.get(Participant, int(payload["participant_id"]))
+        to = p.email if p else None
+    if not to:
+        raise HTTPException(400, "provide 'to' or 'participant_id' (with email)")
+
+    provider = (
+        "smtp" if (settings.smtp_host and settings.smtp_user and settings.smtp_password)
+        else "sendgrid" if settings.sendgrid_api_key
+        else "mock"
+    )
+
+    try:
+        notifications.send_email(
+            to,
+            "GolfReelz test email",
+            "If you can read this, your email wiring is working. — GolfReelz",
+        )
+    except Exception as exc:  # surface SMTP errors back to the admin
+        raise HTTPException(502, f"send failed via {provider}: {exc}")
+
+    return {"ok": True, "provider": provider, "to": to}
+
+
 @router.post("/participants/{participant_id}/resend-gallery")
 def resend_gallery(participant_id: int, db: Session = Depends(get_db)):
     p = db.get(Participant, participant_id)
