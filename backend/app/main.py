@@ -62,6 +62,12 @@ def _migrate() -> None:
         else:
             statements.append("UPDATE courses SET hole_yardages = '{}' WHERE hole_yardages IS NULL")
 
+    # VideoClip additions
+    if "video_clips" in inspector.get_table_names():
+        clip_cols = {c["name"] for c in inspector.get_columns("video_clips")}
+        if "delivered_at" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN delivered_at TIMESTAMP")
+
     if not statements:
         return
     with engine.begin() as conn:

@@ -334,8 +334,13 @@ def manually_assign_clip(clip_id: int, participant_id: int, db: Session = Depend
     clip.processing_status = ClipProcessingStatus.assigned.value
     clip.issue_note = None
     db.add(AuditLog(actor="admin", action="assign_clip", target=f"clip:{clip.id}->p:{participant.id}"))
+
+    course = db.get(Course, clip.course_id)
+    if notifications.notify_clip_ready(participant, clip, course):
+        notifications.mark_delivered(clip)
+
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "delivered": clip.delivered_at is not None}
 
 
 # --- Manual clip upload (proxy for Shot Tracer webhook in V0) ---------------

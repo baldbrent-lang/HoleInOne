@@ -122,6 +122,7 @@ class VideoClip(Base):
     processing_status: Mapped[str] = mapped_column(String(20), default=ClipProcessingStatus.received.value)
     ball_in_cup: Mapped[bool] = mapped_column(Boolean, default=False)
     issue_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     participant: Mapped[Optional[Participant]] = relationship(back_populates="clips")

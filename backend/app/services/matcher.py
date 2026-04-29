@@ -31,7 +31,7 @@ from ..models import (
     TeeTime,
     VideoClip,
 )
-from . import appearance
+from . import appearance, notifications
 
 
 def _candidates_in_window(db: Session, course: Course, clip: VideoClip) -> list[Participant]:
@@ -81,6 +81,10 @@ def match_clip(db: Session, clip: VideoClip) -> Participant | None:
 
     if clip.ball_in_cup and clip.camera_type in ("hole", "tee"):
         _ensure_hio_event(db, participant, clip)
+
+    # Per-clip email delivery (idempotent via clip.delivered_at)
+    if notifications.notify_clip_ready(participant, clip, course):
+        notifications.mark_delivered(clip)
 
     return participant
 
