@@ -9,10 +9,11 @@ from ..config import settings
 
 log = logging.getLogger("golfreelz.notify")
 
-# Maximum attachment size for email. Most providers (Gmail, Yahoo, Outlook)
-# cap inbound email at 25MB; SendGrid recommends <20MB to leave headroom
-# for MIME encoding overhead.
-MAX_ATTACH_BYTES = 20 * 1024 * 1024
+# Hard email-server cap. Most providers (Gmail, Yahoo, Outlook) reject above
+# ~25MB; SendGrid's API limit is 30MB including base64 overhead (~33%), so
+# 22MB raw is the safe ceiling. Uploads are pre-compressed via ffmpeg in
+# services/video.py to fit comfortably; this cap is a last-resort guard.
+MAX_ATTACH_BYTES = 22 * 1024 * 1024
 
 # Resolve once so file lookups don't traverse on every call.
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]

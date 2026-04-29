@@ -6,5 +6,6 @@
     pkgs.postgresql
     pkgs.zlib
     pkgs.libjpeg
+    pkgs.ffmpeg-headless
   ];
 }

@@ -31,6 +31,7 @@ from ..schemas import (
 from ..services import notifications
 from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
+from ..services.video import compress_for_email
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -389,6 +390,11 @@ async def upload_clip(
     fname = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.{ext}"
     fpath = CLIPS_DIR / fname
     fpath.write_bytes(data)
+
+    # Transcode for email delivery. Replaces the file in place, leaving
+    # the same source_url valid. Falls back to the original on ffmpeg
+    # failure so the gallery still works.
+    compress_for_email(fpath)
 
     try:
         captured_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
