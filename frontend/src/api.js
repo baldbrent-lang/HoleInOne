@@ -56,6 +56,24 @@ export const api = {
     return request(`/api/admin/participants${qs.toString() ? `?${qs}` : ""}`, { adminPassword: key });
   },
   participantClips: (key, id) => request(`/api/admin/participants/${id}/clips`, { adminPassword: key }),
+  uploadClip: (key, formData, onProgress) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/clips/upload`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(formData);
+    }),
   resendGallery: (key, id) =>
     request(`/api/admin/participants/${id}/resend-gallery`, { method: "POST", adminPassword: key }),
   listHIO: (key, status) =>

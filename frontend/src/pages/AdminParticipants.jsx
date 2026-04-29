@@ -126,6 +126,7 @@ export default function AdminParticipants() {
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants" className="active">Participants</Link>
+        <Link to="/admin/upload">Upload clip</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>
 

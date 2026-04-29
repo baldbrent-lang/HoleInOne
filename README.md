@@ -99,6 +99,50 @@ APP_BASE_URL=http://localhost:5173
 ADMIN_PASSWORD=Baldy123
 ```
 
+## Wiring up real video clips
+
+Two paths into the system:
+
+### 1. Manual upload via admin (no hardware needed)
+
+Sign in to `/admin/upload`. Pick a course, hole #, camera angle, and timestamp,
+then drop an MP4 from your phone or GoPro. The video is saved to
+`backend/uploads/clips/`, served from `/uploads/clips/<file>`, and run through
+the appearance matcher exactly like a Shot Tracer webhook payload would.
+
+Use this to:
+- demo end-to-end with real footage before any cameras are deployed
+- backfill clips when a camera misses a swing
+- test the matcher with edge cases (ambiguous outfits, etc.)
+
+### 2. Real Shot Tracer / partner webhook
+
+Send a JSON POST to `https://<your-deploy>/api/webhooks/shot-tracer`:
+
+```bash
+curl -X POST "https://<your-deploy>/api/webhooks/shot-tracer" \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: $SHOT_TRACER_WEBHOOK_SECRET" \
+  -d '{
+    "course_id": 1,
+    "hole_number": 3,
+    "camera_type": "tee",
+    "captured_at": "2026-04-17T14:32:11Z",
+    "source_url": "https://your-cdn.example.com/clips/abc123.mp4",
+    "thumbnail_url": "https://your-cdn.example.com/clips/abc123.jpg",
+    "carry_yards": 173,
+    "ball_speed_mph": 142,
+    "ball_in_cup": false
+  }'
+```
+
+`X-Webhook-Secret` is checked only when `SHOT_TRACER_WEBHOOK_SECRET` is set in
+env; otherwise any caller is accepted (useful for local testing).
+
+The matcher will assign the clip to a registered participant in the tee-time
+window using their selfie embedding. If confidence is too low, the clip lands
+in the manual review queue at `/admin` (Flagged / unassigned section).
+
 ## Explicitly out of scope for V0
 
 - Real ForeUP / Lightspeed tee-sheet API wiring (mock endpoint only)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -27,6 +29,7 @@ from ..schemas import (
     HIOReviewAction,
 )
 from ..services import notifications
+from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -333,6 +336,102 @@ def manually_assign_clip(clip_id: int, participant_id: int, db: Session = Depend
     db.add(AuditLog(actor="admin", action="assign_clip", target=f"clip:{clip.id}->p:{participant.id}"))
     db.commit()
     return {"ok": True}
+
+
+# --- Manual clip upload (proxy for Shot Tracer webhook in V0) ---------------
+
+CLIPS_DIR = Path(__file__).resolve().parents[2] / settings.upload_dir / "clips"
+CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@router.post("/clips/upload")
+async def upload_clip(
+    course_id: int = Form(...),
+    hole_number: int = Form(...),
+    camera_type: str = Form("tee"),
+    captured_at: str = Form(...),  # ISO datetime, e.g. "2026-04-17T14:32:11Z"
+    carry_yards: int | None = Form(None),
+    apex_feet: int | None = Form(None),
+    ball_speed_mph: int | None = Form(None),
+    ball_in_cup: bool = Form(False),
+    video: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Manual upload that mimics the Shot Tracer webhook.
+
+    Saves the video to backend/uploads/clips/, creates a VideoClip row,
+    runs the appearance matcher, and fires gallery-ready notifications
+    just like the real webhook would. Useful for testing the pipeline
+    end-to-end with phone or GoPro footage before any real cameras are
+    deployed.
+    """
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "course not found")
+
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(400, "must be a video file")
+
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "empty video upload")
+    if len(data) > 500 * 1024 * 1024:
+        raise HTTPException(413, "video too large (max 500MB)")
+
+    ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    if ext not in ("mp4", "mov", "webm", "m4v"):
+        ext = "mp4"
+    fname = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.{ext}"
+    fpath = CLIPS_DIR / fname
+    fpath.write_bytes(data)
+
+    try:
+        captured_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        if captured_dt.tzinfo is not None:
+            # Normalize to naive UTC since the column is TIMESTAMP WITHOUT TIME ZONE
+            captured_dt = captured_dt.astimezone().replace(tzinfo=None)
+    except ValueError:
+        raise HTTPException(400, "invalid captured_at; use ISO 8601")
+
+    clip = VideoClip(
+        course_id=course_id,
+        hole_number=hole_number,
+        camera_type=camera_type,
+        captured_at=captured_dt,
+        source_url=f"{settings.app_base_url}/uploads/clips/{fname}",
+        thumbnail_url=None,
+        carry_yards=carry_yards,
+        apex_feet=apex_feet,
+        ball_speed_mph=ball_speed_mph,
+        ball_in_cup=ball_in_cup,
+        processing_status=ClipProcessingStatus.received.value,
+    )
+    db.add(clip)
+    db.flush()
+
+    participant = match_clip(db, clip)
+    if participant and ball_in_cup:
+        notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+
+    db.commit()
+
+    # Fire gallery-ready notification on first assigned clip
+    if clip.participant_id and clip.processing_status == ClipProcessingStatus.assigned.value:
+        p = db.get(Participant, clip.participant_id)
+        if p and not p.gallery_ready_sent:
+            p.gallery_ready_sent = True
+            gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
+            notifications.notify_gallery_ready(p.name, p.mobile, p.email, gallery_url)
+            db.commit()
+
+    return {
+        "clip_id": clip.id,
+        "status": clip.processing_status,
+        "participant_id": clip.participant_id,
+        "participant_name": participant.name if participant else None,
+        "source_url": clip.source_url,
+        "issue_note": clip.issue_note,
+    }
 
 
 # --- Hole-in-one review queue ------------------------------------------------

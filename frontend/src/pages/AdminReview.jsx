@@ -62,6 +62,7 @@ export default function AdminReview() {
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
+        <Link to="/admin/upload">Upload clip</Link>
         <Link to="/admin/review" className="active">Hole-in-one review</Link>
       </div>
 

@@ -125,6 +125,7 @@ export default function Admin() {
       <div className="nav">
         <Link to="/admin" className="active">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
+        <Link to="/admin/upload">Upload clip</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
         <button
           className="ghost"

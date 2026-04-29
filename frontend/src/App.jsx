@@ -5,6 +5,7 @@ import Gallery from "./pages/Gallery.jsx";
 import Admin from "./pages/Admin.jsx";
 import AdminParticipants from "./pages/AdminParticipants.jsx";
 import AdminReview from "./pages/AdminReview.jsx";
+import AdminUpload from "./pages/AdminUpload.jsx";
 import Home from "./pages/Home.jsx";
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
       <Route path="/g/:galleryToken" element={<Gallery />} />
       <Route path="/admin" element={<Admin />} />
       <Route path="/admin/participants" element={<AdminParticipants />} />
+      <Route path="/admin/upload" element={<AdminUpload />} />
       <Route path="/admin/review" element={<AdminReview />} />
       <Route
         path="*"
