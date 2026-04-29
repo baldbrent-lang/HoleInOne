@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     shot_tracer_webhook_secret: str = ""
 
     default_minutes_per_hole: int = 14
+    # How long after a tee time we'll still try to match a clip to that
+    # group. Real-world rounds run long, golfers play out of order, and
+    # camera/upload pipelines back-fill late, so keep this generous.
+    match_window_minutes: int = 300  # 5 hours
 
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"

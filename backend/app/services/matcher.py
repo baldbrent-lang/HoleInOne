@@ -1,7 +1,10 @@
 """Match incoming video clips to participants by visual appearance.
 
 Matching pipeline:
-- Find tee times whose hole window plausibly contains the clip timestamp.
+- Find tee times whose round window contains the clip's captured_at.
+  The window runs from tee_time.starts_at to + match_window_minutes
+  (default 5 hours) — generous on purpose, since real rounds run long
+  and clips can be back-filled hours after capture.
 - Gather all participants from those tee times.
 - In real mode: embed the clip, compare cosine similarity against each
   participant's selfie embedding, assign top match if margin > threshold.
@@ -30,22 +33,16 @@ from ..models import (
 from . import appearance
 
 
-def _hole_window(tt: TeeTime, hole_number: int, minutes_per_hole: int) -> tuple:
-    start_offset = timedelta(minutes=minutes_per_hole * (hole_number - 1))
-    window_start = tt.starts_at + start_offset
-    window_end = window_start + timedelta(minutes=minutes_per_hole * 2)
-    return window_start, window_end
-
-
 def _candidates_in_window(db: Session, course: Course, clip: VideoClip) -> list[Participant]:
-    mph = course.minutes_per_hole or 14
+    """Tee times whose round window contains the clip's captured_at."""
+    window = timedelta(minutes=settings.match_window_minutes)
     tee_times = (
         db.execute(
             select(TeeTime).where(
                 and_(
                     TeeTime.course_id == course.id,
                     TeeTime.starts_at <= clip.captured_at,
-                    TeeTime.starts_at >= clip.captured_at - timedelta(minutes=mph * 19),
+                    TeeTime.starts_at >= clip.captured_at - window,
                 )
             )
         )
@@ -54,9 +51,7 @@ def _candidates_in_window(db: Session, course: Course, clip: VideoClip) -> list[
     )
     matching: list[Participant] = []
     for tt in tee_times:
-        ws, we = _hole_window(tt, clip.hole_number, mph)
-        if ws <= clip.captured_at <= we:
-            matching.extend(tt.participants)
+        matching.extend(tt.participants)
     return matching
 
 
