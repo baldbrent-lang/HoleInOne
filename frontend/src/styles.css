@@ -61,16 +61,16 @@ html, body, #root { height: 100%; }
 
 body {
   margin: 0;
-  background:
-    linear-gradient(
-      180deg,
-      #0d9488 0%,
-      #14b8a6 18%,
-      #34d399 38%,
-      #86efac 60%,
-      #d1fae5 80%,
-      var(--emerald-50) 100%
-    );
+  /* Layered: subtle dark-to-light overlay (so text + cards stay readable) on
+     top of the photograph. If frontend/public/bg.jpg is missing, the
+     emerald fallback shows. */
+  background-color: var(--emerald-50);
+  background-image:
+    linear-gradient(180deg, rgba(11, 30, 59, 0.18) 0%, rgba(255, 255, 255, 0.55) 100%),
+    url("/bg.jpg");
+  background-size: cover;
+  background-position: center center;
+  background-repeat: no-repeat;
   background-attachment: fixed;
   color: var(--ink);
   min-height: 100vh;
@@ -127,12 +127,14 @@ code { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monos
 
 /* Cards */
 .card {
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
   border-radius: var(--radius);
   padding: 20px;
   margin-bottom: 16px;
-  box-shadow: var(--shadow-sm);
+  box-shadow: 0 4px 18px -6px rgba(11, 30, 59, 0.18), 0 1px 3px rgba(11, 30, 59, 0.06);
 }
 .card.tight { padding: 14px; }
 .card.feature {
@@ -152,11 +154,16 @@ code { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monos
   position: relative;
   border-radius: var(--radius-lg);
   overflow: hidden;
-  background: radial-gradient(circle at 85% 15%, rgba(16, 185, 129, 0.35), transparent 60%), linear-gradient(135deg, var(--navy-900), var(--navy-700));
+  background:
+    radial-gradient(circle at 85% 15%, rgba(16, 185, 129, 0.30), transparent 60%),
+    linear-gradient(135deg, rgba(11, 30, 59, 0.92), rgba(13, 148, 136, 0.85));
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   color: white;
   padding: 44px 32px;
   margin-bottom: 24px;
   box-shadow: var(--shadow-lg);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 .hero::after {
   content: "";
