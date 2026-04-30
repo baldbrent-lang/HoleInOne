@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import optional_user
-from ..models import Course, Participant, TeeTime, User
+from ..models import Course, Participant, Showcase, TeeTime, User
 from ..schemas import (
     PublicCourseOut,
     RegistrationResult,
@@ -40,6 +40,21 @@ def _get_course_by_token(db: Session, token: str) -> Course:
 @router.get("/courses", response_model=list[PublicCourseOut])
 def list_public_courses(db: Session = Depends(get_db)):
     return db.query(Course).order_by(Course.name).all()
+
+
+@router.get("/showcase")
+def list_showcase(db: Session = Depends(get_db)):
+    rows = db.query(Showcase).order_by(Showcase.position.asc()).all()
+    return [
+        {
+            "position": s.position,
+            "source_url": s.source_url,
+            "thumbnail_url": s.thumbnail_url,
+            "title": s.title,
+            "caption": s.caption,
+        }
+        for s in rows
+    ]
 
 
 @router.get("/courses/{course_token}", response_model=PublicCourseOut)

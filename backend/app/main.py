@@ -84,6 +84,23 @@ def _startup() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate()
     _seed_default_courses()
+    _seed_showcase_slots()
+
+
+def _seed_showcase_slots() -> None:
+    """Ensure positions 1/2/3 exist in the showcase table (empty by default)."""
+    from .database import SessionLocal
+    from .models import Showcase
+
+    db = SessionLocal()
+    try:
+        existing = {s.position for s in db.query(Showcase).all()}
+        for pos in (1, 2, 3):
+            if pos not in existing:
+                db.add(Showcase(position=pos))
+        db.commit()
+    finally:
+        db.close()
 
 
 def _seed_default_courses() -> None:

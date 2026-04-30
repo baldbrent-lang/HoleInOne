@@ -38,6 +38,32 @@ async function request(path, { method = "GET", body, adminPassword, auth = true 
 
 export const api = {
   listPublicCourses: () => request(`/api/public/courses`),
+  listShowcase: () => request(`/api/public/showcase`),
+  adminListShowcase: (key) => request(`/api/admin/showcase`, { adminPassword: key }),
+  updateShowcase: (key, position, payload) =>
+    request(`/api/admin/showcase/${position}`, {
+      method: "PATCH", body: payload, adminPassword: key,
+    }),
+  clearShowcase: (key, position) =>
+    request(`/api/admin/showcase/${position}`, { method: "DELETE", adminPassword: key }),
+  uploadShowcase: (key, position, formData, onProgress) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/showcase/${position}/upload`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(formData);
+    }),
   courseByToken: (token) => request(`/api/public/courses/${token}`),
   teeTimes: (token, date) =>
     request(`/api/public/courses/${token}/tee-times${date ? `?date=${date}` : ""}`),

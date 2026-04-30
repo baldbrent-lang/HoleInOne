@@ -5,10 +5,14 @@ import { api } from "../api.js";
 
 export default function Home() {
   const [courses, setCourses] = useState(null);
+  const [showcase, setShowcase] = useState(null);
 
   useEffect(() => {
     api.listPublicCourses().then(setCourses).catch(() => setCourses([]));
+    api.listShowcase().then(setShowcase).catch(() => setShowcase([]));
   }, []);
+
+  const showcaseFilled = (showcase || []).filter((s) => s.source_url);
 
   return (
     <div className="wrap">
@@ -24,6 +28,45 @@ export default function Home() {
           text your personal gallery when your round is done — tracer overlays,
           stats, and shareable clips included.
         </p>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginBottom: 4 }}>Our videos in action</h3>
+        <p className="small muted" style={{ marginBottom: 14 }}>
+          A few clips from real golfers using GolfReelz.
+        </p>
+        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+          {showcase === null ? (
+            <>
+              <div className="shimmer" style={{ aspectRatio: "16/9" }} />
+              <div className="shimmer" style={{ aspectRatio: "16/9" }} />
+              <div className="shimmer" style={{ aspectRatio: "16/9" }} />
+            </>
+          ) : showcaseFilled.length === 0 ? (
+            <div className="muted small" style={{ gridColumn: "1 / -1" }}>
+              No demo videos uploaded yet. Add them in <code>/admin/showcase</code>.
+            </div>
+          ) : (
+            showcaseFilled.map((s) => (
+              <div key={s.position}>
+                <video
+                  src={s.source_url}
+                  poster={s.thumbnail_url || undefined}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  style={{ width: "100%", aspectRatio: "16/9", borderRadius: 8, background: "#000", display: "block" }}
+                />
+                {(s.title || s.caption) && (
+                  <div style={{ marginTop: 8 }}>
+                    {s.title && <b style={{ display: "block" }}>{s.title}</b>}
+                    {s.caption && <div className="small muted">{s.caption}</div>}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       <div className="card">

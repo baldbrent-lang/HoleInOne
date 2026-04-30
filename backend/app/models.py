@@ -165,3 +165,18 @@ class AuditLog(Base):
     target: Mapped[str] = mapped_column(String(200))
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Showcase(Base):
+    """Featured clips on the public Home page. Three slots (positions 1-3).
+    Admin uploads or pastes a URL into each slot; appears in 'Our videos in
+    action' on the marketing page."""
+    __tablename__ = "showcase"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, unique=True)  # 1, 2, 3
+    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    caption: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

@@ -18,6 +18,7 @@ from ..models import (
     HIOStatus,
     HoleInOneEvent,
     Participant,
+    Showcase,
     TeeTime,
     VideoClip,
 )
@@ -504,6 +505,105 @@ async def upload_clip(
         "source_url": clip.source_url,
         "issue_note": clip.issue_note,
     }
+
+
+# --- Showcase (Home page 'Our videos in action') ----------------------------
+
+SHOWCASE_DIR = Path(__file__).resolve().parents[2] / settings.upload_dir / "showcase"
+SHOWCASE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@router.get("/showcase")
+def list_showcase_admin(db: Session = Depends(get_db)):
+    rows = db.query(Showcase).order_by(Showcase.position.asc()).all()
+    return [
+        {
+            "position": s.position,
+            "source_url": s.source_url,
+            "thumbnail_url": s.thumbnail_url,
+            "title": s.title,
+            "caption": s.caption,
+            "updated_at": s.updated_at,
+        }
+        for s in rows
+    ]
+
+
+@router.patch("/showcase/{position}")
+def update_showcase(position: int, payload: dict, db: Session = Depends(get_db)):
+    s = db.query(Showcase).filter(Showcase.position == position).first()
+    if not s:
+        raise HTTPException(404, "slot not found")
+    for field in ("source_url", "thumbnail_url", "title", "caption"):
+        if field in payload:
+            setattr(s, field, payload[field])
+    s.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/showcase/{position}/upload")
+async def upload_showcase(
+    position: int,
+    video: UploadFile = File(...),
+    title: str = Form(""),
+    caption: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    s = db.query(Showcase).filter(Showcase.position == position).first()
+    if not s:
+        raise HTTPException(404, "slot not found")
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(400, "must be a video file")
+
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "empty upload")
+    if len(data) > 500 * 1024 * 1024:
+        raise HTTPException(413, "video too large (max 500MB)")
+
+    ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    if ext not in ("mp4", "mov", "webm", "m4v"):
+        ext = "mp4"
+    fname = f"slot{position}-{secrets.token_hex(6)}.{ext}"
+    fpath = SHOWCASE_DIR / fname
+    fpath.write_bytes(data)
+
+    # Compress + extract first-frame thumbnail (same pipeline as clip uploads)
+    compress_for_email(fpath)
+    thumb = extract_thumbnail(fpath)
+
+    s.source_url = f"{settings.app_base_url}/uploads/showcase/{fname}"
+    s.thumbnail_url = (
+        f"{settings.app_base_url}/uploads/showcase/{thumb.name}" if thumb else None
+    )
+    if title.strip():
+        s.title = title.strip()
+    if caption.strip():
+        s.caption = caption.strip()
+    s.updated_at = datetime.utcnow()
+    db.commit()
+    return {
+        "ok": True,
+        "source_url": s.source_url,
+        "thumbnail_url": s.thumbnail_url,
+        "title": s.title,
+        "caption": s.caption,
+    }
+
+
+@router.delete("/showcase/{position}")
+def clear_showcase(position: int, db: Session = Depends(get_db)):
+    s = db.query(Showcase).filter(Showcase.position == position).first()
+    if not s:
+        raise HTTPException(404, "slot not found")
+    s.source_url = None
+    s.thumbnail_url = None
+    s.title = None
+    s.caption = None
+    s.updated_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
 
 
 # --- Hole-in-one review queue ------------------------------------------------
