@@ -54,6 +54,7 @@ class PublicCourseOut(BaseModel):
     id: int
     name: str
     location: str
+    qr_token: str
     livestream_url: Optional[str] = None
     hole_yardages: dict[str, int] = Field(default_factory=dict)
 

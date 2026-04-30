@@ -1,7 +1,15 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Brand, Icon } from "../components/Brand.jsx";
+import { api } from "../api.js";
 
 export default function Home() {
+  const [courses, setCourses] = useState(null);
+
+  useEffect(() => {
+    api.listPublicCourses().then(setCourses).catch(() => setCourses([]));
+  }, []);
+
   return (
     <div className="wrap">
       <Brand subtitle="Par 3 Videos and Hole In One Sweepstakes!" />
@@ -16,6 +24,62 @@ export default function Home() {
           text your personal gallery when your round is done — tracer overlays,
           stats, and shareable clips included.
         </p>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginBottom: 4 }}>Pick your course</h3>
+        <p className="small muted" style={{ marginBottom: 14 }}>
+          Tap a course to start your registration.
+        </p>
+        {courses === null ? (
+          <>
+            <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
+            <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
+            <div className="shimmer" style={{ height: 64 }} />
+          </>
+        ) : courses.length === 0 ? (
+          <div className="muted small">No courses available yet.</div>
+        ) : (
+          <div className="stack" style={{ gap: 10 }}>
+            {courses.map((c) => (
+              <Link
+                key={c.id}
+                to={`/r/${c.qr_token}`}
+                className="card"
+                style={{
+                  margin: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 14,
+                  textDecoration: "none",
+                  color: "inherit",
+                  padding: 14,
+                  transition: "border-color .15s, transform .04s",
+                }}
+                onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.99)")}
+                onMouseUp={(e) => (e.currentTarget.style.transform = "")}
+                onMouseLeave={(e) => (e.currentTarget.style.transform = "")}
+              >
+                <div
+                  className="logo"
+                  style={{
+                    background: "var(--primary-soft)",
+                    color: "var(--emerald-700)",
+                    flexShrink: 0,
+                  }}
+                  aria-hidden="true"
+                >
+                  <Icon name="flag" />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <b style={{ display: "block" }}>{c.name}</b>
+                  <div className="small muted">{c.location || "—"}</div>
+                </div>
+                <span style={{ color: "var(--ink-soft)" }}>→</span>
+              </Link>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card">
@@ -44,8 +108,8 @@ export default function Home() {
         <div className="feature-row">
           <div className="icon"><Icon name="share" /></div>
           <div>
-            <h4>4. Text or email, one tap to share</h4>
-            <p>Download a clip, share to Instagram, or send it to your group chat. Hole-in-one? We verify it with the cup camera.</p>
+            <h4>4. Email delivery, one tap to share</h4>
+            <p>One email lands in your inbox with all your par-3 clips attached. Hole-in-one? We verify it with the cup camera.</p>
           </div>
         </div>
       </div>

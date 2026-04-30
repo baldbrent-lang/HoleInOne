@@ -23,6 +23,7 @@ async function request(path, { method = "GET", body, adminPassword } = {}) {
 }
 
 export const api = {
+  listPublicCourses: () => request(`/api/public/courses`),
   courseByToken: (token) => request(`/api/public/courses/${token}`),
   teeTimes: (token, date) =>
     request(`/api/public/courses/${token}/tee-times${date ? `?date=${date}` : ""}`),

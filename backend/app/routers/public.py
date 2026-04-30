@@ -36,6 +36,11 @@ def _get_course_by_token(db: Session, token: str) -> Course:
     return course
 
 
+@router.get("/courses", response_model=list[PublicCourseOut])
+def list_public_courses(db: Session = Depends(get_db)):
+    return db.query(Course).order_by(Course.name).all()
+
+
 @router.get("/courses/{course_token}", response_model=PublicCourseOut)
 def course_by_token(course_token: str, db: Session = Depends(get_db)):
     return _get_course_by_token(db, course_token)

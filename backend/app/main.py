@@ -81,6 +81,48 @@ def _migrate() -> None:
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate()
+    _seed_default_courses()
+
+
+def _seed_default_courses() -> None:
+    """Ensure the demo course set exists. Adds courses by name if missing;
+    never overwrites an existing course's data."""
+    from .database import SessionLocal
+    from .models import Course
+
+    defaults = [
+        {
+            "name": "Maridoe Golf Club",
+            "location": "Carrollton, TX",
+            "par3_holes": [3, 8, 11, 14],
+            "hole_yardages": {"3": 173, "8": 165, "11": 205, "14": 192},
+            "minutes_per_hole": 14,
+        },
+        {
+            "name": "Pebble Beach",
+            "location": "Pebble Beach, CA",
+            "par3_holes": [5, 7, 12, 17],
+            "hole_yardages": {"5": 195, "7": 106, "12": 202, "17": 178},
+            "minutes_per_hole": 14,
+        },
+        {
+            "name": "Kiawah Island",
+            "location": "Kiawah Island, SC",
+            "par3_holes": [5, 8, 14, 17],
+            "hole_yardages": {"5": 207, "8": 197, "14": 194, "17": 221},
+            "minutes_per_hole": 14,
+        },
+    ]
+    db = SessionLocal()
+    try:
+        for d in defaults:
+            existing = db.query(Course).filter(Course.name == d["name"]).first()
+            if existing:
+                continue
+            db.add(Course(**d))
+        db.commit()
+    finally:
+        db.close()
 
 
 @app.get("/health")
