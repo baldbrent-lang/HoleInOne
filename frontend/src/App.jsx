@@ -9,6 +9,7 @@ import AdminUpload from "./pages/AdminUpload.jsx";
 import Login from "./pages/Login.jsx";
 import Signup from "./pages/Signup.jsx";
 import Me from "./pages/Me.jsx";
+import CoursePicker from "./pages/CoursePicker.jsx";
 import Home from "./pages/Home.jsx";
 
 export default function App() {
@@ -18,6 +19,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/signup" element={<Signup />} />
       <Route path="/me" element={<Me />} />
+      <Route path="/courses" element={<CoursePicker />} />
       <Route path="/r/:courseToken" element={<Register />} />
       <Route path="/confirm/:participantId" element={<Confirmation />} />
       <Route path="/g/:galleryToken" element={<Gallery />} />

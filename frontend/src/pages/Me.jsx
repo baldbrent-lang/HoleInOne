@@ -56,7 +56,7 @@ export default function Me() {
           Hi {user?.name || user?.email?.split("@")[0]}.
         </h1>
         <p>{groups.length === 0 ? "No rounds yet — pick a course to get started." : "Pick a round below to watch your clips."}</p>
-        <Link to="/" className="btn small" style={{ width: "auto", marginTop: 14 }}>
+        <Link to="/courses" className="btn small" style={{ width: "auto", marginTop: 14 }}>
           Register for a new round
         </Link>
       </div>
@@ -66,7 +66,7 @@ export default function Me() {
       {groups.length === 0 && (
         <div className="card center" style={{ padding: 28 }}>
           <p className="muted">No rounds linked to your account yet.</p>
-          <Link to="/" className="btn" style={{ marginTop: 12, maxWidth: 220, marginLeft: "auto", marginRight: "auto" }}>
+          <Link to="/courses" className="btn" style={{ marginTop: 12, maxWidth: 220, marginLeft: "auto", marginRight: "auto" }}>
             Browse courses
           </Link>
         </div>
