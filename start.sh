@@ -14,6 +14,12 @@ fi
 # shellcheck disable=SC1091
 source backend/.venv/bin/activate
 
+# Pull in any new Python deps that landed via git pull (idempotent + fast
+# when nothing changed). Without this, new packages in requirements.txt
+# don't get installed until someone wipes backend/.venv.
+export PIP_USER=0
+pip install --disable-pip-version-check --quiet -r backend/requirements.txt
+
 # Always rebuild the SPA so new JSX is served after `git pull`.
 echo "==> Rebuilding frontend"
 (cd frontend && npm run build --silent)
