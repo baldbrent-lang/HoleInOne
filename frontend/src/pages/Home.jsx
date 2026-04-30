@@ -12,7 +12,9 @@ export default function Home() {
     api.listShowcase().then(setShowcase).catch(() => setShowcase([]));
   }, []);
 
-  const showcaseFilled = (showcase || []).filter((s) => s.source_url);
+  // Single featured video for now — only slot 1 appears on Home.
+  const featured = (showcase || []).find((s) => s.position === 1 && s.source_url);
+  const showcaseLoaded = showcase !== null;
 
   return (
     <div className="wrap">
@@ -30,44 +32,34 @@ export default function Home() {
         </p>
       </div>
 
-      <div className="card">
-        <h3 style={{ marginBottom: 4 }}>Our videos in action</h3>
-        <p className="small muted" style={{ marginBottom: 14 }}>
-          A few clips from real golfers using GolfReelz.
-        </p>
-        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
-          {showcase === null ? (
-            <>
-              <div className="shimmer" style={{ aspectRatio: "16/9" }} />
-              <div className="shimmer" style={{ aspectRatio: "16/9" }} />
-              <div className="shimmer" style={{ aspectRatio: "16/9" }} />
-            </>
-          ) : showcaseFilled.length === 0 ? (
-            <div className="muted small" style={{ gridColumn: "1 / -1" }}>
-              No demo videos uploaded yet. Add them in <code>/admin/showcase</code>.
-            </div>
+      {(featured || !showcaseLoaded) && (
+        <div className="card">
+          <h3 style={{ marginBottom: 4 }}>Our videos in action</h3>
+          <p className="small muted" style={{ marginBottom: 14 }}>
+            A clip from a real GolfReelz round.
+          </p>
+          {!showcaseLoaded ? (
+            <div className="shimmer" style={{ aspectRatio: "16/9", borderRadius: 8 }} />
           ) : (
-            showcaseFilled.map((s) => (
-              <div key={s.position}>
-                <video
-                  src={s.source_url}
-                  poster={s.thumbnail_url || undefined}
-                  controls
-                  playsInline
-                  preload="metadata"
-                  style={{ width: "100%", aspectRatio: "16/9", borderRadius: 8, background: "#000", display: "block" }}
-                />
-                {(s.title || s.caption) && (
-                  <div style={{ marginTop: 8 }}>
-                    {s.title && <b style={{ display: "block" }}>{s.title}</b>}
-                    {s.caption && <div className="small muted">{s.caption}</div>}
-                  </div>
-                )}
-              </div>
-            ))
+            <>
+              <video
+                src={featured.source_url}
+                poster={featured.thumbnail_url || undefined}
+                controls
+                playsInline
+                preload="metadata"
+                style={{ width: "100%", aspectRatio: "16/9", borderRadius: 8, background: "#000", display: "block" }}
+              />
+              {(featured.title || featured.caption) && (
+                <div style={{ marginTop: 10 }}>
+                  {featured.title && <b style={{ display: "block" }}>{featured.title}</b>}
+                  {featured.caption && <div className="small muted">{featured.caption}</div>}
+                </div>
+              )}
+            </>
           )}
         </div>
-      </div>
+      )}
 
       <div className="card">
         <h3 style={{ marginBottom: 4 }}>Pick your course</h3>

@@ -51,15 +51,16 @@ export default function AdminShowcase() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>Home page videos</h3>
+        <h3 style={{ marginBottom: 4 }}>Home page video</h3>
         <p className="small muted" style={{ marginBottom: 14 }}>
-          Three slots show on the public Home page under "Our videos in action".
-          Upload an MP4 or paste an external URL. Leave a slot blank to hide it.
+          Shown on the public Home page under "Our videos in action". Upload
+          an MP4 or paste an external URL. Leave blank to hide the section.
         </p>
       </div>
 
-      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
-        {slots.map((s) => (
+      {slots
+        .filter((s) => s.position === 1)
+        .map((s) => (
           <ShowcaseSlot
             key={s.position}
             slot={s}
@@ -68,7 +69,6 @@ export default function AdminShowcase() {
             onError={(m) => showToast(m)}
           />
         ))}
-      </div>
 
       {error && <div className="card err-text small" style={{ marginTop: 12 }}>{error}</div>}
       {toast && <div className="toast">{toast}</div>}
@@ -152,7 +152,7 @@ function ShowcaseSlot({ slot, adminPassword, onChange, onError }) {
   return (
     <div className="card">
       <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
-        <h3>Slot {slot.position}</h3>
+        <h3>Featured video</h3>
         {slot.source_url && (
           <button className="ghost small" onClick={clear} disabled={busy}>Clear</button>
         )}
