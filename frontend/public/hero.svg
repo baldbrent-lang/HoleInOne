@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="sky" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#fbe7c2"/>
+      <stop offset="40%" stop-color="#9bc8e8"/>
+      <stop offset="100%" stop-color="#5b9cc8"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#3f7fa6"/>
+      <stop offset="60%" stop-color="#1f4e76"/>
+      <stop offset="100%" stop-color="#102f4a"/>
+    </linearGradient>
+    <linearGradient id="grass" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#5da84f"/>
+      <stop offset="100%" stop-color="#2c6024"/>
+    </linearGradient>
+    <linearGradient id="distantGrass" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#7ab06a"/>
+      <stop offset="100%" stop-color="#4f8542"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.85" cy="0.18" r="0.18">
+      <stop offset="0%" stop-color="#fff3cf" stop-opacity="0.95"/>
+      <stop offset="60%" stop-color="#fff3cf" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#fff3cf" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- sky -->
+  <rect width="1600" height="500" fill="url(#sky)"/>
+  <rect width="1600" height="500" fill="url(#sun)"/>
+
+  <!-- distant mountains / hills -->
+  <path d="M0 440 L 180 380 L 320 410 L 480 360 L 640 400 L 820 370 L 1000 405 L 1200 380 L 1400 410 L 1600 390 L 1600 470 L 0 470 Z" fill="#7d96aa" opacity="0.55"/>
+  <path d="M0 470 L 200 430 L 420 460 L 600 440 L 820 470 L 1080 445 L 1300 470 L 1600 455 L 1600 510 L 0 510 Z" fill="#5e7c93" opacity="0.7"/>
+
+  <!-- distant tree line -->
+  <g fill="#3a5d2f" opacity="0.85">
+    <path d="M0 510 Q 80 470 160 500 T 320 495 T 480 500 T 640 490 T 800 495 T 960 488 T 1120 500 T 1280 495 T 1440 500 T 1600 495 L 1600 530 L 0 530 Z"/>
+  </g>
+
+  <!-- water -->
+  <rect y="510" width="1600" height="240" fill="url(#water)"/>
+
+  <!-- water highlights / ripples -->
+  <g stroke="#9ed1e8" fill="none" opacity="0.45" stroke-linecap="round">
+    <path d="M40 575 q 80 -8 160 0 t 160 0" stroke-width="2"/>
+    <path d="M520 595 q 100 -6 200 0 t 200 0" stroke-width="2"/>
+    <path d="M1080 580 q 80 -6 160 0 t 160 0" stroke-width="2"/>
+    <path d="M120 645 q 100 -6 200 0 t 200 0" stroke-width="1.5" opacity="0.3"/>
+    <path d="M780 660 q 100 -6 200 0 t 200 0" stroke-width="1.5" opacity="0.3"/>
+  </g>
+
+  <!-- distant green with pin (the par-3 green) -->
+  <ellipse cx="1140" cy="540" rx="190" ry="32" fill="url(#distantGrass)"/>
+  <ellipse cx="1140" cy="540" rx="190" ry="32" fill="#2f5d24" opacity="0.25"/>
+  <!-- bunker by the green -->
+  <ellipse cx="1265" cy="555" rx="60" ry="11" fill="#e8d8a6"/>
+  <!-- pin / flag -->
+  <line x1="1130" y1="455" x2="1130" y2="540" stroke="#1c1c1c" stroke-width="2"/>
+  <path d="M1130 455 L 1180 470 L 1130 482 Z" fill="#d83a3a"/>
+  <!-- ball on green near pin -->
+  <circle cx="1135" cy="540" r="4" fill="#fff"/>
+
+  <!-- foreground tee box & fairway -->
+  <path d="M0 750 Q 400 720 800 740 T 1600 730 L 1600 900 L 0 900 Z" fill="url(#grass)"/>
+  <!-- texture stripes -->
+  <g fill="#3e7a32" opacity="0.35">
+    <ellipse cx="200" cy="820" rx="220" ry="14"/>
+    <ellipse cx="700" cy="850" rx="280" ry="14"/>
+    <ellipse cx="1300" cy="830" rx="240" ry="14"/>
+  </g>
+  <!-- darker grass shadow under golfer -->
+  <ellipse cx="430" cy="790" rx="120" ry="14" fill="#1d3d18" opacity="0.4"/>
+
+  <!-- ball trajectory tracer (apex over water heading to green) -->
+  <path
+    d="M 425 770
+       C 525 540, 720 280, 920 360
+       S 1100 470, 1135 540"
+    stroke="#ffffff" stroke-width="4" fill="none"
+    stroke-linecap="round" opacity="0.9"
+  />
+  <!-- glow under tracer -->
+  <path
+    d="M 425 770
+       C 525 540, 720 280, 920 360
+       S 1100 470, 1135 540"
+    stroke="#ffffff" stroke-width="14" fill="none"
+    stroke-linecap="round" opacity="0.18"
+  />
+
+  <!-- golfer at finish position (left foreground) -->
+  <g transform="translate(420 580)">
+    <!-- Head -->
+    <circle cx="0" cy="0" r="18" fill="#1a1a1a"/>
+    <!-- cap brim -->
+    <path d="M-18 -6 Q 0 -22 22 -6 L 22 -2 L -18 -2 Z" fill="#0d0d0d"/>
+    <!-- Torso (turned, finish position) -->
+    <path d="M-22 18 L 24 12 L 30 90 L 18 130 L -16 134 L -28 92 Z" fill="#1a1a1a"/>
+    <!-- left arm extended back along club -->
+    <line x1="-18" y1="22" x2="-90" y2="-100" stroke="#1a1a1a" stroke-width="10" stroke-linecap="round"/>
+    <!-- right arm crossing -->
+    <line x1="20" y1="24" x2="-30" y2="-110" stroke="#1a1a1a" stroke-width="10" stroke-linecap="round"/>
+    <!-- club shaft (over shoulder finish) -->
+    <line x1="-30" y1="-110" x2="-150" y2="-180" stroke="#5b5b5b" stroke-width="3"/>
+    <!-- club head -->
+    <ellipse cx="-150" cy="-180" rx="11" ry="5" fill="#aaaaaa" transform="rotate(-25 -150 -180)"/>
+    <!-- legs -->
+    <path d="M-16 132 L -28 210 L -10 210 L 0 132 Z" fill="#1a1a1a"/>
+    <path d="M16 130 L 30 215 L 8 218 L 4 132 Z" fill="#1a1a1a"/>
+    <!-- shoes -->
+    <ellipse cx="-19" cy="216" rx="14" ry="5" fill="#ffffff"/>
+    <ellipse cx="22"  cy="220" rx="14" ry="5" fill="#ffffff"/>
+  </g>
+
+  <!-- subtle vignette -->
+  <radialGradient id="vignette" cx="0.5" cy="0.55" r="0.85">
+    <stop offset="60%" stop-color="#000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000" stop-opacity="0.35"/>
+  </radialGradient>
+  <rect width="1600" height="900" fill="url(#vignette)"/>
+</svg>

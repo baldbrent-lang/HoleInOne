@@ -7,7 +7,7 @@ export function Brand({ subtitle, hideAccount }) {
     <div className="brand" style={{ justifyContent: "space-between", width: "100%" }}>
       <Link to="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none", color: "inherit" }}>
         <div className="logo" aria-hidden="true">
-          <FlagIcon />
+          <LogoMark />
         </div>
         <div>
           <h1>GolfReelz</h1>
@@ -43,6 +43,34 @@ export function FlagIcon({ size = 20 }) {
       <path d="M7 4v17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       <path d="M7 4l11 3.2L7 10.4" fill="currentColor" />
       <circle cx="7" cy="21" r="1.8" fill="currentColor" />
+    </svg>
+  );
+}
+
+export function LogoMark({ size = 24 }) {
+  // Golfer mid-swing on the left, dashed ball trace arcing up and to the
+  // right, ball at the apex/landing point.
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      {/* dashed tracer */}
+      <path
+        d="M9 22 Q16 4 27 11"
+        stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+        strokeDasharray="1.6 2"
+      />
+      {/* ball */}
+      <circle cx="27" cy="11" r="1.8" fill="currentColor" />
+      {/* head */}
+      <circle cx="9" cy="9" r="2" fill="currentColor" />
+      {/* body */}
+      <path d="M8 11 L9 18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      {/* arms extended forward through ball */}
+      <path d="M9 13 L17 18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      {/* club shaft */}
+      <path d="M17 18 L20 22" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      {/* legs */}
+      <path d="M9 18 L7 24" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M9 18 L11 24" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
     </svg>
   );
 }
