@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./golfreelz.db"
     app_base_url: str = _default_app_base_url()
     admin_password: str = "Baldy123"
+    # User-auth secret. Override in prod via env. Tokens are JWT HS256.
+    jwt_secret: str = "dev-jwt-secret-change-in-prod"
+    jwt_ttl_days: int = 30
 
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""

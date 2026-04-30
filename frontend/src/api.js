@@ -4,9 +4,23 @@
 const API_BASE =
   import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "http://localhost:8000" : "");
 
-async function request(path, { method = "GET", body, adminPassword } = {}) {
+const USER_TOKEN_STORAGE = "golfreelz.userToken";
+
+export function getUserToken() {
+  return localStorage.getItem(USER_TOKEN_STORAGE) || "";
+}
+export function setUserToken(token) {
+  if (token) localStorage.setItem(USER_TOKEN_STORAGE, token);
+  else localStorage.removeItem(USER_TOKEN_STORAGE);
+}
+
+async function request(path, { method = "GET", body, adminPassword, auth = true } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (adminPassword) headers["X-Admin-Password"] = adminPassword;
+  if (auth) {
+    const t = getUserToken();
+    if (t) headers["Authorization"] = `Bearer ${t}`;
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers,
@@ -28,8 +42,12 @@ export const api = {
   teeTimes: (token, date) =>
     request(`/api/public/courses/${token}/tee-times${date ? `?date=${date}` : ""}`),
   register: async (formData) => {
+    const headers = {};
+    const t = getUserToken();
+    if (t) headers["Authorization"] = `Bearer ${t}`;
     const res = await fetch(`${API_BASE}/api/public/register`, {
       method: "POST",
+      headers,
       body: formData,
     });
     if (!res.ok) {
@@ -38,6 +56,13 @@ export const api = {
     }
     return res.json();
   },
+
+  // ---- User auth ----
+  signup: (payload) => request(`/api/auth/signup`, { method: "POST", body: payload, auth: false }),
+  login: (payload) => request(`/api/auth/login`, { method: "POST", body: payload, auth: false }),
+  me: () => request(`/api/auth/me`),
+  myRounds: () => request(`/api/auth/me/rounds`),
+  myRoundClips: (participantId) => request(`/api/auth/me/rounds/${participantId}/clips`),
   selfieUrl: (path) => `${API_BASE}/uploads/${path}`,
 
   gallery: (token) => request(`/api/gallery/${token}`),

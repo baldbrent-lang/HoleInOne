@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import Course, Participant, TeeTime
+from ..deps import optional_user
+from ..models import Course, Participant, TeeTime, User
 from ..schemas import (
     PublicCourseOut,
     RegistrationResult,
@@ -93,7 +94,15 @@ async def register(
     group_size: int = Form(4),
     selfie: UploadFile = File(...),
     db: Session = Depends(get_db),
+    user: User | None = Depends(optional_user),
 ):
+    # If logged in, default contact info to the user's account.
+    if user:
+        if not email.strip():
+            email = user.email
+        if not name.strip():
+            name = user.name or user.email
+
     if not (mobile.strip() or email.strip()):
         raise HTTPException(400, "mobile or email required")
 
@@ -117,8 +126,16 @@ async def register(
 
     embedding = appearance.embed_image_bytes(selfie_bytes)
 
+    # Auto-claim by email even without a token (case-insensitive)
+    auto_user_id = user.id if user else None
+    if not auto_user_id and email.strip():
+        match = db.query(User).filter(User.email == email.strip().lower()).first()
+        if match:
+            auto_user_id = match.id
+
     participant = Participant(
         tee_time_id=tt.id,
+        user_id=auto_user_id,
         name=name.strip(),
         mobile=mobile.strip() or None,
         email=email.strip() or None,

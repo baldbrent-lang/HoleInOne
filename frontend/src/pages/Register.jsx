@@ -1,18 +1,20 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 import SelfieCamera from "../components/SelfieCamera.jsx";
+import useAuth from "../hooks/useAuth.js";
 
 export default function Register() {
   const { courseToken } = useParams();
   const nav = useNavigate();
+  const { user } = useAuth();
   const [course, setCourse] = useState(null);
   const [teeTimes, setTeeTimes] = useState([]);
   const [teeTimeId, setTeeTimeId] = useState("");
-  const [name, setName] = useState("");
+  const [name, setName] = useState(user?.name || "");
   const [mobile, setMobile] = useState("");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(user?.email || "");
   const [groupSize, setGroupSize] = useState(4);
   const [selfieFile, setSelfieFile] = useState(null);
   const [selfiePreview, setSelfiePreview] = useState(null);
@@ -104,6 +106,11 @@ export default function Register() {
         <span className="eyebrow"><Icon name="flag" size={14} /> {course.name}</span>
         <h1 style={{ fontSize: "clamp(1.6rem, 3.2vw, 2.1rem)" }}>Let's get your shots on tape.</h1>
         <p style={{ fontSize: "0.95rem" }}>{course.location}</p>
+        {!user && (
+          <p className="small" style={{ marginTop: 12, color: "rgba(255,255,255,0.85)" }}>
+            Have an account? <Link to={`/login?next=/r/${courseToken}`} style={{ color: "white", textDecoration: "underline" }}>Log in</Link> to save this round to your history.
+          </p>
+        )}
       </div>
 
       {course.livestream_url && (

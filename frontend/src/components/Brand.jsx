@@ -1,13 +1,38 @@
-export function Brand({ subtitle }) {
+import { Link } from "react-router-dom";
+import useAuth from "../hooks/useAuth.js";
+
+export function Brand({ subtitle, hideAccount }) {
+  const { user, logout } = useAuth();
   return (
-    <div className="brand">
-      <div className="logo" aria-hidden="true">
-        <FlagIcon />
-      </div>
-      <div>
-        <h1>GolfReelz</h1>
-        {subtitle && <div className="tag">{subtitle}</div>}
-      </div>
+    <div className="brand" style={{ justifyContent: "space-between", width: "100%" }}>
+      <Link to="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none", color: "inherit" }}>
+        <div className="logo" aria-hidden="true">
+          <FlagIcon />
+        </div>
+        <div>
+          <h1>GolfReelz</h1>
+          {subtitle && <div className="tag">{subtitle}</div>}
+        </div>
+      </Link>
+      {!hideAccount && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {user ? (
+            <>
+              <Link to="/me" className="btn secondary small" style={{ width: "auto" }}>
+                {user.name || user.email.split("@")[0]}
+              </Link>
+              <button className="ghost small" onClick={logout} style={{ width: "auto" }}>
+                Sign out
+              </button>
+            </>
+          ) : (
+            <>
+              <Link to="/login" className="btn ghost small" style={{ width: "auto" }}>Log in</Link>
+              <Link to="/signup" className="btn small" style={{ width: "auto" }}>Sign up</Link>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

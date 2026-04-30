@@ -48,6 +48,16 @@ def utcnow() -> datetime:
     return datetime.utcnow()
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(200))
+    name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Course(Base):
     __tablename__ = "courses"
 
@@ -84,6 +94,7 @@ class Participant(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     tee_time_id: Mapped[int] = mapped_column(ForeignKey("tee_times.id"))
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
     mobile: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
