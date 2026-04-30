@@ -99,6 +99,7 @@ class Participant(Base):
     paid: Mapped[bool] = mapped_column(Boolean, default=False)
     gallery_token: Mapped[str] = mapped_column(String(64), unique=True, default=lambda: _token("g_", 20))
     gallery_ready_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    summary_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tee_time: Mapped[TeeTime] = relationship(back_populates="participants")

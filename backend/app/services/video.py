@@ -19,10 +19,10 @@ from typing import Optional
 
 log = logging.getLogger("golfreelz.video")
 
-DEFAULT_TARGET_MB = 12
+DEFAULT_TARGET_MB = 5
 AUDIO_KBPS = 96
 MAX_VIDEO_KBPS = 4000  # cap so short clips don't waste bytes
-MIN_VIDEO_KBPS = 250   # floor so we don't produce unwatchable garbage
+MIN_VIDEO_KBPS = 220   # floor so we don't produce unwatchable garbage
 
 
 def have_ffmpeg() -> bool:

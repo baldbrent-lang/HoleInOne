@@ -94,6 +94,20 @@ export default function AdminParticipants() {
     }
   }
 
+  async function sendSummary(p, force = true) {
+    try {
+      const r = await api.sendRoundSummary(adminPassword, p.id, force);
+      if (r.sent) {
+        showToast(`Round summary sent to ${p.email || p.name}`);
+      } else {
+        showToast(`Couldn't send — ${p.email ? "round not complete (missing par-3 clips)" : "no email on file"}`);
+      }
+      load();
+    } catch (e) {
+      showToast(`Error: ${e.message}`);
+    }
+  }
+
   function showToast(msg) {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
@@ -263,6 +277,13 @@ export default function AdminParticipants() {
                       >
                         Gallery ↗
                       </a>
+                      <button
+                        className="ghost small"
+                        onClick={() => sendSummary(p, true)}
+                        title="Email all par-3 clips as one summary email"
+                      >
+                        Email round
+                      </button>
                       <button className="ghost small" onClick={() => resend(p)} title="Re-send gallery link">
                         Resend
                       </button>

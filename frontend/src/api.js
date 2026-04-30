@@ -81,6 +81,10 @@ export const api = {
     }),
   resendGallery: (key, id) =>
     request(`/api/admin/participants/${id}/resend-gallery`, { method: "POST", adminPassword: key }),
+  sendRoundSummary: (key, id, force = false) =>
+    request(`/api/admin/participants/${id}/send-summary${force ? "?force=true" : ""}`, {
+      method: "POST", adminPassword: key,
+    }),
   sendTestEmail: (key, payload) =>
     request(`/api/admin/test-email`, { method: "POST", body: payload, adminPassword: key }),
   listHIO: (key, status) =>

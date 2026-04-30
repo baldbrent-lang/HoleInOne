@@ -42,6 +42,8 @@ def _migrate() -> None:
     if "appearance_embedding" not in cols:
         # Both SQLite and Postgres accept JSON; SQLite stores as TEXT.
         statements.append("ALTER TABLE participants ADD COLUMN appearance_embedding JSON")
+    if "summary_sent_at" not in cols:
+        statements.append("ALTER TABLE participants ADD COLUMN summary_sent_at TIMESTAMP")
     # Old schema had playing_order NOT NULL. The matcher no longer uses it,
     # so drop the constraint on Postgres (SQLite can't ALTER nullability
     # and enforces it loosely anyway).

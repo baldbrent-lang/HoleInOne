@@ -284,6 +284,29 @@ def send_test_email(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True, "provider": provider, "to": to}
 
 
+@router.post("/participants/{participant_id}/send-summary")
+def send_round_summary(participant_id: int, force: bool = False, db: Session = Depends(get_db)):
+    """Manually fire the round-summary email for a participant.
+
+    Use force=true to resend even if summary_sent_at is already set.
+    """
+    p = db.get(Participant, participant_id)
+    if not p:
+        raise HTTPException(404, "participant not found")
+    course = db.get(Course, p.tee_time.course_id) if p.tee_time else None
+    if not course:
+        raise HTTPException(404, "course not found")
+    if force:
+        p.summary_sent_at = None
+    sent = notifications.maybe_send_round_summary(db, p, course)
+    db.commit()
+    return {
+        "sent": sent,
+        "summary_sent_at": p.summary_sent_at,
+        "to": p.email,
+    }
+
+
 @router.post("/participants/{participant_id}/resend-gallery")
 def resend_gallery(participant_id: int, db: Session = Depends(get_db)):
     p = db.get(Participant, participant_id)
@@ -368,11 +391,10 @@ def manually_assign_clip(clip_id: int, participant_id: int, db: Session = Depend
     db.add(AuditLog(actor="admin", action="assign_clip", target=f"clip:{clip.id}->p:{participant.id}"))
 
     course = db.get(Course, clip.course_id)
-    if notifications.notify_clip_ready(participant, clip, course):
-        notifications.mark_delivered(clip)
+    notifications.maybe_send_round_summary(db, participant, course)
 
     db.commit()
-    return {"ok": True, "delivered": clip.delivered_at is not None}
+    return {"ok": True, "summary_sent": participant.summary_sent_at is not None}
 
 
 # --- Manual clip upload (proxy for Shot Tracer webhook in V0) ---------------

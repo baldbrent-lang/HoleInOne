@@ -147,6 +147,49 @@ def send_email_with_attachment(
     SendGridAPIClient(settings.sendgrid_api_key).send(message)
 
 
+def send_email_with_attachments(
+    to: str | None,
+    subject: str,
+    body: str,
+    attachments: list[tuple[str, bytes, str]],
+) -> None:
+    """attachments: list of (filename, bytes, mime_type)."""
+    if not to:
+        return
+    if _smtp_configured():
+        _send_smtp(to, subject, body, attachments=attachments)
+        return
+    if not settings.sendgrid_api_key:
+        log.info(
+            "EMAIL+ATTACHx%d (mock) -> %s | %s | %s | %s",
+            len(attachments), to, subject, body,
+            ", ".join(f"{n} ({len(b)}b)" for (n, b, _t) in attachments),
+        )
+        return
+    import base64
+    from sendgrid import SendGridAPIClient  # type: ignore
+    from sendgrid.helpers.mail import (  # type: ignore
+        Attachment, Disposition, FileContent, FileName, FileType, Mail,
+    )
+
+    message = Mail(
+        from_email=settings.sendgrid_from_email,
+        to_emails=to,
+        subject=subject,
+        plain_text_content=body,
+    )
+    sg_attachments = []
+    for fname, fbytes, mime in attachments:
+        sg_attachments.append(Attachment(
+            FileContent(base64.b64encode(fbytes).decode()),
+            FileName(fname),
+            FileType(mime),
+            Disposition("attachment"),
+        ))
+    message.attachment = sg_attachments
+    SendGridAPIClient(settings.sendgrid_api_key).send(message)
+
+
 def notify_registration_confirmed(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:
     msg = (
         f"You're registered for GolfReelz, {name}! "
@@ -258,3 +301,118 @@ def _mime_for(ext: str) -> str:
 def mark_delivered(clip) -> None:
     """Record the delivery timestamp on a clip after a successful send."""
     clip.delivered_at = datetime.utcnow()
+
+
+def maybe_send_round_summary(db, participant, course) -> bool:
+    """Send a single email with all par-3 clips attached, once per round.
+
+    Subject: 'Golf Reelz - <Course Name>'
+    Body: per-hole stats + gallery link
+    Attachments: one MP4 per par-3 hole, named 'Hole-<N>.mp4'
+
+    Skips if:
+    - participant has no email
+    - course has no par-3 holes configured
+    - any par-3 hole is missing an assigned clip (round not complete yet)
+    - summary was already sent (Participant.summary_sent_at)
+
+    If the combined attachments would exceed the email cap, falls back to
+    a body containing per-hole download links instead.
+
+    Returns True if a send was attempted.
+    """
+    from ..models import ClipProcessingStatus, VideoClip
+
+    if not participant or not course or not participant.email:
+        return False
+    if participant.summary_sent_at is not None:
+        return False
+    par3s: list[int] = list(course.par3_holes or [])
+    if not par3s:
+        return False
+
+    # Make sure pending in-flight changes (the clip we just assigned in
+    # the matcher) are visible to the query below.
+    db.flush()
+
+    clips = (
+        db.query(VideoClip)
+        .filter(
+            VideoClip.participant_id == participant.id,
+            VideoClip.processing_status == ClipProcessingStatus.assigned.value,
+        )
+        .order_by(VideoClip.hole_number.asc(), VideoClip.captured_at.asc())
+        .all()
+    )
+
+    # Pick one clip per hole (prefer the tee camera if multiple angles).
+    by_hole: dict[int, VideoClip] = {}
+    for c in clips:
+        cur = by_hole.get(c.hole_number)
+        if cur is None or (c.camera_type == "tee" and cur.camera_type != "tee"):
+            by_hole[c.hole_number] = c
+
+    missing = [h for h in par3s if h not in by_hole]
+    if missing:
+        log.info(
+            "summary not yet sent for participant %s: missing holes %s",
+            participant.id, missing,
+        )
+        return False
+
+    selected = [by_hole[h] for h in par3s]
+
+    yardages = course.hole_yardages or {}
+    body_lines = [
+        f"Your round at {course.name}, {participant.name}.",
+        "",
+        "Each clip is attached below — see the file name for which hole.",
+        "",
+    ]
+    for c in selected:
+        y = yardages.get(str(c.hole_number))
+        bits = []
+        if y: bits.append(f"{y} yds")
+        if c.carry_yards: bits.append(f"{c.carry_yards} yd carry")
+        if c.ball_speed_mph: bits.append(f"{c.ball_speed_mph} mph")
+        suffix = ("  ·  " + "  ·  ".join(bits)) if bits else ""
+        ace = "   HOLE-IN-ONE!" if c.ball_in_cup else ""
+        body_lines.append(f"  Hole {c.hole_number}{suffix}{ace}")
+    body_lines.append("")
+    body_lines.append(f"Full gallery: {settings.app_base_url}/g/{participant.gallery_token}")
+
+    subject = f"Golf Reelz - {course.name}"
+
+    attachments: list[tuple[str, bytes, str]] = []
+    total_bytes = 0
+    for c in selected:
+        path = _local_path_from_url(c.source_url)
+        if not path or not path.is_file():
+            continue
+        data = path.read_bytes()
+        ext = path.suffix.lstrip(".").lower() or "mp4"
+        attachments.append((f"Hole-{c.hole_number}.{ext}", data, _mime_for(ext)))
+        total_bytes += len(data)
+
+    if attachments and total_bytes <= MAX_ATTACH_BYTES:
+        try:
+            send_email_with_attachments(
+                participant.email, subject, "\n".join(body_lines), attachments,
+            )
+            participant.summary_sent_at = datetime.utcnow()
+            for c in selected:
+                if c.delivered_at is None:
+                    c.delivered_at = participant.summary_sent_at
+            return True
+        except Exception as exc:  # pragma: no cover
+            log.warning("summary send failed for participant %s: %s", participant.id, exc)
+            # fall through to link-only body
+
+    # Fallback: too big OR send failed — body with per-hole download links.
+    body_lines.append("")
+    body_lines.append("Clip downloads:")
+    for c in selected:
+        body_lines.append(f"  Hole {c.hole_number}: {c.source_url}")
+    send_email(participant.email, subject, "\n".join(body_lines))
+    participant.summary_sent_at = datetime.utcnow()
+    return True

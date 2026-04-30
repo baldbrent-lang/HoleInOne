@@ -82,9 +82,9 @@ def match_clip(db: Session, clip: VideoClip) -> Participant | None:
     if clip.ball_in_cup and clip.camera_type in ("hole", "tee"):
         _ensure_hio_event(db, participant, clip)
 
-    # Per-clip email delivery (idempotent via clip.delivered_at)
-    if notifications.notify_clip_ready(participant, clip, course):
-        notifications.mark_delivered(clip)
+    # Once all par-3 holes have a clip for this golfer, fire the single
+    # round summary email (idempotent via participant.summary_sent_at).
+    notifications.maybe_send_round_summary(db, participant, course)
 
     return participant
 
