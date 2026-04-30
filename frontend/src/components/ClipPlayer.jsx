@@ -13,7 +13,7 @@ export default function ClipPlayer({ clip, courseName, golferName, yardage }) {
     <div className="clip-player">
       <video
         src={clip.source_url}
-        poster={clip.thumbnail_url}
+        poster={clip.thumbnail_url || undefined}
         controls
         playsInline
         preload="metadata"

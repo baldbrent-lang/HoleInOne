@@ -31,7 +31,7 @@ from ..schemas import (
 from ..services import notifications
 from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
-from ..services.video import compress_for_email
+from ..services.video import compress_for_email, extract_thumbnail
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -449,6 +449,14 @@ async def upload_clip(
     # failure so the gallery still works.
     compress_for_email(fpath)
 
+    # Extract a JPG of the first frame so the video player has a poster
+    # that matches the clip's opening — no black box before pressing play.
+    thumb_path = extract_thumbnail(fpath)
+    thumb_url = (
+        f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
+        if thumb_path else None
+    )
+
     try:
         captured_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
         if captured_dt.tzinfo is not None:
@@ -463,7 +471,7 @@ async def upload_clip(
         camera_type=camera_type,
         captured_at=captured_dt,
         source_url=f"{settings.app_base_url}/uploads/clips/{fname}",
-        thumbnail_url=None,
+        thumbnail_url=thumb_url,
         carry_yards=carry_yards,
         apex_feet=apex_feet,
         ball_speed_mph=ball_speed_mph,

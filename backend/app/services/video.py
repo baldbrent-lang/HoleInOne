@@ -29,6 +29,37 @@ def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
+def extract_thumbnail(video_path: Path) -> Path | None:
+    """Pull a JPG of the first frame so the player has a poster image
+    that matches the clip's opening shot. Returns the path or None.
+    """
+    if not have_ffmpeg():
+        return None
+    out = video_path.with_suffix(".jpg")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(video_path),
+                "-ss", "00:00:00.001",
+                "-frames:v", "1",
+                "-q:v", "2",
+                "-vf", "scale='min(1280,iw)':-2",
+                str(out),
+            ],
+            check=True,
+            timeout=60,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("thumbnail extract failed for %s: %s", video_path.name, exc)
+        out.unlink(missing_ok=True)
+        return None
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    out.unlink(missing_ok=True)
+    return None
+
+
 def _probe_duration(path: Path) -> Optional[float]:
     try:
         out = subprocess.check_output(
