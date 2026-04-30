@@ -17,7 +17,7 @@ export default function Home() {
   const showcaseLoaded = showcase !== null;
 
   return (
-    <div className="wrap">
+    <div className="wrap wide">
       <Brand subtitle="Par 3 Videos and Hole In One Sweepstakes!" />
 
       <div className="hero">
@@ -32,119 +32,115 @@ export default function Home() {
         </p>
       </div>
 
-      {(featured || !showcaseLoaded) && (
-        <div className="card">
-          <h3 style={{ marginBottom: 4 }}>Our videos in action</h3>
-          <p className="small muted" style={{ marginBottom: 14 }}>
-            A clip from a real GolfReelz round.
-          </p>
-          {!showcaseLoaded ? (
-            <div className="shimmer" style={{ aspectRatio: "16/9", borderRadius: 8 }} />
-          ) : (
-            <>
-              <video
-                src={featured.source_url}
-                poster={featured.thumbnail_url || undefined}
-                controls
-                playsInline
-                preload="metadata"
-                style={{ width: "100%", aspectRatio: "16/9", borderRadius: 8, background: "#000", display: "block" }}
-              />
-              {(featured.title || featured.caption) && (
-                <div style={{ marginTop: 10 }}>
-                  {featured.title && <b style={{ display: "block" }}>{featured.title}</b>}
-                  {featured.caption && <div className="small muted">{featured.caption}</div>}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      <div className="card">
-        <h3 style={{ marginBottom: 4 }}>Pick your course</h3>
-        <p className="small muted" style={{ marginBottom: 14 }}>
-          Tap a course to start your registration.
-        </p>
-        {courses === null ? (
-          <>
-            <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
-            <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
-            <div className="shimmer" style={{ height: 64 }} />
-          </>
-        ) : courses.length === 0 ? (
-          <div className="muted small">No courses available yet.</div>
-        ) : (
-          <div className="stack" style={{ gap: 10 }}>
-            {courses.map((c) => (
-              <Link
-                key={c.id}
-                to={`/r/${c.qr_token}`}
-                className="card"
-                style={{
-                  margin: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 14,
-                  textDecoration: "none",
-                  color: "inherit",
-                  padding: 14,
-                  transition: "border-color .15s, transform .04s",
-                }}
-                onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.99)")}
-                onMouseUp={(e) => (e.currentTarget.style.transform = "")}
-                onMouseLeave={(e) => (e.currentTarget.style.transform = "")}
-              >
-                <div
-                  className="logo"
-                  style={{
-                    background: "var(--primary-soft)",
-                    color: "var(--emerald-700)",
-                    flexShrink: 0,
-                  }}
-                  aria-hidden="true"
-                >
-                  <Icon name="flag" />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <b style={{ display: "block" }}>{c.name}</b>
-                  <div className="small muted">{c.location || "—"}</div>
-                </div>
-                <span style={{ color: "var(--ink-soft)" }}>→</span>
-              </Link>
-            ))}
+      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 16 }}>
+        {(featured || !showcaseLoaded) && (
+          <div className="card" style={{ marginBottom: 0 }}>
+            <h3 style={{ marginBottom: 4 }}>Our videos in action</h3>
+            <p className="small muted" style={{ marginBottom: 14 }}>
+              A clip from a real GolfReelz round.
+            </p>
+            {!showcaseLoaded ? (
+              <div className="shimmer" style={{ aspectRatio: "16/9", borderRadius: 8 }} />
+            ) : (
+              <>
+                <video
+                  src={featured.source_url}
+                  poster={featured.thumbnail_url || undefined}
+                  controls
+                  playsInline
+                  preload="metadata"
+                  style={{ width: "100%", aspectRatio: "16/9", borderRadius: 8, background: "#000", display: "block" }}
+                />
+                {(featured.title || featured.caption) && (
+                  <div style={{ marginTop: 10 }}>
+                    {featured.title && <b style={{ display: "block" }}>{featured.title}</b>}
+                    {featured.caption && <div className="small muted">{featured.caption}</div>}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
+
+        <div className="card" style={{ marginBottom: 0 }}>
+          <h3 style={{ marginBottom: 4 }}>Pick your course</h3>
+          <p className="small muted" style={{ marginBottom: 14 }}>
+            Tap a course to start your registration.
+          </p>
+          {courses === null ? (
+            <>
+              <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
+              <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
+              <div className="shimmer" style={{ height: 64 }} />
+            </>
+          ) : courses.length === 0 ? (
+            <div className="muted small">No courses available yet.</div>
+          ) : (
+            <div className="stack" style={{ gap: 10 }}>
+              {courses.map((c) => (
+                <Link
+                  key={c.id}
+                  to={`/r/${c.qr_token}`}
+                  className="card"
+                  style={{
+                    margin: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 14,
+                    textDecoration: "none",
+                    color: "inherit",
+                    padding: 14,
+                  }}
+                >
+                  <div
+                    className="logo"
+                    style={{ background: "var(--primary-soft)", color: "var(--emerald-700)", flexShrink: 0 }}
+                    aria-hidden="true"
+                  >
+                    <Icon name="flag" />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <b style={{ display: "block" }}>{c.name}</b>
+                    <div className="small muted">{c.location || "—"}</div>
+                  </div>
+                  <span style={{ color: "var(--ink-soft)" }}>→</span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      <div className="card">
-        <h3 style={{ marginBottom: 10 }}>How it works</h3>
-        <div className="feature-row">
-          <div className="icon"><Icon name="qr" /></div>
-          <div>
-            <h4>1. Scan at the pro shop</h4>
-            <p>A QR code on the counter opens this page, pre-loaded for your course and today's tee sheet.</p>
+      <div className="card" style={{ marginTop: 16 }}>
+        <h3 style={{ marginBottom: 14 }}>How it works</h3>
+        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+          <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
+            <div className="icon"><Icon name="qr" /></div>
+            <div>
+              <h4>1. Scan at the pro shop</h4>
+              <p>A QR code on the counter opens this page, pre-loaded for your course and today's tee sheet.</p>
+            </div>
           </div>
-        </div>
-        <div className="feature-row">
-          <div className="icon"><Icon name="camera" /></div>
-          <div>
-            <h4>2. Register + snap an outfit photo</h4>
-            <p>We match your shots to you using your outfit. Head-to-toe is all we need — 60 seconds flat.</p>
+          <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
+            <div className="icon"><Icon name="camera" /></div>
+            <div>
+              <h4>2. Register + snap an outfit photo</h4>
+              <p>We match your shots to you using your outfit. Head-to-toe is all we need — 60 seconds flat.</p>
+            </div>
           </div>
-        </div>
-        <div className="feature-row">
-          <div className="icon"><Icon name="sparkle" /></div>
-          <div>
-            <h4>3. Play golf. We'll do the rest.</h4>
-            <p>Every par-3 tee shot is filmed by on-course cameras, auto-processed with tracer overlays, and assembled into your gallery.</p>
+          <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
+            <div className="icon"><Icon name="sparkle" /></div>
+            <div>
+              <h4>3. Play golf. We'll do the rest.</h4>
+              <p>Every par-3 tee shot is filmed by on-course cameras, auto-processed with tracer overlays, and assembled into your gallery.</p>
+            </div>
           </div>
-        </div>
-        <div className="feature-row">
-          <div className="icon"><Icon name="share" /></div>
-          <div>
-            <h4>4. Email delivery, one tap to share</h4>
-            <p>One email lands in your inbox with all your par-3 clips attached. Hole-in-one? We verify it with the cup camera.</p>
+          <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
+            <div className="icon"><Icon name="share" /></div>
+            <div>
+              <h4>4. Email delivery, one tap to share</h4>
+              <p>One email lands in your inbox with all your par-3 clips attached. Hole-in-one? We verify it with the cup camera.</p>
+            </div>
           </div>
         </div>
       </div>

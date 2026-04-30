@@ -61,7 +61,17 @@ html, body, #root { height: 100%; }
 
 body {
   margin: 0;
-  background: var(--bg);
+  background:
+    linear-gradient(
+      180deg,
+      #0d9488 0%,
+      #14b8a6 18%,
+      #34d399 38%,
+      #86efac 60%,
+      #d1fae5 80%,
+      var(--emerald-50) 100%
+    );
+  background-attachment: fixed;
   color: var(--ink);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
