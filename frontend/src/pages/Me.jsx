@@ -5,6 +5,20 @@ import { Brand, Icon } from "../components/Brand.jsx";
 import ClipPlayer from "../components/ClipPlayer.jsx";
 import useAuth from "../hooks/useAuth.js";
 
+function ordinalSuffix(n) {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return s[(v - 20) % 10] || s[v] || s[0];
+}
+
+function formatRoundDate(value) {
+  const d = new Date(value);
+  const weekday = d.toLocaleDateString("en-US", { weekday: "long" });
+  const month = d.toLocaleDateString("en-US", { month: "long" });
+  const day = d.getDate();
+  return `${weekday} ${month} ${day}${ordinalSuffix(day)}`;
+}
+
 export default function Me() {
   const { user, loading } = useAuth();
   const nav = useNavigate();
@@ -90,12 +104,7 @@ export default function Me() {
                     onClick={() => openRound(r.participant_id)}
                   >
                     <div>
-                      <b>
-                        {new Date(r.tee_time).toLocaleString([], {
-                          weekday: "short", month: "short", day: "numeric",
-                          hour: "numeric", minute: "2-digit",
-                        })}
-                      </b>
+                      <b>{formatRoundDate(r.tee_time)}</b>
                       <div className="small muted">
                         {r.clips.assigned} of {r.clips.total || r.clips.assigned} clip
                         {r.clips.assigned === 1 ? "" : "s"} matched
