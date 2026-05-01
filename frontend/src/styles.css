@@ -61,7 +61,7 @@ html, body, #root { height: 100%; }
 
 body {
   margin: 0;
-  background: url('/background.webp') center center / cover no-repeat fixed;
+  background: #86efac;
   color: var(--ink);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
