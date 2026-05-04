@@ -106,9 +106,12 @@ export default function Home() {
         )}
 
         <div className="card" style={{ marginBottom: 0 }}>
-          <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 14 }}>
+          <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
             <h3>Current leaderboard</h3>
-            <Link to="/leaderboards" className="small">See full leaderboard →</Link>
+            <div className="small" style={{ display: "flex", gap: 12 }}>
+              <Link to="/contests">Daily / monthly / yearly →</Link>
+              <Link to="/leaderboards">All-time →</Link>
+            </div>
           </div>
           {!boards ? (
             <div className="shimmer" style={{ height: 220 }} />

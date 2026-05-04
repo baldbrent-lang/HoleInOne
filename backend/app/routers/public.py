@@ -168,6 +168,115 @@ def public_leaderboards(limit: int = 10, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/contests")
+def contests(db: Session = Depends(get_db)):
+    """Daily / monthly / yearly contests with prize labels + countdown end-times.
+
+    Time windows are UTC midnight boundaries — good enough for V0 across one
+    timezone-agnostic deployment. Per-course local time can come later.
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month_start.month == 12:
+        month_end = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        month_end = month_start.replace(month=month_start.month + 1)
+    year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    year_end = year_start.replace(year=year_start.year + 1)
+
+    assigned = ClipProcessingStatus.assigned.value
+
+    def shot_rows(field, since, limit, unit):
+        attr = getattr(VideoClip, field)
+        rows = (
+            db.query(Participant.name, Course.name.label("course"), VideoClip.hole_number, attr)
+            .join(VideoClip, VideoClip.participant_id == Participant.id)
+            .join(TeeTime, TeeTime.id == Participant.tee_time_id)
+            .join(Course, Course.id == TeeTime.course_id)
+            .filter(attr.isnot(None))
+            .filter(VideoClip.processing_status == assigned)
+            .filter(VideoClip.captured_at >= since)
+            .order_by(desc(attr))
+            .limit(limit)
+            .all()
+        )
+        return [
+            {"golfer": _short_name(name), "course": course, "hole": hole, "value": v, "unit": unit}
+            for (name, course, hole, v) in rows
+        ]
+
+    def aces_rows(since, limit):
+        rows = (
+            db.query(Participant.name, func.count(VideoClip.id).label("aces"))
+            .join(VideoClip, VideoClip.participant_id == Participant.id)
+            .filter(VideoClip.ball_in_cup.is_(True))
+            .filter(VideoClip.processing_status == assigned)
+            .filter(VideoClip.captured_at >= since)
+            .group_by(Participant.id)
+            .order_by(desc(func.count(VideoClip.id)))
+            .limit(limit)
+            .all()
+        )
+        return [{"golfer": _short_name(n), "value": a, "unit": "aces"} for (n, a) in rows]
+
+    def rounds_rows(since, limit):
+        rows = (
+            db.query(User.name, User.email, func.count(Participant.id).label("rounds"))
+            .join(Participant, Participant.user_id == User.id)
+            .filter(Participant.created_at >= since)
+            .group_by(User.id)
+            .order_by(desc(func.count(Participant.id)))
+            .limit(limit)
+            .all()
+        )
+        return [
+            {"golfer": _short_name(n or e.split("@")[0]), "value": r, "unit": "rounds"}
+            for (n, e, r) in rows
+        ]
+
+    return {
+        "daily": {
+            "ends_at": day_end.isoformat() + "Z",
+            "contests": [
+                {"id": "daily_carry", "title": "Longest Carry Today", "icon": "sparkle",
+                 "prize": "$25 gift card", "rows": shot_rows("carry_yards", day_start, 5, "yds")},
+                {"id": "daily_apex", "title": "Highest Apex Today", "icon": "chart",
+                 "prize": "$25 gift card", "rows": shot_rows("apex_feet", day_start, 5, "ft")},
+                {"id": "daily_speed", "title": "Fastest Ball Today", "icon": "capture",
+                 "prize": "$25 gift card", "rows": shot_rows("ball_speed_mph", day_start, 5, "mph")},
+            ],
+        },
+        "monthly": {
+            "ends_at": month_end.isoformat() + "Z",
+            "contests": [
+                {"id": "monthly_carry", "title": "Longest Carry This Month", "icon": "sparkle",
+                 "prize": "$250 cash", "rows": shot_rows("carry_yards", month_start, 5, "yds")},
+                {"id": "monthly_rounds", "title": "Most Rounds Played", "icon": "users",
+                 "prize": "$250 cash", "rows": rounds_rows(month_start, 5)},
+                {"id": "monthly_aces", "title": "Most Aces This Month", "icon": "dollar",
+                 "prize": "$500 cash", "rows": aces_rows(month_start, 5)},
+            ],
+        },
+        "yearly": {
+            "ends_at": year_end.isoformat() + "Z",
+            "contests": [
+                {"id": "yearly_player", "title": "Player of the Year", "icon": "users",
+                 "prize": "$5,000 + free year", "rows": rounds_rows(year_start, 10)},
+                {"id": "yearly_carry", "title": "Longest Carry of the Year", "icon": "sparkle",
+                 "prize": "$1,000 cash", "rows": shot_rows("carry_yards", year_start, 10, "yds")},
+                {"id": "yearly_apex", "title": "Highest Apex of the Year", "icon": "chart",
+                 "prize": "$1,000 cash", "rows": shot_rows("apex_feet", year_start, 10, "ft")},
+                {"id": "yearly_aces", "title": "Hole-in-One Champion", "icon": "dollar",
+                 "prize": "$2,500 + Titleist bag", "rows": aces_rows(year_start, 10)},
+            ],
+        },
+    }
+
+
 @router.get("/showcase")
 def list_showcase(db: Session = Depends(get_db)):
     rows = db.query(Showcase).order_by(Showcase.position.asc()).all()

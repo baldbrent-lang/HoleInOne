@@ -580,6 +580,26 @@ tr:last-child td { border-bottom: none; }
   vertical-align: middle;
 }
 
+.cadence-header {
+  display: flex; align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 24px 0 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.cadence-countdown {
+  font-size: 0.95rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.cadence-countdown b {
+  font-family: "Fraunces", serif;
+  color: var(--emerald-700);
+  font-size: 1.1rem;
+  margin: 0 2px;
+}
+
 .live-banner {
   display: flex; align-items: center; gap: 12px;
   padding: 12px 16px;

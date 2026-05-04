@@ -20,7 +20,10 @@ export default function Leaderboards() {
           The longest, the fastest, the cleanest aces.
         </h1>
         <p>Rankings update as new clips get matched. Want on the board? Pick a course and play.</p>
-        <Link to="/courses" className="btn small" style={{ width: "auto", marginTop: 14 }}>Pick a course</Link>
+        <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+          <Link to="/courses" className="btn small" style={{ width: "auto" }}>Pick a course</Link>
+          <Link to="/contests" className="btn secondary small" style={{ width: "auto" }}>Live contests + prizes →</Link>
+        </div>
       </div>
 
       {!data ? (
