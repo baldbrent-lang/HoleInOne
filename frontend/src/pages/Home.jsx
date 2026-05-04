@@ -118,8 +118,8 @@ export default function Home() {
           <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
             <div className="icon"><Icon name="qr" /></div>
             <div>
-              <h4>1. Scan at the pro shop</h4>
-              <p>A QR code on the counter opens this page, pre-loaded for your course and today's tee sheet.</p>
+              <h4>1. Register before you play</h4>
+              <p>Sign up right here on the website, or scan the QR code at your course's pro shop. Either way takes under a minute.</p>
             </div>
           </div>
           <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
