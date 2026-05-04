@@ -121,35 +121,35 @@ export default function Home() {
             <div className="icon"><Icon name="qr" /></div>
             <div>
               <h4>1. Register before you play</h4>
-              <p>Sign up right here on the website, or scan the QR code at your course's pro shop. Either way takes under a minute.</p>
+              <p>Sign up here, or scan the QR at the pro shop. Takes under a minute.</p>
             </div>
           </div>
           <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
             <div className="icon"><Icon name="camera" /></div>
             <div>
-              <h4>2. Register + snap an outfit photo</h4>
-              <p>We match your shots to you using your outfit. Head-to-toe is all we need — 60 seconds flat.</p>
+              <h4>2. Snap an outfit photo</h4>
+              <p>Head-to-toe is all we need — that's how we match shots to you.</p>
             </div>
           </div>
           <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
             <div className="icon"><Icon name="sparkle" /></div>
             <div>
-              <h4>3. Play golf. We'll do the rest.</h4>
-              <p>Every par-3 tee shot is filmed by on-course cameras, auto-processed with tracer overlays, and assembled into your gallery.</p>
+              <h4>3. Play golf. We do the rest.</h4>
+              <p>Every par-3 tee shot is filmed and tracer-overlaid automatically.</p>
             </div>
           </div>
           <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
             <div className="icon"><Icon name="share" /></div>
             <div>
-              <h4>4. Email delivery, one tap to share</h4>
-              <p>One email lands in your inbox with all your par-3 clips attached. Hole-in-one? We verify it with the cup camera.</p>
+              <h4>4. Email delivery</h4>
+              <p>One email with all your par-3 clips attached, ready to share.</p>
             </div>
           </div>
           <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
             <div className="icon"><Icon name="dollar" /></div>
             <div>
               <h4>5. Hole-in-one? Win <b>$10,000</b>.</h4>
-              <p>Ace any par 3 during your round and we'll cut you a $10,000 check. Our cup camera verifies it instantly — no signed scorecards or witness disputes.</p>
+              <p>Ace any par 3, our cup camera verifies it, you get a $10,000 check.</p>
             </div>
           </div>
         </div>
