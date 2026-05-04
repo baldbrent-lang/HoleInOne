@@ -9,10 +9,14 @@ export default function Home() {
   const { user } = useAuth();
   const [showcase, setShowcase] = useState(null);
   const [boards, setBoards] = useState(null);
+  const [courses, setCourses] = useState(null);
+  const [stats, setStats] = useState(null);
 
   useEffect(() => {
     api.listShowcase().then(setShowcase).catch(() => setShowcase([]));
     api.leaderboards(3).then(setBoards).catch(() => setBoards({}));
+    api.listPublicCourses().then(setCourses).catch(() => setCourses([]));
+    api.publicStats().then(setStats).catch(() => setStats(null));
   }, []);
 
   // Single featured video for now — only slot 1 appears on Home.
@@ -39,6 +43,37 @@ export default function Home() {
           <Link to="/sample" className="btn secondary" style={{ width: "auto" }}>See sample gallery</Link>
         </div>
       </div>
+
+      {courses && courses.length > 0 && (
+        <div className="trust-band">
+          <div className="label">Now live at</div>
+          <div className="logos">
+            {courses.map((c) => (
+              <div key={c.id} className="logo-plate">
+                <div className="name">{c.name}</div>
+                {c.location && <div className="loc">{c.location}</div>}
+              </div>
+            ))}
+          </div>
+          {stats && (stats.clips_this_week > 0 || stats.golfers_today > 0 || stats.aces_pending > 0 || stats.total_clips_delivered > 0) && (
+            <div className="stats">
+              <span className="pulse" aria-hidden="true" />
+              {stats.clips_this_week > 0 && (
+                <span><b>{stats.clips_this_week}</b>clip{stats.clips_this_week === 1 ? "" : "s"} delivered this week</span>
+              )}
+              {stats.golfers_today > 0 && (
+                <span><b>{stats.golfers_today}</b>golfer{stats.golfers_today === 1 ? "" : "s"} playing today</span>
+              )}
+              {stats.aces_pending > 0 && (
+                <span><b>{stats.aces_pending}</b>ace claim{stats.aces_pending === 1 ? "" : "s"} under review</span>
+              )}
+              {stats.clips_this_week === 0 && stats.golfers_today === 0 && stats.total_clips_delivered > 0 && (
+                <span><b>{stats.total_clips_delivered}</b>clips delivered to date</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 16 }}>
         {(featured || !showcaseLoaded) && (

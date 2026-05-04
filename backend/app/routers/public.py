@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import get_db
 from ..deps import optional_user
-from ..models import ClipProcessingStatus, Course, Participant, Showcase, TeeTime, User, VideoClip
+from ..models import ClipProcessingStatus, Course, HIOStatus, HoleInOneEvent, Participant, Showcase, TeeTime, User, VideoClip
 from ..schemas import (
     PublicCourseOut,
     RegistrationResult,
@@ -43,6 +43,35 @@ def _get_course_by_token(db: Session, token: str) -> Course:
 @router.get("/courses", response_model=list[PublicCourseOut])
 def list_public_courses(db: Session = Depends(get_db)):
     return db.query(Course).order_by(Course.name).all()
+
+
+@router.get("/stats")
+def public_stats(db: Session = Depends(get_db)):
+    """Live numbers shown on the Home page. Hide-on-zero is left to the
+    frontend so an empty install still gets a meaningful payload."""
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    week_ago = now - timedelta(days=7)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    assigned = ClipProcessingStatus.assigned.value
+
+    return {
+        "clips_this_week": db.query(VideoClip).filter(
+            VideoClip.created_at >= week_ago,
+            VideoClip.processing_status == assigned,
+        ).count(),
+        "golfers_today": db.query(Participant).filter(
+            Participant.created_at >= today_start,
+        ).count(),
+        "aces_pending": db.query(HoleInOneEvent).filter(
+            HoleInOneEvent.status == HIOStatus.pending.value,
+        ).count(),
+        "courses_live": db.query(Course).count(),
+        "total_clips_delivered": db.query(VideoClip).filter(
+            VideoClip.processing_status == assigned,
+        ).count(),
+    }
 
 
 @router.get("/stripe-config")
