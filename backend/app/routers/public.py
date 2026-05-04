@@ -123,6 +123,9 @@ async def register(
     group_size: int = Form(4),
     group_members: str = Form("[]"),  # JSON string: [{name, email, mobile}, ...]
     selfie: UploadFile = File(...),
+    member_2_selfie: UploadFile | None = File(None),
+    member_3_selfie: UploadFile | None = File(None),
+    member_4_selfie: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     user: User | None = Depends(optional_user),
 ):
@@ -213,14 +216,17 @@ async def register(
             participant.name, participant.mobile, participant.email, gallery_url
         )
 
-    # Group members: lead pays for everyone; each invitee gets a link to add
-    # their own selfie. They share the same tee time + are auto-paid.
-    invited = []
+    # Group members: lead pays for everyone AND captures every player's
+    # outfit photo at registration so each gets a personal gallery from
+    # the moment the round starts. The /invite/<token> path is kept around
+    # as a fallback for back-fills, but the canonical flow requires a
+    # selfie up-front for each member.
+    member_selfie_files = [member_2_selfie, member_3_selfie, member_4_selfie]
     try:
         members = json.loads(group_members or "[]")
     except json.JSONDecodeError:
         members = []
-    for m in members[:3]:  # cap at 3 additional players (4 total per group)
+    for idx, m in enumerate(members[:3]):
         m_name = (m.get("name") or "").strip()
         m_email = (m.get("email") or "").strip()
         m_mobile = (m.get("mobile") or "").strip()
@@ -229,6 +235,18 @@ async def register(
         spots = db.query(Participant).filter(Participant.tee_time_id == tt.id).count()
         if spots >= tt.max_players:
             break
+
+        m_selfie = member_selfie_files[idx]
+        m_selfie_bytes = None
+        if m_selfie is not None:
+            if not (m_selfie.content_type or "").startswith("image/"):
+                raise HTTPException(400, f"player {idx + 2} selfie must be an image")
+            m_selfie_bytes = await m_selfie.read()
+            if len(m_selfie_bytes) > 8 * 1024 * 1024:
+                raise HTTPException(413, f"player {idx + 2} selfie too large (max 8MB)")
+
+        m_embedding = appearance.embed_image_bytes(m_selfie_bytes) if m_selfie_bytes else None
+
         member = Participant(
             tee_time_id=tt.id,
             user_id=None,
@@ -236,28 +254,56 @@ async def register(
             mobile=m_mobile or None,
             email=m_email or None,
             group_size=group_size,
+            appearance_embedding=m_embedding,
             paid=True,  # lead's payment covers them
             stripe_payment_intent_id=f"group_via_{participant.id}",
         )
         db.add(member)
         db.flush()
-        invite_url = f"{settings.app_base_url}/invite/{member.gallery_token}"
-        # Reuse the existing 'registered' notification — copy adapted on the
-        # invite page itself.
-        notifications.send_email(
-            m_email,
-            f"You're registered for GolfReelz at {course.name}",
-            (
-                f"{name.strip()} signed you up for a round at {course.name}.\n\n"
-                f"To get your shots matched, take a quick outfit photo:\n{invite_url}\n\n"
-                f"You'll get an email with all your par-3 clips after the round."
-            ),
-        )
-        notifications.send_sms(
-            m_mobile,
-            f"GolfReelz: {name.strip()} added you to a round at {course.name}. Snap an outfit photo: {invite_url}",
-        )
-        invited.append({"id": member.id, "name": m_name, "invite_url": invite_url})
+
+        if m_selfie_bytes:
+            ext = (m_selfie.filename or "").rsplit(".", 1)[-1].lower() if "." in (m_selfie.filename or "") else "jpg"
+            if ext not in ("jpg", "jpeg", "png", "webp", "heic"):
+                ext = "jpg"
+            m_fname = f"{member.id}-{secrets.token_hex(4)}.{ext}"
+            m_fpath = SELFIE_DIR / m_fname
+            m_fpath.write_bytes(m_selfie_bytes)
+            member.selfie_path = f"selfies/{m_fname}"
+
+            # Selfie captured up-front — send a confirmation email/SMS with
+            # their gallery link instead of an "add your selfie" invite.
+            gallery = f"{settings.app_base_url}/g/{member.gallery_token}"
+            notifications.send_email(
+                m_email,
+                f"You're registered for GolfReelz at {course.name}",
+                (
+                    f"{name.strip()} signed you up for a round at {course.name}.\n\n"
+                    f"You're all set — your outfit photo was captured at registration.\n"
+                    f"We'll email your par-3 clips after the round.\n\n"
+                    f"Bookmark your gallery: {gallery}"
+                ),
+            )
+            notifications.send_sms(
+                m_mobile,
+                f"GolfReelz: {name.strip()} added you to a round at {course.name}. Your gallery: {gallery}",
+            )
+        else:
+            # Fallback: no selfie at registration time. Send the legacy invite
+            # link so they can add one later.
+            invite_url = f"{settings.app_base_url}/invite/{member.gallery_token}"
+            notifications.send_email(
+                m_email,
+                f"You're registered for GolfReelz at {course.name}",
+                (
+                    f"{name.strip()} signed you up for a round at {course.name}.\n\n"
+                    f"One more step — take a quick outfit photo so we can match\n"
+                    f"your shots: {invite_url}"
+                ),
+            )
+            notifications.send_sms(
+                m_mobile,
+                f"GolfReelz: {name.strip()} added you to a round at {course.name}. Snap an outfit photo: {invite_url}",
+            )
 
     db.commit()
 

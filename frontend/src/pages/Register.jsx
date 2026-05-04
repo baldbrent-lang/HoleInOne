@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
-import SelfieCamera from "../components/SelfieCamera.jsx";
+import SelfieField from "../components/SelfieField.jsx";
 import useAuth from "../hooks/useAuth.js";
+
+const EMPTY_MEMBER = { name: "", email: "", mobile: "", selfieFile: null, selfiePreview: null };
 
 export default function Register() {
   const { courseToken } = useParams();
@@ -17,13 +19,12 @@ export default function Register() {
   const [email, setEmail] = useState(user?.email || "");
   const [groupSize, setGroupSize] = useState(1);
   const [groupMembers, setGroupMembers] = useState([
-    { name: "", email: "", mobile: "" },
-    { name: "", email: "", mobile: "" },
-    { name: "", email: "", mobile: "" },
+    { ...EMPTY_MEMBER }, { ...EMPTY_MEMBER }, { ...EMPTY_MEMBER },
   ]);
   const [selfieFile, setSelfieFile] = useState(null);
   const [selfiePreview, setSelfiePreview] = useState(null);
-  const [cameraOpen, setCameraOpen] = useState(false);
+  // Single openCameraId across the whole form so only one device camera is mounted at a time.
+  const [openCameraId, setOpenCameraId] = useState(null);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -42,19 +43,37 @@ export default function Register() {
     })();
   }, [courseToken]);
 
-  function onSelfiePicked(file) {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setError("That doesn't look like a photo. Try again?");
-      return;
-    }
+  function readPreview(file, set) {
+    const reader = new FileReader();
+    reader.onload = () => set(reader.result);
+    reader.readAsDataURL(file);
+  }
+
+  function onLeadSelfie(file) {
+    if (!file?.type?.startsWith("image/")) { setError("That doesn't look like a photo."); return; }
     setError(null);
     setSelfieFile(file);
-    const reader = new FileReader();
-    reader.onload = () => setSelfiePreview(reader.result);
-    reader.readAsDataURL(file);
-    setCameraOpen(false);
+    readPreview(file, setSelfiePreview);
   }
+
+  function onMemberSelfie(idx, file) {
+    if (!file?.type?.startsWith("image/")) { setError("That doesn't look like a photo."); return; }
+    setError(null);
+    const next = [...groupMembers];
+    next[idx] = { ...next[idx], selfieFile: file };
+    setGroupMembers(next);
+    readPreview(file, (preview) => {
+      const after = [...next];
+      after[idx] = { ...after[idx], selfiePreview: preview };
+      setGroupMembers(after);
+    });
+  }
+
+  const memberCount = Math.max(0, Number(groupSize) - 1);
+  const activeMembers = groupMembers.slice(0, memberCount);
+  const allMembersComplete = activeMembers.every(
+    (m) => m.name.trim() && (m.email.trim() || m.mobile.trim()) && m.selfieFile,
+  );
 
   async function submit(e) {
     e.preventDefault();
@@ -62,17 +81,16 @@ export default function Register() {
     setError(null);
     try {
       if (!mobile && !email) throw new Error("Enter a mobile number or an email so we can text you your clips.");
-      if (!selfieFile) throw new Error("Please take an outfit photo so we can match your shots.");
+      if (!selfieFile) throw new Error("Take your outfit photo so we can match your shots.");
+      if (memberCount > 0 && !allMembersComplete) {
+        throw new Error("Each player needs a name, contact, and an outfit photo.");
+      }
 
-      const memberCount = Math.max(0, Number(groupSize) - 1);
-      const cleanMembers = groupMembers.slice(0, memberCount).map((m) => ({
+      const cleanMembers = activeMembers.map((m) => ({
         name: m.name.trim(),
         email: m.email.trim(),
         mobile: m.mobile.trim(),
-      })).filter((m) => m.name && (m.email || m.mobile));
-      if (memberCount > 0 && cleanMembers.length < memberCount) {
-        throw new Error("Each additional player needs a name and at least one of email or mobile.");
-      }
+      }));
 
       const fd = new FormData();
       fd.append("course_token", courseToken);
@@ -83,10 +101,14 @@ export default function Register() {
       fd.append("group_size", String(groupSize));
       fd.append("group_members", JSON.stringify(cleanMembers));
       fd.append("selfie", selfieFile, selfieFile.name || "selfie.jpg");
+      activeMembers.forEach((m, i) => {
+        if (m.selfieFile) {
+          // member_2_selfie, member_3_selfie, member_4_selfie
+          fd.append(`member_${i + 2}_selfie`, m.selfieFile, m.selfieFile.name || `member_${i + 2}.jpg`);
+        }
+      });
 
       const res = await api.register(fd);
-      // If real Stripe is configured the participant comes back unpaid with a
-      // client_secret — route to the Pay page where Apple/Google Pay + card live.
       if (res.client_secret && !res.paid) {
         nav(`/pay/${res.participant_id}`, {
           state: {
@@ -196,25 +218,52 @@ export default function Register() {
           </select>
           {Number(groupSize) > 1 && (
             <div className="hint small muted">
-              You'll pay <b>${20 * Number(groupSize)}</b> total ($20 × {groupSize}). Each player gets matched to their own clips.
+              You'll pay <b>${20 * Number(groupSize)}</b> total ($20 × {groupSize}). Each player needs their own outfit photo for personal clips.
             </div>
           )}
         </div>
 
-        {Number(groupSize) > 1 && (
+        <div className="field">
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Icon name="camera" size={16} /> Your outfit photo
+          </label>
+          <p className="hint">
+            Hand your phone to a friend or use a mirror — head to toe, full
+            outfit visible. We use this to pick your shots out of the footage.
+          </p>
+          <SelfieField
+            id="lead"
+            openCameraId={openCameraId}
+            setOpenCameraId={setOpenCameraId}
+            preview={selfiePreview}
+            onPicked={onLeadSelfie}
+          />
+        </div>
+
+        {memberCount > 0 && (
           <div className="card" style={{ background: "var(--primary-soft)", border: "1px solid var(--emerald-200)", margin: "0 0 16px" }}>
             <h4 style={{ marginBottom: 6 }}>Add your group</h4>
             <p className="hint">
-              We'll text or email each player a link to upload their own outfit
-              photo — they don't need to register again.
+              Each player needs an outfit photo so we can build them their own
+              personal gallery. Hand the phone around — capture each one before
+              you tee off.
             </p>
-            {Array.from({ length: Number(groupSize) - 1 }).map((_, i) => (
-              <div key={i} style={{ marginTop: 10, paddingTop: 10, borderTop: i === 0 ? "none" : "1px solid var(--emerald-200)" }}>
-                <div className="tiny upper muted" style={{ marginBottom: 6 }}>Player {i + 2}</div>
+            {activeMembers.map((m, i) => (
+              <div
+                key={i}
+                style={{
+                  marginTop: 12, paddingTop: 12,
+                  borderTop: i === 0 ? "none" : "1px solid var(--emerald-200)",
+                }}
+              >
+                <div className="tiny upper muted" style={{ marginBottom: 6 }}>
+                  Player {i + 2}
+                  {m.selfieFile && <span className="ok-text" style={{ marginLeft: 8 }}>· photo captured</span>}
+                </div>
                 <div className="field" style={{ marginBottom: 8 }}>
                   <input
                     placeholder="Name"
-                    value={groupMembers[i].name}
+                    value={m.name}
                     onChange={(e) => {
                       const next = [...groupMembers];
                       next[i] = { ...next[i], name: e.target.value };
@@ -222,12 +271,12 @@ export default function Register() {
                     }}
                   />
                 </div>
-                <div className="row">
+                <div className="row" style={{ marginBottom: 10 }}>
                   <div className="field" style={{ marginBottom: 0 }}>
                     <input
                       type="tel"
                       placeholder="Mobile"
-                      value={groupMembers[i].mobile}
+                      value={m.mobile}
                       onChange={(e) => {
                         const next = [...groupMembers];
                         next[i] = { ...next[i], mobile: e.target.value };
@@ -239,7 +288,7 @@ export default function Register() {
                     <input
                       type="email"
                       placeholder="Email"
-                      value={groupMembers[i].email}
+                      value={m.email}
                       onChange={(e) => {
                         const next = [...groupMembers];
                         next[i] = { ...next[i], email: e.target.value };
@@ -248,38 +297,17 @@ export default function Register() {
                     />
                   </div>
                 </div>
+                <SelfieField
+                  id={`m${i}`}
+                  openCameraId={openCameraId}
+                  setOpenCameraId={setOpenCameraId}
+                  preview={m.selfiePreview}
+                  onPicked={(file) => onMemberSelfie(i, file)}
+                />
               </div>
             ))}
           </div>
         )}
-
-        <div className="field">
-          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <Icon name="camera" size={16} /> Outfit photo
-          </label>
-          <p className="hint">
-            Hand your phone to a friend or use a mirror — head to toe, full outfit visible.
-            We use this to pick your shots out of the footage.
-          </p>
-          {cameraOpen ? (
-            <SelfieCamera onCapture={onSelfiePicked} onCancel={() => setCameraOpen(false)} />
-          ) : selfiePreview ? (
-            <div className="selfie-preview">
-              <img src={selfiePreview} alt="outfit preview" />
-              <div style={{ flex: 1 }}>
-                <div className="ok-text inline"><Icon name="check" size={16} /> Looks great</div>
-                <div className="small muted">We'll match clips to this outfit.</div>
-              </div>
-              <button type="button" className="secondary small" onClick={() => setCameraOpen(true)}>
-                <Icon name="retake" size={14} /> Retake
-              </button>
-            </div>
-          ) : (
-            <button type="button" onClick={() => setCameraOpen(true)}>
-              <Icon name="camera" size={16} /> Open camera
-            </button>
-          )}
-        </div>
 
         <div className="divider" />
         <div className="inline" style={{ justifyContent: "space-between", marginBottom: 14, width: "100%" }}>
@@ -288,7 +316,12 @@ export default function Register() {
         </div>
 
         {error && <p className="err-text small">{error}</p>}
-        <button disabled={submitting || !teeTimeId || !name || !selfieFile}>
+        <button
+          disabled={
+            submitting || !teeTimeId || !name || !selfieFile ||
+            (memberCount > 0 && !allMembersComplete)
+          }
+        >
           {submitting ? "Processing…" : `Pay $${20 * Number(groupSize)} and register`}
         </button>
       </form>
