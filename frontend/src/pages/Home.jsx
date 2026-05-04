@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Brand, Icon } from "../components/Brand.jsx";
 import { api } from "../api.js";
+import useAuth from "../hooks/useAuth.js";
 
 export default function Home() {
+  const { user } = useAuth();
   const [courses, setCourses] = useState(null);
   const [showcase, setShowcase] = useState(null);
 
@@ -152,6 +154,49 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {!user && (
+        <div
+          className="card"
+          style={{
+            background: "linear-gradient(135deg, var(--emerald-50), var(--emerald-100))",
+            border: "1px solid var(--emerald-200)",
+            display: "flex",
+            gap: 16,
+            alignItems: "flex-start",
+          }}
+        >
+          <div
+            style={{
+              flexShrink: 0,
+              width: 44, height: 44, borderRadius: 12,
+              background: "var(--emerald-600)", color: "white",
+              display: "grid", placeItems: "center",
+            }}
+          >
+            <Icon name="users" />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ color: "var(--emerald-800)", marginBottom: 4 }}>
+              Make an account, keep every shot
+            </h3>
+            <p className="small" style={{ color: "var(--emerald-800)", marginBottom: 12 }}>
+              Sign up with your email and every round you ever play with
+              GolfReelz lands in your personal dashboard. Pull up past shots,
+              re-share clips, and re-register for new rounds in one tap — no
+              more digging through old emails.
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Link to="/signup" className="btn small" style={{ width: "auto" }}>
+                Create free account
+              </Link>
+              <Link to="/login" className="btn secondary small" style={{ width: "auto" }}>
+                Log in
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="card" style={{ background: "var(--primary-soft)", border: "1px solid var(--emerald-200)" }}>
         <h3 style={{ color: "var(--emerald-800)" }}>For operators + testers</h3>
