@@ -38,6 +38,16 @@ async function request(path, { method = "GET", body, adminPassword, auth = true 
 
 export const api = {
   listPublicCourses: () => request(`/api/public/courses`),
+  inviteInfo: (token) => request(`/api/public/invite/${token}`, { auth: false }),
+  inviteSelfie: async (token, file) => {
+    const fd = new FormData();
+    fd.append("selfie", file, file.name || "selfie.jpg");
+    const res = await fetch(`${API_BASE}/api/public/invite/${token}/selfie`, {
+      method: "POST", body: fd,
+    });
+    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+    return res.json();
+  },
   listShowcase: () => request(`/api/public/showcase`),
   adminListShowcase: (key) => request(`/api/admin/showcase`, { adminPassword: key }),
   updateShowcase: (key, position, payload) =>

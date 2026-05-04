@@ -15,7 +15,12 @@ export default function Register() {
   const [name, setName] = useState(user?.name || "");
   const [mobile, setMobile] = useState("");
   const [email, setEmail] = useState(user?.email || "");
-  const [groupSize, setGroupSize] = useState(4);
+  const [groupSize, setGroupSize] = useState(1);
+  const [groupMembers, setGroupMembers] = useState([
+    { name: "", email: "", mobile: "" },
+    { name: "", email: "", mobile: "" },
+    { name: "", email: "", mobile: "" },
+  ]);
   const [selfieFile, setSelfieFile] = useState(null);
   const [selfiePreview, setSelfiePreview] = useState(null);
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -59,6 +64,16 @@ export default function Register() {
       if (!mobile && !email) throw new Error("Enter a mobile number or an email so we can text you your clips.");
       if (!selfieFile) throw new Error("Please take an outfit photo so we can match your shots.");
 
+      const memberCount = Math.max(0, Number(groupSize) - 1);
+      const cleanMembers = groupMembers.slice(0, memberCount).map((m) => ({
+        name: m.name.trim(),
+        email: m.email.trim(),
+        mobile: m.mobile.trim(),
+      })).filter((m) => m.name && (m.email || m.mobile));
+      if (memberCount > 0 && cleanMembers.length < memberCount) {
+        throw new Error("Each additional player needs a name and at least one of email or mobile.");
+      }
+
       const fd = new FormData();
       fd.append("course_token", courseToken);
       fd.append("tee_time_id", String(teeTimeId));
@@ -66,6 +81,7 @@ export default function Register() {
       fd.append("mobile", mobile);
       fd.append("email", email);
       fd.append("group_size", String(groupSize));
+      fd.append("group_members", JSON.stringify(cleanMembers));
       fd.append("selfie", selfieFile, selfieFile.name || "selfie.jpg");
 
       const res = await api.register(fd);
@@ -166,7 +182,64 @@ export default function Register() {
           <select value={groupSize} onChange={(e) => setGroupSize(e.target.value)}>
             {[1, 2, 3, 4].map((n) => (<option key={n} value={n}>{n}</option>))}
           </select>
+          {Number(groupSize) > 1 && (
+            <div className="hint small muted">
+              You'll pay <b>${20 * Number(groupSize)}</b> total ($20 × {groupSize}). Each player gets matched to their own clips.
+            </div>
+          )}
         </div>
+
+        {Number(groupSize) > 1 && (
+          <div className="card" style={{ background: "var(--primary-soft)", border: "1px solid var(--emerald-200)", margin: "0 0 16px" }}>
+            <h4 style={{ marginBottom: 6 }}>Add your group</h4>
+            <p className="hint">
+              We'll text or email each player a link to upload their own outfit
+              photo — they don't need to register again.
+            </p>
+            {Array.from({ length: Number(groupSize) - 1 }).map((_, i) => (
+              <div key={i} style={{ marginTop: 10, paddingTop: 10, borderTop: i === 0 ? "none" : "1px solid var(--emerald-200)" }}>
+                <div className="tiny upper muted" style={{ marginBottom: 6 }}>Player {i + 2}</div>
+                <div className="field" style={{ marginBottom: 8 }}>
+                  <input
+                    placeholder="Name"
+                    value={groupMembers[i].name}
+                    onChange={(e) => {
+                      const next = [...groupMembers];
+                      next[i] = { ...next[i], name: e.target.value };
+                      setGroupMembers(next);
+                    }}
+                  />
+                </div>
+                <div className="row">
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <input
+                      type="tel"
+                      placeholder="Mobile"
+                      value={groupMembers[i].mobile}
+                      onChange={(e) => {
+                        const next = [...groupMembers];
+                        next[i] = { ...next[i], mobile: e.target.value };
+                        setGroupMembers(next);
+                      }}
+                    />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <input
+                      type="email"
+                      placeholder="Email"
+                      value={groupMembers[i].email}
+                      onChange={(e) => {
+                        const next = [...groupMembers];
+                        next[i] = { ...next[i], email: e.target.value };
+                        setGroupMembers(next);
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="field">
           <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -199,12 +272,12 @@ export default function Register() {
         <div className="divider" />
         <div className="inline" style={{ justifyContent: "space-between", marginBottom: 14, width: "100%" }}>
           <span className="small muted"><Icon name="lock" size={14} /> Secure Stripe checkout</span>
-          <span className="inline" style={{ fontWeight: 600 }}>$20</span>
+          <span className="inline" style={{ fontWeight: 600 }}>${20 * Number(groupSize)}</span>
         </div>
 
         {error && <p className="err-text small">{error}</p>}
         <button disabled={submitting || !teeTimeId || !name || !selfieFile}>
-          {submitting ? "Processing…" : "Pay $20 and register"}
+          {submitting ? "Processing…" : `Pay $${20 * Number(groupSize)} and register`}
         </button>
       </form>
     </div>

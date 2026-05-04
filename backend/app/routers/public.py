@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import json
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy.orm import Session
 
@@ -107,6 +109,7 @@ async def register(
     mobile: str = Form(""),
     email: str = Form(""),
     group_size: int = Form(4),
+    group_members: str = Form("[]"),  # JSON string: [{name, email, mobile}, ...]
     selfie: UploadFile = File(...),
     db: Session = Depends(get_db),
     user: User | None = Depends(optional_user),
@@ -180,6 +183,52 @@ async def register(
             participant.name, participant.mobile, participant.email, gallery_url
         )
 
+    # Group members: lead pays for everyone; each invitee gets a link to add
+    # their own selfie. They share the same tee time + are auto-paid.
+    invited = []
+    try:
+        members = json.loads(group_members or "[]")
+    except json.JSONDecodeError:
+        members = []
+    for m in members[:3]:  # cap at 3 additional players (4 total per group)
+        m_name = (m.get("name") or "").strip()
+        m_email = (m.get("email") or "").strip()
+        m_mobile = (m.get("mobile") or "").strip()
+        if not m_name or (not m_email and not m_mobile):
+            continue
+        spots = db.query(Participant).filter(Participant.tee_time_id == tt.id).count()
+        if spots >= tt.max_players:
+            break
+        member = Participant(
+            tee_time_id=tt.id,
+            user_id=None,
+            name=m_name,
+            mobile=m_mobile or None,
+            email=m_email or None,
+            group_size=group_size,
+            paid=True,  # lead's payment covers them
+            stripe_payment_intent_id=f"group_via_{participant.id}",
+        )
+        db.add(member)
+        db.flush()
+        invite_url = f"{settings.app_base_url}/invite/{member.gallery_token}"
+        # Reuse the existing 'registered' notification — copy adapted on the
+        # invite page itself.
+        notifications.send_email(
+            m_email,
+            f"You're registered for GolfReelz at {course.name}",
+            (
+                f"{name.strip()} signed you up for a round at {course.name}.\n\n"
+                f"To get your shots matched, take a quick outfit photo:\n{invite_url}\n\n"
+                f"You'll get an email with all your par-3 clips after the round."
+            ),
+        )
+        notifications.send_sms(
+            m_mobile,
+            f"GolfReelz: {name.strip()} added you to a round at {course.name}. Snap an outfit photo: {invite_url}",
+        )
+        invited.append({"id": member.id, "name": m_name, "invite_url": invite_url})
+
     db.commit()
 
     return RegistrationResult(
@@ -188,3 +237,56 @@ async def register(
         client_secret=intent.client_secret,
         paid=participant.paid,
     )
+
+
+@router.get("/invite/{gallery_token}")
+def invite_info(gallery_token: str, db: Session = Depends(get_db)):
+    """Public details for an invited group member: course + tee time, plus
+    whether they've already submitted their selfie."""
+    p = db.query(Participant).filter(Participant.gallery_token == gallery_token).first()
+    if not p:
+        raise HTTPException(404, "invite not found")
+    course = db.get(Course, p.tee_time.course_id) if p.tee_time else None
+    return {
+        "name": p.name,
+        "mobile": p.mobile,
+        "email": p.email,
+        "tee_time": p.tee_time.starts_at if p.tee_time else None,
+        "selfie_uploaded": bool(p.selfie_path),
+        "course": {
+            "name": course.name if course else "",
+            "location": course.location if course else "",
+            "qr_token": course.qr_token if course else None,
+        },
+    }
+
+
+@router.post("/invite/{gallery_token}/selfie")
+async def invite_selfie(
+    gallery_token: str,
+    selfie: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    p = db.query(Participant).filter(Participant.gallery_token == gallery_token).first()
+    if not p:
+        raise HTTPException(404, "invite not found")
+    if not (selfie.content_type or "").startswith("image/"):
+        raise HTTPException(400, "selfie must be an image")
+    data = await selfie.read()
+    if not data:
+        raise HTTPException(400, "empty selfie")
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(413, "selfie too large (max 8MB)")
+
+    p.appearance_embedding = appearance.embed_image_bytes(data)
+
+    ext = (selfie.filename or "").rsplit(".", 1)[-1].lower() if "." in (selfie.filename or "") else "jpg"
+    if ext not in ("jpg", "jpeg", "png", "webp", "heic"):
+        ext = "jpg"
+    fname = f"{p.id}-{secrets.token_hex(4)}.{ext}"
+    fpath = SELFIE_DIR / fname
+    fpath.write_bytes(data)
+    p.selfie_path = f"selfies/{fname}"
+    db.commit()
+
+    return {"ok": True, "gallery_url": f"{settings.app_base_url}/g/{p.gallery_token}"}

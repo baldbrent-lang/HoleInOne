@@ -33,6 +33,10 @@ export default function Home() {
           overlays and emailed to you after your round. Make a hole-in-one and
           win <b>$10,000</b>.
         </p>
+        <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+          <Link to="/courses" className="btn" style={{ width: "auto" }}>Pick a course — $20</Link>
+          <Link to="/sample" className="btn secondary" style={{ width: "auto" }}>See sample gallery</Link>
+        </div>
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 16 }}>
