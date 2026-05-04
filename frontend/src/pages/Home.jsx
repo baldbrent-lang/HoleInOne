@@ -26,9 +26,10 @@ export default function Home() {
         </span>
         <h1>Every par-3 shot, tracked and delivered.</h1>
         <p>
-          Scan the QR code at your course, register in under a minute, and we
-          text your personal gallery when your round is done — tracer overlays,
-          stats, and shareable clips included.
+          Register here on the website or scan the QR code at your course —
+          either way, in under a minute. We email your personal gallery when
+          your round is done: tracer overlays, stats, and shareable clips
+          included.
         </p>
       </div>
 
