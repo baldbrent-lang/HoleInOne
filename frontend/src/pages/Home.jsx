@@ -7,12 +7,10 @@ import useAuth from "../hooks/useAuth.js";
 
 export default function Home() {
   const { user } = useAuth();
-  const [courses, setCourses] = useState(null);
   const [showcase, setShowcase] = useState(null);
   const [boards, setBoards] = useState(null);
 
   useEffect(() => {
-    api.listPublicCourses().then(setCourses).catch(() => setCourses([]));
     api.listShowcase().then(setShowcase).catch(() => setShowcase([]));
     api.leaderboards(3).then(setBoards).catch(() => setBoards({}));
   }, []);
@@ -73,49 +71,26 @@ export default function Home() {
         )}
 
         <div className="card" style={{ marginBottom: 0 }}>
-          <h3 style={{ marginBottom: 4 }}>Pick your course</h3>
-          <p className="small muted" style={{ marginBottom: 14 }}>
-            Tap a course to start your registration.
-          </p>
-          {courses === null ? (
-            <>
-              <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
-              <div className="shimmer" style={{ height: 64, marginBottom: 8 }} />
-              <div className="shimmer" style={{ height: 64 }} />
-            </>
-          ) : courses.length === 0 ? (
-            <div className="muted small">No courses available yet.</div>
+          <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 14 }}>
+            <h3>Current leaderboard</h3>
+            <Link to="/leaderboards" className="small">See full leaderboard →</Link>
+          </div>
+          {!boards ? (
+            <div className="shimmer" style={{ height: 220 }} />
           ) : (
-            <div className="stack" style={{ gap: 10 }}>
-              {courses.map((c) => (
-                <Link
-                  key={c.id}
-                  to={`/r/${c.qr_token}`}
-                  className="card"
-                  style={{
-                    margin: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 14,
-                    textDecoration: "none",
-                    color: "inherit",
-                    padding: 14,
-                  }}
-                >
-                  <div
-                    className="logo"
-                    style={{ background: "var(--primary-soft)", color: "var(--emerald-700)", flexShrink: 0 }}
-                    aria-hidden="true"
-                  >
-                    <Icon name="flag" />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <b style={{ display: "block" }}>{c.name}</b>
-                    <div className="small muted">{c.location || "—"}</div>
-                  </div>
-                  <span style={{ color: "var(--ink-soft)" }}>→</span>
-                </Link>
-              ))}
+            <div className="stack" style={{ gap: 14 }}>
+              <LeaderboardCard
+                title="Longest carry"
+                icon="sparkle"
+                rows={(boards.longest_carry || []).slice(0, 3)}
+                emptyText="No carries logged yet — be the first."
+              />
+              <LeaderboardCard
+                title="Most aces"
+                icon="dollar"
+                rows={(boards.most_aces || []).slice(0, 3)}
+                emptyText="No aces yet. Win $10,000 by being the first."
+              />
             </div>
           )}
         </div>
@@ -159,36 +134,6 @@ export default function Home() {
               <p>Ace any par 3, our cup camera verifies it, you get a $10,000 check.</p>
             </div>
           </div>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 14 }}>
-          <h3>Current leaderboard</h3>
-          <Link to="/leaderboards" className="small">See full leaderboard →</Link>
-        </div>
-        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
-          {!boards ? (
-            <>
-              <div className="shimmer" style={{ height: 200 }} />
-              <div className="shimmer" style={{ height: 200 }} />
-            </>
-          ) : (
-            <>
-              <LeaderboardCard
-                title="Longest carry"
-                icon="sparkle"
-                rows={(boards.longest_carry || []).slice(0, 3)}
-                emptyText="No carries logged yet — be the first."
-              />
-              <LeaderboardCard
-                title="Most aces"
-                icon="dollar"
-                rows={(boards.most_aces || []).slice(0, 3)}
-                emptyText="No aces yet. Win $10,000 by being the first."
-              />
-            </>
-          )}
         </div>
       </div>
 
