@@ -143,6 +143,13 @@ export default function Home() {
               <p>One email lands in your inbox with all your par-3 clips attached. Hole-in-one? We verify it with the cup camera.</p>
             </div>
           </div>
+          <div className="feature-row" style={{ borderBottom: "none", padding: "8px 0" }}>
+            <div className="icon"><Icon name="dollar" /></div>
+            <div>
+              <h4>5. Hole-in-one? Win <b>$10,000</b>.</h4>
+              <p>Ace any par 3 during your round and we'll cut you a $10,000 check. Our cup camera verifies it instantly — no signed scorecards or witness disputes.</p>
+            </div>
+          </div>
         </div>
       </div>
 
