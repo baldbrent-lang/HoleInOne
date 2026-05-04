@@ -26,10 +26,10 @@ export default function Home() {
         </span>
         <h1>Every par-3 shot, tracked and delivered.</h1>
         <p>
-          Register here on the website or scan the QR code at your course —
-          either way, in under a minute. We email your personal gallery when
-          your round is done: tracer overlays, stats, and shareable clips
-          included.
+          Two ways to register: right here on the website, or by scanning the
+          QR code at your course. Every par-3 tee shot is filmed with tracer
+          overlays and emailed to you after your round. Make a hole-in-one and
+          win <b>$10,000</b>.
         </p>
       </div>
 
