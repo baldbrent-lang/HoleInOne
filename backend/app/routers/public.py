@@ -44,6 +44,18 @@ def list_public_courses(db: Session = Depends(get_db)):
     return db.query(Course).order_by(Course.name).all()
 
 
+@router.get("/stripe-config")
+def stripe_config():
+    """Expose the publishable key + flag the frontend uses to decide whether
+    to mount the real Stripe Elements (Apple Pay / Google Pay / card / Link)
+    or fall through to the mock-paid happy path."""
+    return {
+        "publishable_key": settings.stripe_publishable_key or None,
+        "configured": bool(settings.stripe_publishable_key and settings.stripe_secret_key),
+        "price_cents": settings.registration_price_cents,
+    }
+
+
 @router.get("/showcase")
 def list_showcase(db: Session = Depends(get_db)):
     rows = db.query(Showcase).order_by(Showcase.position.asc()).all()
@@ -172,7 +184,25 @@ async def register(
     fpath.write_bytes(selfie_bytes)
     participant.selfie_path = f"selfies/{fname}"
 
-    intent = create_registration_payment_intent(participant.id)
+    # Lead pays for the whole group: $20 per registered player.
+    # Cap members count up-front so the charge matches the participants we'll
+    # actually create below.
+    try:
+        _members_preview = json.loads(group_members or "[]")
+    except json.JSONDecodeError:
+        _members_preview = []
+    spots_remaining = tt.max_players - 1  # lead already takes one
+    member_count = min(
+        len([m for m in _members_preview[:3]
+             if (m.get("name") or "").strip()
+             and ((m.get("email") or "").strip() or (m.get("mobile") or "").strip())]),
+        spots_remaining,
+    )
+    total_players = 1 + member_count
+    intent = create_registration_payment_intent(
+        participant.id,
+        amount_cents=settings.registration_price_cents * total_players,
+    )
     participant.stripe_payment_intent_id = intent.id
     participant.paid = intent.status == "succeeded"
 

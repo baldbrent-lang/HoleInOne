@@ -38,6 +38,7 @@ async function request(path, { method = "GET", body, adminPassword, auth = true 
 
 export const api = {
   listPublicCourses: () => request(`/api/public/courses`),
+  stripeConfig: () => request(`/api/public/stripe-config`, { auth: false }),
   inviteInfo: (token) => request(`/api/public/invite/${token}`, { auth: false }),
   inviteSelfie: async (token, file) => {
     const fd = new FormData();

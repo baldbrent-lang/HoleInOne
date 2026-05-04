@@ -14,6 +14,7 @@ import CoursePicker from "./pages/CoursePicker.jsx";
 import SampleGallery from "./pages/SampleGallery.jsx";
 import Legal from "./pages/Legal.jsx";
 import Invite from "./pages/Invite.jsx";
+import Pay from "./pages/Pay.jsx";
 import Footer from "./components/Footer.jsx";
 import Home from "./pages/Home.jsx";
 
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="/sample" element={<SampleGallery />} />
         <Route path="/legal/:doc" element={<Legal />} />
         <Route path="/invite/:galleryToken" element={<Invite />} />
+        <Route path="/pay/:participantId" element={<Pay />} />
         <Route path="/r/:courseToken" element={<Register />} />
         <Route path="/confirm/:participantId" element={<Confirmation />} />
         <Route path="/g/:galleryToken" element={<Gallery />} />

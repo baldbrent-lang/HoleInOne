@@ -85,7 +85,19 @@ export default function Register() {
       fd.append("selfie", selfieFile, selfieFile.name || "selfie.jpg");
 
       const res = await api.register(fd);
-      nav(`/confirm/${res.participant_id}`, { state: res });
+      // If real Stripe is configured the participant comes back unpaid with a
+      // client_secret — route to the Pay page where Apple/Google Pay + card live.
+      if (res.client_secret && !res.paid) {
+        nav(`/pay/${res.participant_id}`, {
+          state: {
+            client_secret: res.client_secret,
+            gallery_url: res.gallery_url,
+            total: 20 * Number(groupSize),
+          },
+        });
+      } else {
+        nav(`/confirm/${res.participant_id}`, { state: res });
+      }
     } catch (e) {
       setError(e.message);
     } finally {

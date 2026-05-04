@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     jwt_ttl_days: int = 30
 
     stripe_secret_key: str = ""
+    stripe_publishable_key: str = ""
     stripe_webhook_secret: str = ""
     registration_price_cents: int = 2000
 
