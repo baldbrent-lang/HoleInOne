@@ -9,12 +9,13 @@ from typing import Optional
 import json
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
 from ..deps import optional_user
-from ..models import Course, Participant, Showcase, TeeTime, User
+from ..models import ClipProcessingStatus, Course, Participant, Showcase, TeeTime, User, VideoClip
 from ..schemas import (
     PublicCourseOut,
     RegistrationResult,
@@ -53,6 +54,88 @@ def stripe_config():
         "publishable_key": settings.stripe_publishable_key or None,
         "configured": bool(settings.stripe_publishable_key and settings.stripe_secret_key),
         "price_cents": settings.registration_price_cents,
+    }
+
+
+def _short_name(full_name: str | None) -> str:
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "—"
+    first = parts[0]
+    if len(parts) == 1:
+        return first
+    return f"{first} {parts[-1][0].upper()}."
+
+
+@router.get("/leaderboards")
+def public_leaderboards(limit: int = 10, db: Session = Depends(get_db)):
+    """Top entries across the meaningful axes. limit=3 for the home preview,
+    higher for the full page."""
+    limit = max(1, min(50, limit))
+    assigned = ClipProcessingStatus.assigned.value
+
+    # Longest single-shot carry
+    longest_carry_rows = (
+        db.query(Participant.name, Course.name.label("course"), VideoClip.hole_number, VideoClip.carry_yards)
+        .join(VideoClip, VideoClip.participant_id == Participant.id)
+        .join(TeeTime, TeeTime.id == Participant.tee_time_id)
+        .join(Course, Course.id == TeeTime.course_id)
+        .filter(VideoClip.carry_yards.isnot(None), VideoClip.processing_status == assigned)
+        .order_by(desc(VideoClip.carry_yards))
+        .limit(limit)
+        .all()
+    )
+
+    # Fastest single-shot ball speed
+    fastest_ball_rows = (
+        db.query(Participant.name, Course.name.label("course"), VideoClip.hole_number, VideoClip.ball_speed_mph)
+        .join(VideoClip, VideoClip.participant_id == Participant.id)
+        .join(TeeTime, TeeTime.id == Participant.tee_time_id)
+        .join(Course, Course.id == TeeTime.course_id)
+        .filter(VideoClip.ball_speed_mph.isnot(None), VideoClip.processing_status == assigned)
+        .order_by(desc(VideoClip.ball_speed_mph))
+        .limit(limit)
+        .all()
+    )
+
+    # Most hole-in-ones (aces) — counted at the participant level
+    most_aces_rows = (
+        db.query(Participant.name, func.count(VideoClip.id).label("aces"))
+        .join(VideoClip, VideoClip.participant_id == Participant.id)
+        .filter(VideoClip.ball_in_cup.is_(True), VideoClip.processing_status == assigned)
+        .group_by(Participant.id)
+        .order_by(desc(func.count(VideoClip.id)))
+        .limit(limit)
+        .all()
+    )
+
+    # Most rounds played — counted across registered Users
+    most_rounds_rows = (
+        db.query(User.name, User.email, func.count(Participant.id).label("rounds"))
+        .join(Participant, Participant.user_id == User.id)
+        .group_by(User.id)
+        .order_by(desc(func.count(Participant.id)))
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "longest_carry": [
+            {"golfer": _short_name(name), "course": course, "hole": hole, "value": yards, "unit": "yds"}
+            for (name, course, hole, yards) in longest_carry_rows
+        ],
+        "fastest_ball": [
+            {"golfer": _short_name(name), "course": course, "hole": hole, "value": mph, "unit": "mph"}
+            for (name, course, hole, mph) in fastest_ball_rows
+        ],
+        "most_aces": [
+            {"golfer": _short_name(name), "value": aces, "unit": "aces"}
+            for (name, aces) in most_aces_rows
+        ],
+        "most_rounds": [
+            {"golfer": _short_name(name or email.split("@")[0]), "value": rounds, "unit": "rounds"}
+            for (name, email, rounds) in most_rounds_rows
+        ],
     }
 
 

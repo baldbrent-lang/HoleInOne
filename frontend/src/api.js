@@ -50,6 +50,7 @@ export const api = {
     return res.json();
   },
   listShowcase: () => request(`/api/public/showcase`),
+  leaderboards: (limit) => request(`/api/public/leaderboards${limit ? `?limit=${limit}` : ""}`, { auth: false }),
   adminListShowcase: (key) => request(`/api/admin/showcase`, { adminPassword: key }),
   updateShowcase: (key, position, payload) =>
     request(`/api/admin/showcase/${position}`, {

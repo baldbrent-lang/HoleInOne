@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Brand, Icon } from "../components/Brand.jsx";
+import LeaderboardCard from "../components/LeaderboardCard.jsx";
 import { api } from "../api.js";
 import useAuth from "../hooks/useAuth.js";
 
@@ -8,10 +9,12 @@ export default function Home() {
   const { user } = useAuth();
   const [courses, setCourses] = useState(null);
   const [showcase, setShowcase] = useState(null);
+  const [boards, setBoards] = useState(null);
 
   useEffect(() => {
     api.listPublicCourses().then(setCourses).catch(() => setCourses([]));
     api.listShowcase().then(setShowcase).catch(() => setShowcase([]));
+    api.leaderboards(3).then(setBoards).catch(() => setBoards({}));
   }, []);
 
   // Single featured video for now — only slot 1 appears on Home.
@@ -156,6 +159,36 @@ export default function Home() {
               <p>Ace any par 3, our cup camera verifies it, you get a $10,000 check.</p>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 14 }}>
+          <h3>Current leaderboard</h3>
+          <Link to="/leaderboards" className="small">See full leaderboard →</Link>
+        </div>
+        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+          {!boards ? (
+            <>
+              <div className="shimmer" style={{ height: 200 }} />
+              <div className="shimmer" style={{ height: 200 }} />
+            </>
+          ) : (
+            <>
+              <LeaderboardCard
+                title="Longest carry"
+                icon="sparkle"
+                rows={(boards.longest_carry || []).slice(0, 3)}
+                emptyText="No carries logged yet — be the first."
+              />
+              <LeaderboardCard
+                title="Most aces"
+                icon="dollar"
+                rows={(boards.most_aces || []).slice(0, 3)}
+                emptyText="No aces yet. Win $10,000 by being the first."
+              />
+            </>
+          )}
         </div>
       </div>
 
