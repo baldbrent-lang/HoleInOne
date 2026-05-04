@@ -35,6 +35,7 @@ class CourseOut(BaseModel):
     qr_token: str
     tee_sheet_provider: str
     livestream_url: Optional[str] = None
+    operator_password_set: bool = False
 
     @field_validator("hole_yardages", mode="before")
     @classmethod

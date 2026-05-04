@@ -3,8 +3,8 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import get_db
-from .models import User
-from .services.auth import decode_token
+from .models import Course, User
+from .services.auth import decode_operator_token, decode_token
 
 
 def require_admin(x_admin_password: str | None = Header(default=None)) -> None:
@@ -39,3 +39,20 @@ def current_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
     return user
+
+
+def current_operator(
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> Course:
+    """401 unless caller has a valid operator JWT bound to a course."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="operator login required")
+    token = authorization.split(" ", 1)[1].strip()
+    course_id = decode_operator_token(token)
+    if not course_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="operator login required")
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="course not found")
+    return course

@@ -228,6 +228,11 @@ export default function Admin() {
                   <td>
                     <div className="stack" style={{ gap: 6 }}>
                       <LivestreamEditor course={c} adminPassword={adminPassword} onSaved={(msg) => { showToast(msg); load(); }} />
+                      <OperatorPasswordControl
+                        course={c}
+                        adminPassword={adminPassword}
+                        onSaved={(msg) => { showToast(msg); load(); }}
+                      />
                       <Link className="btn secondary small" to={`/admin/participants?course_id=${c.id}`} style={{ textAlign: "center" }}>
                         <Icon name="users" size={14} /> View participants
                       </Link>
@@ -414,6 +419,60 @@ function ParThreeEditor({ course, adminPassword, onSaved }) {
           {saving ? "Saving…" : "Save"}
         </button>
         <button className="ghost small" onClick={() => setEditing(false)}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function OperatorPasswordControl({ course, adminPassword, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  if (!editing) {
+    return (
+      <button className="ghost small" onClick={() => setEditing(true)}>
+        Operator password {course.operator_password_set ? "✓" : "—"}
+      </button>
+    );
+  }
+
+  async function save(clear = false) {
+    if (!clear && value && value.length < 6) {
+      onSaved?.("Min 6 characters");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.setOperatorPassword(adminPassword, course.id, clear ? "" : value);
+      setEditing(false);
+      setValue("");
+      onSaved?.(clear ? "Operator access disabled" : "Operator password saved");
+    } catch (e) {
+      onSaved?.(`Error: ${e.message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <input
+        type="password"
+        placeholder="6+ chars"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        autoFocus
+        style={{ fontSize: "0.8rem", padding: "6px 8px" }}
+      />
+      <div style={{ display: "flex", gap: 4 }}>
+        <button className="small" onClick={() => save(false)} disabled={saving || !value} style={{ flex: 1 }}>
+          Save
+        </button>
+        <button className="ghost small" onClick={() => save(true)} disabled={saving} title="Disable operator login">
+          Clear
+        </button>
+        <button className="ghost small" onClick={() => { setEditing(false); setValue(""); }}>Cancel</button>
       </div>
     </div>
   );

@@ -32,6 +32,8 @@ from ..schemas import (
 from ..services import notifications
 from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
+from ..services.auth import hash_password
+from ..services.stripe_service import refund_payment_intent
 from ..services.video import compress_for_email, extract_thumbnail
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -71,6 +73,24 @@ def update_course(course_id: int, payload: CourseUpdate, db: Session = Depends(g
     db.commit()
     db.refresh(course)
     return course
+
+
+@router.post("/courses/{course_id}/operator-password")
+def set_operator_password(course_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Set or clear the per-course operator portal password. Pass an empty
+    string to disable operator login for that course."""
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "course not found")
+    pw = (payload or {}).get("password", "")
+    if not pw:
+        course.operator_password_hash = None
+    else:
+        if len(pw) < 6:
+            raise HTTPException(400, "operator password must be at least 6 characters")
+        course.operator_password_hash = hash_password(pw)
+    db.commit()
+    return {"ok": True, "configured": course.operator_password_hash is not None}
 
 
 @router.get("/courses/{course_id}/qr.png")
@@ -182,6 +202,7 @@ def list_participants(
             "mobile": p.mobile,
             "email": p.email,
             "paid": p.paid,
+            "refunded_at": p.refunded_at,
             "selfie_url": f"/uploads/{p.selfie_path}" if p.selfie_path else None,
             "gallery_token": p.gallery_token,
             "gallery_url": f"{settings.app_base_url}/g/{p.gallery_token}",
@@ -306,6 +327,31 @@ def send_round_summary(participant_id: int, force: bool = False, db: Session = D
         "summary_sent_at": p.summary_sent_at,
         "to": p.email,
     }
+
+
+@router.post("/participants/{participant_id}/refund")
+def refund_participant(participant_id: int, db: Session = Depends(get_db)):
+    p = db.get(Participant, participant_id)
+    if not p:
+        raise HTTPException(404, "participant not found")
+    if p.refunded_at:
+        return {"ok": True, "already_refunded": True, "refunded_at": p.refunded_at}
+    if not p.paid:
+        raise HTTPException(400, "participant was not paid")
+
+    result = refund_payment_intent(p.stripe_payment_intent_id)
+    if not result.get("ok"):
+        raise HTTPException(502, f"refund failed: {result.get('error', 'unknown')}")
+
+    p.refunded_at = datetime.utcnow()
+    p.paid = False
+    db.add(AuditLog(
+        actor="admin", action="refund",
+        target=f"participant:{p.id}",
+        detail=f"mode={result.get('mode')} refund_id={result.get('refund_id')}",
+    ))
+    db.commit()
+    return {"ok": True, "mode": result.get("mode"), "refund_id": result.get("refund_id")}
 
 
 @router.post("/participants/{participant_id}/resend-gallery")

@@ -71,9 +71,14 @@ class Course(Base):
     tee_sheet_provider: Mapped[str] = mapped_column(String(40), default="mock")  # foreup|lightspeed|mock
     tee_sheet_config: Mapped[dict] = mapped_column(JSON, default=dict)
     livestream_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    operator_password_hash: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tee_times: Mapped[list[TeeTime]] = relationship(back_populates="course", cascade="all, delete-orphan")
+
+    @property
+    def operator_password_set(self) -> bool:
+        return bool(self.operator_password_hash)
 
 
 class TeeTime(Base):
@@ -108,6 +113,7 @@ class Participant(Base):
     appearance_embedding: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     stripe_payment_intent_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     paid: Mapped[bool] = mapped_column(Boolean, default=False)
+    refunded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     gallery_token: Mapped[str] = mapped_column(String(64), unique=True, default=lambda: _token("g_", 20))
     gallery_ready_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     summary_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

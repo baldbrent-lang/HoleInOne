@@ -16,6 +16,7 @@ export default function Footer() {
         <Link to="/legal/terms">Terms of Service</Link>
         <Link to="/legal/privacy">Privacy Policy</Link>
         <Link to="/legal/rules">Sweepstakes Rules</Link>
+        <Link to="/operator/login">Course operator portal</Link>
         <a href="mailto:hello@golfreelz.com">Contact</a>
       </div>
       <div style={{ textAlign: "center", marginTop: 12 }}>

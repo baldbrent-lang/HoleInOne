@@ -12,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
 from .database import Base, engine
-from .routers import admin, auth, gallery, public, webhooks
+from .routers import admin, auth, gallery, operator, public, webhooks
 
 app = FastAPI(title="GolfReelz API", version="0.1.0")
 
@@ -46,6 +46,8 @@ def _migrate() -> None:
         statements.append("ALTER TABLE participants ADD COLUMN summary_sent_at TIMESTAMP")
     if "user_id" not in cols:
         statements.append("ALTER TABLE participants ADD COLUMN user_id INTEGER")
+    if "refunded_at" not in cols:
+        statements.append("ALTER TABLE participants ADD COLUMN refunded_at TIMESTAMP")
     # Old schema had playing_order NOT NULL. The matcher no longer uses it,
     # so drop the constraint on Postgres (SQLite can't ALTER nullability
     # and enforces it loosely anyway).
@@ -65,6 +67,8 @@ def _migrate() -> None:
             statements.append("UPDATE courses SET hole_yardages = '{}' WHERE hole_yardages IS NULL")
         else:
             statements.append("UPDATE courses SET hole_yardages = '{}' WHERE hole_yardages IS NULL")
+        if "operator_password_hash" not in course_cols:
+            statements.append("ALTER TABLE courses ADD COLUMN operator_password_hash VARCHAR(200)")
 
     # VideoClip additions
     if "video_clips" in inspector.get_table_names():
@@ -156,6 +160,7 @@ app.include_router(gallery.router)
 app.include_router(webhooks.router)
 app.include_router(admin.router)
 app.include_router(auth.router)
+app.include_router(operator.router)
 
 
 # --- Uploads (selfies) -------------------------------------------------------

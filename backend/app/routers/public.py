@@ -168,6 +168,102 @@ def public_leaderboards(limit: int = 10, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/profile/{user_id}")
+def public_profile(user_id: int, db: Session = Depends(get_db)):
+    """Public-facing player profile. Aggregates stats across every round
+    the user has registered (linked to their account)."""
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "player not found")
+
+    assigned = ClipProcessingStatus.assigned.value
+
+    # Round count + courses played
+    rounds_q = (
+        db.query(Participant, TeeTime, Course)
+        .join(TeeTime, Participant.tee_time_id == TeeTime.id)
+        .join(Course, Course.id == TeeTime.course_id)
+        .filter(Participant.user_id == user.id)
+        .order_by(TeeTime.starts_at.desc())
+        .all()
+    )
+    total_rounds = len(rounds_q)
+    courses_played = sorted({c.name for (_p, _tt, c) in rounds_q})
+
+    # Aggregate per-clip stats
+    p_ids = [p.id for (p, _tt, _c) in rounds_q]
+    if p_ids:
+        clip_q = (
+            db.query(VideoClip, Course)
+            .join(Participant, Participant.id == VideoClip.participant_id)
+            .join(TeeTime, TeeTime.id == Participant.tee_time_id)
+            .join(Course, Course.id == TeeTime.course_id)
+            .filter(VideoClip.participant_id.in_(p_ids))
+            .filter(VideoClip.processing_status == assigned)
+            .all()
+        )
+    else:
+        clip_q = []
+
+    total_aces = sum(1 for (c, _) in clip_q if c.ball_in_cup)
+    longest_carry = max((c.carry_yards for (c, _) in clip_q if c.carry_yards), default=None)
+    fastest_ball = max((c.ball_speed_mph for (c, _) in clip_q if c.ball_speed_mph), default=None)
+    closest_ctp = min((c.distance_from_pin_feet for (c, _) in clip_q if c.distance_from_pin_feet is not None), default=None)
+
+    # Highlight clips: prefer aces, then longest carry, then fastest ball
+    highlights = []
+    for c, course in clip_q:
+        if c.ball_in_cup:
+            highlights.append((1000 + (c.carry_yards or 0), c, course, "ACE"))
+    for c, course in clip_q:
+        if c.carry_yards:
+            highlights.append((c.carry_yards, c, course, f"{c.carry_yards} yd carry"))
+    seen = set()
+    dedup = []
+    for score, clip, course, tag in sorted(highlights, key=lambda x: -x[0]):
+        if clip.id in seen:
+            continue
+        seen.add(clip.id)
+        dedup.append({
+            "clip_id": clip.id,
+            "course": course.name,
+            "hole": clip.hole_number,
+            "source_url": clip.source_url,
+            "thumbnail_url": clip.thumbnail_url,
+            "ball_in_cup": clip.ball_in_cup,
+            "tag": tag,
+        })
+        if len(dedup) >= 3:
+            break
+
+    # Recent rounds
+    recent = [
+        {
+            "participant_id": p.id,
+            "course": c.name,
+            "tee_time": tt.starts_at,
+            "gallery_token": p.gallery_token,
+        }
+        for (p, tt, c) in rounds_q[:5]
+    ]
+
+    return {
+        "user_id": user.id,
+        "display_name": user.name or user.email.split("@")[0],
+        "joined_at": user.created_at,
+        "stats": {
+            "total_rounds": total_rounds,
+            "total_aces": total_aces,
+            "courses_played": courses_played,
+            "longest_carry_yards": longest_carry,
+            "fastest_ball_mph": fastest_ball,
+            "closest_ctp_feet": closest_ctp,
+        },
+        "highlights": dedup,
+        "recent_rounds": recent,
+    }
+
+
 @router.get("/contests")
 def contests(db: Session = Depends(get_db)):
     """Three contests, three cadences:

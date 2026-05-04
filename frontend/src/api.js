@@ -5,6 +5,7 @@ const API_BASE =
   import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "http://localhost:8000" : "");
 
 const USER_TOKEN_STORAGE = "golfreelz.userToken";
+const OPERATOR_TOKEN_STORAGE = "golfreelz.operatorToken";
 
 export function getUserToken() {
   return localStorage.getItem(USER_TOKEN_STORAGE) || "";
@@ -12,6 +13,24 @@ export function getUserToken() {
 export function setUserToken(token) {
   if (token) localStorage.setItem(USER_TOKEN_STORAGE, token);
   else localStorage.removeItem(USER_TOKEN_STORAGE);
+}
+
+export function getOperatorToken() {
+  return localStorage.getItem(OPERATOR_TOKEN_STORAGE) || "";
+}
+export function setOperatorToken(token) {
+  if (token) localStorage.setItem(OPERATOR_TOKEN_STORAGE, token);
+  else localStorage.removeItem(OPERATOR_TOKEN_STORAGE);
+}
+
+async function operatorRequest(path) {
+  const token = getOperatorToken();
+  if (!token) throw new Error("operator login required");
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  return res.json();
 }
 
 async function request(path, { method = "GET", body, adminPassword, auth = true } = {}) {
@@ -53,6 +72,23 @@ export const api = {
   publicStats: () => request(`/api/public/stats`, { auth: false }),
   leaderboards: (limit) => request(`/api/public/leaderboards${limit ? `?limit=${limit}` : ""}`, { auth: false }),
   contests: () => request(`/api/public/contests`, { auth: false }),
+  publicProfile: (userId) => request(`/api/public/profile/${userId}`, { auth: false }),
+  setOperatorPassword: (key, courseId, password) =>
+    request(`/api/admin/courses/${courseId}/operator-password`, {
+      method: "POST", body: { password }, adminPassword: key,
+    }),
+  operatorLogin: ({ course_token, password }) =>
+    fetch(`${API_BASE}/api/operator/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ course_token, password }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      return r.json();
+    }),
+  operatorMe: () => operatorRequest(`/api/operator/me`),
+  operatorDashboard: () => operatorRequest(`/api/operator/dashboard`),
+  operatorParticipants: () => operatorRequest(`/api/operator/participants`),
   adminListShowcase: (key) => request(`/api/admin/showcase`, { adminPassword: key }),
   updateShowcase: (key, position, payload) =>
     request(`/api/admin/showcase/${position}`, {
@@ -147,6 +183,8 @@ export const api = {
     }),
   resendGallery: (key, id) =>
     request(`/api/admin/participants/${id}/resend-gallery`, { method: "POST", adminPassword: key }),
+  refundParticipant: (key, id) =>
+    request(`/api/admin/participants/${id}/refund`, { method: "POST", adminPassword: key }),
   sendRoundSummary: (key, id, force = false) =>
     request(`/api/admin/participants/${id}/send-summary${force ? "?force=true" : ""}`, {
       method: "POST", adminPassword: key,

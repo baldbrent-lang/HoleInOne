@@ -94,6 +94,21 @@ export default function AdminParticipants() {
     }
   }
 
+  async function refund(p) {
+    if (!window.confirm(`Refund ${p.name}? This issues a Stripe refund (or no-op in mock mode) and marks the round as refunded. Their clips stay accessible.`)) return;
+    try {
+      const r = await api.refundParticipant(adminPassword, p.id);
+      if (r.already_refunded) {
+        showToast(`${p.name} was already refunded.`);
+      } else {
+        showToast(`Refund issued (${r.mode || "ok"})`);
+      }
+      load();
+    } catch (e) {
+      showToast(`Error: ${e.message}`);
+    }
+  }
+
   async function sendSummary(p, force = true) {
     try {
       const r = await api.sendRoundSummary(adminPassword, p.id, force);
@@ -263,7 +278,9 @@ export default function AdminParticipants() {
                   <td>
                     {p.paid
                       ? <span className="pill ok">Paid</span>
-                      : <span className="pill err">Unpaid</span>}
+                      : (p.refunded_at
+                        ? <span className="pill warn">Refunded</span>
+                        : <span className="pill err">Unpaid</span>)}
                   </td>
                   <td>
                     <div style={{ display: "flex", gap: 6, whiteSpace: "nowrap" }}>
@@ -288,6 +305,11 @@ export default function AdminParticipants() {
                       <button className="ghost small" onClick={() => resend(p)} title="Re-send gallery link">
                         Resend
                       </button>
+                      {p.paid && !p.refunded_at && (
+                        <button className="ghost small" onClick={() => refund(p)} title="Refund this round" style={{ color: "var(--danger)" }}>
+                          Refund
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
