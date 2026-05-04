@@ -71,6 +71,8 @@ def _migrate() -> None:
         clip_cols = {c["name"] for c in inspector.get_columns("video_clips")}
         if "delivered_at" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN delivered_at TIMESTAMP")
+        if "distance_from_pin_feet" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN distance_from_pin_feet INTEGER")
 
     if not statements:
         return

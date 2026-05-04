@@ -413,6 +413,7 @@ async def upload_clip(
     carry_yards: int | None = Form(None),
     apex_feet: int | None = Form(None),
     ball_speed_mph: int | None = Form(None),
+    distance_from_pin_feet: int | None = Form(None),
     ball_in_cup: bool = Form(False),
     video: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -476,6 +477,7 @@ async def upload_clip(
         carry_yards=carry_yards,
         apex_feet=apex_feet,
         ball_speed_mph=ball_speed_mph,
+        distance_from_pin_feet=distance_from_pin_feet,
         ball_in_cup=ball_in_cup,
         processing_status=ClipProcessingStatus.received.value,
     )

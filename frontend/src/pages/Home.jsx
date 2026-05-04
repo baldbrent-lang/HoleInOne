@@ -8,16 +8,19 @@ import useAuth from "../hooks/useAuth.js";
 export default function Home() {
   const { user } = useAuth();
   const [showcase, setShowcase] = useState(null);
-  const [boards, setBoards] = useState(null);
+  const [contestData, setContestData] = useState(null);
   const [courses, setCourses] = useState(null);
   const [stats, setStats] = useState(null);
 
   useEffect(() => {
     api.listShowcase().then(setShowcase).catch(() => setShowcase([]));
-    api.leaderboards(3).then(setBoards).catch(() => setBoards({}));
+    api.contests().then(setContestData).catch(() => setContestData({}));
     api.listPublicCourses().then(setCourses).catch(() => setCourses([]));
     api.publicStats().then(setStats).catch(() => setStats(null));
   }, []);
+
+  const monthlyContest = contestData?.monthly?.contests?.[0];
+  const yearlyContest = contestData?.yearly?.contests?.[0];
 
   // Single featured video for now — only slot 1 appears on Home.
   const featured = (showcase || []).find((s) => s.position === 1 && s.source_url);
@@ -113,21 +116,33 @@ export default function Home() {
               <Link to="/leaderboards">All-time →</Link>
             </div>
           </div>
-          {!boards ? (
+          {!contestData ? (
             <div className="shimmer" style={{ height: 220 }} />
           ) : (
             <div className="stack" style={{ gap: 14 }}>
               <LeaderboardCard
-                title="Longest carry"
-                icon="sparkle"
-                rows={(boards.longest_carry || []).slice(0, 3)}
-                emptyText="No carries logged yet — be the first."
+                title={monthlyContest?.title || "Most Rounds Played"}
+                icon={monthlyContest?.icon || "users"}
+                rows={(monthlyContest?.rows || []).slice(0, 3)}
+                emptyText="No rounds logged this month — be the first."
+                footer={monthlyContest && (
+                  <div className="small center" style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", color: "var(--ink-soft)" }}>
+                    <span className="tiny upper muted" style={{ marginRight: 6 }}>This month</span>
+                    <b style={{ color: "var(--emerald-700)" }}>{monthlyContest.prize}</b>
+                  </div>
+                )}
               />
               <LeaderboardCard
-                title="Most aces"
-                icon="dollar"
-                rows={(boards.most_aces || []).slice(0, 3)}
-                emptyText="No aces yet. Win $10,000 by being the first."
+                title={yearlyContest?.title || "Most Hole-in-Ones"}
+                icon={yearlyContest?.icon || "dollar"}
+                rows={(yearlyContest?.rows || []).slice(0, 3)}
+                emptyText="No aces yet — be the first to grab the pool."
+                footer={yearlyContest && (
+                  <div className="small center" style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", color: "var(--ink-soft)" }}>
+                    <span className="tiny upper muted" style={{ marginRight: 6 }}>This year</span>
+                    <b style={{ color: "var(--emerald-700)" }}>{yearlyContest.prize}</b>
+                  </div>
+                )}
               />
             </div>
           )}

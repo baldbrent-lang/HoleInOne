@@ -131,6 +131,7 @@ class VideoClip(Base):
     carry_yards: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     apex_feet: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     ball_speed_mph: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    distance_from_pin_feet: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     processing_status: Mapped[str] = mapped_column(String(20), default=ClipProcessingStatus.received.value)
     ball_in_cup: Mapped[bool] = mapped_column(Boolean, default=False)
     issue_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

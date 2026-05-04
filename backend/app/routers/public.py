@@ -170,10 +170,12 @@ def public_leaderboards(limit: int = 10, db: Session = Depends(get_db)):
 
 @router.get("/contests")
 def contests(db: Session = Depends(get_db)):
-    """Daily / monthly / yearly contests with prize labels + countdown end-times.
+    """Three contests, three cadences:
+        Daily   — Closest to the Pin (one contest per course)
+        Monthly — Most Rounds Played
+        Yearly  — Most Hole-in-Ones (prize pool splits if multiple golfers tie)
 
-    Time windows are UTC midnight boundaries — good enough for V0 across one
-    timezone-agnostic deployment. Per-course local time can come later.
+    Time windows are UTC midnight boundaries.
     """
     from datetime import datetime, timedelta
 
@@ -190,89 +192,109 @@ def contests(db: Session = Depends(get_db)):
 
     assigned = ClipProcessingStatus.assigned.value
 
-    def shot_rows(field, since, limit, unit):
-        attr = getattr(VideoClip, field)
-        rows = (
-            db.query(Participant.name, Course.name.label("course"), VideoClip.hole_number, attr)
+    # Daily — one Closest-to-Pin contest per course
+    daily_contests = []
+    for course in db.query(Course).order_by(Course.name).all():
+        ctp_rows = (
+            db.query(Participant.name, VideoClip.hole_number, VideoClip.distance_from_pin_feet)
             .join(VideoClip, VideoClip.participant_id == Participant.id)
             .join(TeeTime, TeeTime.id == Participant.tee_time_id)
-            .join(Course, Course.id == TeeTime.course_id)
-            .filter(attr.isnot(None))
+            .filter(TeeTime.course_id == course.id)
+            .filter(VideoClip.distance_from_pin_feet.isnot(None))
             .filter(VideoClip.processing_status == assigned)
-            .filter(VideoClip.captured_at >= since)
-            .order_by(desc(attr))
-            .limit(limit)
+            .filter(VideoClip.captured_at >= day_start)
+            .order_by(VideoClip.distance_from_pin_feet.asc())  # closest = smallest distance
+            .limit(5)
             .all()
         )
-        return [
-            {"golfer": _short_name(name), "course": course, "hole": hole, "value": v, "unit": unit}
-            for (name, course, hole, v) in rows
-        ]
+        daily_contests.append({
+            "id": f"daily_ctp_{course.id}",
+            "title": f"Closest to Pin — {course.name}",
+            "icon": "flag",
+            "prize": "$50 pro shop gift card",
+            "rows": [
+                {"golfer": _short_name(name), "hole": hole, "value": dist, "unit": "ft"}
+                for (name, hole, dist) in ctp_rows
+            ],
+        })
 
-    def aces_rows(since, limit):
-        rows = (
-            db.query(Participant.name, func.count(VideoClip.id).label("aces"))
-            .join(VideoClip, VideoClip.participant_id == Participant.id)
-            .filter(VideoClip.ball_in_cup.is_(True))
-            .filter(VideoClip.processing_status == assigned)
-            .filter(VideoClip.captured_at >= since)
-            .group_by(Participant.id)
-            .order_by(desc(func.count(VideoClip.id)))
-            .limit(limit)
-            .all()
-        )
-        return [{"golfer": _short_name(n), "value": a, "unit": "aces"} for (n, a) in rows]
-
-    def rounds_rows(since, limit):
-        rows = (
-            db.query(User.name, User.email, func.count(Participant.id).label("rounds"))
-            .join(Participant, Participant.user_id == User.id)
-            .filter(Participant.created_at >= since)
-            .group_by(User.id)
-            .order_by(desc(func.count(Participant.id)))
-            .limit(limit)
-            .all()
-        )
-        return [
+    # Monthly — Most Rounds Played
+    monthly_rows = (
+        db.query(User.name, User.email, func.count(Participant.id).label("rounds"))
+        .join(Participant, Participant.user_id == User.id)
+        .filter(Participant.created_at >= month_start)
+        .group_by(User.id)
+        .order_by(desc(func.count(Participant.id)))
+        .limit(10)
+        .all()
+    )
+    monthly_contest = {
+        "id": "monthly_rounds",
+        "title": "Most Rounds Played",
+        "icon": "users",
+        "prize": "$500 cash + free month of GolfReelz",
+        "rows": [
             {"golfer": _short_name(n or e.split("@")[0]), "value": r, "unit": "rounds"}
-            for (n, e, r) in rows
-        ]
+            for (n, e, r) in monthly_rows
+        ],
+    }
+
+    # Yearly — Most Hole-in-Ones (split prize among ties for #1)
+    aces_rows = (
+        db.query(Participant.name, func.count(VideoClip.id).label("aces"))
+        .join(VideoClip, VideoClip.participant_id == Participant.id)
+        .filter(VideoClip.ball_in_cup.is_(True))
+        .filter(VideoClip.processing_status == assigned)
+        .filter(VideoClip.captured_at >= year_start)
+        .group_by(Participant.id)
+        .order_by(desc(func.count(VideoClip.id)))
+        .limit(20)
+        .all()
+    )
+    pool_dollars = 5000
+    top_score = aces_rows[0][1] if aces_rows else 0
+    leaders_count = sum(1 for (_, c) in aces_rows if c == top_score) if top_score > 0 else 0
+    if leaders_count > 1:
+        per_winner = pool_dollars // leaders_count
+        prize_label = (
+            f"${pool_dollars:,} pool — split ${per_winner:,} each among {leaders_count} leaders tied at {top_score}"
+        )
+    elif leaders_count == 1:
+        prize_label = f"${pool_dollars:,} cash"
+    else:
+        prize_label = f"${pool_dollars:,} pool — split if multiple aces"
+
+    yearly_contest = {
+        "id": "yearly_aces",
+        "title": "Most Hole-in-Ones",
+        "icon": "dollar",
+        "prize": prize_label,
+        "split_pool_dollars": pool_dollars,
+        "leaders_count": leaders_count,
+        "top_score": top_score,
+        "rows": [
+            {
+                "golfer": _short_name(n),
+                "value": c,
+                "unit": "aces",
+                "tied_for_first": c == top_score and top_score > 0,
+            }
+            for (n, c) in aces_rows
+        ],
+    }
 
     return {
         "daily": {
             "ends_at": day_end.isoformat() + "Z",
-            "contests": [
-                {"id": "daily_carry", "title": "Longest Carry Today", "icon": "sparkle",
-                 "prize": "$25 gift card", "rows": shot_rows("carry_yards", day_start, 5, "yds")},
-                {"id": "daily_apex", "title": "Highest Apex Today", "icon": "chart",
-                 "prize": "$25 gift card", "rows": shot_rows("apex_feet", day_start, 5, "ft")},
-                {"id": "daily_speed", "title": "Fastest Ball Today", "icon": "capture",
-                 "prize": "$25 gift card", "rows": shot_rows("ball_speed_mph", day_start, 5, "mph")},
-            ],
+            "contests": daily_contests,
         },
         "monthly": {
             "ends_at": month_end.isoformat() + "Z",
-            "contests": [
-                {"id": "monthly_carry", "title": "Longest Carry This Month", "icon": "sparkle",
-                 "prize": "$250 cash", "rows": shot_rows("carry_yards", month_start, 5, "yds")},
-                {"id": "monthly_rounds", "title": "Most Rounds Played", "icon": "users",
-                 "prize": "$250 cash", "rows": rounds_rows(month_start, 5)},
-                {"id": "monthly_aces", "title": "Most Aces This Month", "icon": "dollar",
-                 "prize": "$500 cash", "rows": aces_rows(month_start, 5)},
-            ],
+            "contests": [monthly_contest],
         },
         "yearly": {
             "ends_at": year_end.isoformat() + "Z",
-            "contests": [
-                {"id": "yearly_player", "title": "Player of the Year", "icon": "users",
-                 "prize": "$5,000 + free year", "rows": rounds_rows(year_start, 10)},
-                {"id": "yearly_carry", "title": "Longest Carry of the Year", "icon": "sparkle",
-                 "prize": "$1,000 cash", "rows": shot_rows("carry_yards", year_start, 10, "yds")},
-                {"id": "yearly_apex", "title": "Highest Apex of the Year", "icon": "chart",
-                 "prize": "$1,000 cash", "rows": shot_rows("apex_feet", year_start, 10, "ft")},
-                {"id": "yearly_aces", "title": "Hole-in-One Champion", "icon": "dollar",
-                 "prize": "$2,500 + Titleist bag", "rows": aces_rows(year_start, 10)},
-            ],
+            "contests": [yearly_contest],
         },
     }
 

@@ -26,6 +26,7 @@ export default function AdminUpload() {
   const [capturedAt, setCapturedAt] = useState(nowLocal());
   const [carryYards, setCarryYards] = useState("");
   const [ballSpeed, setBallSpeed] = useState("");
+  const [distanceFromPin, setDistanceFromPin] = useState("");
   const [ballInCup, setBallInCup] = useState(false);
   const [file, setFile] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -60,6 +61,7 @@ export default function AdminUpload() {
     fd.append("captured_at", new Date(capturedAt).toISOString());
     if (carryYards) fd.append("carry_yards", carryYards);
     if (ballSpeed) fd.append("ball_speed_mph", ballSpeed);
+    if (distanceFromPin) fd.append("distance_from_pin_feet", distanceFromPin);
     fd.append("ball_in_cup", ballInCup ? "true" : "false");
     fd.append("video", file, file.name);
 
@@ -190,6 +192,16 @@ export default function AdminUpload() {
             <div className="field">
               <label>Ball speed (mph)</label>
               <input type="number" value={ballSpeed} onChange={(e) => setBallSpeed(e.target.value)} placeholder="optional" />
+            </div>
+            <div className="field">
+              <label>Distance from pin (ft)</label>
+              <input
+                type="number"
+                value={distanceFromPin}
+                onChange={(e) => setDistanceFromPin(e.target.value)}
+                placeholder="for closest-to-pin"
+              />
+              <div className="hint small muted">Powers the daily Closest-to-Pin contest.</div>
             </div>
             <div className="field" style={{ alignSelf: "end", flex: 0 }}>
               <label className="inline" style={{ gap: 8 }}>

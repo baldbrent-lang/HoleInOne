@@ -123,6 +123,7 @@ class ClipOut(BaseModel):
     carry_yards: Optional[int] = None
     apex_feet: Optional[int] = None
     ball_speed_mph: Optional[int] = None
+    distance_from_pin_feet: Optional[int] = None
     processing_status: str
     ball_in_cup: bool
 
