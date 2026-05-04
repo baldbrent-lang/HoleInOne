@@ -70,9 +70,16 @@ export default function Me() {
           Hi {user?.name || user?.email?.split("@")[0]}.
         </h1>
         <p>{groups.length === 0 ? "No rounds yet — pick a course to get started." : "Pick a round below to watch your clips."}</p>
-        <Link to="/courses" className="btn small" style={{ width: "auto", marginTop: 14 }}>
-          Register for a new round
-        </Link>
+        <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+          <Link to="/courses" className="btn small" style={{ width: "auto" }}>
+            Register for a new round
+          </Link>
+          {user?.id && (
+            <Link to={`/p/${user.id}`} className="btn secondary small" style={{ width: "auto" }}>
+              View my public profile →
+            </Link>
+          )}
+        </div>
       </div>
 
       {error && <div className="card err-text small">{error}</div>}
