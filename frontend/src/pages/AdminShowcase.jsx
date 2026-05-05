@@ -46,6 +46,7 @@ export default function AdminShowcase() {
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/upload">Upload clip</Link>
+        <Link to="/admin/long-upload">Long upload</Link>
         <Link to="/admin/showcase" className="active">Home videos</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>

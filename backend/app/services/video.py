@@ -25,6 +25,43 @@ MAX_VIDEO_KBPS = 4000  # cap so short clips don't waste bytes
 MIN_VIDEO_KBPS = 220   # floor so we don't produce unwatchable garbage
 
 
+def cut_segment(input_path: Path, output_path: Path, start_sec: float, end_sec: float) -> bool:
+    """Cut a [start_sec, end_sec] window out of input_path into a new MP4.
+
+    Frame-accurate (`-ss` after `-i`) — slower than fast-seek but reliable
+    on the few-minute scrubbed segments this is used for. Re-encodes via
+    H.264 + AAC so the output is normalized for downstream compression.
+    """
+    if not have_ffmpeg():
+        log.warning("ffmpeg missing; cannot cut %s", input_path)
+        return False
+    duration = max(0.1, float(end_sec) - float(start_sec))
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(input_path),
+                "-ss", str(float(start_sec)),
+                "-t", str(duration),
+                "-c:v", "libx264", "-preset", "veryfast",
+                "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                str(output_path),
+            ],
+            check=True,
+            timeout=600,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("ffmpeg cut failed for %s: %s", input_path, exc)
+        output_path.unlink(missing_ok=True)
+        return False
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        output_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
 def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 

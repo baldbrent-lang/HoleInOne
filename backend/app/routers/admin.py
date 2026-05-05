@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,7 +35,7 @@ from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
-from ..services.video import compress_for_email, extract_thumbnail
+from ..services.video import compress_for_email, cut_segment, extract_thumbnail
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -448,6 +449,138 @@ def manually_assign_clip(clip_id: int, participant_id: int, db: Session = Depend
 
 CLIPS_DIR = Path(__file__).resolve().parents[2] / settings.upload_dir / "clips"
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@router.post("/clips/long-upload")
+async def upload_long_video(
+    course_id: int = Form(...),
+    camera_type: str = Form("tee"),
+    base_captured_at: str = Form(...),
+    segments: str = Form(...),
+    video: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Cut a long video into multiple per-swing clips and run each through
+    the standard match + deliver pipeline.
+
+    Body (multipart):
+      course_id: int
+      camera_type: 'tee' | 'wide_green' | 'hole'
+      base_captured_at: ISO 8601 — when the recording started. Each segment's
+                       captured_at = base + start_sec.
+      segments: JSON array of {hole_number, start_sec, end_sec, ...stats}
+      video: long MP4 file
+    """
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "course not found")
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(400, "must be a video file")
+
+    try:
+        seg_list = json.loads(segments or "[]")
+    except json.JSONDecodeError:
+        raise HTTPException(400, "segments must be a JSON array")
+    if not isinstance(seg_list, list) or not seg_list:
+        raise HTTPException(400, "at least one segment is required")
+
+    try:
+        base_dt = datetime.fromisoformat(base_captured_at.replace("Z", "+00:00"))
+        if base_dt.tzinfo is not None:
+            base_dt = base_dt.astimezone().replace(tzinfo=None)
+    except ValueError:
+        raise HTTPException(400, "invalid base_captured_at; use ISO 8601")
+
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "empty video upload")
+    if len(data) > 1024 * 1024 * 1024:  # 1GB cap on the long source
+        raise HTTPException(413, "video too large (max 1GB)")
+
+    src_ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    if src_ext not in ("mp4", "mov", "webm", "m4v"):
+        src_ext = "mp4"
+    src_name = f"long-{course_id}-{secrets.token_hex(6)}.{src_ext}"
+    src_path = CLIPS_DIR / src_name
+    src_path.write_bytes(data)
+
+    results = []
+    try:
+        for idx, seg in enumerate(seg_list):
+            try:
+                hole_number = int(seg["hole_number"])
+                start_sec = float(seg["start_sec"])
+                end_sec = float(seg["end_sec"])
+            except (KeyError, TypeError, ValueError):
+                results.append({"index": idx, "ok": False, "error": "missing or invalid hole_number / start_sec / end_sec"})
+                continue
+            if end_sec <= start_sec:
+                results.append({"index": idx, "ok": False, "error": "end_sec must be > start_sec"})
+                continue
+
+            seg_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.mp4"
+            seg_path = CLIPS_DIR / seg_name
+            ok = cut_segment(src_path, seg_path, start_sec, end_sec)
+            if not ok:
+                results.append({"index": idx, "ok": False, "error": "ffmpeg cut failed (or ffmpeg not installed)"})
+                continue
+
+            compress_for_email(seg_path)
+            thumb_path = extract_thumbnail(seg_path)
+            thumb_url = (
+                f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
+                if thumb_path else None
+            )
+
+            captured_dt = base_dt + timedelta(seconds=start_sec)
+            clip = VideoClip(
+                course_id=course_id,
+                hole_number=hole_number,
+                camera_type=camera_type,
+                captured_at=captured_dt,
+                source_url=f"{settings.app_base_url}/uploads/clips/{seg_name}",
+                thumbnail_url=thumb_url,
+                carry_yards=_optional_int(seg.get("carry_yards")),
+                apex_feet=_optional_int(seg.get("apex_feet")),
+                ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
+                distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
+                ball_in_cup=bool(seg.get("ball_in_cup", False)),
+                processing_status=ClipProcessingStatus.received.value,
+            )
+            db.add(clip)
+            db.flush()
+
+            participant = match_clip(db, clip)
+            if participant and clip.ball_in_cup:
+                notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+            db.commit()
+
+            results.append({
+                "index": idx,
+                "ok": True,
+                "clip_id": clip.id,
+                "hole_number": hole_number,
+                "captured_at": captured_dt.isoformat(),
+                "status": clip.processing_status,
+                "participant_id": clip.participant_id,
+                "participant_name": participant.name if participant else None,
+                "source_url": clip.source_url,
+                "issue_note": clip.issue_note,
+            })
+    finally:
+        # Clean up the long source — we don't keep it after cutting.
+        src_path.unlink(missing_ok=True)
+
+    return {"results": results}
+
+
+def _optional_int(v):
+    if v in (None, "", "null"):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.post("/clips/upload")

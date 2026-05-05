@@ -63,6 +63,7 @@ export default function AdminReview() {
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/upload">Upload clip</Link>
+        <Link to="/admin/long-upload">Long upload</Link>
         <Link to="/admin/showcase">Home videos</Link>
         <Link to="/admin/review" className="active">Hole-in-one review</Link>
       </div>
