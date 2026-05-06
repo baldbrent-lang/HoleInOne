@@ -31,12 +31,13 @@ export default function SelfieCamera({ onCapture, onCancel }) {
       }
 
       try {
+        // Ask for high-res video to hint the browser toward a wider lens.
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: false,
           video: {
             facingMode: { ideal: facing },
-            width: { ideal: 1080 },
-            height: { ideal: 1920 },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
           },
         });
         if (cancelled) {
@@ -44,9 +45,15 @@ export default function SelfieCamera({ onCapture, onCancel }) {
           return;
         }
         streamRef.current = stream;
+
+        // Try to widen the field of view: pick the ultrawide back lens
+        // (iPhones expose it as a separate device) and/or apply min-zoom
+        // (Android Chrome supports the zoom constraint).
+        await widenIfPossible(facing);
+
         const video = videoRef.current;
         if (video) {
-          video.srcObject = stream;
+          video.srcObject = streamRef.current;
           // iOS requires playsInline + a user gesture; we start from the
           // parent's onClick so this play() call is allowed.
           await video.play().catch(() => {});
@@ -64,6 +71,54 @@ export default function SelfieCamera({ onCapture, onCancel }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facing]);
+
+  async function widenIfPossible(currentFacing) {
+    const stream = streamRef.current;
+    if (!stream) return;
+
+    // 1. Apply min-zoom on the existing track if the device supports it.
+    //    Works on most modern Android Chrome; iOS Safari ignores it.
+    const track = stream.getVideoTracks()[0];
+    try {
+      const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.zoom && typeof caps.zoom.min === "number") {
+        await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+      }
+    } catch { /* best-effort */ }
+
+    // 2. On rear-facing only, look for an ultrawide device and swap to it.
+    //    enumerateDevices only returns labels after permission has been
+    //    granted (which we just did above), so this is the right time.
+    if (currentFacing !== "environment") return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const ultrawide = devices.find(
+        (d) =>
+          d.kind === "videoinput" &&
+          /ultra.?wide|0\.?5/i.test(d.label || "")
+      );
+      if (!ultrawide || !ultrawide.deviceId) return;
+
+      stream.getTracks().forEach((t) => t.stop());
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { deviceId: { exact: ultrawide.deviceId } },
+      });
+      streamRef.current = newStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = newStream;
+        await videoRef.current.play().catch(() => {});
+      }
+      // Re-apply min zoom on the new track too.
+      const t2 = newStream.getVideoTracks()[0];
+      try {
+        const c2 = t2 && t2.getCapabilities ? t2.getCapabilities() : {};
+        if (c2.zoom && typeof c2.zoom.min === "number") {
+          await t2.applyConstraints({ advanced: [{ zoom: c2.zoom.min }] });
+        }
+      } catch { /* best-effort */ }
+    } catch { /* fall back to the default rear cam */ }
+  }
 
   function stopStream() {
     if (streamRef.current) {
