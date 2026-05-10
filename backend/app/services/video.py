@@ -66,6 +66,69 @@ def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
+def concat_two_clips(
+    first_path: Path,
+    first_start_sec: float,
+    first_end_sec: float,
+    second_path: Path,
+    second_start_sec: float,
+    second_end_sec: float,
+    output_path: Path,
+    target_height: int = 720,
+    target_fps: int = 30,
+) -> bool:
+    """Stitch a window of one MP4 onto a window of another.
+
+    Used by the dual-camera upload flow to compose tee-cam → green-cam
+    into a single deliverable clip. Both segments are normalized to the
+    same height / fps / pixel format before concat so the join is clean
+    even if the source cameras shot at different framerates or
+    resolutions. Audio is dropped.
+
+    Returns True on success, False if ffmpeg is missing or the encode
+    failed; output_path is removed on failure.
+    """
+    if not have_ffmpeg():
+        log.warning("ffmpeg missing; cannot concat clips")
+        return False
+    if first_end_sec <= first_start_sec or second_end_sec <= second_start_sec:
+        log.warning("concat: window has non-positive duration")
+        return False
+    filter_complex = (
+        f"[0:v]trim=start={first_start_sec:.3f}:end={first_end_sec:.3f},"
+        f"setpts=PTS-STARTPTS,"
+        f"scale=-2:{target_height},fps={target_fps},setsar=1[a];"
+        f"[1:v]trim=start={second_start_sec:.3f}:end={second_end_sec:.3f},"
+        f"setpts=PTS-STARTPTS,"
+        f"scale=-2:{target_height},fps={target_fps},setsar=1[b];"
+        f"[a][b]concat=n=2:v=1:a=0[out]"
+    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(first_path),
+                "-i", str(second_path),
+                "-filter_complex", filter_complex,
+                "-map", "[out]",
+                "-c:v", "libx264", "-preset", "veryfast",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                str(output_path),
+            ],
+            check=True,
+            timeout=600,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("ffmpeg concat failed: %s", exc)
+        output_path.unlink(missing_ok=True)
+        return False
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        output_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
 def extract_thumbnail(video_path: Path) -> Path | None:
     """Pull a JPG of the first frame so the player has a poster image
     that matches the clip's opening shot. Returns the path or None.

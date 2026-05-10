@@ -29,6 +29,7 @@ export default function AdminUpload() {
   const [distanceFromPin, setDistanceFromPin] = useState("");
   const [ballInCup, setBallInCup] = useState(false);
   const [file, setFile] = useState(null);
+  const [fileGreen, setFileGreen] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState(null);
@@ -64,11 +65,13 @@ export default function AdminUpload() {
     if (distanceFromPin) fd.append("distance_from_pin_feet", distanceFromPin);
     fd.append("ball_in_cup", ballInCup ? "true" : "false");
     fd.append("video", file, file.name);
+    if (fileGreen) fd.append("video_green", fileGreen, fileGreen.name);
 
     try {
       const data = await api.uploadClip(adminPassword, fd, setProgress);
       setResult(data);
       setFile(null);
+      setFileGreen(null);
       // If unmatched, load all of this course's recent registrants for quick-assign
       if (data.status !== "assigned") {
         try {
@@ -217,19 +220,42 @@ export default function AdminUpload() {
             </div>
           </div>
 
-          <div className="field">
-            <label>Video file</label>
-            <input
-              type="file"
-              accept="video/*"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
-            />
-            {file && (
-              <div className="small muted" style={{ marginTop: 6 }}>
-                {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB
-              </div>
-            )}
+          <div className="row">
+            <div className="field" style={{ flex: 1 }}>
+              <label>Tee-cam video <span className="muted small">(required)</span></label>
+              <input
+                type="file"
+                accept="video/*"
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+              />
+              {file && (
+                <div className="small muted" style={{ marginTop: 6 }}>
+                  {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB
+                </div>
+              )}
+            </div>
+            <div className="field" style={{ flex: 1 }}>
+              <label>Green-side video <span className="muted small">(optional)</span></label>
+              <input
+                type="file"
+                accept="video/*"
+                onChange={(e) => setFileGreen(e.target.files?.[0] || null)}
+              />
+              {fileGreen && (
+                <div className="small muted" style={{ marginTop: 6 }}>
+                  {fileGreen.name} · {(fileGreen.size / 1024 / 1024).toFixed(1)} MB
+                </div>
+              )}
+            </div>
           </div>
+          {fileGreen && (
+            <div className="hint small muted" style={{ marginTop: -6, marginBottom: 12 }}>
+              Both cameras must start recording at the same moment. We'll detect
+              ball launch on the tee, hold 3 sec, hard-cut to the green-side at
+              the same wall-clock time, and end 3 sec after the ball lands.
+              Composite goes in the golfer's gallery.
+            </div>
+          )}
 
           {error && <p className="err-text small">{error}</p>}
           {uploading && (
@@ -277,43 +303,110 @@ export default function AdminUpload() {
               {result.issue_note && <> Reason: <code>{result.issue_note}</code></>}
             </p>
           )}
-          <div className="grid" style={{ gridTemplateColumns: result.tracer_url ? "1fr 1fr" : "1fr", gap: 12, marginTop: 10 }}>
-            <div>
-              <div className="tiny upper muted" style={{ marginBottom: 4 }}>Original</div>
-              <video
-                src={result.source_url}
-                controls
-                style={{ width: "100%", borderRadius: 8, background: "#000" }}
-              />
-            </div>
-            {result.tracer_url && (
-              <div>
+          {result.composite_url ? (
+            <>
+              <div style={{ marginTop: 10 }}>
                 <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  Tracer overlay
-                  {result.tracer_info?.residual_px != null && (
+                  Composite (tee → green-side)
+                  {result.composite_info && (
                     <span className="muted" style={{ marginLeft: 6 }}>
-                      · {result.tracer_info.residual_px.toFixed(1)}px residual
-                      · {result.tracer_info.n_points} pts
+                      · cut at {result.composite_info.switch_sec}s
+                      · ends at {result.composite_info.end_sec}s
                     </span>
                   )}
                 </div>
                 <video
-                  src={result.tracer_url}
+                  src={result.composite_url}
                   controls
                   style={{ width: "100%", borderRadius: 8, background: "#000" }}
                 />
+                <div className="small muted" style={{ marginTop: 6 }}>
+                  This is the clip in the golfer's gallery.
+                </div>
               </div>
-            )}
-          </div>
-          {!result.tracer_url && result.tracer_info && (
-            <p className="small muted" style={{ marginTop: 8 }}>
-              Tracer didn't find a clean trajectory
-              {result.tracer_info.error ? <> — <code>{result.tracer_info.error}</code></> : null}
-              {result.tracer_info.n_candidates != null && (
-                <> · {result.tracer_info.n_candidates} raw candidates seen</>
+              <details style={{ marginTop: 12 }}>
+                <summary className="small muted" style={{ cursor: "pointer" }}>
+                  Diagnostics (tee + green raw tracer renders)
+                </summary>
+                <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
+                  <div>
+                    <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                      Tee tracer
+                      {result.tracer_info?.residual_px != null && (
+                        <span className="muted" style={{ marginLeft: 6 }}>
+                          · {result.tracer_info.residual_px.toFixed(1)}px · {result.tracer_info.n_points} pts
+                        </span>
+                      )}
+                    </div>
+                    {result.tracer_url ? (
+                      <video src={result.tracer_url} controls style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                    ) : <div className="muted small">no trajectory</div>}
+                  </div>
+                  <div>
+                    <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                      Green tracer
+                      {result.green_tracer_info?.residual_px != null && (
+                        <span className="muted" style={{ marginLeft: 6 }}>
+                          · {result.green_tracer_info.residual_px.toFixed(1)}px · {result.green_tracer_info.n_points} pts
+                        </span>
+                      )}
+                    </div>
+                    {result.green_tracer_url ? (
+                      <video src={result.green_tracer_url} controls style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                    ) : <div className="muted small">no trajectory</div>}
+                  </div>
+                </div>
+              </details>
+            </>
+          ) : (
+            <>
+              <div className="grid" style={{ gridTemplateColumns: result.tracer_url ? "1fr 1fr" : "1fr", gap: 12, marginTop: 10 }}>
+                <div>
+                  <div className="tiny upper muted" style={{ marginBottom: 4 }}>Original</div>
+                  <video
+                    src={result.source_url}
+                    controls
+                    style={{ width: "100%", borderRadius: 8, background: "#000" }}
+                  />
+                </div>
+                {result.tracer_url && (
+                  <div>
+                    <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                      Tracer overlay
+                      {result.tracer_info?.residual_px != null && (
+                        <span className="muted" style={{ marginLeft: 6 }}>
+                          · {result.tracer_info.residual_px.toFixed(1)}px residual
+                          · {result.tracer_info.n_points} pts
+                        </span>
+                      )}
+                    </div>
+                    <video
+                      src={result.tracer_url}
+                      controls
+                      style={{ width: "100%", borderRadius: 8, background: "#000" }}
+                    />
+                  </div>
+                )}
+              </div>
+              {result.green_raw_url && !result.composite_url && (
+                <p className="small muted" style={{ marginTop: 8 }}>
+                  Green-side clip was uploaded but the composite couldn't be built
+                  {result.green_tracer_info?.error ? <> — green: <code>{result.green_tracer_info.error}</code></> : null}
+                  {result.tracer_info && !result.tracer_info.ok ? <> · tee: <code>{result.tracer_info.error || "no trajectory"}</code></> : null}
+                  . Gallery shows the tee clip alone.
+                </p>
               )}
-              . The clip is still uploaded; the broadcast channel will play the original.
-            </p>
+              {!result.tracer_url && result.tracer_info && (
+                <p className="small muted" style={{ marginTop: 8 }}>
+                  Tracer didn't find a clean trajectory
+                  {result.tracer_info.error ? <> — <code>{result.tracer_info.error}</code></> : null}
+                  {result.tracer_info.n_candidates != null && (
+                    <> · {result.tracer_info.n_candidates} raw candidates seen</>
+                  )}
+                  . The clip is still uploaded; the broadcast channel will play the original.
+                </p>
+              )}
+            </>
           )}
 
           {result.status !== "assigned" && overrideCandidates.length > 0 && (

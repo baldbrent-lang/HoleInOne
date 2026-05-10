@@ -36,7 +36,7 @@ from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
 from ..services.tracer import have_tracer, render_tracer
-from ..services.video import compress_for_email, cut_segment, extract_thumbnail
+from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -532,7 +532,7 @@ async def upload_long_video(
                 f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
                 if thumb_path else None
             )
-            tracer_url, _ = _run_tracer(seg_path)
+            tracer_url, _, _ = _run_tracer(seg_path)
 
             captured_dt = base_dt + timedelta(seconds=start_sec)
             clip = VideoClip(
@@ -587,26 +587,27 @@ def _optional_int(v):
         return None
 
 
-def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None]:
-    """Render the tracer overlay for clip_path. Returns (tracer_url, info).
+def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None]:
+    """Render the tracer overlay for clip_path. Returns (url, info, traced_path).
 
-    Best-effort: any failure here returns (None, info) so the upload still
-    succeeds — the broadcast channel falls back to playing source_url
-    when tracer_url is null.
+    Best-effort: any failure here returns (None, info, None) so the upload
+    still succeeds — the broadcast channel falls back to playing source_url
+    when tracer_url is null. The third element is the on-disk path of the
+    rendered MP4, needed by the dual-camera composite path.
     """
     if not have_tracer():
-        return None, {"ok": False, "error": "opencv not installed"}
+        return None, {"ok": False, "error": "opencv not installed"}, None
     traced_name = f"{clip_path.stem}_traced.mp4"
     traced_path = CLIPS_DIR / traced_name
     info = render_tracer(clip_path, traced_path)
     if not info.get("ok"):
         traced_path.unlink(missing_ok=True)
-        return None, info
+        return None, info, None
     # OpenCV writes mp4v; re-encode to H.264 + faststart for browser playback.
     compress_for_email(traced_path)
     if not traced_path.exists() or traced_path.stat().st_size == 0:
-        return None, {"ok": False, "error": "post-encode produced empty file"}
-    return f"{settings.app_base_url}/uploads/clips/{traced_name}", info
+        return None, {"ok": False, "error": "post-encode produced empty file"}, None
+    return f"{settings.app_base_url}/uploads/clips/{traced_name}", info, traced_path
 
 
 @router.post("/clips/upload")
@@ -621,6 +622,7 @@ async def upload_clip(
     distance_from_pin_feet: int | None = Form(None),
     ball_in_cup: bool = Form(False),
     video: UploadFile = File(...),
+    video_green: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     """Manual upload that mimics the Shot Tracer webhook.
@@ -630,6 +632,15 @@ async def upload_clip(
     just like the real webhook would. Useful for testing the pipeline
     end-to-end with phone or GoPro footage before any real cameras are
     deployed.
+
+    If `video_green` is also supplied, both cameras are assumed to have
+    started recording at the same wall-clock moment. The tracer runs on
+    each side independently. The deliverable clip is a composite:
+    tee-cam shown from t=0 until 3 seconds after the ball leaves the
+    tee, then a hard cut to green-cam at the matching wall-clock time
+    until 3 seconds after the ball lands. The composite (with tracer
+    overlay on both halves) becomes the gallery clip; tee + green raws
+    are kept on disk for audit but not surfaced to the golfer.
     """
     course = db.get(Course, course_id)
     if not course:
@@ -664,11 +675,66 @@ async def upload_clip(
         if thumb_path else None
     )
 
-    # Render the classical-CV tracer overlay. Sync — admin uploads are
-    # already a long-running request and the operator wants to see the
-    # result. If detection fails, tracer_url stays null and the original
-    # clip is still saved + delivered.
-    tracer_url, tracer_info = _run_tracer(fpath)
+    # Render the classical-CV tracer overlay on the tee clip. Sync —
+    # admin uploads are already a long-running request and the operator
+    # wants to see the result. If detection fails, tracer_url stays null
+    # and the original clip is still saved + delivered.
+    tracer_url, tracer_info, tee_traced_path = _run_tracer(fpath)
+
+    # Dual-camera path: when a green-side clip is also uploaded, both
+    # cameras are assumed to have started at the same moment. We run the
+    # tracer on the green clip independently, then concat
+    # tee[0..launch+3s] + green[launch+3s..landing+3s] into a single
+    # composite. The composite replaces source_url / tracer_url so the
+    # golfer's gallery shows the dual-angle deliverable.
+    green_url = None
+    green_tracer_url = None
+    green_tracer_info = None
+    composite_url = None
+    composite_info: dict | None = None
+    if video_green is not None:
+        green_data = await video_green.read()
+        if green_data:
+            if len(green_data) > 500 * 1024 * 1024:
+                raise HTTPException(413, "green video too large (max 500MB)")
+            g_ext = (video_green.filename or "").rsplit(".", 1)[-1].lower() if "." in (video_green.filename or "") else "mp4"
+            if g_ext not in ("mp4", "mov", "webm", "m4v"):
+                g_ext = "mp4"
+            green_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}_green.{g_ext}"
+            green_path = CLIPS_DIR / green_name
+            green_path.write_bytes(green_data)
+            compress_for_email(green_path)
+            green_url = f"{settings.app_base_url}/uploads/clips/{green_name}"
+
+            green_tracer_url, green_tracer_info, green_traced_path = _run_tracer(green_path)
+
+            if (
+                tracer_info and tracer_info.get("ok")
+                and green_tracer_info and green_tracer_info.get("ok")
+                and tee_traced_path is not None and green_traced_path is not None
+            ):
+                tee_fps = float(tracer_info.get("fps") or 30.0) or 30.0
+                green_fps = float(green_tracer_info.get("fps") or 30.0) or 30.0
+                tee_launch_frame = tracer_info["frame_range"][0]
+                green_land_frame = green_tracer_info["frame_range"][1]
+                switch_sec = max(0.0, tee_launch_frame / tee_fps + 3.0)
+                end_sec_in_green = green_land_frame / green_fps + 3.0
+                # Sanity: the green cut window must have positive duration.
+                if end_sec_in_green > switch_sec + 0.1:
+                    composite_name = f"{fpath.stem}_composite.mp4"
+                    composite_path = CLIPS_DIR / composite_name
+                    if concat_two_clips(
+                        tee_traced_path, 0.0, switch_sec,
+                        green_traced_path, switch_sec, end_sec_in_green,
+                        composite_path,
+                    ):
+                        composite_url = f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                        composite_info = {
+                            "switch_sec": round(switch_sec, 2),
+                            "end_sec": round(end_sec_in_green, 2),
+                            "tee_fps": round(tee_fps, 2),
+                            "green_fps": round(green_fps, 2),
+                        }
 
     try:
         captured_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
@@ -678,14 +744,19 @@ async def upload_clip(
     except ValueError:
         raise HTTPException(400, "invalid captured_at; use ISO 8601")
 
+    # If we built a dual-camera composite, that IS the gallery clip —
+    # use it for both source_url and tracer_url so it plays everywhere
+    # the golfer or broadcast channel pulls clips from.
+    final_source = composite_url or f"{settings.app_base_url}/uploads/clips/{fname}"
+    final_tracer = composite_url or tracer_url
     clip = VideoClip(
         course_id=course_id,
         hole_number=hole_number,
         camera_type=camera_type,
         captured_at=captured_dt,
-        source_url=f"{settings.app_base_url}/uploads/clips/{fname}",
+        source_url=final_source,
         thumbnail_url=thumb_url,
-        tracer_url=tracer_url,
+        tracer_url=final_tracer,
         carry_yards=carry_yards,
         apex_feet=apex_feet,
         ball_speed_mph=ball_speed_mph,
@@ -720,6 +791,12 @@ async def upload_clip(
         "tracer_url": clip.tracer_url,
         "tracer_info": tracer_info,
         "issue_note": clip.issue_note,
+        "tee_raw_url": f"{settings.app_base_url}/uploads/clips/{fname}",
+        "green_raw_url": green_url,
+        "green_tracer_url": green_tracer_url,
+        "green_tracer_info": green_tracer_info,
+        "composite_url": composite_url,
+        "composite_info": composite_info,
     }
 
 

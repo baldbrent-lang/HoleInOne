@@ -150,6 +150,7 @@ def _render(input_path: Path, output_path: Path) -> dict:
         "n_points": len(track),
         "n_candidates": len(detections),
         "frame_range": [track[0].frame, track[-1].frame],
+        "fps": float(fps),
         "error": None,
     }
 
