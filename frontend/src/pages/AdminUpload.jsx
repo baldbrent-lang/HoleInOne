@@ -277,11 +277,44 @@ export default function AdminUpload() {
               {result.issue_note && <> Reason: <code>{result.issue_note}</code></>}
             </p>
           )}
-          <video
-            src={result.source_url}
-            controls
-            style={{ width: "100%", maxWidth: 640, marginTop: 10, borderRadius: 8, background: "#000" }}
-          />
+          <div className="grid" style={{ gridTemplateColumns: result.tracer_url ? "1fr 1fr" : "1fr", gap: 12, marginTop: 10 }}>
+            <div>
+              <div className="tiny upper muted" style={{ marginBottom: 4 }}>Original</div>
+              <video
+                src={result.source_url}
+                controls
+                style={{ width: "100%", borderRadius: 8, background: "#000" }}
+              />
+            </div>
+            {result.tracer_url && (
+              <div>
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  Tracer overlay
+                  {result.tracer_info?.residual_px != null && (
+                    <span className="muted" style={{ marginLeft: 6 }}>
+                      · {result.tracer_info.residual_px.toFixed(1)}px residual
+                      · {result.tracer_info.n_points} pts
+                    </span>
+                  )}
+                </div>
+                <video
+                  src={result.tracer_url}
+                  controls
+                  style={{ width: "100%", borderRadius: 8, background: "#000" }}
+                />
+              </div>
+            )}
+          </div>
+          {!result.tracer_url && result.tracer_info && (
+            <p className="small muted" style={{ marginTop: 8 }}>
+              Tracer didn't find a clean trajectory
+              {result.tracer_info.error ? <> — <code>{result.tracer_info.error}</code></> : null}
+              {result.tracer_info.n_candidates != null && (
+                <> · {result.tracer_info.n_candidates} raw candidates seen</>
+              )}
+              . The clip is still uploaded; the broadcast channel will play the original.
+            </p>
+          )}
 
           {result.status !== "assigned" && overrideCandidates.length > 0 && (
             <div style={{ marginTop: 16 }}>

@@ -35,6 +35,7 @@ from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
+from ..services.tracer import have_tracer, render_tracer
 from ..services.video import compress_for_email, cut_segment, extract_thumbnail
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -531,6 +532,7 @@ async def upload_long_video(
                 f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
                 if thumb_path else None
             )
+            tracer_url, _ = _run_tracer(seg_path)
 
             captured_dt = base_dt + timedelta(seconds=start_sec)
             clip = VideoClip(
@@ -540,6 +542,7 @@ async def upload_long_video(
                 captured_at=captured_dt,
                 source_url=f"{settings.app_base_url}/uploads/clips/{seg_name}",
                 thumbnail_url=thumb_url,
+                tracer_url=tracer_url,
                 carry_yards=_optional_int(seg.get("carry_yards")),
                 apex_feet=_optional_int(seg.get("apex_feet")),
                 ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
@@ -565,6 +568,7 @@ async def upload_long_video(
                 "participant_id": clip.participant_id,
                 "participant_name": participant.name if participant else None,
                 "source_url": clip.source_url,
+                "tracer_url": clip.tracer_url,
                 "issue_note": clip.issue_note,
             })
     finally:
@@ -581,6 +585,28 @@ def _optional_int(v):
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None]:
+    """Render the tracer overlay for clip_path. Returns (tracer_url, info).
+
+    Best-effort: any failure here returns (None, info) so the upload still
+    succeeds — the broadcast channel falls back to playing source_url
+    when tracer_url is null.
+    """
+    if not have_tracer():
+        return None, {"ok": False, "error": "opencv not installed"}
+    traced_name = f"{clip_path.stem}_traced.mp4"
+    traced_path = CLIPS_DIR / traced_name
+    info = render_tracer(clip_path, traced_path)
+    if not info.get("ok"):
+        traced_path.unlink(missing_ok=True)
+        return None, info
+    # OpenCV writes mp4v; re-encode to H.264 + faststart for browser playback.
+    compress_for_email(traced_path)
+    if not traced_path.exists() or traced_path.stat().st_size == 0:
+        return None, {"ok": False, "error": "post-encode produced empty file"}
+    return f"{settings.app_base_url}/uploads/clips/{traced_name}", info
 
 
 @router.post("/clips/upload")
@@ -638,6 +664,12 @@ async def upload_clip(
         if thumb_path else None
     )
 
+    # Render the classical-CV tracer overlay. Sync — admin uploads are
+    # already a long-running request and the operator wants to see the
+    # result. If detection fails, tracer_url stays null and the original
+    # clip is still saved + delivered.
+    tracer_url, tracer_info = _run_tracer(fpath)
+
     try:
         captured_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
         if captured_dt.tzinfo is not None:
@@ -653,6 +685,7 @@ async def upload_clip(
         captured_at=captured_dt,
         source_url=f"{settings.app_base_url}/uploads/clips/{fname}",
         thumbnail_url=thumb_url,
+        tracer_url=tracer_url,
         carry_yards=carry_yards,
         apex_feet=apex_feet,
         ball_speed_mph=ball_speed_mph,
@@ -684,6 +717,8 @@ async def upload_clip(
         "participant_id": clip.participant_id,
         "participant_name": participant.name if participant else None,
         "source_url": clip.source_url,
+        "tracer_url": clip.tracer_url,
+        "tracer_info": tracer_info,
         "issue_note": clip.issue_note,
     }
 
