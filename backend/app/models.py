@@ -142,6 +142,15 @@ class VideoClip(Base):
     ball_in_cup: Mapped[bool] = mapped_column(Boolean, default=False)
     issue_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Rendered-with-tracer version of source_url. Populated by the tracer job
+    # once the spike pipeline ships; until then the broadcast falls back to
+    # source_url so the channel works without the tracer.
+    tracer_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Marks a clip as eligible to play during dead time on the broadcast
+    # channel ("highlights"). Auto-set for aces and CTP winners; operators
+    # can toggle via the admin UI.
+    is_highlight: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    highlight_tag: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     participant: Mapped[Optional[Participant]] = relationship(back_populates="clips")
@@ -172,6 +181,22 @@ class AuditLog(Base):
     target: Mapped[str] = mapped_column(String(200))
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class BroadcastView(Base):
+    """Per-viewer dedup for the /broadcast/next playlist.
+
+    The viewer mints a UUID client-side and sends it as `viewer_id`. We log
+    one row per (viewer, clip) so the same person doesn't see the same swing
+    twice in quick succession. Old rows can be pruned after ~24h."""
+
+    __tablename__ = "broadcast_views"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    viewer_id: Mapped[str] = mapped_column(String(64), index=True)
+    clip_id: Mapped[int] = mapped_column(ForeignKey("video_clips.id"))
+    course_id: Mapped[Optional[int]] = mapped_column(ForeignKey("courses.id"), nullable=True)
+    shown_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
 class Showcase(Base):

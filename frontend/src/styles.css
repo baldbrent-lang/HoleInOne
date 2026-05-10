@@ -691,3 +691,76 @@ tr:last-child td { border-bottom: none; }
 .clip-player.compact .clip-overlay-top-right .course-name { font-size: 0.82rem; }
 .clip-player.compact .clip-overlay-top-right .hole-info { font-size: 0.7rem; }
 .clip-player.compact .clip-overlay-bottom-right { font-size: 0.82rem; bottom: 44px; }
+
+/* --- Watch / Broadcast channel --- */
+.watch-stage {
+  background: #0b1220;
+  color: #fff;
+  min-height: 100vh;
+}
+.watch-stage.kiosk .watch-frame { aspect-ratio: auto; height: 100vh; border-radius: 0; }
+.watch-frame {
+  position: relative;
+  margin: 0 auto;
+  max-width: 1200px;
+  aspect-ratio: 16/9;
+  background: #000;
+  border-radius: 14px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.watch-video { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
+.watch-loading {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  color: rgba(255,255,255,0.55);
+  font-size: 0.9rem;
+}
+.watch-error {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  color: #fecaca; padding: 24px; text-align: center;
+}
+.muted-on-dark { color: rgba(255,255,255,0.65); }
+
+.watch-overlay {
+  position: absolute;
+  padding: 10px 14px;
+  background: rgba(0,0,0,0.45);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.watch-overlay.tr { top: 14px; right: 14px; text-align: right; }
+.watch-overlay.br { bottom: 14px; right: 14px; text-align: right; }
+.watch-overlay-title { font-weight: 700; font-size: 1rem; line-height: 1.1; margin-top: 2px; }
+
+.watch-slate {
+  position: absolute; inset: 0;
+  padding: clamp(20px, 5vw, 60px);
+  display: flex; flex-direction: column; justify-content: center;
+  background: radial-gradient(circle at 30% 30%, #14532d 0%, #0b1220 70%);
+}
+.watch-slate-title {
+  font-size: clamp(2rem, 5vw, 3.6rem);
+  line-height: 1.05;
+  margin: 8px 0 20px;
+  letter-spacing: -0.02em;
+}
+.watch-slate-list {
+  list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 10px;
+  font-size: clamp(1rem, 2vw, 1.4rem);
+}
+.watch-slate-list li {
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  align-items: baseline;
+  gap: 14px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.watch-slate-list .rank { color: var(--emerald-300, #6ee7b7); font-weight: 700; }
+.watch-slate-list .who { color: #fff; }
+.watch-slate-list .metric { color: rgba(255,255,255,0.75); font-variant-numeric: tabular-nums; }

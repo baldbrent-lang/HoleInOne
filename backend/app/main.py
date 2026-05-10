@@ -12,7 +12,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
 from .database import Base, engine
-from .routers import admin, auth, gallery, operator, public, webhooks
+from .routers import admin, auth, broadcast, gallery, operator, public, webhooks
 
 app = FastAPI(title="GolfReelz API", version="0.1.0")
 
@@ -77,6 +77,14 @@ def _migrate() -> None:
             statements.append("ALTER TABLE video_clips ADD COLUMN delivered_at TIMESTAMP")
         if "distance_from_pin_feet" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN distance_from_pin_feet INTEGER")
+        if "tracer_url" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN tracer_url TEXT")
+        if "is_highlight" not in clip_cols:
+            # SQLite allows BOOLEAN; Postgres treats it as BOOLEAN natively.
+            statements.append("ALTER TABLE video_clips ADD COLUMN is_highlight BOOLEAN DEFAULT FALSE")
+            statements.append("UPDATE video_clips SET is_highlight = FALSE WHERE is_highlight IS NULL")
+        if "highlight_tag" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN highlight_tag VARCHAR(60)")
 
     if not statements:
         return
@@ -161,6 +169,7 @@ app.include_router(webhooks.router)
 app.include_router(admin.router)
 app.include_router(auth.router)
 app.include_router(operator.router)
+app.include_router(broadcast.router)
 
 
 # --- Uploads (selfies) -------------------------------------------------------

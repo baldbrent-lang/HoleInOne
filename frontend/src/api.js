@@ -72,6 +72,21 @@ export const api = {
   publicStats: () => request(`/api/public/stats`, { auth: false }),
   leaderboards: (limit) => request(`/api/public/leaderboards${limit ? `?limit=${limit}` : ""}`, { auth: false }),
   contests: () => request(`/api/public/contests`, { auth: false }),
+  broadcastNext: (viewerId, courseId) => {
+    const qs = new URLSearchParams({ viewer_id: viewerId });
+    if (courseId) qs.set("course_id", courseId);
+    return request(`/api/broadcast/next?${qs}`, { auth: false });
+  },
+  tagHighlight: (key, clipId, tag) =>
+    request(`/api/broadcast/admin/clips/${clipId}/highlight${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`, {
+      method: "POST", adminPassword: key,
+    }),
+  untagHighlight: (key, clipId) =>
+    request(`/api/broadcast/admin/clips/${clipId}/highlight`, {
+      method: "DELETE", adminPassword: key,
+    }),
+  autoTagHighlights: (key) =>
+    request(`/api/broadcast/admin/auto-tag`, { method: "POST", adminPassword: key }),
   publicProfile: (userId) => request(`/api/public/profile/${userId}`, { auth: false }),
   setOperatorPassword: (key, courseId, password) =>
     request(`/api/admin/courses/${courseId}/operator-password`, {
