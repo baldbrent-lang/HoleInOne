@@ -532,7 +532,7 @@ async def upload_long_video(
                 f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
                 if thumb_path else None
             )
-            tracer_url, _, _ = _run_tracer(seg_path)
+            tracer_url, _, _, _ = _run_tracer(seg_path)
 
             captured_dt = base_dt + timedelta(seconds=start_sec)
             clip = VideoClip(
@@ -587,27 +587,34 @@ def _optional_int(v):
         return None
 
 
-def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None]:
-    """Render the tracer overlay for clip_path. Returns (url, info, traced_path).
+def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, str | None]:
+    """Render the tracer overlay for clip_path.
 
-    Best-effort: any failure here returns (None, info, None) so the upload
-    still succeeds — the broadcast channel falls back to playing source_url
-    when tracer_url is null. The third element is the on-disk path of the
-    rendered MP4, needed by the dual-camera composite path.
+    Returns (tracer_url, info, traced_path, debug_url). Best-effort: any
+    failure here still returns a debug image URL so the operator can see
+    what the detector is staring at (candidates circled in red, or a
+    "0 candidates" overlay if the HSV/motion gates filtered everything).
     """
     if not have_tracer():
-        return None, {"ok": False, "error": "opencv not installed"}, None
+        return None, {"ok": False, "error": "opencv not installed"}, None, None
     traced_name = f"{clip_path.stem}_traced.mp4"
     traced_path = CLIPS_DIR / traced_name
-    info = render_tracer(clip_path, traced_path)
+    debug_name = f"{clip_path.stem}_candidates.jpg"
+    debug_path = CLIPS_DIR / debug_name
+
+    info = render_tracer(clip_path, traced_path, debug_path)
+    debug_url = (
+        f"{settings.app_base_url}/uploads/clips/{debug_name}"
+        if debug_path.exists() else None
+    )
     if not info.get("ok"):
         traced_path.unlink(missing_ok=True)
-        return None, info, None
+        return None, info, None, debug_url
     # OpenCV writes mp4v; re-encode to H.264 + faststart for browser playback.
     compress_for_email(traced_path)
     if not traced_path.exists() or traced_path.stat().st_size == 0:
-        return None, {"ok": False, "error": "post-encode produced empty file"}, None
-    return f"{settings.app_base_url}/uploads/clips/{traced_name}", info, traced_path
+        return None, {"ok": False, "error": "post-encode produced empty file"}, None, debug_url
+    return f"{settings.app_base_url}/uploads/clips/{traced_name}", info, traced_path, debug_url
 
 
 @router.post("/clips/upload")
@@ -679,7 +686,7 @@ async def upload_clip(
     # admin uploads are already a long-running request and the operator
     # wants to see the result. If detection fails, tracer_url stays null
     # and the original clip is still saved + delivered.
-    tracer_url, tracer_info, tee_traced_path = _run_tracer(fpath)
+    tracer_url, tracer_info, tee_traced_path, tracer_debug_url = _run_tracer(fpath)
 
     # Dual-camera path: when a green-side clip is also uploaded, both
     # cameras are assumed to have started at the same moment. We run the
@@ -690,6 +697,7 @@ async def upload_clip(
     green_url = None
     green_tracer_url = None
     green_tracer_info = None
+    green_debug_url = None
     composite_url = None
     composite_info: dict | None = None
     if video_green is not None:
@@ -706,7 +714,7 @@ async def upload_clip(
             compress_for_email(green_path)
             green_url = f"{settings.app_base_url}/uploads/clips/{green_name}"
 
-            green_tracer_url, green_tracer_info, green_traced_path = _run_tracer(green_path)
+            green_tracer_url, green_tracer_info, green_traced_path, green_debug_url = _run_tracer(green_path)
 
             if (
                 tracer_info and tracer_info.get("ok")
@@ -790,11 +798,13 @@ async def upload_clip(
         "source_url": clip.source_url,
         "tracer_url": clip.tracer_url,
         "tracer_info": tracer_info,
+        "tracer_debug_url": tracer_debug_url,
         "issue_note": clip.issue_note,
         "tee_raw_url": f"{settings.app_base_url}/uploads/clips/{fname}",
         "green_raw_url": green_url,
         "green_tracer_url": green_tracer_url,
         "green_tracer_info": green_tracer_info,
+        "green_debug_url": green_debug_url,
         "composite_url": composite_url,
         "composite_info": composite_info,
     }

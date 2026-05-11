@@ -34,18 +34,26 @@ except Exception:  # pragma: no cover
 HSV_LOWER = (0, 0, 200)
 HSV_UPPER = (180, 70, 255)
 
-MIN_BALL_AREA = 4
-MAX_BALL_AREA = 200
-MIN_BALL_RADIUS = 1.0
-MAX_BALL_RADIUS = 14.0
+# Real-world tuning notes for GoPro Hero 13 at 1080p60, mounted 4-6ft
+# behind a right-handed golfer:
+#   - At impact the ball is ~6ft from camera → ~30px diameter (~700 area)
+#     so MAX_BALL_AREA / MAX_BALL_RADIUS need headroom or the close-up
+#     impact frames get rejected.
+#   - At 50yd downrange the ball is ~3-4px diameter, near MIN floor.
+#   - Motion blur at 1/240 or slower shutter elongates the ball, so the
+#     circularity floor needs to be forgiving.
+MIN_BALL_AREA = 3
+MAX_BALL_AREA = 900
+MIN_BALL_RADIUS = 0.8
+MAX_BALL_RADIUS = 22.0
 
-MIN_CIRCULARITY = 0.55
-MOTION_DIFF_THRESHOLD = 22
+MIN_CIRCULARITY = 0.45
+MOTION_DIFF_THRESHOLD = 18
 
 MAX_FRAME_GAP = 6
-MAX_PIXEL_JUMP_PER_FRAME = 60
-MIN_TRACK_LENGTH = 6
-MAX_PARABOLA_RESIDUAL = 18.0
+MAX_PIXEL_JUMP_PER_FRAME = 90
+MIN_TRACK_LENGTH = 5
+MAX_PARABOLA_RESIDUAL = 22.0
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
@@ -67,8 +75,15 @@ def have_tracer() -> bool:
     return HAS_CV
 
 
-def render_tracer(input_path: Path, output_path: Path) -> dict:
+def render_tracer(input_path: Path, output_path: Path, debug_path: Path | None = None) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
+
+    If `debug_path` is provided, also save a JPG of the first frame that
+    has any ball candidates (with every candidate circled in red),
+    regardless of whether the trajectory passed the parabolic-fit gate.
+    On total detection failure, saves the first frame of the video with
+    a "0 candidates" overlay so the operator can see what the detector
+    is staring at.
 
     Returns a dict shaped like::
         {ok: bool, residual_px: float|None, n_points: int,
@@ -80,7 +95,7 @@ def render_tracer(input_path: Path, output_path: Path) -> dict:
     if not HAS_CV:
         return {"ok": False, "error": "opencv not installed", "n_points": 0, "n_candidates": 0}
     try:
-        return _render(input_path, output_path)
+        return _render(input_path, output_path, debug_path)
     except Exception as exc:  # pragma: no cover
         log.warning("tracer crashed on %s: %s", input_path, exc)
         try:
@@ -92,7 +107,7 @@ def render_tracer(input_path: Path, output_path: Path) -> dict:
 
 # --- internals --------------------------------------------------------------
 
-def _render(input_path: Path, output_path: Path) -> dict:
+def _render(input_path: Path, output_path: Path, debug_path: Path | None = None) -> dict:
     hsv_lower = np.array(HSV_LOWER)
     hsv_upper = np.array(HSV_UPPER)
 
@@ -104,17 +119,35 @@ def _render(input_path: Path, output_path: Path) -> dict:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    # Snapshot the first frame and the first frame-with-candidates so we
+    # can emit a debug JPG even when detection fails downstream.
+    first_frame_snapshot = None
+    debug_frame = None
+    debug_frame_idx = -1
+    debug_candidates: list[tuple[float, float, float]] = []
+
     prev_gray = None
     idx = 0
     while True:
         ok, frame = cap.read()
         if not ok:
             break
-        for cx, cy, r in _candidates(frame, prev_gray, hsv_lower, hsv_upper):
+        if first_frame_snapshot is None:
+            first_frame_snapshot = frame.copy()
+        cands = _candidates(frame, prev_gray, hsv_lower, hsv_upper)
+        if debug_frame is None and cands:
+            debug_frame = frame.copy()
+            debug_frame_idx = idx
+            debug_candidates = list(cands)
+        for cx, cy, r in cands:
             detections.append(_Det(idx, cx, cy, r))
         prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         idx += 1
     cap.release()
+
+    if debug_path is not None:
+        _write_debug(debug_path, debug_frame, debug_frame_idx, debug_candidates,
+                     first_frame_snapshot, len(detections))
 
     track = _pick_best(_link(detections))
     if not track:
@@ -153,6 +186,25 @@ def _render(input_path: Path, output_path: Path) -> dict:
         "fps": float(fps),
         "error": None,
     }
+
+
+def _write_debug(path, debug_frame, debug_idx, debug_cands, first_frame, total_candidates):
+    """Save a diagnostic JPG: first frame that had any candidates with
+    them circled in red; or the first frame of the video with a
+    "0 candidates" overlay if detection found nothing at all."""
+    if debug_frame is not None:
+        for cx, cy, r in debug_cands:
+            cv2.circle(debug_frame, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
+        msg = f"frame {debug_idx}: {len(debug_cands)} candidates here / {total_candidates} total"
+        cv2.putText(debug_frame, msg, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.imwrite(str(path), debug_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    elif first_frame is not None:
+        cv2.putText(
+            first_frame,
+            "0 candidates - HSV/motion gates may be too strict",
+            (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA,
+        )
+        cv2.imwrite(str(path), first_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
 
 
 def _candidates(frame_bgr, prev_gray, hsv_lower, hsv_upper):

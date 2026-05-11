@@ -397,14 +397,33 @@ export default function AdminUpload() {
                 </p>
               )}
               {!result.tracer_url && result.tracer_info && (
-                <p className="small muted" style={{ marginTop: 8 }}>
-                  Tracer didn't find a clean trajectory
-                  {result.tracer_info.error ? <> — <code>{result.tracer_info.error}</code></> : null}
-                  {result.tracer_info.n_candidates != null && (
-                    <> · {result.tracer_info.n_candidates} raw candidates seen</>
+                <div style={{ marginTop: 10 }}>
+                  <p className="small muted" style={{ marginBottom: 8 }}>
+                    Tracer didn't find a clean trajectory
+                    {result.tracer_info.error ? <> — <code>{result.tracer_info.error}</code></> : null}
+                    {result.tracer_info.n_candidates != null && (
+                      <> · {result.tracer_info.n_candidates} raw candidates seen</>
+                    )}
+                    . The clip is still uploaded; the broadcast channel will play the original.
+                  </p>
+                  {result.tracer_debug_url && (
+                    <div>
+                      <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                        Detector view — what it's seeing as candidates
+                      </div>
+                      <img
+                        src={result.tracer_debug_url}
+                        alt="ball candidates debug"
+                        style={{ width: "100%", maxWidth: 640, borderRadius: 8, border: "1px solid var(--border)" }}
+                      />
+                      <div className="small muted" style={{ marginTop: 6 }}>
+                        Red circles = blobs the detector flagged as possible balls.
+                        Lots of circles = noise (too permissive). Zero circles = HSV/motion gates too strict.
+                        Share this image and we'll tune.
+                      </div>
+                    </div>
                   )}
-                  . The clip is still uploaded; the broadcast channel will play the original.
-                </p>
+                </div>
               )}
             </>
           )}
