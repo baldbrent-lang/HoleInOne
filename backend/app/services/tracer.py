@@ -43,7 +43,13 @@ except Exception:  # pragma: no cover
 # by size, radius, and circularity.
 
 # MOG2 sensitivity. Higher = stricter, fewer foreground pixels.
-BG_VAR_THRESHOLD = 16
+# v3: bumped 16 → 50 after outdoor footage (wind-moved foliage / grass,
+# HEVC shimmer) produced 600+ candidates/frame at threshold 16. 50
+# corresponds to ~7σ above the per-pixel background gaussian, which
+# suppresses random texture wiggle but easily lets the actual ball
+# through (the ball traverses pixels whose σ is tiny because the
+# background there is mostly uniform sky / grass).
+BG_VAR_THRESHOLD = 50
 
 # Skip the first N frames of candidate extraction so the background
 # model has time to converge. The frames are still fed to the
@@ -122,9 +128,24 @@ MC_RANSAC_REPROJ_PX = 3.0
 # can soften this later to "anchor linker on upward seeds, extend both
 # directions" if the half-arc looks short.
 USE_UPWARD_STREAK_FILTER = True
-MIN_UPWARD_CHAIN_LEN = 3
-MIN_UPWARD_DY_PER_FRAME = 1.5
+# v3 tightening: prior thresholds (chain_len=3, dy=1.5px) were so
+# permissive that with 200+ cands/frame, random pairs satisfied the
+# upward criterion by chance and the filter became a near no-op
+# (kept 96%+ of raw). A real ball moves 10-30px/frame at launch — 6px
+# is still permissive enough for the apex / blurred frames where it
+# slows, but enough to discard wind-wiggle noise.
+MIN_UPWARD_CHAIN_LEN = 5
+MIN_UPWARD_DY_PER_FRAME = 6.0
 UPWARD_SEARCH_FRAMES = 2
+
+# Hard cap on the number of candidates we keep per frame. Even with
+# tighter MOG2 + body-blob exclusion, outdoor footage with wind +
+# foliage can still produce dozens of ball-shaped fragments per frame.
+# At that density any temporal-coherence filter (upward streak,
+# parabolic fit) finds chains by chance. Capping per-frame guarantees
+# the temporal filters operate on a sparse field. Ranking is by
+# circularity scaled by smallness, so the most ball-like survive.
+MAX_CANDIDATES_PER_FRAME = 40
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
@@ -498,7 +519,7 @@ def _candidates_from_mask(fg_mask):
         b = BODY_BBOX_BUFFER_PX
         body_bbox = (x - b, y - b, x + w + b, y + h + b)
 
-    out = []
+    scored = []
     for c in contours:
         area = cv2.contourArea(c)
         if not (MIN_BALL_AREA <= area <= MAX_BALL_AREA):
@@ -517,8 +538,17 @@ def _candidates_from_mask(fg_mask):
         circ = 4.0 * np.pi * area / (perimeter ** 2)
         if circ < MIN_CIRCULARITY:
             continue
-        out.append((float(cx), float(cy), float(radius)))
-    return out
+        # Ball-likeness score: high circularity * smallness. A real ball
+        # is small AND round; disc-shaped body fragments are round but
+        # bigger. Used to rank when we cap the per-frame candidate set.
+        smallness = 1.0 - (area / MAX_BALL_AREA)
+        score = circ * smallness
+        scored.append((score, float(cx), float(cy), float(radius)))
+
+    if len(scored) > MAX_CANDIDATES_PER_FRAME:
+        scored.sort(key=lambda s: -s[0])
+        scored = scored[:MAX_CANDIDATES_PER_FRAME]
+    return [(cx, cy, r) for (_score, cx, cy, r) in scored]
 
 
 def _link(detections):
