@@ -7,6 +7,7 @@ import AdminParticipants from "./pages/AdminParticipants.jsx";
 import AdminReview from "./pages/AdminReview.jsx";
 import AdminUpload from "./pages/AdminUpload.jsx";
 import AdminLongUpload from "./pages/AdminLongUpload.jsx";
+import AdminClips from "./pages/AdminClips.jsx";
 import AdminShowcase from "./pages/AdminShowcase.jsx";
 import Login from "./pages/Login.jsx";
 import Signup from "./pages/Signup.jsx";
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="/admin/participants" element={<AdminParticipants />} />
         <Route path="/admin/upload" element={<AdminUpload />} />
         <Route path="/admin/long-upload" element={<AdminLongUpload />} />
+        <Route path="/admin/clips" element={<AdminClips />} />
         <Route path="/admin/showcase" element={<AdminShowcase />} />
         <Route path="/admin/review" element={<AdminReview />} />
         <Route

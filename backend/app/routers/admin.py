@@ -452,6 +452,92 @@ CLIPS_DIR = Path(__file__).resolve().parents[2] / settings.upload_dir / "clips"
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+@router.get("/clips")
+def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
+    """All clips, newest first. Includes orphans (no participant_id).
+
+    Powers the /admin/clips test/iteration page where we can rerun the
+    tracer on any existing clip without re-uploading.
+    """
+    clips = (
+        db.query(VideoClip)
+        .order_by(VideoClip.created_at.desc())
+        .limit(max(1, min(500, limit)))
+        .all()
+    )
+    course_ids = {c.course_id for c in clips}
+    participant_ids = {c.participant_id for c in clips if c.participant_id}
+    courses = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
+    participants = (
+        {p.id: p for p in db.query(Participant).filter(Participant.id.in_(participant_ids)).all()}
+        if participant_ids else {}
+    )
+    out = []
+    for c in clips:
+        course = courses.get(c.course_id)
+        participant = participants.get(c.participant_id) if c.participant_id else None
+        out.append({
+            "id": c.id,
+            "course_id": c.course_id,
+            "course_name": course.name if course else None,
+            "hole_number": c.hole_number,
+            "camera_type": c.camera_type,
+            "captured_at": c.captured_at.isoformat() if c.captured_at else None,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "source_url": c.source_url,
+            "tracer_url": c.tracer_url,
+            "thumbnail_url": c.thumbnail_url,
+            "ball_in_cup": bool(c.ball_in_cup),
+            "processing_status": c.processing_status,
+            "participant_id": c.participant_id,
+            "participant_name": participant.name if participant else None,
+        })
+    return out
+
+
+@router.post("/clips/{clip_id}/retry-tracer")
+def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
+    """Re-run the classical-CV tracer on an existing clip's source file.
+
+    For iteration: lets us tune detector thresholds and re-render the
+    overlay without uploading new footage. Updates clip.tracer_url on
+    success. Returns the same info shape as /clips/upload so the
+    AdminClips UI can render the new result inline.
+
+    Doesn't work on dual-camera composite outputs (we'd need both raw
+    halves and the composite logic, which is more than this V1 covers).
+    """
+    clip = db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+    if not clip.source_url:
+        raise HTTPException(400, "clip has no source_url")
+    # Pull the file name from the URL — we stored it as
+    # {base}/uploads/clips/{fname}. Use the URL's last segment.
+    fname = clip.source_url.rstrip("/").rsplit("/", 1)[-1]
+    if not fname:
+        raise HTTPException(400, "could not parse filename from source_url")
+    if "_composite" in fname:
+        raise HTTPException(
+            400, "retry-tracer doesn't yet support composite clips (need raw halves)",
+        )
+    fpath = CLIPS_DIR / fname
+    if not fpath.exists():
+        raise HTTPException(404, f"source file missing on disk: {fname}")
+    tracer_url, tracer_info, _, tracer_debug_url = _run_tracer(fpath)
+    clip.tracer_url = tracer_url
+    db.add(AuditLog(actor="admin", action="retry_tracer", target=f"clip:{clip.id}",
+                    detail=str(tracer_info)))
+    db.commit()
+    return {
+        "clip_id": clip.id,
+        "source_url": clip.source_url,
+        "tracer_url": clip.tracer_url,
+        "tracer_info": tracer_info,
+        "tracer_debug_url": tracer_debug_url,
+    }
+
+
 @router.post("/clips/long-upload")
 async def upload_long_video(
     course_id: int = Form(...),

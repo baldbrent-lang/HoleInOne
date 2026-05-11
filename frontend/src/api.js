@@ -165,6 +165,10 @@ export const api = {
   updateCourse: (key, id, payload) => request(`/api/admin/courses/${id}`, { method: "PATCH", body: payload, adminPassword: key }),
   stats: (key) => request(`/api/admin/stats`, { adminPassword: key }),
   flaggedClips: (key) => request(`/api/admin/flagged-clips`, { adminPassword: key }),
+  listAllClips: (key, limit = 100) =>
+    request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
+  retryTracer: (key, clipId) =>
+    request(`/api/admin/clips/${clipId}/retry-tracer`, { method: "POST", adminPassword: key }),
   listParticipants: (key, params = {}) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
