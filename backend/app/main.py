@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,6 +15,18 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .config import settings
 from .database import Base, engine
 from .routers import admin, auth, broadcast, gallery, operator, public, webhooks
+
+# Our internal loggers (`golfreelz.tracer`, `golfreelz.admin`, etc.) default to
+# WARNING and uvicorn doesn't configure them, so INFO diagnostics were never
+# making it to the Replit console. Attach a stdout handler at INFO once at
+# import time so retry / encode / heatmap stats show up next to uvicorn's own
+# request logs.
+_glog = logging.getLogger("golfreelz")
+_glog.setLevel(logging.INFO)
+if not _glog.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _glog.addHandler(_h)
 
 app = FastAPI(title="GolfReelz API", version="0.1.0")
 
