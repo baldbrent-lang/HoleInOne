@@ -57,13 +57,23 @@ WARMUP_FRAMES = 12
 #   - Ball mid-flight against sky: ~3-4px wide, ~7-15px area
 #   - Body / club shaft: thousands of pixels — easily filtered by
 #     MAX_BALL_AREA
-MIN_BALL_AREA = 2
+MIN_BALL_AREA = 3
 MAX_BALL_AREA = 400
 MIN_BALL_RADIUS = 0.5
 MAX_BALL_RADIUS = 18.0
 
 # Motion blur elongates the ball; allow a forgiving floor.
-MIN_CIRCULARITY = 0.40
+# Bumped 0.40 → 0.55 after first MOG2 run showed body-edge fragments
+# (slightly oblong) sneaking through.
+MIN_CIRCULARITY = 0.55
+
+# Any single foreground blob larger than this is treated as "the body
+# or club arc" — the bounding box (plus a buffer) is excluded from
+# candidate extraction so we don't pick up hundreds of silhouette
+# fragments. The body is reliably the biggest motion blob in any
+# par-3 shot from a tee-cam mount.
+BODY_BLOB_MIN_AREA = 1500
+BODY_BBOX_BUFFER_PX = 30
 
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
@@ -327,15 +337,28 @@ def _candidates_from_mask(fg_mask):
     foreground mask. Color-agnostic — works for the ball whether it's
     white-on-grass or dark-on-sky.
 
-    The body and club are giant blobs in the mask; the size cap kills
-    them. Body silhouette edge fragments tend to be elongated and fail
-    the circularity gate. Real ball motion produces small, round
-    foreground blobs."""
-    # Tiny morphological close to fill speckles inside the ball blob,
-    # then open to break thin connections to body silhouette edges.
-    mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    Critical step: find the largest motion blob (the golfer's body /
+    club arc) and exclude its bounding box from candidate extraction.
+    Without this the body silhouette generates hundreds of small
+    ball-shaped fragments per frame that completely drown out the real
+    ball detection.
+    """
+    # Bigger close kernel (5x5) to merge body silhouette fragments
+    # into one connected blob so we can find it as the largest contour.
+    mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+
+    # Largest contour = body / club arc. Bounding-box-exclude it.
+    largest = max(contours, key=cv2.contourArea)
+    body_bbox = None
+    if cv2.contourArea(largest) >= BODY_BLOB_MIN_AREA:
+        x, y, w, h = cv2.boundingRect(largest)
+        b = BODY_BBOX_BUFFER_PX
+        body_bbox = (x - b, y - b, x + w + b, y + h + b)
+
     out = []
     for c in contours:
         area = cv2.contourArea(c)
@@ -343,6 +366,11 @@ def _candidates_from_mask(fg_mask):
             continue
         (cx, cy), radius = cv2.minEnclosingCircle(c)
         if not (MIN_BALL_RADIUS <= radius <= MAX_BALL_RADIUS):
+            continue
+        if body_bbox is not None and (
+            body_bbox[0] <= cx <= body_bbox[2] and body_bbox[1] <= cy <= body_bbox[3]
+        ):
+            # Inside the body / club arc — skip.
             continue
         perimeter = cv2.arcLength(c, True)
         if perimeter <= 0:
