@@ -31,8 +31,11 @@ except Exception:  # pragma: no cover
 
 # Kept in sync with tools/tracer_spike.py — tune both files together if
 # you change a threshold during validation.
-HSV_LOWER = (0, 0, 200)
-HSV_UPPER = (180, 70, 255)
+HSV_LOWER = (0, 0, 215)
+# Tightened saturation cap (was 70) — sky and clouds tend to carry a
+# subtle blue tint with non-trivial saturation; real golf balls are
+# almost achromatic.
+HSV_UPPER = (180, 38, 255)
 
 # Real-world tuning notes for GoPro Hero 13 at 1080p60, mounted 4-6ft
 # behind a right-handed golfer:
@@ -48,12 +51,20 @@ MIN_BALL_RADIUS = 0.8
 MAX_BALL_RADIUS = 22.0
 
 MIN_CIRCULARITY = 0.45
-MOTION_DIFF_THRESHOLD = 18
+# Raised from 18 → 28: sky / wind-blown leaves register at ~10-25 in
+# absolute pixel diff. Real ball motion frame-to-frame is much higher
+# (a hit ball is a high-contrast white pixel transition).
+MOTION_DIFF_THRESHOLD = 28
 
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
 MIN_TRACK_LENGTH = 5
 MAX_PARABOLA_RESIDUAL = 22.0
+# A "trajectory" stuck in one corner of the sky (random noise) often
+# has tiny total displacement. A real ball flight covers a big chunk
+# of the frame. Reject anything whose total motion is smaller than
+# this (in pixels, measured as max of x-range or y-range).
+MIN_TRAJECTORY_SPAN_PX = 60.0
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
@@ -119,12 +130,16 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Snapshot the first frame and the first frame-with-candidates so we
-    # can emit a debug JPG even when detection fails downstream.
+    # Snapshot frames for the debug JPG. We pick the *busiest* frame
+    # (the one with the most candidate detections) rather than the first
+    # frame with any candidates — that's almost always pre-swing sky
+    # noise. The busiest frame is usually near impact, where a real ball
+    # plus surrounding motion blur generates lots of candidates.
     first_frame_snapshot = None
-    debug_frame = None
-    debug_frame_idx = -1
-    debug_candidates: list[tuple[float, float, float]] = []
+    busiest_frame = None
+    busiest_frame_idx = -1
+    busiest_candidates: list[tuple[float, float, float]] = []
+    busiest_count = 0
 
     prev_gray = None
     idx = 0
@@ -135,10 +150,11 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         if first_frame_snapshot is None:
             first_frame_snapshot = frame.copy()
         cands = _candidates(frame, prev_gray, hsv_lower, hsv_upper)
-        if debug_frame is None and cands:
-            debug_frame = frame.copy()
-            debug_frame_idx = idx
-            debug_candidates = list(cands)
+        if len(cands) > busiest_count:
+            busiest_count = len(cands)
+            busiest_frame = frame.copy()
+            busiest_frame_idx = idx
+            busiest_candidates = list(cands)
         for cx, cy, r in cands:
             detections.append(_Det(idx, cx, cy, r))
         prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -146,8 +162,10 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     cap.release()
 
     if debug_path is not None:
-        _write_debug(debug_path, debug_frame, debug_frame_idx, debug_candidates,
-                     first_frame_snapshot, len(detections))
+        _write_debug(
+            debug_path, busiest_frame, busiest_frame_idx, busiest_candidates,
+            first_frame_snapshot, detections,
+        )
 
     track = _pick_best(_link(detections))
     if not track:
@@ -188,23 +206,33 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     }
 
 
-def _write_debug(path, debug_frame, debug_idx, debug_cands, first_frame, total_candidates):
-    """Save a diagnostic JPG: first frame that had any candidates with
-    them circled in red; or the first frame of the video with a
-    "0 candidates" overlay if detection found nothing at all."""
-    if debug_frame is not None:
-        for cx, cy, r in debug_cands:
-            cv2.circle(debug_frame, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
-        msg = f"frame {debug_idx}: {len(debug_cands)} candidates here / {total_candidates} total"
-        cv2.putText(debug_frame, msg, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
-        cv2.imwrite(str(path), debug_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-    elif first_frame is not None:
-        cv2.putText(
-            first_frame,
-            "0 candidates - HSV/motion gates may be too strict",
-            (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA,
+def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame, all_detections):
+    """Diagnostic JPG with the spatial pattern of every detection.
+
+    Base image = the busiest frame (most candidates in one frame), or
+    the first frame if nothing ever made it through the gates. We
+    overlay every detection from every frame as a small yellow dot, so
+    a real ball flight appears as a curved sweep across the frame,
+    while sky/cloud noise appears as a cluster up top. Red circles
+    additionally mark the busiest frame's candidates."""
+    base = busiest_frame if busiest_frame is not None else first_frame
+    if base is None:
+        return
+    # Tiny yellow dots for every detection across the whole video.
+    for d in all_detections:
+        cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
+    if busiest_cands:
+        # Red circles on the busiest frame's candidates, plus a label.
+        for cx, cy, r in busiest_cands:
+            cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
+        msg = (
+            f"busiest frame {busiest_idx}: {len(busiest_cands)} cands "
+            f"/ {len(all_detections)} total across clip"
         )
-        cv2.imwrite(str(path), first_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    else:
+        msg = "0 candidates - HSV/motion gates too strict (or no white objects in frame)"
+    cv2.putText(base, msg, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+    cv2.imwrite(str(path), base, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
 
 
 def _candidates(frame_bgr, prev_gray, hsv_lower, hsv_upper):
@@ -301,6 +329,12 @@ def _pick_best(trajectories):
     for t in trajectories:
         r = _residual(t)
         if r > MAX_PARABOLA_RESIDUAL:
+            continue
+        xs = [p.x for p in t]
+        ys = [p.y for p in t]
+        span = max(max(xs) - min(xs), max(ys) - min(ys))
+        if span < MIN_TRAJECTORY_SPAN_PX:
+            # Stuck-in-corner noise. Real ball flight sweeps across the frame.
             continue
         scored.append((r - 0.5 * len(t), t))
     if not scored:
