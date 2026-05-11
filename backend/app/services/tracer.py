@@ -31,31 +31,39 @@ except Exception:  # pragma: no cover
 
 # Kept in sync with tools/tracer_spike.py — tune both files together if
 # you change a threshold during validation.
-HSV_LOWER = (0, 0, 210)
-# Middle ground after iteration: 70 was too permissive (caught sky/clouds),
-# 38 was too strict (caught nothing in real footage). 55 admits a real
-# golf ball (which can pick up subtle saturation from grass reflections,
-# motion blur, or shadow) while still rejecting most overcast sky.
-HSV_UPPER = (180, 55, 255)
+# Kept in sync with tools/tracer_spike.py — tune both files together if
+# you change a threshold during validation.
+#
+# v2: dropped the HSV "is it white?" color filter entirely. The old
+# approach worked when the ball was on grass (white-on-green) but failed
+# completely when the ball climbed into bright overcast sky, where it
+# appears as a DARK silhouette against bright clouds, not as a white
+# pixel. We now use MOG2 background subtraction to detect any pixel
+# that differs from the static scene — lighter OR darker — then filter
+# by size, radius, and circularity.
+
+# MOG2 sensitivity. Higher = stricter, fewer foreground pixels.
+BG_VAR_THRESHOLD = 16
+
+# Skip the first N frames of candidate extraction so the background
+# model has time to converge. The frames are still fed to the
+# subtractor (to build the model), just not searched for candidates.
+WARMUP_FRAMES = 12
 
 # Real-world tuning notes for GoPro Hero 13 at 1080p60, mounted 4-6ft
 # behind a right-handed golfer:
-#   - At impact the ball is ~6ft from camera → ~30px diameter (~700 area)
-#     so MAX_BALL_AREA / MAX_BALL_RADIUS need headroom or the close-up
-#     impact frames get rejected.
-#   - At 50yd downrange the ball is ~3-4px diameter, near MIN floor.
-#   - Motion blur at 1/240 or slower shutter elongates the ball, so the
-#     circularity floor needs to be forgiving.
-MIN_BALL_AREA = 3
-MAX_BALL_AREA = 900
-MIN_BALL_RADIUS = 0.8
-MAX_BALL_RADIUS = 22.0
+#   - Ball just past impact (frame 2 in test footage): ~4-6px wide,
+#     ~12-30px area
+#   - Ball mid-flight against sky: ~3-4px wide, ~7-15px area
+#   - Body / club shaft: thousands of pixels — easily filtered by
+#     MAX_BALL_AREA
+MIN_BALL_AREA = 2
+MAX_BALL_AREA = 400
+MIN_BALL_RADIUS = 0.5
+MAX_BALL_RADIUS = 18.0
 
-MIN_CIRCULARITY = 0.45
-# Tuned middle ground after iteration: 18 caught too much noise, 28
-# rejected real ball motion in lower-light footage. 22 is a reasonable
-# compromise for most GoPro daylight clips.
-MOTION_DIFF_THRESHOLD = 22
+# Motion blur elongates the ball; allow a forgiving floor.
+MIN_CIRCULARITY = 0.40
 
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
@@ -120,9 +128,6 @@ def render_tracer(input_path: Path, output_path: Path, debug_path: Path | None =
 # --- internals --------------------------------------------------------------
 
 def _render(input_path: Path, output_path: Path, debug_path: Path | None = None) -> dict:
-    hsv_lower = np.array(HSV_LOWER)
-    hsv_upper = np.array(HSV_UPPER)
-
     detections: list[_Det] = []
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -131,18 +136,23 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    # MOG2 background subtractor: learns the static scene over the
+    # first ~WARMUP_FRAMES frames, then reports any pixel that differs
+    # from background (lighter OR darker — this is the key fix vs the
+    # old HSV approach which only saw white-on-darker pixels).
+    bg = cv2.createBackgroundSubtractorMOG2(
+        history=300, varThreshold=BG_VAR_THRESHOLD, detectShadows=False,
+    )
+
     # Snapshot frames for the debug JPG. We pick the *busiest* frame
     # (the one with the most candidate detections) rather than the first
-    # frame with any candidates — that's almost always pre-swing sky
-    # noise. The busiest frame is usually near impact, where a real ball
-    # plus surrounding motion blur generates lots of candidates.
+    # frame with any candidates — that's almost always pre-swing noise.
     first_frame_snapshot = None
     busiest_frame = None
     busiest_frame_idx = -1
     busiest_candidates: list[tuple[float, float, float]] = []
     busiest_count = 0
 
-    prev_gray = None
     idx = 0
     while True:
         ok, frame = cap.read()
@@ -150,7 +160,13 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             break
         if first_frame_snapshot is None:
             first_frame_snapshot = frame.copy()
-        cands = _candidates(frame, prev_gray, hsv_lower, hsv_upper)
+        # Always apply the subtractor (so it keeps learning) but skip
+        # candidate extraction until the model has converged.
+        fg_mask = bg.apply(frame)
+        if idx < WARMUP_FRAMES:
+            idx += 1
+            continue
+        cands = _candidates_from_mask(fg_mask)
         if len(cands) > busiest_count:
             busiest_count = len(cands)
             busiest_frame = frame.copy()
@@ -158,7 +174,6 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             busiest_candidates = list(cands)
         for cx, cy, r in cands:
             detections.append(_Det(idx, cx, cy, r))
-        prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         idx += 1
     cap.release()
 
@@ -307,18 +322,19 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
     cv2.imwrite(str(path), out, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
 
 
-def _candidates(frame_bgr, prev_gray, hsv_lower, hsv_upper):
-    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-    white_mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
-    if prev_gray is not None:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        diff = cv2.absdiff(gray, prev_gray)
-        _, motion_mask = cv2.threshold(diff, MOTION_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
-        motion_mask = cv2.dilate(motion_mask, np.ones((3, 3), np.uint8), iterations=1)
-        mask = cv2.bitwise_and(white_mask, motion_mask)
-    else:
-        mask = white_mask
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+def _candidates_from_mask(fg_mask):
+    """Extract small, roundish candidate ball positions from a binary
+    foreground mask. Color-agnostic — works for the ball whether it's
+    white-on-grass or dark-on-sky.
+
+    The body and club are giant blobs in the mask; the size cap kills
+    them. Body silhouette edge fragments tend to be elongated and fail
+    the circularity gate. Real ball motion produces small, round
+    foreground blobs."""
+    # Tiny morphological close to fill speckles inside the ball blob,
+    # then open to break thin connections to body silhouette edges.
+    mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     out = []
     for c in contours:
