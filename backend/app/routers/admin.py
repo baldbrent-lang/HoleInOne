@@ -628,6 +628,7 @@ async def upload_clip(
     ball_speed_mph: int | None = Form(None),
     distance_from_pin_feet: int | None = Form(None),
     ball_in_cup: bool = Form(False),
+    already_traced: bool = Form(False),
     video: UploadFile = File(...),
     video_green: UploadFile | None = File(None),
     db: Session = Depends(get_db),
@@ -682,11 +683,21 @@ async def upload_clip(
         if thumb_path else None
     )
 
-    # Render the classical-CV tracer overlay on the tee clip. Sync —
-    # admin uploads are already a long-running request and the operator
-    # wants to see the result. If detection fails, tracer_url stays null
-    # and the original clip is still saved + delivered.
-    tracer_url, tracer_info, tee_traced_path, tracer_debug_url = _run_tracer(fpath)
+    # When the operator says the clip is already traced (e.g. rendered
+    # in the Shot Tracer iOS/Android app before upload), skip our
+    # classical-CV pipeline entirely. The uploaded file IS the
+    # deliverable — point both source_url and tracer_url at it.
+    if already_traced:
+        tracer_url = f"{settings.app_base_url}/uploads/clips/{fname}"
+        tracer_info = {"ok": True, "source": "external", "note": "already_traced upload"}
+        tee_traced_path = None
+        tracer_debug_url = None
+    else:
+        # Render the classical-CV tracer overlay on the tee clip. Sync —
+        # admin uploads are already a long-running request and the operator
+        # wants to see the result. If detection fails, tracer_url stays null
+        # and the original clip is still saved + delivered.
+        tracer_url, tracer_info, tee_traced_path, tracer_debug_url = _run_tracer(fpath)
 
     # Dual-camera path: when a green-side clip is also uploaded, both
     # cameras are assumed to have started at the same moment. We run the
@@ -700,7 +711,7 @@ async def upload_clip(
     green_debug_url = None
     composite_url = None
     composite_info: dict | None = None
-    if video_green is not None:
+    if video_green is not None and not already_traced:
         green_data = await video_green.read()
         if green_data:
             if len(green_data) > 500 * 1024 * 1024:

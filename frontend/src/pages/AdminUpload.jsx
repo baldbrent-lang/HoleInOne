@@ -28,6 +28,7 @@ export default function AdminUpload() {
   const [ballSpeed, setBallSpeed] = useState("");
   const [distanceFromPin, setDistanceFromPin] = useState("");
   const [ballInCup, setBallInCup] = useState(false);
+  const [alreadyTraced, setAlreadyTraced] = useState(false);
   const [file, setFile] = useState(null);
   const [fileGreen, setFileGreen] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -64,8 +65,9 @@ export default function AdminUpload() {
     if (ballSpeed) fd.append("ball_speed_mph", ballSpeed);
     if (distanceFromPin) fd.append("distance_from_pin_feet", distanceFromPin);
     fd.append("ball_in_cup", ballInCup ? "true" : "false");
+    fd.append("already_traced", alreadyTraced ? "true" : "false");
     fd.append("video", file, file.name);
-    if (fileGreen) fd.append("video_green", fileGreen, fileGreen.name);
+    if (fileGreen && !alreadyTraced) fd.append("video_green", fileGreen, fileGreen.name);
 
     try {
       const data = await api.uploadClip(adminPassword, fd, setProgress);
@@ -220,6 +222,28 @@ export default function AdminUpload() {
             </div>
           </div>
 
+          <div className="field" style={{
+            background: alreadyTraced ? "var(--primary-soft)" : "var(--surface-alt)",
+            border: alreadyTraced ? "1px solid var(--emerald-200)" : "1px solid var(--border)",
+            borderRadius: 8, padding: "10px 12px", marginBottom: 12,
+          }}>
+            <label className="inline" style={{ gap: 10, margin: 0, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={alreadyTraced}
+                onChange={(e) => setAlreadyTraced(e.target.checked)}
+                style={{ width: "auto" }}
+              />
+              <span>
+                <b>This clip already has a tracer</b> <span className="small muted">(rendered in Shot Tracer app, etc.)</span>
+                <div className="hint small muted" style={{ marginTop: 2 }}>
+                  When checked, GolfReelz skips its auto-tracer and stores the clip as-is.
+                  Green-side composite is disabled — upload a single pre-traced clip.
+                </div>
+              </span>
+            </label>
+          </div>
+
           <div className="row">
             <div className="field" style={{ flex: 1 }}>
               <label>Tee-cam video <span className="muted small">(required)</span></label>
@@ -234,16 +258,22 @@ export default function AdminUpload() {
                 </div>
               )}
             </div>
-            <div className="field" style={{ flex: 1 }}>
+            <div className="field" style={{ flex: 1, opacity: alreadyTraced ? 0.4 : 1 }}>
               <label>Green-side video <span className="muted small">(optional)</span></label>
               <input
                 type="file"
                 accept="video/*"
+                disabled={alreadyTraced}
                 onChange={(e) => setFileGreen(e.target.files?.[0] || null)}
               />
-              {fileGreen && (
+              {fileGreen && !alreadyTraced && (
                 <div className="small muted" style={{ marginTop: 6 }}>
                   {fileGreen.name} · {(fileGreen.size / 1024 / 1024).toFixed(1)} MB
+                </div>
+              )}
+              {alreadyTraced && (
+                <div className="small muted" style={{ marginTop: 6 }}>
+                  Composite disabled when "already traced" is checked.
                 </div>
               )}
             </div>
