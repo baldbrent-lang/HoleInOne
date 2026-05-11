@@ -81,6 +81,20 @@ MIN_CIRCULARITY = 0.55
 BODY_BLOB_MIN_AREA = 1500
 BODY_BBOX_BUFFER_PX = 30
 
+# Motion-density "hot mask". After scanning the clip we have a per-pixel
+# count of how often that pixel showed up in the MOG2 foreground. The
+# golfer's body stays in roughly the same place across the entire swing,
+# so its pixels accumulate huge counts. Wind-blown leaves and tree edges
+# accumulate moderate counts. A real ball-flight pixel is touched in 1-2
+# frames at most. Thresholding the heatmap therefore gives us a static
+# "ignore" region that kills body silhouette, club corridor, and tree
+# noise in one pass — leaving the sparse, transient ball detections.
+# Threshold is taken as max(floor, pct * counted_frames) so it scales
+# with clip length but never drops below the floor on very short clips.
+HOT_MASK_PCT = 0.05
+HOT_MASK_MIN_HITS = 8
+HOT_MASK_DILATE_PX = 5
+
 # Performance ceilings. Without these the tracer runs for minutes on
 # long clips and the browser request times out before the server
 # finishes. These caps trade some coverage for keeping the round-trip
@@ -200,7 +214,6 @@ def render_tracer(input_path: Path, output_path: Path, debug_path: Path | None =
 # --- internals --------------------------------------------------------------
 
 def _render(input_path: Path, output_path: Path, debug_path: Path | None = None) -> dict:
-    detections: list[_Det] = []
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         return {"ok": False, "error": "could not open video", "n_points": 0, "n_candidates": 0}
@@ -222,19 +235,26 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         history=300, varThreshold=BG_VAR_THRESHOLD, detectShadows=False,
     )
 
-    # Snapshot frames for the debug JPG. Always store the NATIVE-res
-    # frame so the debug image is readable.
+    # Per-pixel foreground-hit count at detection resolution. After the
+    # scan finishes we threshold this to a binary "hot mask" of regions
+    # the ball never visits but the body/club/foliage always does.
+    heatmap = np.zeros((det_h, det_w), dtype=np.uint16)
+    counted_frames = 0  # frames after warmup that contributed to heatmap
+
+    # Raw candidates are stored at DETECTION resolution so we can index
+    # them into the heatmap before scaling survivors back to native.
+    raw_cands_det: list[tuple[int, float, float, float]] = []
     first_frame_snapshot = None
-    busiest_frame = None
-    busiest_frame_idx = -1
-    busiest_candidates: list[tuple[float, float, float]] = []
-    busiest_count = 0
 
     # Motion compensation state. Reference frame is the first frame we
     # see (at detection resolution, grayscale). Every subsequent frame is
     # warped INTO the reference's coordinate space before MOG2 sees it.
     ref_gray = None
     mc_failed_frames = 0
+    # Per-frame inverse affine transform (ref → current). Stored so we
+    # can apply the hot-mask filter in ref-coords (where the heatmap
+    # lives) and only then unwarp survivors back to current-frame coords.
+    frame_M_inv: dict[int, "np.ndarray | None"] = {}
 
     aborted_early = False
     idx = 0
@@ -278,49 +298,73 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         if idx < WARMUP_FRAMES:
             idx += 1
             continue
+        # Heatmap only accumulates when fg_mask lives in a consistent
+        # coord space across frames — i.e., motion-comp succeeded (or
+        # is disabled). A motion-comp-failed frame's mask is in raw
+        # current-frame coords and would smear the heatmap.
+        if M_to_ref is not None or not USE_MOTION_COMPENSATION:
+            heatmap += (fg_mask > 0).astype(np.uint16)
+            counted_frames += 1
+        if USE_MOTION_COMPENSATION:
+            frame_M_inv[idx] = (
+                cv2.invertAffineTransform(M_to_ref) if M_to_ref is not None else None
+            )
         cands_det = _candidates_from_mask(fg_mask)
-        # Inverse-warp candidates back to current-frame detection coords
-        # (they came out of MOG2 in reference-frame coords).
-        if cands_det and USE_MOTION_COMPENSATION and M_to_ref is not None:
-            M_inv = cv2.invertAffineTransform(M_to_ref)
-            cands_det = [
-                (
-                    float(M_inv[0, 0] * cx + M_inv[0, 1] * cy + M_inv[0, 2]),
-                    float(M_inv[1, 0] * cx + M_inv[1, 1] * cy + M_inv[1, 2]),
-                    r,
-                )
-                for (cx, cy, r) in cands_det
-            ]
-        if cands_det:
-            # Scale candidates from detection-res back to native coords.
-            inv = 1.0 / det_scale if det_scale != 0 else 1.0
-            cands = [(cx * inv, cy * inv, r * inv) for (cx, cy, r) in cands_det]
-        else:
-            cands = []
-        if len(cands) > busiest_count:
-            busiest_count = len(cands)
-            busiest_frame = frame.copy()
-            busiest_frame_idx = idx
-            busiest_candidates = list(cands)
-        for cx, cy, r in cands:
-            detections.append(_Det(idx, cx, cy, r))
-        if len(detections) > MAX_TOTAL_CANDIDATES:
+        # Store at REFERENCE-frame detection coords (no unwarp yet) so we
+        # can apply the hot-mask filter (which lives in ref coords) before
+        # paying the unwarp + scale cost. When motion-comp failed for
+        # this frame, frame_M_inv[idx] is None and the cand stays in
+        # current-frame coords; we'll skip the hot-mask filter for it
+        # downstream.
+        for cx, cy, r in cands_det:
+            raw_cands_det.append((idx, cx, cy, r))
+        if len(raw_cands_det) > MAX_TOTAL_CANDIDATES:
             aborted_early = True
             log.info("tracer: hit MAX_TOTAL_CANDIDATES=%d; aborting (noise overwhelming)", MAX_TOTAL_CANDIDATES)
             break
         if idx and idx % 120 == 0:
-            log.info("tracer: %d frames scanned, %d candidates so far", idx, len(detections))
+            log.info("tracer: %d frames scanned, %d raw cands so far", idx, len(raw_cands_det))
         idx += 1
     cap.release()
     if USE_MOTION_COMPENSATION:
         log.info("tracer: motion-comp registration failed on %d/%d frames",
                  mc_failed_frames, max(idx, 1))
+    total_frames_scanned = idx
 
-    # Stage B: prune candidates that aren't part of any short upward streak.
-    # The ball's initial flight phase generates a chain of detections moving
-    # consistently upward; random noise rarely does. Performed BEFORE the
-    # noise-ceiling abort check so an over-the-ceiling clip can still
-    # produce a usable result if the upward filter rescues it.
+    # Hot-mask: threshold the per-pixel heatmap into a binary "always
+    # moving" mask in ref-frame coords (body silhouette, club corridor,
+    # wind-blown foliage). A real ball touches each pixel for 1-2 frames
+    # so it sails through; static-corridor noise gets killed.
+    hot_mask = _build_hot_mask(heatmap, counted_frames)
+
+    # One-shot pass: filter by hot mask in ref coords, unwarp the
+    # survivor back to current-frame coords, scale to native. Frames
+    # where motion-comp failed keep their cand (no reliable hot-mask
+    # filtering possible) and skip the unwarp.
+    inv = 1.0 / det_scale if det_scale != 0 else 1.0
+    detections: list[_Det] = []
+    hot_rejected = 0
+    for f, cx, cy, r in raw_cands_det:
+        M_inv = frame_M_inv.get(f) if USE_MOTION_COMPENSATION else None
+        if M_inv is not None or not USE_MOTION_COMPENSATION:
+            iy, ix = int(cy), int(cx)
+            if 0 <= iy < det_h and 0 <= ix < det_w and hot_mask[iy, ix]:
+                hot_rejected += 1
+                continue
+        if M_inv is not None:
+            cx_cur = float(M_inv[0, 0] * cx + M_inv[0, 1] * cy + M_inv[0, 2])
+            cy_cur = float(M_inv[1, 0] * cx + M_inv[1, 1] * cy + M_inv[1, 2])
+        else:
+            cx_cur, cy_cur = cx, cy
+        detections.append(_Det(f, cx_cur * inv, cy_cur * inv, r * inv))
+    log.info(
+        "tracer: hot-mask kept %d / %d raw candidates (%d rejected)",
+        len(detections), len(raw_cands_det), hot_rejected,
+    )
+
+    # Stage B: prune candidates that aren't part of any short upward
+    # streak. Done AFTER hot-mask so the upward filter operates on a
+    # sparse field (no static-corridor noise contaminating the streaks).
     if USE_UPWARD_STREAK_FILTER and detections:
         seeds = _find_upward_seeds(detections)
         log.info("tracer: upward-streak filter kept %d/%d candidates",
@@ -328,26 +372,47 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     else:
         seeds = detections
 
+    # Recompute "busiest frame" from POST-hot-mask counts — what the
+    # upward-streak filter and linker actually see.
+    busiest_frame_idx = -1
+    busiest_count = 0
+    busiest_candidates: list[tuple[float, float, float]] = []
+    busiest_frame = None
+    if detections:
+        per_frame: dict[int, list[_Det]] = {}
+        for d in detections:
+            per_frame.setdefault(d.frame, []).append(d)
+        busiest_frame_idx = max(per_frame, key=lambda f: len(per_frame[f]))
+        bf = per_frame[busiest_frame_idx]
+        busiest_count = len(bf)
+        busiest_candidates = [(d.x, d.y, d.radius) for d in bf]
+        busiest_frame = _grab_frame(input_path, busiest_frame_idx)
+
     if debug_path is not None:
-        filmstrip = _sample_filmstrip(input_path, idx)
+        filmstrip = _sample_filmstrip(input_path, total_frames_scanned)
         _write_debug(
             debug_path, busiest_frame, busiest_frame_idx, busiest_candidates,
-            first_frame_snapshot, detections, seeds, filmstrip, idx, fps,
+            first_frame_snapshot, detections, seeds, filmstrip,
+            total_frames_scanned, fps,
+            n_raw=len(raw_cands_det), hot_mask=hot_mask, det_scale=det_scale,
+            native_size=(width, height),
         )
 
-    if aborted_early and len(detections) >= MAX_TOTAL_CANDIDATES and len(seeds) < MIN_TRACK_LENGTH:
-        # Detection blew past our noise ceiling AND the upward filter
-        # didn't rescue enough seeds to form a trajectory. Don't waste
-        # time on linking — the result won't be useful and the request
-        # would time out. The debug JPG still shows what we saw.
+    # Abort only if every filter failed to rescue a usable seed set —
+    # hot-mask + upward-streak might cut noise enough even on a clip
+    # that blew past the raw-candidate ceiling.
+    if aborted_early and len(raw_cands_det) >= MAX_TOTAL_CANDIDATES and len(seeds) < MIN_TRACK_LENGTH:
         return {
             "ok": False,
-            "error": f"noise overwhelming ({len(detections)}+ candidates) — check the debug image for the source (rain on lens, camera shake, etc.)",
+            "error": f"noise overwhelming ({len(raw_cands_det)}+ candidates pre-mask) — check the debug image for the source (rain on lens, camera shake, etc.)",
             "n_candidates": len(detections),
             "n_points": 0,
         }
 
-    log.info("tracer: linking %d detections (from %d raw)...", len(seeds), len(detections))
+    log.info(
+        "tracer: linking %d seeds (post-hot-mask: %d, raw: %d)...",
+        len(seeds), len(detections), len(raw_cands_det),
+    )
     track = _pick_best(_link(seeds))
     if not track:
         return {
@@ -388,6 +453,43 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     }
 
 
+def _build_hot_mask(heatmap, counted_frames: int):
+    """Threshold per-pixel hit counts into a binary 'always-moving' mask.
+
+    A real ball touches any given pixel for 1-2 frames, so the threshold
+    is set well above that floor. The body and tree corridors accumulate
+    counts in the dozens, so they cross the threshold easily.
+
+    Returned mask is uint8 {0,1}-valued at detection resolution, with a
+    small dilation applied to grow a buffer around hot regions.
+    """
+    if counted_frames <= 0:
+        return np.zeros(heatmap.shape, dtype=np.uint8)
+    threshold = max(HOT_MASK_MIN_HITS, int(counted_frames * HOT_MASK_PCT))
+    raw = (heatmap >= threshold).astype(np.uint8)
+    if HOT_MASK_DILATE_PX > 0:
+        k = HOT_MASK_DILATE_PX * 2 + 1
+        raw = cv2.dilate(raw, np.ones((k, k), np.uint8))
+    return raw
+
+
+def _grab_frame(input_path: Path, frame_idx: int):
+    """Re-open the video and read a specific frame at native resolution.
+
+    Used to fetch the post-filter busiest frame for the debug image
+    without keeping every frame in memory during the detection pass.
+    """
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return None
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
+        ok, frame = cap.read()
+        return frame if ok else None
+    finally:
+        cap.release()
+
+
 def _sample_filmstrip(input_path: Path, n_frames: int) -> list:
     """Pull 5 evenly-spaced frames from the clip, downscale them, and
     return as a list of small BGR images. Used to embed a visual
@@ -422,16 +524,18 @@ def _sample_filmstrip(input_path: Path, n_frames: int) -> list:
 
 
 def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
-                 all_detections, seed_detections, filmstrip, total_frames, fps):
+                 all_detections, seed_detections, filmstrip, total_frames, fps,
+                 n_raw=None, hot_mask=None, det_scale=1.0, native_size=None):
     """Diagnostic JPG composed of two parts stacked vertically.
 
     Top half = the busiest frame (most candidates seen) with:
-      - tiny yellow dots for every raw detection across the clip (so a
-        real ball flight shows as a curved sweep and sky noise shows as
-        a cluster up top)
-      - red circles around the busiest frame's specific candidates
+      - a red translucent overlay of the hot mask (the regions excluded
+        by the motion-density filter — body, club corridor, leaves)
+      - tiny yellow dots for every POST-hot-mask detection across the
+        clip
       - bright green dots for the candidates that survived the
         upward-streak prefilter — these should trace the actual ball arc
+      - red circles around the busiest frame's surviving candidates
 
     Bottom half = 5-frame filmstrip sampled evenly across the clip, so
     the operator can see what the video actually contains independent
@@ -445,6 +549,15 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
         return
 
     if base is not None:
+        if hot_mask is not None:
+            target_size = native_size if native_size else (base.shape[1], base.shape[0])
+            scaled = cv2.resize(
+                hot_mask, target_size, interpolation=cv2.INTER_NEAREST,
+            )
+            tint = np.zeros_like(base)
+            tint[..., 2] = 200  # red in BGR
+            mask3 = scaled.astype(bool)
+            base[mask3] = (0.55 * base[mask3] + 0.45 * tint[mask3]).astype(np.uint8)
         for d in all_detections:
             cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
         # Surviving upward-streak seeds: bigger, brighter, opaque green.
@@ -453,14 +566,20 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
         if busiest_cands:
             for cx, cy, r in busiest_cands:
                 cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
-            secs = total_frames / fps if fps > 0 else 0.0
+        secs = total_frames / fps if fps > 0 else 0.0
+        raw_str = f"raw: {n_raw}  |  " if n_raw is not None else ""
+        if busiest_cands:
             msg = (
                 f"clip: {total_frames}f / {secs:.1f}s  |  "
                 f"busiest frame {busiest_idx}: {len(busiest_cands)} cands  |  "
-                f"raw: {len(all_detections)}  |  upward-streak: {len(seed_detections)}"
+                f"{raw_str}post-mask: {len(all_detections)}  |  "
+                f"upward-streak: {len(seed_detections)}"
             )
         else:
-            msg = "0 candidates across entire clip - filters too strict, or no white moving objects in view"
+            msg = (
+                f"clip: {total_frames}f / {secs:.1f}s  |  "
+                f"0 cands survived hot-mask  |  {raw_str}post-mask: 0  |  upward-streak: 0"
+            )
         cv2.rectangle(base, (0, 0), (base.shape[1], 40), (0, 0, 0), -1)
         cv2.putText(base, msg, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                     (0, 0, 255), 2, cv2.LINE_AA)
