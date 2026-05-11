@@ -77,7 +77,7 @@ export default function AdminClips() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>All uploaded clips</h3>
+        <h3 style={{ marginBottom: 4 }}>All uploaded reelz</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
           Re-run the tracer on any clip without re-uploading. Useful while we're
           iterating on the detector — tune thresholds in the code, push, then
