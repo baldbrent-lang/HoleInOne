@@ -168,6 +168,18 @@ UPWARD_SEARCH_FRAMES = 2
 # circularity scaled by smallness, so the most ball-like survive.
 MAX_CANDIDATES_PER_FRAME = 40
 
+# Parabola extension. The upward-streak filter intentionally truncates
+# the track at the apex (the ball moves <6px upward there, so no chain
+# forms across it). Once we have a confident seed track of the rising
+# arc, we fit y(frame) as a quadratic + x(frame) as linear, sweep ALL
+# post-hot-mask detections, and pull in anything within `eps` of the
+# predicted position. This recovers the apex + early descent the streak
+# filter cut off. eps = max(min_px, mult * seed_rms_px) so it scales
+# with how clean the seed fit is.
+EXTEND_EPS_MIN_PX = 15.0
+EXTEND_EPS_MULT = 3.0
+EXTEND_BACKWARD_FRAMES = 3
+
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
 DASH_LENGTH = 14
@@ -426,15 +438,24 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         "tracer: linking %d seeds (post-hot-mask: %d, raw: %d)...",
         len(seeds), len(detections), len(raw_cands_det),
     )
-    track = _pick_best(_link(seeds))
-    if not track:
+    seed_track = _pick_best(_link(seeds))
+    if not seed_track:
         return {
             "ok": False,
             "error": "no usable trajectory",
             "n_candidates": len(detections),
             "n_points": 0,
         }
-    log.info("tracer: picked track of %d points, residual %.2fpx", len(track), _residual(track))
+    log.info(
+        "tracer: seed track %d points, residual %.2fpx",
+        len(seed_track), _residual(seed_track),
+    )
+    track = _extend_track(seed_track, detections, total_frames_scanned)
+    if len(track) > len(seed_track):
+        log.info(
+            "tracer: extended track %d → %d points (residual %.2fpx)",
+            len(seed_track), len(track), _residual(track),
+        )
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
@@ -739,6 +760,79 @@ def _residual(track):
     coeffs = np.polyfit(xs, ys, 2)
     pred = np.polyval(coeffs, xs)
     return float(np.sqrt(np.mean((ys - pred) ** 2)))
+
+
+def _extend_track(seed_track, all_detections, total_frames):
+    """Extend a confident seed track (rising arc) with apex + descent
+    detections from `all_detections`.
+
+    Fits the seed track as a frame-parameterized motion model:
+      y(frame) ≈ a*frame² + b*frame + c  (gravity)
+      x(frame) ≈ m*frame + n             (mostly straight horizontal)
+    then for every frame in [first_seed - margin, total_frames] picks
+    the closest post-hot-mask detection within `eps_px` of the predicted
+    point. Frames the seed already covers are kept as-is.
+
+    Uses frame parameterization (rather than y=f(x) like _residual) so
+    near-vertical trajectories — common from tee-cam views — can still
+    be modeled past their apex, where y becomes non-monotonic in x.
+    """
+    if len(seed_track) < 5:
+        return list(seed_track)
+    frames = np.array([d.frame for d in seed_track], dtype=np.float64)
+    xs = np.array([d.x for d in seed_track], dtype=np.float64)
+    ys = np.array([d.y for d in seed_track], dtype=np.float64)
+    if float(frames.max() - frames.min()) < 4:
+        return list(seed_track)
+    y_coef = np.polyfit(frames, ys, 2)
+    x_coef = np.polyfit(frames, xs, 1)
+    xs_pred = np.polyval(x_coef, frames)
+    ys_pred = np.polyval(y_coef, frames)
+    seed_rms = float(np.sqrt(np.mean((xs - xs_pred) ** 2 + (ys - ys_pred) ** 2)))
+    eps = max(EXTEND_EPS_MIN_PX, EXTEND_EPS_MULT * seed_rms)
+
+    first_f = int(frames.min())
+    last_f = int(frames.max())
+    window_start = max(0, first_f - EXTEND_BACKWARD_FRAMES)
+    window_end = total_frames
+
+    seed_frames = {int(d.frame) for d in seed_track}
+    by_frame: dict[int, list[_Det]] = {}
+    for d in all_detections:
+        f = int(d.frame)
+        if f in seed_frames:
+            continue
+        if not (window_start <= f <= window_end):
+            continue
+        by_frame.setdefault(f, []).append(d)
+
+    extra: list[_Det] = []
+    last_kept_f = last_f
+    for f in sorted(by_frame):
+        # Once we accept a point, predicting further out from there
+        # should still match the parabola — but if we miss too many
+        # frames in a row, stop extending forward (the ball has likely
+        # left the frame or trail has gone too cold).
+        if f > last_kept_f + MAX_FRAME_GAP * 2 and f > last_f:
+            break
+        py = float(np.polyval(y_coef, f))
+        px = float(np.polyval(x_coef, f))
+        best = None
+        best_err = float("inf")
+        for d in by_frame[f]:
+            err = float(np.hypot(d.x - px, d.y - py))
+            if err < best_err:
+                best_err = err
+                best = d
+        if best is not None and best_err <= eps:
+            extra.append(best)
+            last_kept_f = f
+
+    if not extra:
+        return list(seed_track)
+    out = list(seed_track) + extra
+    out.sort(key=lambda d: d.frame)
+    return out
 
 
 def _pick_best(trajectories):
