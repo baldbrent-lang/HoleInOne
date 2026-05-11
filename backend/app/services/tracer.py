@@ -75,6 +75,17 @@ MIN_CIRCULARITY = 0.55
 BODY_BLOB_MIN_AREA = 1500
 BODY_BBOX_BUFFER_PX = 30
 
+# Performance ceilings. Without these the tracer runs for minutes on
+# long clips and the browser request times out before the server
+# finishes. These caps trade some coverage for keeping the round-trip
+# under ~2 minutes on Replit's shared CPU.
+MAX_FRAMES_PROCESS = 900     # ~15s @ 60fps, ~30s @ 30fps
+MAX_TOTAL_CANDIDATES = 60000  # Early abort if drowning in noise
+# Downsample to at most this wide for detection. Track coordinates
+# are scaled back to native resolution before rendering so the
+# overlay still lines up.
+DETECT_MAX_WIDTH = 1280
+
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
 MIN_TRACK_LENGTH = 5
@@ -146,37 +157,52 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # MOG2 background subtractor: learns the static scene over the
-    # first ~WARMUP_FRAMES frames, then reports any pixel that differs
-    # from background (lighter OR darker — this is the key fix vs the
-    # old HSV approach which only saw white-on-darker pixels).
+    # Downsample for detection so MOG2 + contour finding don't drag.
+    # Candidates are scaled back to native coords before being stored,
+    # so the rendered overlay stays aligned with the source video.
+    det_scale = 1.0
+    if width > DETECT_MAX_WIDTH:
+        det_scale = DETECT_MAX_WIDTH / float(width)
+    det_w = max(1, int(round(width * det_scale)))
+    det_h = max(1, int(round(height * det_scale)))
+    log.info("tracer: %s %dx%d @ %.1ffps  detect@%dx%d", input_path.name, width, height, fps, det_w, det_h)
+
     bg = cv2.createBackgroundSubtractorMOG2(
         history=300, varThreshold=BG_VAR_THRESHOLD, detectShadows=False,
     )
 
-    # Snapshot frames for the debug JPG. We pick the *busiest* frame
-    # (the one with the most candidate detections) rather than the first
-    # frame with any candidates — that's almost always pre-swing noise.
+    # Snapshot frames for the debug JPG. Always store the NATIVE-res
+    # frame so the debug image is readable.
     first_frame_snapshot = None
     busiest_frame = None
     busiest_frame_idx = -1
     busiest_candidates: list[tuple[float, float, float]] = []
     busiest_count = 0
 
+    aborted_early = False
     idx = 0
     while True:
         ok, frame = cap.read()
         if not ok:
             break
+        if idx >= MAX_FRAMES_PROCESS:
+            aborted_early = True
+            log.info("tracer: hit MAX_FRAMES_PROCESS=%d cap; stopping detection", MAX_FRAMES_PROCESS)
+            break
         if first_frame_snapshot is None:
             first_frame_snapshot = frame.copy()
-        # Always apply the subtractor (so it keeps learning) but skip
-        # candidate extraction until the model has converged.
-        fg_mask = bg.apply(frame)
+        det_frame = cv2.resize(frame, (det_w, det_h)) if det_scale != 1.0 else frame
+        fg_mask = bg.apply(det_frame)
         if idx < WARMUP_FRAMES:
             idx += 1
             continue
-        cands = _candidates_from_mask(fg_mask)
+        cands_det = _candidates_from_mask(fg_mask)
+        if cands_det:
+            # Scale candidates from detection-res back to native coords.
+            inv = 1.0 / det_scale if det_scale != 0 else 1.0
+            cands = [(cx * inv, cy * inv, r * inv) for (cx, cy, r) in cands_det]
+        else:
+            cands = []
         if len(cands) > busiest_count:
             busiest_count = len(cands)
             busiest_frame = frame.copy()
@@ -184,6 +210,12 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             busiest_candidates = list(cands)
         for cx, cy, r in cands:
             detections.append(_Det(idx, cx, cy, r))
+        if len(detections) > MAX_TOTAL_CANDIDATES:
+            aborted_early = True
+            log.info("tracer: hit MAX_TOTAL_CANDIDATES=%d; aborting (noise overwhelming)", MAX_TOTAL_CANDIDATES)
+            break
+        if idx and idx % 120 == 0:
+            log.info("tracer: %d frames scanned, %d candidates so far", idx, len(detections))
         idx += 1
     cap.release()
 
@@ -194,6 +226,19 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             first_frame_snapshot, detections, filmstrip, idx, fps,
         )
 
+    if aborted_early and len(detections) >= MAX_TOTAL_CANDIDATES:
+        # Detection blew past our noise ceiling. Don't waste time on
+        # trajectory linking or rendering — the result won't be useful
+        # and the request would time out. The debug JPG still shows
+        # what we saw so the operator can tell why.
+        return {
+            "ok": False,
+            "error": f"noise overwhelming ({len(detections)}+ candidates) — check the debug image for the source (rain on lens, camera shake, etc.)",
+            "n_candidates": len(detections),
+            "n_points": 0,
+        }
+
+    log.info("tracer: linking %d detections...", len(detections))
     track = _pick_best(_link(detections))
     if not track:
         return {
@@ -202,6 +247,7 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             "n_candidates": len(detections),
             "n_points": 0,
         }
+    log.info("tracer: picked track of %d points, residual %.2fpx", len(track), _residual(track))
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))

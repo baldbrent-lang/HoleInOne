@@ -33,18 +33,31 @@ async function operatorRequest(path) {
   return res.json();
 }
 
-async function request(path, { method = "GET", body, adminPassword, auth = true } = {}) {
+async function request(path, { method = "GET", body, adminPassword, auth = true, timeoutMs } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (adminPassword) headers["X-Admin-Password"] = adminPassword;
   if (auth) {
     const t = getUserToken();
     if (t) headers["Authorization"] = `Bearer ${t}`;
   }
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const controller = timeoutMs ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller?.signal,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error(`request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status}: ${text}`);
@@ -168,7 +181,11 @@ export const api = {
   listAllClips: (key, limit = 100) =>
     request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
   retryTracer: (key, clipId) =>
-    request(`/api/admin/clips/${clipId}/retry-tracer`, { method: "POST", adminPassword: key }),
+    // Tracer can run ~1-3 min on long clips. Time out at 4 min so the
+    // UI doesn't spin forever if the server hangs or gets killed.
+    request(`/api/admin/clips/${clipId}/retry-tracer`, {
+      method: "POST", adminPassword: key, timeoutMs: 240_000,
+    }),
   listParticipants: (key, params = {}) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
