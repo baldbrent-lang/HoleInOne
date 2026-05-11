@@ -31,11 +31,12 @@ except Exception:  # pragma: no cover
 
 # Kept in sync with tools/tracer_spike.py — tune both files together if
 # you change a threshold during validation.
-HSV_LOWER = (0, 0, 215)
-# Tightened saturation cap (was 70) — sky and clouds tend to carry a
-# subtle blue tint with non-trivial saturation; real golf balls are
-# almost achromatic.
-HSV_UPPER = (180, 38, 255)
+HSV_LOWER = (0, 0, 210)
+# Middle ground after iteration: 70 was too permissive (caught sky/clouds),
+# 38 was too strict (caught nothing in real footage). 55 admits a real
+# golf ball (which can pick up subtle saturation from grass reflections,
+# motion blur, or shadow) while still rejecting most overcast sky.
+HSV_UPPER = (180, 55, 255)
 
 # Real-world tuning notes for GoPro Hero 13 at 1080p60, mounted 4-6ft
 # behind a right-handed golfer:
@@ -51,10 +52,10 @@ MIN_BALL_RADIUS = 0.8
 MAX_BALL_RADIUS = 22.0
 
 MIN_CIRCULARITY = 0.45
-# Raised from 18 → 28: sky / wind-blown leaves register at ~10-25 in
-# absolute pixel diff. Real ball motion frame-to-frame is much higher
-# (a hit ball is a high-contrast white pixel transition).
-MOTION_DIFF_THRESHOLD = 28
+# Tuned middle ground after iteration: 18 caught too much noise, 28
+# rejected real ball motion in lower-light footage. 22 is a reasonable
+# compromise for most GoPro daylight clips.
+MOTION_DIFF_THRESHOLD = 22
 
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
@@ -162,9 +163,10 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     cap.release()
 
     if debug_path is not None:
+        filmstrip = _sample_filmstrip(input_path, idx)
         _write_debug(
             debug_path, busiest_frame, busiest_frame_idx, busiest_candidates,
-            first_frame_snapshot, detections,
+            first_frame_snapshot, detections, filmstrip, idx, fps,
         )
 
     track = _pick_best(_link(detections))
@@ -206,33 +208,103 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     }
 
 
-def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame, all_detections):
-    """Diagnostic JPG with the spatial pattern of every detection.
+def _sample_filmstrip(input_path: Path, n_frames: int) -> list:
+    """Pull 5 evenly-spaced frames from the clip, downscale them, and
+    return as a list of small BGR images. Used to embed a visual
+    timeline of the clip in the debug JPG so the operator can see what
+    actually happens in the video regardless of detection success."""
+    if n_frames <= 0:
+        return []
+    out = []
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return []
+    try:
+        pcts = (0.05, 0.27, 0.5, 0.73, 0.95)
+        for pct in pcts:
+            target_idx = max(0, min(n_frames - 1, int(n_frames * pct)))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            h, w = frame.shape[:2]
+            tile_h = 200
+            tile_w = max(1, int(w * tile_h / max(h, 1)))
+            small = cv2.resize(frame, (tile_w, tile_h))
+            label = f"{int(pct * 100)}%  f{target_idx}"
+            cv2.rectangle(small, (0, 0), (tile_w, 22), (0, 0, 0), -1)
+            cv2.putText(small, label, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (255, 255, 255), 1, cv2.LINE_AA)
+            out.append(small)
+    finally:
+        cap.release()
+    return out
 
-    Base image = the busiest frame (most candidates in one frame), or
-    the first frame if nothing ever made it through the gates. We
-    overlay every detection from every frame as a small yellow dot, so
-    a real ball flight appears as a curved sweep across the frame,
-    while sky/cloud noise appears as a cluster up top. Red circles
-    additionally mark the busiest frame's candidates."""
-    base = busiest_frame if busiest_frame is not None else first_frame
-    if base is None:
+
+def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
+                 all_detections, filmstrip, total_frames, fps):
+    """Diagnostic JPG composed of two parts stacked vertically.
+
+    Top half = the busiest frame (most candidates seen) with:
+      - tiny yellow dots for every detection across the entire clip
+        (so a real ball flight shows as a curved sweep; sky noise shows
+        as a cluster up top)
+      - red circles around the busiest frame's specific candidates
+
+    Bottom half = 5-frame filmstrip sampled evenly across the clip, so
+    the operator can see what the video actually contains independent
+    of whether anything was detected. Crucial when zero candidates
+    came through the gates — we need to know if it's a filter problem
+    or a "the clip has no swing in it" problem."""
+    base = busiest_frame.copy() if busiest_frame is not None else (
+        first_frame.copy() if first_frame is not None else None
+    )
+    if base is None and not filmstrip:
         return
-    # Tiny yellow dots for every detection across the whole video.
-    for d in all_detections:
-        cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
-    if busiest_cands:
-        # Red circles on the busiest frame's candidates, plus a label.
-        for cx, cy, r in busiest_cands:
-            cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
-        msg = (
-            f"busiest frame {busiest_idx}: {len(busiest_cands)} cands "
-            f"/ {len(all_detections)} total across clip"
-        )
+
+    if base is not None:
+        for d in all_detections:
+            cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
+        if busiest_cands:
+            for cx, cy, r in busiest_cands:
+                cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
+            secs = total_frames / fps if fps > 0 else 0.0
+            msg = (
+                f"clip: {total_frames}f / {secs:.1f}s  |  "
+                f"busiest frame {busiest_idx}: {len(busiest_cands)} cands  |  "
+                f"total cands across clip: {len(all_detections)}"
+            )
+        else:
+            msg = "0 candidates across entire clip - filters too strict, or no white moving objects in view"
+        cv2.rectangle(base, (0, 0), (base.shape[1], 40), (0, 0, 0), -1)
+        cv2.putText(base, msg, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+                    (0, 0, 255), 2, cv2.LINE_AA)
+
+    strip = None
+    if filmstrip:
+        strip = np.hstack(filmstrip)
+        # Pad / scale strip to match base width if base exists
+        if base is not None:
+            base_w = base.shape[1]
+            sh, sw = strip.shape[:2]
+            if sw < base_w:
+                pad = np.zeros((sh, base_w - sw, 3), dtype=np.uint8)
+                strip = np.hstack([strip, pad])
+            elif sw > base_w:
+                new_h = int(sh * base_w / sw)
+                strip = cv2.resize(strip, (base_w, new_h))
+        # Add a header bar over the filmstrip
+        cv2.rectangle(strip, (0, 0), (strip.shape[1], 24), (40, 40, 40), -1)
+        cv2.putText(strip, "Clip timeline (5 frames)", (8, 17),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+    if base is not None and strip is not None:
+        out = np.vstack([base, strip])
+    elif base is not None:
+        out = base
     else:
-        msg = "0 candidates - HSV/motion gates too strict (or no white objects in frame)"
-    cv2.putText(base, msg, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
-    cv2.imwrite(str(path), base, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        out = strip
+    cv2.imwrite(str(path), out, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
 
 
 def _candidates(frame_bgr, prev_gray, hsv_lower, hsv_upper):
