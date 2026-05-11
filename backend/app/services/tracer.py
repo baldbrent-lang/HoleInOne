@@ -126,7 +126,14 @@ MIN_TRAJECTORY_SPAN_PX = 60.0
 # current frame into reference coords, then feed the WARPED frame to MOG2.
 # This collapses camera-shake noise so MOG2 only flags genuine scene motion.
 # Detections are inverse-warped back to current-frame coords for rendering.
-USE_MOTION_COMPENSATION = True
+#
+# Default OFF: on tripod-mounted tee-cam footage (the production case) MC
+# isn't earning its keep — and when `_estimate_cur_to_ref` silently fails
+# (ORB+RANSAC is flaky on HEVC iPhone footage with uniform grass/sky), the
+# heatmap stops accumulating and the hot-mask filter degenerates to a
+# no-op. Flip back to True only for handheld footage where camera shake
+# is visible in the raw clip.
+USE_MOTION_COMPENSATION = False
 MC_ORB_FEATURES = 500
 MC_MIN_MATCHES = 30
 MC_RANSAC_REPROJ_PX = 3.0
@@ -336,6 +343,12 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # wind-blown foliage). A real ball touches each pixel for 1-2 frames
     # so it sails through; static-corridor noise gets killed.
     hot_mask = _build_hot_mask(heatmap, counted_frames)
+    hot_pixels = int(hot_mask.sum()) if hot_mask is not None else 0
+    log.info(
+        "tracer: heatmap counted_frames=%d  hot_mask non-zero px=%d (%.1f%% of detect area)",
+        counted_frames, hot_pixels,
+        100.0 * hot_pixels / max(1, det_w * det_h),
+    )
 
     # One-shot pass: filter by hot mask in ref coords, unwarp the
     # survivor back to current-frame coords, scale to native. Frames
