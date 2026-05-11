@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
+
+log = logging.getLogger("golfreelz.admin")
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy import func
@@ -36,7 +39,7 @@ from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
 from ..services.tracer import have_tracer, render_tracer
-from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail
+from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -697,9 +700,23 @@ def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, 
         traced_path.unlink(missing_ok=True)
         return None, info, None, debug_url
     # OpenCV writes mp4v; re-encode to H.264 + faststart for browser playback.
-    compress_for_email(traced_path)
+    compressed = compress_for_email(traced_path)
+    if not compressed:
+        log.warning(
+            "tracer: compress_for_email returned False for %s — file likely still mp4v, browser playback may fail",
+            traced_path.name,
+        )
     if not traced_path.exists() or traced_path.stat().st_size == 0:
         return None, {"ok": False, "error": "post-encode produced empty file"}, None, debug_url
+    # Probe the final file so we can spot mp4v-leftover or VFR-timestamp
+    # bugs in the logs (symptoms: "still photo with claimed duration").
+    probe = probe_video_info(traced_path)
+    log.info(
+        "tracer: traced output %s  codec=%s  fps=%s  nb_frames=%s  duration=%ss  size=%dB",
+        traced_path.name, probe.get("codec"), probe.get("fps"),
+        probe.get("nb_frames"), probe.get("duration"),
+        traced_path.stat().st_size,
+    )
     return f"{settings.app_base_url}/uploads/clips/{traced_name}", info, traced_path, debug_url
 
 

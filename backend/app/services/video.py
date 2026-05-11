@@ -160,6 +160,53 @@ def extract_thumbnail(video_path: Path) -> Path | None:
     return None
 
 
+def probe_video_info(path: Path) -> dict:
+    """Return a small dict of video diagnostics: codec, fps, nb_frames,
+    duration. Missing fields are None. Used to verify the output of the
+    tracer encode pipeline — cv2's mp4v writer can produce files whose
+    container duration looks right but whose timestamps are bunched up,
+    so we need to see the actual codec + frame count to spot it.
+    """
+    info: dict = {"codec": None, "fps": None, "nb_frames": None, "duration": None}
+    if not have_ffmpeg():
+        return info
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,r_frame_rate,nb_frames:format=duration",
+                "-of", "json", str(path),
+            ],
+            stderr=subprocess.STDOUT,
+            timeout=20,
+        )
+        data = json.loads(out)
+        stream = (data.get("streams") or [{}])[0]
+        info["codec"] = stream.get("codec_name")
+        rfr = stream.get("r_frame_rate")
+        if rfr and "/" in rfr:
+            num, den = rfr.split("/", 1)
+            try:
+                d = float(den)
+                info["fps"] = float(num) / d if d else None
+            except (TypeError, ValueError):
+                info["fps"] = None
+        nb = stream.get("nb_frames")
+        try:
+            info["nb_frames"] = int(nb) if nb is not None else None
+        except (TypeError, ValueError):
+            info["nb_frames"] = None
+        dur = (data.get("format") or {}).get("duration")
+        try:
+            info["duration"] = float(dur) if dur is not None else None
+        except (TypeError, ValueError):
+            info["duration"] = None
+    except Exception as exc:  # pragma: no cover
+        log.warning("ffprobe video-info failed for %s: %s", path, exc)
+    return info
+
+
 def _probe_duration(path: Path) -> Optional[float]:
     try:
         out = subprocess.check_output(
@@ -217,6 +264,11 @@ def _encode(input_path: Path, video_kbps: int, target_mb: int) -> bool:
                 "-maxrate", f"{int(video_kbps * 1.5)}k",
                 "-bufsize", f"{video_kbps * 2}k",
                 "-pix_fmt", "yuv420p",
+                # Force constant frame rate. cv2's mp4v intermediate
+                # sometimes carries weird per-frame timestamps that
+                # collapse into a "0→duration in a blink" player
+                # experience if we let ffmpeg pass them through.
+                "-fps_mode", "cfr",
                 "-c:a", "aac",
                 "-b:a", f"{AUDIO_KBPS}k",
                 "-ac", "2",
