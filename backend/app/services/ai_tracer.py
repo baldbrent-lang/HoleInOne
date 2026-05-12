@@ -64,10 +64,21 @@ class _Det:
 # different vision model is preferred for cost (e.g. claude-haiku-4-5).
 MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 
-# Number of anchor frames sent to Claude. 8 covers most par-3 flight
-# arcs at typical 60fps clips (~3-5s flight = 180-300 frames) while
-# keeping per-clip cost reasonable.
-N_ANCHOR_FRAMES = 8
+# Number of anchor frames sent to Claude. Two-pass strategy:
+#   Pass 1: N_ANCHORS_SCOUT frames spread across the whole clip to
+#           find which window contains the ball in flight.
+#   Pass 2: N_ANCHORS_DENSE frames packed into that window for the
+#           parabola fit.
+# 8 evenly-spaced anchors on a 10s slow-mo clip easily stepped over a
+# 1-2s ball-flight window. Scout-then-densify gives us reliable
+# coverage regardless of clip length / flight duration.
+N_ANCHOR_FRAMES = 8  # legacy single-pass count (still used as a fallback)
+N_ANCHORS_SCOUT = 10
+N_ANCHORS_DENSE = 10
+# How far on either side of a "ball found" scout frame we densify.
+# 0.5s in clip-time is wide enough to cover the rest of the flight
+# even if the scout caught only one end of it.
+DENSE_WINDOW_SEC = 1.5
 
 # Frames are downscaled to this max width before being sent so token
 # count stays bounded regardless of source resolution (4K GoPros etc.).
@@ -81,9 +92,9 @@ ACCEPTED_CONFIDENCE = {"high", "medium"}
 # bail and let the caller fall back to classical CV.
 MIN_ANCHORS_FOR_FIT = 3
 
-# Concurrent API calls — small parallelism keeps per-clip latency
-# under ~10s while staying well under rate limits.
-MAX_CONCURRENT_REQUESTS = 4
+# Concurrent API calls — keep per-clip latency under ~15s while
+# staying well under rate limits.
+MAX_CONCURRENT_REQUESTS = 8
 
 
 SYSTEM_PROMPT = (
@@ -258,20 +269,96 @@ def _query_anchor(
     return frame_idx, parsed, native_w, native_h, sent_w, sent_h
 
 
+def _run_pass(
+    input_path: Path, client, indices: list[int],
+    frame_w: int, frame_h: int, info: dict,
+) -> list[tuple[int, float, float]]:
+    """Query Claude for each frame in `indices`, return accepted anchors
+    in NATIVE coords. Appends per-frame Claude responses to info["anchors"]
+    for diagnostics."""
+    raw_results: list[tuple[int, dict | None, int, int, int, int]] = []
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as ex:
+        futures = [
+            ex.submit(_query_anchor, input_path, client, idx)
+            for idx in indices
+        ]
+        for fut in as_completed(futures):
+            res = fut.result()
+            if res is not None:
+                raw_results.append(res)
+    raw_results.sort(key=lambda r: r[0])
+
+    accepted: list[tuple[int, float, float]] = []
+    for frame_idx, parsed, native_w, native_h, sent_w, sent_h in raw_results:
+        if not parsed:
+            continue
+        found = bool(parsed.get("found"))
+        confidence = str(parsed.get("confidence") or "low").lower()
+        x = parsed.get("x")
+        y = parsed.get("y")
+        notes = str(parsed.get("notes") or "")[:80]
+        info["anchors"].append({
+            "frame": frame_idx, "found": found, "confidence": confidence,
+            "x": x, "y": y, "notes": notes,
+        })
+        if not found or confidence not in ACCEPTED_CONFIDENCE:
+            continue
+        if x is None or y is None:
+            continue
+        try:
+            xv = float(x); yv = float(y)
+        except (TypeError, ValueError):
+            continue
+        if sent_w > 0 and sent_h > 0:
+            xv = xv * (native_w / float(sent_w))
+            yv = yv * (native_h / float(sent_h))
+        xv = max(0.0, min(float(frame_w - 1), xv))
+        yv = max(0.0, min(float(frame_h - 1), yv))
+        accepted.append((frame_idx, xv, yv))
+    return accepted
+
+
+def _dense_indices_around(
+    center_lo: int, center_hi: int, total_frames: int,
+    fps: float, n_samples: int, window_sec: float = DENSE_WINDOW_SEC,
+) -> list[int]:
+    """Spread `n_samples` integer frame indices across a window centered
+    on [center_lo, center_hi], extended by ±window_sec at the ends so
+    we catch nearby flight frames the scout missed."""
+    pad_frames = int(round(window_sec * max(fps, 1.0)))
+    lo = max(0, center_lo - pad_frames)
+    hi = min(total_frames - 1, center_hi + pad_frames)
+    if hi <= lo:
+        return [lo]
+    if n_samples <= 1:
+        return [(lo + hi) // 2]
+    step = (hi - lo) / float(n_samples - 1)
+    out: list[int] = []
+    for i in range(n_samples):
+        idx = int(round(lo + i * step))
+        idx = max(0, min(total_frames - 1, idx))
+        if idx not in out:
+            out.append(idx)
+    return out
+
+
 def track_ball_with_ai(
     input_path: Path, fps: float, frame_w: int, frame_h: int,
     n_anchors: int = N_ANCHOR_FRAMES,
 ) -> tuple[list[_Det], dict]:
     """Primary AI-based ball tracker.
 
+    Two-pass strategy:
+      Scout: sample N_ANCHORS_SCOUT frames evenly across the clip.
+             Find which scout frames Claude says contain a ball.
+      Dense: sample N_ANCHORS_DENSE more frames packed into a window
+             around the scout hits. This nails down the parabola.
+
     Returns (track, info_dict). `track` is a list of _Det in NATIVE
     pixel coordinates, dense over the rendered flight range (impact
-    through apex). `info_dict` carries diagnostics for logging and for
-    feeding into the existing debug-image writer.
-
-    On any failure mode (no API key, no anchors, fit failure) returns
-    ([], {"stop_reason": "..."}). The caller treats that as fallthrough
-    to the classical CV pipeline.
+    through apex). On any failure mode (no API key, no anchors found,
+    fit failure) returns ([], {"stop_reason": "..."}) and the caller
+    falls through to the classical CV pipeline.
     """
     info: dict = {
         "stop_reason": None,
@@ -280,6 +367,7 @@ def track_ball_with_ai(
         "n_anchors_returned": 0,
         "anchors": [],  # list of {frame, x, y, confidence, notes}
         "impact_frame": None,
+        "scout_hits": [],
     }
 
     if not have_ai_tracer():
@@ -298,64 +386,54 @@ def track_ball_with_ai(
         info["stop_reason"] = "no_frames"
         return [], info
 
-    sample_indices = _sample_frame_indices(total_frames, n_anchors)
-    info["n_anchors_requested"] = len(sample_indices)
-    log.info(
-        "ai_tracer: querying Claude (%s) for %d anchors out of %d frames",
-        MODEL, len(sample_indices), total_frames,
-    )
-
     client = Anthropic()  # ANTHROPIC_API_KEY picked up from env
 
-    raw_results: list[tuple[int, dict | None, int, int, int, int]] = []
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as ex:
-        futures = [
-            ex.submit(_query_anchor, input_path, client, idx)
-            for idx in sample_indices
-        ]
-        for fut in as_completed(futures):
-            res = fut.result()
-            if res is not None:
-                raw_results.append(res)
+    # --- Pass 1: scout -----------------------------------------------
+    scout_indices = _sample_frame_indices(total_frames, N_ANCHORS_SCOUT)
+    log.info(
+        "ai_tracer: SCOUT — querying Claude (%s) for %d frames out of %d (fps=%.1f)",
+        MODEL, len(scout_indices), total_frames, fps,
+    )
+    scout_anchors = _run_pass(input_path, client, scout_indices, frame_w, frame_h, info)
+    info["scout_hits"] = [a[0] for a in scout_anchors]
+    log.info(
+        "ai_tracer: SCOUT — %d/%d hits at frames %s",
+        len(scout_anchors), len(scout_indices), info["scout_hits"],
+    )
 
-    raw_results.sort(key=lambda r: r[0])
+    anchors: list[tuple[int, float, float]] = list(scout_anchors)
 
-    # Filter to accepted anchors and scale coordinates back to native.
-    anchors: list[tuple[int, float, float]] = []
-    for frame_idx, parsed, native_w, native_h, sent_w, sent_h in raw_results:
-        if not parsed:
-            continue
-        found = bool(parsed.get("found"))
-        confidence = str(parsed.get("confidence") or "low").lower()
-        x = parsed.get("x")
-        y = parsed.get("y")
-        notes = str(parsed.get("notes") or "")[:80]
-        anchor_log = {
-            "frame": frame_idx, "found": found, "confidence": confidence,
-            "x": x, "y": y, "notes": notes,
-        }
-        info["anchors"].append(anchor_log)
-        if not found or confidence not in ACCEPTED_CONFIDENCE:
-            continue
-        if x is None or y is None:
-            continue
-        try:
-            xv = float(x); yv = float(y)
-        except (TypeError, ValueError):
-            continue
-        # Scale from sent (resized) image coords back to native frame.
-        if sent_w > 0 and sent_h > 0:
-            xv = xv * (native_w / float(sent_w))
-            yv = yv * (native_h / float(sent_h))
-        # Sanity-clip to frame bounds; Claude occasionally rounds slightly past.
-        xv = max(0.0, min(float(frame_w - 1), xv))
-        yv = max(0.0, min(float(frame_h - 1), yv))
-        anchors.append((frame_idx, xv, yv))
+    # --- Pass 2: densify around the hit window ----------------------
+    if scout_anchors:
+        hit_lo = min(a[0] for a in scout_anchors)
+        hit_hi = max(a[0] for a in scout_anchors)
+        dense_indices = _dense_indices_around(
+            hit_lo, hit_hi, total_frames, fps, N_ANCHORS_DENSE,
+        )
+        # Don't re-query frames already scouted (the dict in info["anchors"]
+        # tracks every frame_idx we've seen).
+        seen_frames = {a["frame"] for a in info["anchors"]}
+        dense_indices = [i for i in dense_indices if i not in seen_frames]
+        if dense_indices:
+            log.info(
+                "ai_tracer: DENSE — querying %d frames in window [%d, %d]",
+                len(dense_indices), hit_lo, hit_hi,
+            )
+            dense_anchors = _run_pass(
+                input_path, client, dense_indices, frame_w, frame_h, info,
+            )
+            anchors.extend(dense_anchors)
+            log.info(
+                "ai_tracer: DENSE — %d/%d additional hits",
+                len(dense_anchors), len(dense_indices),
+            )
 
+    anchors.sort(key=lambda a: a[0])
+    info["n_anchors_requested"] = len({a["frame"] for a in info["anchors"]})
     info["n_anchors_returned"] = len(anchors)
     log.info(
-        "ai_tracer: %d/%d anchors accepted (notes=%s)",
-        len(anchors), len(sample_indices),
+        "ai_tracer: total %d/%d anchors accepted (notes=%s)",
+        len(anchors), info["n_anchors_requested"],
         [(a["frame"], a["confidence"], a["notes"]) for a in info["anchors"]],
     )
 
