@@ -108,7 +108,10 @@ DETECT_MAX_WIDTH = 1280
 
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
-MIN_TRACK_LENGTH = 5
+# Tracks shorter than this aren't considered real ball flight. Bumped
+# from 5 after _pick_best kept picking 5-6 point body/arm squiggles
+# over an obvious 30-point ball-flight column.
+MIN_TRACK_LENGTH = 8
 # Frame-parameterized RMS; a clean ball-flight chain runs ~3-12 px, a
 # chain with a couple of noise-pulled points ~15-25 px, beyond ~35 is
 # real noise. 22 was too tight on jittery clips where the linker
@@ -638,7 +641,17 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         ball_addr_native = None
         if ball_addr_det is not None and det_scale > 0:
             ball_addr_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)
-        seed_track = _pick_best(_link(seeds), ball_addr_native=ball_addr_native)
+        body_bbox_native = None
+        if body_bbox_det is not None and det_scale > 0:
+            body_bbox_native = (
+                body_bbox_det[0] * inv, body_bbox_det[1] * inv,
+                body_bbox_det[2] * inv, body_bbox_det[3] * inv,
+            )
+        seed_track = _pick_best(
+            _link(seeds),
+            ball_addr_native=ball_addr_native,
+            body_bbox_native=body_bbox_native,
+        )
         if seed_track:
             log.info(
                 "tracer: seed track %d points, residual %.2fpx",
@@ -1472,17 +1485,27 @@ def _smooth_track_for_render(track):
     return out
 
 
-def _pick_best(trajectories, ball_addr_native=None):
+def _pick_best(trajectories, ball_addr_native=None, body_bbox_native=None):
     """Pick the most likely ball-flight trajectory. Lower score = better.
 
-    Base score = residual_px - 0.5 * len(track). When a ball-address
-    position is known, chains that START near the address get a bonus
-    and chains that start far from it get a penalty. The club's
-    follow-through arc can otherwise outscore the real ball flight on
-    pure residual + length, since the clubhead also traces a smooth
-    curve over many frames — but it doesn't start at the ball.
+    Score = residual_px − 1.0·len(track) + anchor adjustment + body
+    penalty. Tighter length reward (was 0.5 per point) so a long
+    clean arc beats a short squiggle even when both pass the basic
+    residual/span filters.
+
+    Hard reject tracks whose points sit mostly inside the golfer's body
+    bbox — the ball physically can't pass through the golfer, so any
+    track that does is body/arm/club fragments mis-chained as a
+    trajectory. Tracks with some body overlap (but not majority) get a
+    proportional penalty.
+
+    Anchor: chains that START near the at-rest ball position get a
+    bonus, chains that start far from it get a penalty. The club's
+    follow-through arc and body squiggles otherwise score well on
+    pure residual + length.
     """
     scored = []
+    rejected_body = 0
     for t in trajectories:
         r = _residual(t)
         if r > MAX_PARABOLA_RESIDUAL:
@@ -1491,9 +1514,20 @@ def _pick_best(trajectories, ball_addr_native=None):
         ys = [p.y for p in t]
         span = max(max(xs) - min(xs), max(ys) - min(ys))
         if span < MIN_TRAJECTORY_SPAN_PX:
-            # Stuck-in-corner noise. Real ball flight sweeps across the frame.
             continue
-        score = r - 0.5 * len(t)
+        # Reject body-resident tracks before they can win the score.
+        inside_pct = 0.0
+        if body_bbox_native is not None:
+            x1, y1, x2, y2 = body_bbox_native
+            inside_count = sum(
+                1 for p in t
+                if x1 <= p.x <= x2 and y1 <= p.y <= y2
+            )
+            inside_pct = inside_count / len(t)
+            if inside_pct > 0.7:
+                rejected_body += 1
+                continue
+        score = r - 1.0 * len(t) + inside_pct * 30.0
         if ball_addr_native is not None:
             first = t[0]
             d = float(np.hypot(first.x - ball_addr_native[0], first.y - ball_addr_native[1]))
@@ -1503,8 +1537,18 @@ def _pick_best(trajectories, ball_addr_native=None):
                 score += 5.0
         scored.append((score, t))
     if not scored:
+        if rejected_body:
+            log.info("tracer: _pick_best: all %d trajectories rejected as body-overlapping", rejected_body)
         return []
     scored.sort(key=lambda s: s[0])
+    log.info(
+        "tracer: _pick_best top picks (n=%d, body-rejected=%d): %s",
+        len(scored), rejected_body,
+        ", ".join(
+            f"len={len(t)} r={_residual(t):.1f} score={s:.1f}"
+            for s, t in scored[:3]
+        ),
+    )
     return scored[0][1]
 
 
