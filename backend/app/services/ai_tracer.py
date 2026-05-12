@@ -311,6 +311,23 @@ def have_ai_tracer() -> bool:
     return HAS_CV and HAS_ANTHROPIC and bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+# The Anthropic SDK retries on 5xx by default but only twice, which
+# isn't enough when the API is genuinely overloaded (HTTP 529). Six
+# retries with the SDK's exponential backoff covers ~30 s of wait
+# time, which rides out most transient overload spikes without making
+# the pipeline feel hung.
+ANTHROPIC_MAX_RETRIES = 6
+
+
+def _anthropic_client():
+    """Construct an Anthropic client with our retry policy. Returns None
+    if the SDK isn't installed (caller is expected to check have_ai_tracer
+    first; this is a defensive fallback)."""
+    if not HAS_ANTHROPIC:
+        return None
+    return Anthropic(max_retries=ANTHROPIC_MAX_RETRIES)
+
+
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -558,7 +575,7 @@ def detect_handedness_at_address(
         },
     ]
 
-    client = Anthropic()
+    client = _anthropic_client()
     try:
         resp = client.messages.create(
             model=MODEL,
@@ -705,7 +722,7 @@ def find_address_frame(
         ),
     })
 
-    client = Anthropic()
+    client = _anthropic_client()
     try:
         resp = client.messages.create(
             model=MODEL,
@@ -972,7 +989,7 @@ def find_impact_frame_after_address(
         ),
     })
 
-    client = Anthropic()
+    client = _anthropic_client()
     try:
         resp = client.messages.create(
             model=MODEL,
@@ -1205,7 +1222,7 @@ def refine_impact_frame(
         ),
     })
 
-    client = Anthropic()
+    client = _anthropic_client()
     try:
         resp = client.messages.create(
             model=MODEL,
@@ -1455,7 +1472,7 @@ def track_ball_after_impact(
         info["error"] = "could not extract any frames"
         return info
 
-    client = Anthropic()
+    client = _anthropic_client()
 
     # Pre-compute the ball-at-rest hint in each frame's sent-coord space
     # so we can include it as initial context on Phase 1 calls. The
