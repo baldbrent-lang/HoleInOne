@@ -78,16 +78,17 @@ export default function AdminClipsAi() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>AI tracer — address → handedness → impact</h3>
+        <h3 style={{ marginBottom: 4 }}>AI tracer — address → handedness → impact (rough → refined)</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
           Camera is assumed to be <b>behind the target line</b>, golfer hitting
-          away from camera. Each Run does three sequential Claude calls:
+          away from camera. Each Run does four sequential Claude calls:
           (1) find the <b>address frame</b> from 12 evenly-spaced frames;
-          (2) on that frame, locate the hands + ball and infer <b>handedness</b>;
-          (3) starting from address, scan ~12 candidate frames over the next
-          ~2 s and pick the <b>impact frame</b> — where the clubhead has
-          returned to the ball after the backswing. Address frame is shown
-          with the shaft overlay, impact frame underneath.
+          (2) on that frame, locate hands + ball and infer <b>handedness</b>;
+          (3) rough <b>impact</b> — scan 12 candidates over the ~2 s after
+          address and pick the frame where the clubhead has returned to the
+          ball; (4) <b>refine</b> — examine ±5 frames around the rough pick,
+          choose the one whose shaft is closest to pointing at the ball,
+          and locate the hands + clubhead so the shaft can be overlaid.
         </p>
       </div>
 
@@ -111,6 +112,7 @@ export default function AdminClipsAi() {
         const addrImage = result?.address_image_url;
         const hand = result?.handedness;
         const impact = result?.impact;
+        const impactRefined = result?.impact_refined;
         const impactImage = result?.impact_image_url;
         const isComposite = (c.source_url || "").includes("_composite");
         return (
@@ -262,16 +264,21 @@ export default function AdminClipsAi() {
               <div style={{ marginTop: 12 }}>
                 <div className="tiny upper muted" style={{ marginBottom: 4 }}>
                   Impact frame
-                  {impact?.impact_frame != null && (
+                  {(impactRefined?.impact_frame ?? impact?.impact_frame) != null && (
                     <span className="muted" style={{ marginLeft: 6 }}>
-                      · frame <code>{impact.impact_frame}</code>
+                      · frame <code>{impactRefined?.impact_frame ?? impact?.impact_frame}</code>
+                      {impact?.impact_frame != null
+                        && impactRefined?.impact_frame != null
+                        && impactRefined.impact_frame !== impact.impact_frame && (
+                        <> (rough <code>{impact.impact_frame}</code>)</>
+                      )}
                     </span>
                   )}
                 </div>
                 {impactImage ? (
                   <img
                     src={impactImage}
-                    alt="Claude's pick for the impact frame"
+                    alt="Claude's pick for the impact frame, with ball circle and shaft overlay"
                     style={{ width: "100%", maxWidth: 800, borderRadius: 8, background: "#000", display: "block" }}
                   />
                 ) : impact?.error ? (
@@ -279,17 +286,42 @@ export default function AdminClipsAi() {
                     Impact failed: <code>{impact.error}</code>
                   </div>
                 ) : null}
-                {impact?.ok && (
+                {impactRefined?.ok ? (
+                  <div className="small muted" style={{ marginTop: 6 }}>
+                    Refined confidence: <b>{impactRefined.confidence || "—"}</b>
+                    {impactRefined.notes && (
+                      <>{" "}— <i>{impactRefined.notes}</i></>
+                    )}
+                  </div>
+                ) : impactRefined?.error ? (
+                  <div className="small err-text" style={{ marginTop: 6 }}>
+                    Refinement failed: <code>{impactRefined.error}</code>
+                  </div>
+                ) : impact?.ok ? (
                   <div className="small muted" style={{ marginTop: 6 }}>
                     Confidence: <b>{impact.confidence || "—"}</b>
                     {impact.notes && (
                       <>{" "}— <i>{impact.notes}</i></>
                     )}
                   </div>
+                ) : null}
+                {(impactRefined?.hands_x != null || impactRefined?.clubhead_x != null) && (
+                  <div className="tiny muted" style={{ marginTop: 2 }}>
+                    hands=<code>({impactRefined.hands_x ?? "—"}, {impactRefined.hands_y ?? "—"})</code>{" · "}
+                    clubhead=<code>({impactRefined.clubhead_x ?? "—"}, {impactRefined.clubhead_y ?? "—"})</code>
+                    {impactRefined.image_width != null && (
+                      <> · image <code>{impactRefined.image_width}×{impactRefined.image_height ?? "—"}</code>px</>
+                    )}
+                  </div>
+                )}
+                {impactRefined?.frames_sent && (
+                  <div className="tiny muted" style={{ marginTop: 2 }}>
+                    Refinement candidates: [{impactRefined.frames_sent.join(", ")}]
+                  </div>
                 )}
                 {impact?.frames_sent && (
                   <div className="tiny muted" style={{ marginTop: 2 }}>
-                    Candidates: [{impact.frames_sent.join(", ")}] · model {impact.model}
+                    Rough candidates: [{impact.frames_sent.join(", ")}] · model {impact.model}
                   </div>
                 )}
               </div>

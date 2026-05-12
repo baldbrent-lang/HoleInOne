@@ -44,6 +44,7 @@ from ..services.ai_tracer import (
     detect_handedness_at_address,
     annotate_address_with_shaft,
     find_impact_frame_after_address,
+    refine_impact_frame,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
@@ -587,6 +588,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
     # verify what Claude saw.
     handedness_info: dict | None = None
     impact_info: dict | None = None
+    refined_impact_info: dict | None = None
     impact_image_url: str | None = None
     addr_idx_int: int | None = None
     if address_info.get("ok") and address_info.get("address_frame") is not None:
@@ -620,17 +622,34 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
 
         impact_image_name = f"{fpath.stem}_impact.jpg"
         impact_image_path = CLIPS_DIR / impact_image_name
+        # Step 4a: rough impact — 12 candidates evenly across [+1, +~2s].
+        # We don't save the image here; the refinement step below
+        # overwrites this path with the final pick (shaft overlay too).
         impact_info = find_impact_frame_after_address(
             fpath, addr_idx_int,
             ball_xy_sent=ball_xy_sent,
             ball_sent_dims=ball_sent_dims,
-            output_image_path=impact_image_path,
+            output_image_path=None,
         )
-        if impact_info.get("saved_image") and impact_image_path.exists():
-            impact_mtime = int(impact_image_path.stat().st_mtime)
-            impact_image_url = (
-                f"{settings.app_base_url}/uploads/clips/{impact_image_name}?v={impact_mtime}"
+
+        # Step 4b: refinement — ±5 around the rough pick. Same blue
+        # ball-rest circle on every candidate so Claude can lock onto
+        # the precise frame where the clubhead is back at the ball.
+        # The refinement call also reports hands+clubhead landmarks on
+        # the picked frame so we can overlay the shaft.
+        refined_impact_info = None
+        if impact_info.get("ok") and impact_info.get("impact_frame") is not None:
+            refined_impact_info = refine_impact_frame(
+                fpath, int(impact_info["impact_frame"]),
+                ball_xy_sent=ball_xy_sent,
+                ball_sent_dims=ball_sent_dims,
+                output_image_path=impact_image_path,
             )
+            if refined_impact_info.get("saved_image") and impact_image_path.exists():
+                impact_mtime = int(impact_image_path.stat().st_mtime)
+                impact_image_url = (
+                    f"{settings.app_base_url}/uploads/clips/{impact_image_name}?v={impact_mtime}"
+                )
 
     db.add(AuditLog(
         actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
@@ -638,6 +657,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
             "address": address_info,
             "handedness": handedness_info,
             "impact": impact_info,
+            "impact_refined": refined_impact_info,
         }),
     ))
     db.commit()
@@ -649,6 +669,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
         "address_image_url": image_url,
         "handedness": handedness_info,
         "impact": impact_info,
+        "impact_refined": refined_impact_info,
         "impact_image_url": impact_image_url,
     }
 

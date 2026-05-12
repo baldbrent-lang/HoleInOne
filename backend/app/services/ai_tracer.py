@@ -157,6 +157,47 @@ ADDRESS_SYSTEM_PROMPT = (
 )
 
 
+REFINE_IMPACT_FRAME_W = 768
+
+
+REFINE_IMPACT_SYSTEM_PROMPT = (
+    "You are looking at a tight cluster of candidate frames near the "
+    "moment of IMPACT in a golf swing. The camera is behind the target "
+    "line; the golfer is hitting AWAY from the camera. Frames are in "
+    "chronological order, each preceded by a 'Frame N:' text block.\n\n"
+    "Every candidate has a BLUE CIRCLE drawn on it at the ball's "
+    "STARTING POSITION — the same pixel on every frame, so you can "
+    "directly compare each candidate's clubhead to the circle.\n\n"
+    "Two things to do in your reply:\n"
+    "  1. Pick the SINGLE candidate whose CLUB SHAFT is closest to "
+    "pointing at the blue circle — i.e., the clubhead is back at the "
+    "ball (the bottom end of the shaft is on or right at the circle).\n"
+    "  2. For that picked frame ONLY, report the (x, y) pixel "
+    "coordinates of the golfer's HANDS (upper end of the shaft) and "
+    "the CLUBHEAD (lower end of the shaft).\n\n"
+    "Earlier candidates typically still have the clubhead above the "
+    "ball (descending). Later candidates have the clubhead past the "
+    "ball (follow-through). The winner is the transition point — "
+    "clubhead on or nearest the circle. If two look equally close, "
+    "pick the EARLIER one (true impact is the last pre-ball-leaving "
+    "frame).\n\n"
+    "Reply with ONE JSON object and nothing else:\n"
+    "{\n"
+    '  "impact_frame": <int — must equal one of the labeled candidate frame numbers>,\n'
+    '  "hands_x": <int pixel x of the hands on the picked frame>,\n'
+    '  "hands_y": <int pixel y of the hands on the picked frame>,\n'
+    '  "clubhead_x": <int pixel x of the clubhead on the picked frame>,\n'
+    '  "clubhead_y": <int pixel y of the clubhead on the picked frame>,\n'
+    '  "confidence": "high" | "medium" | "low",\n'
+    '  "notes": "<≤25 word reasoning about clubhead position relative to the blue circle>"\n'
+    "}\n"
+    "All (x, y) coordinates are in the IMAGE coordinate system of the "
+    "frame you were shown (image dimensions are stated in the user "
+    "message). Never invent a frame number; pick from the candidates "
+    "shown."
+)
+
+
 IMPACT_SYSTEM_PROMPT = (
     "You are analyzing frames from a golf swing video. The camera is "
     "behind the target line and the golfer is hitting AWAY from the "
@@ -943,4 +984,277 @@ def find_impact_frame_after_address(
             info["saved_image"] = bool(ok)
         else:
             log.warning("ai_tracer: impact — could not re-extract picked frame %d", impact)
+    return info
+
+
+def refine_impact_frame(
+    input_path: Path, approximate_impact_idx: int,
+    ball_xy_sent: tuple[float, float] | None,
+    ball_sent_dims: tuple[int, int] | None,
+    output_image_path: Path | None = None,
+) -> dict:
+    """Refine the impact frame to within ±5 of the initial estimate AND
+    locate the shaft (hands + clubhead) on the picked frame in a single
+    multi-image Claude call.
+
+    Pipeline:
+      1. Sample 11 frames [impact-5, impact-4, ..., impact+5], clipped
+         to clip length.
+      2. Draw the BLUE CIRCLE at the ball's starting position on every
+         candidate (at native res, then resize for the API).
+      3. Single Claude call: pick the candidate whose shaft points
+         closest at the blue circle, AND report hands/clubhead pixel
+         positions on that picked frame.
+      4. If output_image_path is provided, write the refined impact
+         frame at native res with both the blue ball circle AND the
+         yellow shaft line overlaid on it.
+
+    Returns dict with refined frame index, landmarks, confidence, notes,
+    frames_sent, saved_image, image dimensions, and any error.
+    """
+    info: dict = {
+        "ok": False,
+        "error": None,
+        "impact_frame": None,
+        "hands_x": None,
+        "hands_y": None,
+        "clubhead_x": None,
+        "clubhead_y": None,
+        "image_width": None,
+        "image_height": None,
+        "confidence": None,
+        "notes": None,
+        "model": MODEL,
+        "frames_sent": [],
+        "saved_image": False,
+    }
+
+    if not HAS_CV:
+        info["error"] = "opencv not installed"
+        return info
+    if not HAS_ANTHROPIC:
+        info["error"] = "anthropic SDK not installed"
+        return info
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        info["error"] = "ANTHROPIC_API_KEY not set in environment"
+        return info
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not open video"
+        return info
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        native_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        native_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+    if total_frames <= 1:
+        info["error"] = "video has no frames"
+        return info
+
+    approximate_impact_idx = int(approximate_impact_idx)
+    candidate_indices = sorted({
+        max(0, min(total_frames - 1, approximate_impact_idx + off))
+        for off in range(-5, 6)
+    })
+    info["frames_sent"] = candidate_indices
+
+    # Resolve ball position to native pixel coords (so the circle lands
+    # on the right pixel of each candidate at native res before resize).
+    ball_xy_native: tuple[float, float] | None = None
+    if (
+        ball_xy_sent is not None and ball_sent_dims is not None
+        and ball_sent_dims[0] > 0 and ball_sent_dims[1] > 0
+        and native_w > 0 and native_h > 0
+    ):
+        sw, sh = ball_sent_dims
+        ball_xy_native = (
+            float(ball_xy_sent[0]) * native_w / float(sw),
+            float(ball_xy_sent[1]) * native_h / float(sh),
+        )
+
+    # Extract + annotate each candidate; track the actual sent
+    # dimensions so we can scale landmark coords back to native later.
+    annotated_jpegs: list[tuple[int, bytes]] = []
+    sent_dims: tuple[int, int] = (0, 0)
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not re-open video"
+        return info
+    try:
+        for idx in candidate_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            if ball_xy_native is not None:
+                bx = int(round(ball_xy_native[0]))
+                by = int(round(ball_xy_native[1]))
+                cv2.circle(frame, (bx, by), 18, (0, 0, 0), 5, cv2.LINE_AA)
+                cv2.circle(frame, (bx, by), 16, (255, 60, 0), 4, cv2.LINE_AA)
+            h, w = frame.shape[:2]
+            if w > REFINE_IMPACT_FRAME_W:
+                scale = REFINE_IMPACT_FRAME_W / float(w)
+                frame = cv2.resize(
+                    frame, (REFINE_IMPACT_FRAME_W, int(round(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            sent_dims = (frame.shape[1], frame.shape[0])
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84])
+            if ok:
+                annotated_jpegs.append((idx, bytes(buf)))
+    finally:
+        cap.release()
+
+    if not annotated_jpegs:
+        info["error"] = "could not extract any candidate frames"
+        return info
+    candidate_indices_actual = [idx for idx, _ in annotated_jpegs]
+    info["image_width"] = sent_dims[0]
+    info["image_height"] = sent_dims[1]
+
+    log.info(
+        "ai_tracer: refine_impact — approx=%d candidates=%s ball_native=%s sent=%sx%s",
+        approximate_impact_idx, candidate_indices_actual, ball_xy_native,
+        sent_dims[0], sent_dims[1],
+    )
+
+    content: list[dict] = [{
+        "type": "text",
+        "text": (
+            f"Below are {len(annotated_jpegs)} candidate frames near "
+            f"impact (image size {sent_dims[0]}x{sent_dims[1]} px). "
+            "Each has the same blue circle at the ball's starting "
+            "position."
+        ),
+    }]
+    for idx, jpeg in annotated_jpegs:
+        content.append({"type": "text", "text": f"Frame {idx}:"})
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(jpeg).decode("ascii"),
+            },
+        })
+    content.append({
+        "type": "text",
+        "text": (
+            "Pick the impact frame (clubhead closest to the blue "
+            "circle) AND report hands + clubhead pixel positions on "
+            f"that frame. Valid frame numbers: {candidate_indices_actual}. "
+            "JSON only."
+        ),
+    })
+
+    client = Anthropic()
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=400,
+            system=[{
+                "type": "text",
+                "text": REFINE_IMPACT_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as exc:
+        log.warning("ai_tracer: refine_impact API call failed: %s", exc)
+        info["error"] = f"api_failed: {exc}"
+        return info
+
+    text_chunks = [
+        b.text for b in resp.content
+        if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+    ]
+    parsed = _extract_json("\n".join(text_chunks))
+    if not parsed:
+        info["error"] = "no_json_in_response"
+        return info
+
+    try:
+        impact = int(parsed.get("impact_frame"))
+    except (TypeError, ValueError):
+        info["error"] = "could_not_parse_impact_frame"
+        return info
+    if impact not in candidate_indices_actual:
+        nearest = min(candidate_indices_actual, key=lambda f: abs(f - impact))
+        log.warning(
+            "ai_tracer: refine_impact returned %d not in candidates; "
+            "snapping to nearest %d", impact, nearest,
+        )
+        impact = nearest
+
+    info["ok"] = True
+    info["impact_frame"] = impact
+    info["confidence"] = str(parsed.get("confidence") or "").lower() or None
+    info["notes"] = str(parsed.get("notes") or "")[:300] or None
+    for key in ("hands_x", "hands_y", "clubhead_x", "clubhead_y"):
+        try:
+            info[key] = int(parsed[key])
+        except (KeyError, TypeError, ValueError):
+            info[key] = None
+    log.info(
+        "ai_tracer: refine_impact — frame=%d conf=%s hands=(%s,%s) clubhead=(%s,%s) "
+        "notes=%s",
+        impact, info["confidence"],
+        info["hands_x"], info["hands_y"], info["clubhead_x"], info["clubhead_y"],
+        info["notes"],
+    )
+
+    # Save the refined impact frame at native res with both annotations:
+    # the blue ball-rest circle AND the yellow shaft line.
+    if output_image_path is not None:
+        full_frame = _grab_frame(input_path, impact)
+        if full_frame is not None:
+            if ball_xy_native is not None:
+                bx = int(round(ball_xy_native[0]))
+                by = int(round(ball_xy_native[1]))
+                cv2.circle(full_frame, (bx, by), 22, (0, 0, 0), 5, cv2.LINE_AA)
+                cv2.circle(full_frame, (bx, by), 20, (255, 60, 0), 4, cv2.LINE_AA)
+            sw, sh = sent_dims
+            hx, hy = info["hands_x"], info["hands_y"]
+            cx, cy = info["clubhead_x"], info["clubhead_y"]
+            if (
+                None not in (hx, hy, cx, cy) and sw > 0 and sh > 0
+                and native_w > 0 and native_h > 0
+            ):
+                sx = native_w / float(sw)
+                sy = native_h / float(sh)
+                p_hands = (int(round(hx * sx)), int(round(hy * sy)))
+                p_club = (int(round(cx * sx)), int(round(cy * sy)))
+                cv2.line(full_frame, p_hands, p_club, (0, 0, 0), 8, cv2.LINE_AA)
+                cv2.line(full_frame, p_hands, p_club, (0, 230, 255), 4, cv2.LINE_AA)
+                cv2.circle(full_frame, p_hands, 12, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.circle(full_frame, p_hands, 9, (0, 230, 255), -1, cv2.LINE_AA)
+                cv2.circle(full_frame, p_club, 12, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.circle(full_frame, p_club, 9, (255, 80, 80), -1, cv2.LINE_AA)
+                cv2.putText(
+                    full_frame, "hands", (p_hands[0] + 14, p_hands[1] - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    full_frame, "hands", (p_hands[0] + 14, p_hands[1] - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 230, 255), 1, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    full_frame, "clubhead", (p_club[0] + 14, p_club[1] + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    full_frame, "clubhead", (p_club[0] + 14, p_club[1] + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 80, 80), 1, cv2.LINE_AA,
+                )
+            ok = cv2.imwrite(
+                str(output_image_path), full_frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 90],
+            )
+            info["saved_image"] = bool(ok)
+        else:
+            log.warning(
+                "ai_tracer: refine_impact — could not re-extract picked frame %d", impact,
+            )
     return info
