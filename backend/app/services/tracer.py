@@ -240,6 +240,18 @@ CLUB_UPPER_Y_MAX_FRACTION = 0.55  # upper endpoint must be in upper 55%
 CLUB_MIN_SLOPE_MAGNITUDE = 1.0
 CLUB_SLOPE_SIGN_THRESHOLD = 0.3
 CLUB_MIN_VOTES = 3
+# A real club at address ends at the clubhead, which sits right at the
+# golfer's feet — meaning its lower endpoint should be near the body
+# bbox bottom (where the feet are). Lines whose lower endpoint is
+# inside the body silhouette (arms / body edges / shirt seams) won't
+# pass this proximity check after the loop.
+CLUB_LOWER_NEAR_BODY_PX_ABOVE = 60   # tolerated above body bottom
+CLUB_LOWER_NEAR_BODY_PX_BELOW = 100  # tolerated below body bottom
+
+# Require ball-address candidates to be near the detected clubhead.
+# Beyond this distance the blob is almost certainly a stray practice
+# ball or other bright object, not the ball being addressed.
+MAX_BALL_TO_CLUBHEAD_PX = 80
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
@@ -341,10 +353,11 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # Club-shaft slope votes for handedness inference. Each vote is a
     # signed slope (dy/dx with image-y down); sign indicates which side
     # of the body the clubhead is on. Plus a single representative
-    # line (longest seen) used to draw on the debug image.
-    club_slope_votes: list[float] = []
-    club_best_line = None
-    club_best_line_len = 0.0
+    # line (longest seen) used to draw on the debug image. Stored as
+    # raw (line, slope) candidates; the body-bbox proximity filter is
+    # applied after the main loop, once we have body geometry from
+    # the hot mask.
+    club_line_candidates: list[tuple[tuple[int, int, int, int], float]] = []
 
     # Per-clip windows scaled by fps. At 120fps a 1s address phase is
     # 120 frames; at 30fps it's 30. Constant frame counts would either
@@ -400,18 +413,12 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         # stays motionless for ~1s while the golfer settles.
         if idx < ball_addr_search_n:
             ball_addr_votes.extend(_scan_for_ball_addr_blobs(det_frame))
-        # Club-shaft slope vote during the same address window. Used
-        # to infer handedness for the side filter regardless of whether
-        # ball-address detection succeeds.
+        # Club-shaft candidates during the address window. We collect
+        # all qualifying lines per frame and filter them against the
+        # body bbox after the main loop.
         if idx < club_detect_search_n:
-            line, slope = _detect_club_in_frame(det_frame)
-            if slope is not None and line is not None:
-                club_slope_votes.append(slope)
-                lx1, ly1, lx2, ly2 = line
-                ln = float(((lx2 - lx1) ** 2 + (ly2 - ly1) ** 2) ** 0.5)
-                if ln > club_best_line_len:
-                    club_best_line_len = ln
-                    club_best_line = line
+            for cand in _detect_club_candidates_in_frame(det_frame):
+                club_line_candidates.append(cand)
         if idx < WARMUP_FRAMES:
             idx += 1
             continue
@@ -470,6 +477,26 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         if body_bbox_det is not None else None
     )
     body_bottom_det = float(body_bbox_det[3]) if body_bbox_det is not None else None
+
+    # Filter club-line candidates by body-bbox proximity: a real club
+    # ends at the clubhead near the body's feet, not inside the body
+    # silhouette. Apply this only if we have a body bbox; otherwise
+    # fall back to the unfiltered candidate pool.
+    club_slope_votes: list[float] = []
+    club_best_line: tuple[int, int, int, int] | None = None
+    club_best_len_sq = 0
+    for (line, slope) in club_line_candidates:
+        _x1, _y1, _x2, y2 = line
+        if body_bottom_det is not None:
+            if (y2 < body_bottom_det - CLUB_LOWER_NEAR_BODY_PX_ABOVE
+                    or y2 > body_bottom_det + CLUB_LOWER_NEAR_BODY_PX_BELOW):
+                continue
+        club_slope_votes.append(slope)
+        x1, y1, x2, y2c = line
+        len_sq = (x2 - x1) ** 2 + (y2c - y1) ** 2
+        if len_sq > club_best_len_sq:
+            club_best_len_sq = len_sq
+            club_best_line = line
     handedness = _handedness_from_slopes(club_slope_votes)
 
     # Decide handedness / behind_side from the club first.
@@ -678,14 +705,15 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     }
 
 
-def _detect_club_in_frame(det_frame):
-    """Find the longest plausible club-shaft line in a single frame.
-    Returns ((x_top, y_top, x_bot, y_bot), slope) or (None, None).
+def _detect_club_candidates_in_frame(det_frame):
+    """Find all plausible club-shaft line segments in a single frame.
+    Returns a list of ((x_top, y_top, x_bot, y_bot), slope).
 
-    Filters Hough-detected line segments by length, position (lower
-    endpoint in middle horizontal half, line reaches into lower 60% of
-    frame), and rejects near-vertical lines whose slope sign is too
-    ambiguous to indicate handedness.
+    These are *candidates*. Final filtering by the body bbox (the actual
+    clubhead at address sits near the body's bottom edge, not inside the
+    body silhouette) happens after the main loop, once the hot mask
+    gives us body geometry. We can't apply that filter here because the
+    body bbox doesn't exist yet during the warmup frames.
     """
     h, w = det_frame.shape[:2]
     gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
@@ -697,14 +725,12 @@ def _detect_club_in_frame(det_frame):
         maxLineGap=CLUB_HOUGH_MAX_GAP,
     )
     if lines is None:
-        return None, None
+        return []
     x_lo = w * CLUB_X_MID_LO_FRACTION
     x_hi = w * CLUB_X_MID_HI_FRACTION
     y_reach = h * CLUB_Y_REACH_FRACTION
     y_upper_max = h * CLUB_UPPER_Y_MAX_FRACTION
-    best_len = 0.0
-    best_line = None
-    best_slope = None
+    out = []
     for line in lines:
         x1, y1, x2, y2 = line[0]
         # Put upper endpoint first (smaller y).
@@ -718,17 +744,16 @@ def _detect_club_in_frame(det_frame):
             continue  # upper end still in lower half — flat ground edges
         dx = x2 - x1
         dy = y2 - y1
-        if abs(dx) < 4:
-            continue  # too vertical to tell which way it leans
+        # Allow near-vertical lines (the actual club from tee-cam-behind
+        # is mostly vertical). |dx|>=2 is enough to give a reliable
+        # slope sign — anything below that is noise-level lateral.
+        if abs(dx) < 2:
+            continue
         slope = float(dy) / float(dx)
         if abs(slope) < CLUB_MIN_SLOPE_MAGNITUDE:
             continue  # too horizontal — grass / horizon / bench top
-        length = float((dx * dx + dy * dy) ** 0.5)
-        if length > best_len:
-            best_len = length
-            best_line = (int(x1), int(y1), int(x2), int(y2))
-            best_slope = slope
-    return best_line, best_slope
+        out.append(((int(x1), int(y1), int(x2), int(y2)), slope))
+    return out
 
 
 def _handedness_from_slopes(slopes):
@@ -805,11 +830,22 @@ def _pick_ball_addr(all_blobs, body_x=None, behind_side=None, clubhead=None):
     if not candidates:
         return None
     if clubhead is not None:
-        candidates.sort(
+        # Reject anything beyond MAX_BALL_TO_CLUBHEAD_PX of the clubhead
+        # entirely. Practice balls scattered in the foreground were
+        # winning the vote on busy ranges; they're meters away from the
+        # actual address position and would mislead the side filter.
+        near = [
+            (c, cx, cy)
+            for (c, cx, cy) in candidates
+            if float(np.hypot(cx - clubhead[0], cy - clubhead[1])) <= MAX_BALL_TO_CLUBHEAD_PX
+        ]
+        if not near:
+            return None
+        near.sort(
             key=lambda x: float(np.hypot(x[1] - clubhead[0], x[2] - clubhead[1]))
         )
-    else:
-        candidates.sort(key=lambda x: -x[0])
+        return (near[0][1], near[0][2])
+    candidates.sort(key=lambda x: -x[0])
     return (candidates[0][1], candidates[0][2])
 
 
