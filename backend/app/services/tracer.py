@@ -741,6 +741,7 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             ball_addr_native=ball_addr_native,
             body_mask_det=body_mask_det,
             det_scale=det_scale,
+            all_detections=detections,
         )
         if seed_track:
             log.info(
@@ -1832,43 +1833,69 @@ def _smooth_track_for_render(track, ball_pos_native=None):
     return out
 
 
-def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None, det_scale=1.0):
+def _count_aligned_detections(track, all_detections, eps=20.0):
+    """Count post-mask detections (excluding those already in `track`)
+    that fall within `eps` of the parabolic motion fit of `track` at
+    their own frame. This is the "green-before-yellow" signature: a
+    real ball-flight chain's parabola also predicts the yellow
+    (post-mask but non-upward-streak) detections that follow it past
+    the apex / wherever the upward-streak filter cut out. The club's
+    follow-through arc doesn't, because its motion isn't sustained
+    parabolic flight.
+    """
+    if len(track) < 3 or not all_detections:
+        return 0
+    y_coef, x_coef, _rms = _fit_motion(track)
+    if y_coef is None:
+        return 0
+    track_frame_set = {int(d.frame) for d in track}
+    aligned = 0
+    for d in all_detections:
+        if int(d.frame) in track_frame_set:
+            continue
+        py = float(np.polyval(y_coef, d.frame))
+        px = float(np.polyval(x_coef, d.frame))
+        if abs(d.y - py) <= eps and abs(d.x - px) <= eps:
+            aligned += 1
+    return aligned
+
+
+def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
+               det_scale=1.0, all_detections=None):
     """Pick the most likely ball-flight trajectory. Lower score = better.
 
-    Score = residual_px − 1.0·len(track) + anchor adjustment + body
-    penalty. Tighter length reward (was 0.5 per point) so a long
-    clean arc beats a short squiggle even when both pass the basic
-    residual/span filters.
+    Score = residual − 1.0·len + body_pct·30 + anchor − 0.3·aligned_count.
+
+    The `aligned_count` bonus captures the "green-before-yellow" pattern:
+    a real ball-flight chain (upward-streak seeds) extends along the
+    same parabola the post-apex / decelerating yellow detections sit
+    on. Club motion chains don't — they're brief arcs whose parabola
+    fit doesn't predict additional sustained-motion detections.
 
     Hard reject tracks whose points sit mostly inside the golfer's body
-    silhouette — the ball physically can't pass through the golfer.
-    Uses the pixel-accurate filled body mask (in detection coords)
-    rather than its rectangular bounding box, so a vertical ball flight
-    passing just outside the body shape but inside the body's bbox
-    isn't falsely rejected.
-
-    Anchor: chains that START near the at-rest ball position get a
-    bonus, chains that start far from it get a penalty. The club's
-    follow-through arc and body squiggles otherwise score well on
-    pure residual + length.
+    silhouette mask. Uses pixel-accurate filled body mask (not bbox)
+    so vertical ball flights alongside the body but inside its bbox
+    aren't falsely rejected.
     """
     scored = []
     rejected_body = 0
+    rejected_residual = 0
+    rejected_span = 0
     if body_mask_det is not None:
         bm_h, bm_w = body_mask_det.shape[:2]
     for t in trajectories:
         r = _residual(t)
         if r > MAX_PARABOLA_RESIDUAL:
+            rejected_residual += 1
             continue
         xs = [p.x for p in t]
         ys = [p.y for p in t]
         span = max(max(xs) - min(xs), max(ys) - min(ys))
         if span < MIN_TRAJECTORY_SPAN_PX:
+            rejected_span += 1
             continue
         # Reject body-resident tracks before they can win the score.
-        # Pixel-accurate against the filled body silhouette (not bbox),
-        # so a near-vertical ball flight passing alongside the body
-        # but inside its bbox is correctly accepted.
+        # Pixel-accurate against the filled body silhouette (not bbox).
         inside_pct = 0.0
         if body_mask_det is not None:
             inside_count = 0
@@ -1878,10 +1905,17 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None, det_scal
                 if 0 <= iy < bm_h and 0 <= ix < bm_w and body_mask_det[iy, ix] > 0:
                     inside_count += 1
             inside_pct = inside_count / len(t)
-            if inside_pct > 0.7:
+            if inside_pct > 0.8:
                 rejected_body += 1
                 continue
         score = r - 1.0 * len(t) + inside_pct * 30.0
+        # Parabola-alignment bonus: this chain's fit predicts the
+        # positions of many post-mask detections. Strong ball-flight
+        # signal because the apex/descent dots that the upward-streak
+        # filter dropped (the yellows) still sit on the same parabola.
+        if all_detections is not None:
+            aligned = _count_aligned_detections(t, all_detections, eps=20.0)
+            score -= 0.3 * aligned
         if ball_addr_native is not None:
             first = t[0]
             d = float(np.hypot(first.x - ball_addr_native[0], first.y - ball_addr_native[1]))
@@ -1891,8 +1925,12 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None, det_scal
                 score += 5.0
         scored.append((score, t))
     if not scored:
-        if rejected_body:
-            log.info("tracer: _pick_best: all %d trajectories rejected as body-overlapping", rejected_body)
+        log.info(
+            "tracer: _pick_best: NO trajectory survived. of %d input chains: "
+            "rejected %d on residual>%.0f, %d on span<%d, %d on body-overlap>0.8",
+            len(trajectories), rejected_residual, MAX_PARABOLA_RESIDUAL,
+            rejected_span, int(MIN_TRAJECTORY_SPAN_PX), rejected_body,
+        )
         return []
     scored.sort(key=lambda s: s[0])
     log.info(
