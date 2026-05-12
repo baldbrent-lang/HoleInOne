@@ -109,12 +109,19 @@ DETECT_MAX_WIDTH = 1280
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
 MIN_TRACK_LENGTH = 5
-MAX_PARABOLA_RESIDUAL = 22.0
+# Frame-parameterized RMS; a clean ball-flight chain runs ~3-12 px, a
+# chain with a couple of noise-pulled points ~15-25 px, beyond ~35 is
+# real noise. 22 was too tight on jittery clips where the linker
+# unavoidably touches an impact-splash divot or two.
+MAX_PARABOLA_RESIDUAL = 35.0
 # A "trajectory" stuck in one corner of the sky (random noise) often
 # has tiny total displacement. A real ball flight covers a big chunk
 # of the frame. Reject anything whose total motion is smaller than
 # this (in pixels, measured as max of x-range or y-range).
-MIN_TRAJECTORY_SPAN_PX = 60.0
+# Lowered from 60: extension grows short seed chains anyway, and 60
+# was hard-rejecting valid impact-area seeds (5-15 points clustered
+# near the ball before the linker walks them upward).
+MIN_TRAJECTORY_SPAN_PX = 30.0
 
 # --- v3 noise reducers ------------------------------------------------------
 # Two stages added to address the "noise blanketing the whole frame" failure
@@ -1199,13 +1206,22 @@ def _candidates_from_mask(fg_mask):
 
 
 def _link(detections):
-    """Greedy nearest-neighbor link of detections into per-starting-point
-    trajectories. Each detection can start its own chain — chains are
-    allowed to overlap, because the alternative (a cross-chain `used`
-    set that consumed a point once it appeared in any accepted track)
-    chops a real long ball-flight curve into 4-5 short fragments.
-    _pick_best already scores by residual - 0.5*len, so the longest
-    cleanest chain wins regardless of overlap.
+    """Velocity-aware chain builder. Each detection starts its own
+    chain; at each step we rank next-frame candidates by distance from
+    the *predicted* position (extrapolating the chain's current
+    velocity), not from the current point.
+
+    This matters around the impact splash: noise dots are spatially
+    closer to the current point than the actual next ball position,
+    but they're far from where the velocity says the ball should be.
+    Velocity-aware ranking keeps the chain on the real trajectory.
+
+    First step has no velocity yet → falls back to current position
+    (same as plain nearest-neighbor). Velocity is exponentially
+    smoothed across steps to absorb single-frame jitter.
+
+    Chains are allowed to overlap; _pick_best scores them by
+    residual − 0.5·len, so the longest, cleanest chain wins.
     """
     by_frame: dict[int, list[_Det]] = {}
     for d in detections:
@@ -1217,32 +1233,50 @@ def _link(detections):
     for sf in frames:
         for si, start in enumerate(by_frame[sf]):
             track = [start]
-            # track_used prevents picking the same point twice WITHIN
-            # one chain (different frames may have the same _Det
-            # object if linking allowed re-entry).
             track_used = {(sf, si)}
             cur = start
+            vel: tuple[float, float] | None = None  # (dx, dy) per frame
             for nf in frames:
                 if nf <= cur.frame:
                     continue
                 gap = nf - cur.frame
                 if gap > MAX_FRAME_GAP:
                     break
+                if vel is not None:
+                    pred_x = cur.x + vel[0] * gap
+                    pred_y = cur.y + vel[1] * gap
+                else:
+                    pred_x, pred_y = cur.x, cur.y
                 best = None
                 best_dist = float("inf")
                 best_idx = -1
                 for ci, cand in enumerate(by_frame[nf]):
                     if (nf, ci) in track_used:
                         continue
-                    dist = float(np.hypot(cand.x - cur.x, cand.y - cur.y))
-                    if dist > MAX_PIXEL_JUMP_PER_FRAME * gap:
+                    # Hard spatial constraint relative to current point
+                    # (the ball physically can't teleport across the
+                    # frame regardless of what velocity predicts).
+                    spatial = float(np.hypot(cand.x - cur.x, cand.y - cur.y))
+                    if spatial > MAX_PIXEL_JUMP_PER_FRAME * gap:
                         continue
-                    if dist < best_dist:
+                    # Rank by distance from predicted position.
+                    pdist = float(np.hypot(cand.x - pred_x, cand.y - pred_y))
+                    if pdist < best_dist:
                         best = cand
-                        best_dist = dist
+                        best_dist = pdist
                         best_idx = ci
                 if best is None:
                     continue
+                actual_dx = (best.x - cur.x) / gap
+                actual_dy = (best.y - cur.y) / gap
+                if vel is None:
+                    vel = (actual_dx, actual_dy)
+                else:
+                    # Exponential smoothing: 60% new, 40% prior.
+                    vel = (
+                        0.6 * actual_dx + 0.4 * vel[0],
+                        0.6 * actual_dy + 0.4 * vel[1],
+                    )
                 track.append(best)
                 track_used.add((nf, best_idx))
                 cur = best
