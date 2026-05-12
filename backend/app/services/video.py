@@ -160,6 +160,37 @@ def extract_thumbnail(video_path: Path) -> Path | None:
     return None
 
 
+def probe_fps(path: Path) -> float | None:
+    """Fast FPS lookup — reads the video container header via OpenCV
+    (no subprocess) and returns the declared frame rate, or None if
+    the file isn't openable or OpenCV isn't installed.
+
+    Use this for cheap per-clip metadata on list views. For full
+    codec/duration/frame-count diagnostics use probe_video_info()
+    instead.
+    """
+    try:
+        import cv2  # type: ignore  # local import keeps the module
+                    # importable on systems without OpenCV.
+    except Exception:
+        return None
+    try:
+        cap = cv2.VideoCapture(str(path))
+    except Exception:
+        return None
+    if not cap.isOpened():
+        return None
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+    finally:
+        cap.release()
+    try:
+        fps_f = float(fps)
+    except (TypeError, ValueError):
+        return None
+    return fps_f if fps_f > 0 else None
+
+
 def probe_video_info(path: Path) -> dict:
     """Return a small dict of video diagnostics: codec, fps, nb_frames,
     duration. Missing fields are None. Used to verify the output of the

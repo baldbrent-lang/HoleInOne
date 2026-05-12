@@ -114,6 +114,9 @@ export default function AdminClips() {
                 <span className="muted small">
                   · {c.course_name || `course #${c.course_id}`} · hole {c.hole_number}{" "}
                   · {c.captured_at ? new Date(c.captured_at).toLocaleString() : "—"}
+                  {c.fps != null && (
+                    <> · <code>{c.fps}</code> fps</>
+                  )}
                 </span>
               </div>
               <div className="inline" style={{ gap: 8 }}>
