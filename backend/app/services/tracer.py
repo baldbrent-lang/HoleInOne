@@ -93,9 +93,19 @@ BODY_BBOX_BUFFER_PX = 30
 # noise in one pass — leaving the sparse, transient ball detections.
 # Threshold is taken as max(floor, pct * counted_frames) so it scales
 # with clip length but never drops below the floor on very short clips.
-HOT_MASK_PCT = 0.05
-HOT_MASK_MIN_HITS = 8
-HOT_MASK_DILATE_PX = 5
+#
+# v2: bumped PCT 0.05 → 0.08 and MIN_HITS 8 → 20 after a 112-frame
+# driving-range clip went 94% red and killed every upward-streak
+# candidate (raw=2437 → post-mask=134 → upward=0). The old MIN_HITS=8
+# floor meant a pixel only had to flicker on 7% of a short clip to be
+# masked, which the rustling foliage + scattered range balls + body-edge
+# camera-shake jitter all easily cleared. The new MIN_HITS=20 still
+# masks the body solidly (it fires every frame) but lets the noisy
+# background through so the upward-streak + linker stages have a
+# fighting chance. DILATE_PX 5 → 3 tightens the edge fuzz.
+HOT_MASK_PCT = 0.08
+HOT_MASK_MIN_HITS = 20
+HOT_MASK_DILATE_PX = 3
 
 # Performance ceilings. Without these the tracer runs for minutes on
 # long clips and the browser request times out before the server
