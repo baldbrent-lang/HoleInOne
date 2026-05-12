@@ -318,6 +318,12 @@ def have_ai_tracer() -> bool:
 # the pipeline feel hung.
 ANTHROPIC_MAX_RETRIES = 6
 
+# Models the per-run override is allowed to pick from. Lets the
+# operator A/B Opus vs Haiku on the same clip without restarting the
+# backend; anything outside this set falls back to the env-driven
+# MODEL default.
+SUPPORTED_MODELS = {"claude-opus-4-7", "claude-haiku-4-5"}
+
 
 def _anthropic_client():
     """Construct an Anthropic client with our retry policy. Returns None
@@ -326,6 +332,21 @@ def _anthropic_client():
     if not HAS_ANTHROPIC:
         return None
     return Anthropic(max_retries=ANTHROPIC_MAX_RETRIES)
+
+
+def _resolve_model(model_override: str | None = None) -> str:
+    """Return the model id to use for an AI call. A non-empty
+    `model_override` wins; anything not in SUPPORTED_MODELS is rejected
+    so a typo doesn't silently route to the wrong endpoint. Falls back
+    to the module-level MODEL default."""
+    if model_override:
+        if model_override in SUPPORTED_MODELS:
+            return model_override
+        log.warning(
+            "ai_tracer: ignoring unsupported model_override %r; using %s",
+            model_override, MODEL,
+        )
+    return MODEL
 
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -481,6 +502,7 @@ def annotate_address_with_shaft(
 def detect_handedness_at_address(
     input_path: Path, address_frame_idx: int,
     frame_w: int = HANDEDNESS_FRAME_W,
+    model: str | None = None,
 ) -> dict:
     """Single-frame Claude call: given the picked address frame index,
     ask whether the golfer is right- or left-handed. Camera is assumed
@@ -500,6 +522,7 @@ def detect_handedness_at_address(
 
     Never raises.
     """
+    model = _resolve_model(model)
     info: dict = {
         "ok": False,
         "error": None,
@@ -513,7 +536,7 @@ def detect_handedness_at_address(
         "shaft_direction": None,
         "image_width": None,
         "image_height": None,
-        "model": MODEL,
+        "model": model,
     }
     if not HAS_CV:
         info["error"] = "opencv not installed"
@@ -578,7 +601,7 @@ def detect_handedness_at_address(
     client = _anthropic_client()
     try:
         resp = client.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=200,
             system=[{
                 "type": "text",
@@ -628,6 +651,7 @@ def detect_handedness_at_address(
 
 def find_address_frame(
     input_path: Path, output_image_path: Path | None = None,
+    model: str | None = None,
 ) -> dict:
     """Ask Claude which frame in the clip is the golfer at address.
 
@@ -649,13 +673,14 @@ def find_address_frame(
     disk so the caller can serve it for display. Never raises — every
     failure path ends with ok=False + a descriptive error.
     """
+    model = _resolve_model(model)
     info: dict = {
         "ok": False,
         "error": None,
         "address_frame": None,
         "confidence": None,
         "notes": None,
-        "model": MODEL,
+        "model": model,
         "frames_sent": [],
         "saved_image": False,
     }
@@ -692,7 +717,7 @@ def find_address_frame(
     info["frames_sent"] = candidate_frames
     log.info(
         "ai_tracer: address — sending %d frames %s of %d total @ %.1f fps to %s",
-        len(frames), candidate_frames, total_frames, fps, MODEL,
+        len(frames), candidate_frames, total_frames, fps, model,
     )
 
     content: list[dict] = [{
@@ -725,7 +750,7 @@ def find_address_frame(
     client = _anthropic_client()
     try:
         resp = client.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=256,
             system=[{
                 "type": "text",
@@ -796,6 +821,7 @@ def find_impact_frame_after_address(
     ball_xy_sent: tuple[float, float] | None = None,
     ball_sent_dims: tuple[int, int] | None = None,
     output_image_path: Path | None = None,
+    model: str | None = None,
 ) -> dict:
     """Find the impact frame — when the clubhead has returned to the
     ball after the backswing.
@@ -818,13 +844,14 @@ def find_impact_frame_after_address(
     output_image_path file is the native-resolution impact frame
     with the same blue ball-circle drawn on it.
     """
+    model = _resolve_model(model)
     info: dict = {
         "ok": False,
         "error": None,
         "impact_frame": None,
         "confidence": None,
         "notes": None,
-        "model": MODEL,
+        "model": model,
         "frames_sent": [],
         "saved_image": False,
     }
@@ -992,7 +1019,7 @@ def find_impact_frame_after_address(
     client = _anthropic_client()
     try:
         resp = client.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=300,
             system=[{
                 "type": "text",
@@ -1065,6 +1092,7 @@ def refine_impact_frame(
     ball_xy_sent: tuple[float, float] | None,
     ball_sent_dims: tuple[int, int] | None,
     output_image_path: Path | None = None,
+    model: str | None = None,
 ) -> dict:
     """Refine the impact frame to within ±5 of the initial estimate AND
     locate the shaft (hands + clubhead) on the picked frame in a single
@@ -1085,6 +1113,7 @@ def refine_impact_frame(
     Returns dict with refined frame index, landmarks, confidence, notes,
     frames_sent, saved_image, image dimensions, and any error.
     """
+    model = _resolve_model(model)
     info: dict = {
         "ok": False,
         "error": None,
@@ -1097,7 +1126,7 @@ def refine_impact_frame(
         "image_height": None,
         "confidence": None,
         "notes": None,
-        "model": MODEL,
+        "model": model,
         "frames_sent": [],
         "saved_image": False,
     }
@@ -1225,7 +1254,7 @@ def refine_impact_frame(
     client = _anthropic_client()
     try:
         resp = client.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=400,
             system=[{
                 "type": "text",
@@ -1343,6 +1372,7 @@ def track_ball_after_impact(
     max_frames: int = BALL_TRACK_MAX_FRAMES,
     send_width: int = BALL_TRACK_FRAME_W,
     concurrency: int = BALL_TRACK_CONCURRENCY,
+    model: str | None = None,
 ) -> dict:
     """Track the ball forward frame-by-frame from `impact_frame_idx`.
 
@@ -1389,6 +1419,7 @@ def track_ball_after_impact(
           "model": str,
         }
     """
+    model = _resolve_model(model)
     info: dict = {
         "ok": False,
         "error": None,
@@ -1397,7 +1428,7 @@ def track_ball_after_impact(
         "n_frames_found": 0,
         "n_frames_found_via_retry": 0,
         "first_lost_run_start": None,
-        "model": MODEL,
+        "model": model,
     }
 
     if not HAS_CV:
@@ -1509,7 +1540,7 @@ def track_ball_after_impact(
         )
         try:
             resp = client.messages.create(
-                model=MODEL,
+                model=model,
                 max_tokens=200,
                 system=[{
                     "type": "text",
@@ -1705,7 +1736,7 @@ def track_ball_after_impact(
             )
             try:
                 resp = client.messages.create(
-                    model=MODEL,
+                    model=model,
                     max_tokens=200,
                     system=[{
                         "type": "text",

@@ -186,14 +186,17 @@ export const api = {
     request(`/api/admin/clips/${clipId}/retry-tracer`, {
       method: "POST", adminPassword: key, timeoutMs: 240_000,
     }),
-  aiTrace: (key, clipId) =>
+  aiTrace: (key, clipId, model) => {
     // Five Claude steps: address, handedness, rough impact, refined
     // impact, ball-track. The track step is up to 60 parallel calls
     // and dominates wall time (~30-60 s on a typical swing). Cap at
-    // 5 min so we don't time out the UI mid-track.
-    request(`/api/admin/clips/${clipId}/ai-trace`, {
+    // 5 min so we don't time out the UI mid-track. Optional `model`
+    // overrides the backend default for per-clip A/B testing.
+    const qs = model ? `?model=${encodeURIComponent(model)}` : "";
+    return request(`/api/admin/clips/${clipId}/ai-trace${qs}`, {
       method: "POST", adminPassword: key, timeoutMs: 300_000,
-    }),
+    });
+  },
   listParticipants: (key, params = {}) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {

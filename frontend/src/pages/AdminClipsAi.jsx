@@ -24,6 +24,7 @@ export default function AdminClipsAi() {
   const [error, setError] = useState(null);
   const [running, setRunning] = useState({});
   const [results, setResults] = useState({});
+  const [selectedModels, setSelectedModels] = useState({}); // {clipId: modelId}
 
   async function load() {
     try {
@@ -41,8 +42,9 @@ export default function AdminClipsAi() {
 
   async function runOne(clipId) {
     setRunning((r) => ({ ...r, [clipId]: true }));
+    const model = selectedModels[clipId] || "claude-opus-4-7";
     try {
-      const data = await api.aiTrace(adminPassword, clipId);
+      const data = await api.aiTrace(adminPassword, clipId, model);
       setResults((r) => ({ ...r, [clipId]: data }));
     } catch (e) {
       setResults((r) => ({ ...r, [clipId]: { error: e.message } }));
@@ -478,7 +480,7 @@ export default function AdminClipsAi() {
               </p>
             )}
 
-            <div className="row" style={{ marginTop: 12 }}>
+            <div className="row" style={{ marginTop: 12, gap: 8 }}>
               <button
                 onClick={() => runOne(c.id)}
                 disabled={!!running[c.id] || isComposite}
@@ -487,6 +489,23 @@ export default function AdminClipsAi() {
                 <Icon name="play" size={14} />{" "}
                 {running[c.id] ? "Running…" : "Run AI analysis"}
               </button>
+              <label
+                className="small muted"
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+              >
+                model:
+                <select
+                  value={selectedModels[c.id] || "claude-opus-4-7"}
+                  onChange={(e) =>
+                    setSelectedModels((m) => ({ ...m, [c.id]: e.target.value }))
+                  }
+                  disabled={!!running[c.id]}
+                  style={{ fontSize: 13 }}
+                >
+                  <option value="claude-opus-4-7">Opus 4.7 (default)</option>
+                  <option value="claude-haiku-4-5">Haiku 4.5 (faster, cheaper)</option>
+                </select>
+              </label>
               {isComposite && (
                 <span className="small muted" style={{ alignSelf: "center" }}>
                   Composite — not supported

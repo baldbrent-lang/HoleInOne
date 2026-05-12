@@ -565,7 +565,11 @@ def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/clips/{clip_id}/ai-trace")
-def ai_trace(clip_id: int, db: Session = Depends(get_db)):
+def ai_trace(
+    clip_id: int,
+    model: str | None = None,
+    db: Session = Depends(get_db),
+):
     """AI analysis — step 2: identify the golfer's address frame.
 
     Camera is always behind the golfer. This endpoint asks Claude
@@ -591,7 +595,9 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
 
     image_name = f"{fpath.stem}_address.jpg"
     image_path = CLIPS_DIR / image_name
-    address_info = find_address_frame(fpath, output_image_path=image_path)
+    address_info = find_address_frame(
+        fpath, output_image_path=image_path, model=model,
+    )
 
     image_url = None
     if address_info.get("saved_image") and image_path.exists():
@@ -613,7 +619,9 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
     addr_idx_int: int | None = None
     if address_info.get("ok") and address_info.get("address_frame") is not None:
         addr_idx_int = int(address_info["address_frame"])
-        handedness_info = detect_handedness_at_address(fpath, addr_idx_int)
+        handedness_info = detect_handedness_at_address(
+            fpath, addr_idx_int, model=model,
+        )
         if handedness_info.get("ok"):
             wrote = annotate_address_with_shaft(
                 fpath, addr_idx_int, handedness_info, image_path,
@@ -650,6 +658,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
             ball_xy_sent=ball_xy_sent,
             ball_sent_dims=ball_sent_dims,
             output_image_path=None,
+            model=model,
         )
 
         # Step 4b: refinement — ±5 around the rough pick. Same blue
@@ -664,6 +673,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                 ball_xy_sent=ball_xy_sent,
                 ball_sent_dims=ball_sent_dims,
                 output_image_path=impact_image_path,
+                model=model,
             )
             if refined_impact_info.get("saved_image") and impact_image_path.exists():
                 impact_mtime = int(impact_image_path.stat().st_mtime)
@@ -684,6 +694,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                 output_prefix=track_prefix,
                 ball_xy_sent=ball_xy_sent,
                 ball_sent_dims=ball_sent_dims,
+                model=model,
             )
             if ball_track_info.get("ok"):
                 for rec in ball_track_info.get("frames", []):
