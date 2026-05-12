@@ -74,8 +74,11 @@ MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 #   Fit a parabola through the in_flight anchors and render.
 N_MONTAGE_FRAMES = 16          # 4x4 grid for the impact-finder pass
 N_TRACK_FRAMES = 10            # tracking anchors after impact
-TRACK_SECONDS = 2.5            # how far past impact to sample
-TRACK_LEAD_SECONDS = 0.25      # small back-pad in case impact estimate is late
+TRACK_SECONDS = 1.35           # how far past impact to sample
+TRACK_LEAD_SECONDS = 0.15      # small back-pad: covers montage ±half-tile slop
+                               # in the impact estimate without wasting many
+                               # samples on pre-flight frames. Combined window
+                               # is ~1.5s.
 
 # Per-tile size in the impact montage. 4 cols * 384 = 1536 px wide —
 # stays under Anthropic's 1568-px sweet spot for token-efficient
@@ -119,11 +122,11 @@ IMPACT_PROMPT = (
 )
 
 BALL_LOCATE_PROMPT = (
-    "You are locating a golf ball in flight in a single frame from a "
+    "You are locating a golf ball IN FLIGHT in a single frame from a "
     "par-3 tee shot. The camera is behind the golfer; the ball was just "
     "struck and is travelling away from the camera, rising and arcing "
     "toward the green.\n\n"
-    "Find the ball:\n"
+    "Find the ball ONLY when it is airborne after impact:\n"
     "- Appears as a small bright white dot or short motion-blur streak, "
     "  3-15 pixels wide. Against grass: white-on-green. Against sky: "
     "  bright speck OR (overcast) a darker silhouette — still small "
@@ -131,8 +134,12 @@ BALL_LOCATE_PROMPT = (
     "- DO NOT confuse the ball with: shoes, belt buckle, hands, club "
     "  head, range balls on the tee mat, divots, leaves, clouds, "
     "  course markers, or background props.\n"
-    "- If the ball is not visible in this frame (already left the frame, "
-    "  occluded, hasn't been struck yet, etc.) set found=false.\n\n"
+    "- Set found=FALSE in all of the following cases:\n"
+    "  * The ball is still sitting on the tee (not yet struck)\n"
+    "  * The ball has already left the frame or landed\n"
+    "  * You can't clearly see a single airborne ball\n"
+    "We only want the airborne, post-impact ball. A ball at address or "
+    "in the backswing is NOT what we want — return found=false.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
     '  "found": true|false,\n'
@@ -412,17 +419,27 @@ def _post_impact_indices(
 
 
 def _query_ball_locate(
-    input_path: Path, client, frame_idx: int,
+    input_path: Path, client, frame_idx: int, impact_frame: int,
 ) -> dict | None:
     """Thread-pool worker: grab one frame and ask Claude for ball coords.
+    `impact_frame` is passed as context so Claude knows the frame's
+    position relative to impact (helps it return found=false for the
+    at-rest ball in frames before impact).
+
     Returns the full diagnostic record (frame, found, x, y, confidence,
     notes, native_w/h, sent_w/h) or None if the frame couldn't be read."""
     grab = _grab_frame_jpeg(input_path, frame_idx)
     if grab is None:
         return None
     jpeg_bytes, native_w, native_h, sent_w, sent_h = grab
+    offset = frame_idx - impact_frame
+    if offset >= 0:
+        rel_desc = f"{offset} frames AFTER impact"
+    else:
+        rel_desc = f"{-offset} frames BEFORE impact (ball still at rest)"
     user_text = (
-        f"Frame {frame_idx}. Image size: {sent_w}x{sent_h} px. "
+        f"Frame {frame_idx} ({rel_desc}; impact estimated at frame "
+        f"{impact_frame}). Image size: {sent_w}x{sent_h} px. "
         "Locate the airborne golf ball (JSON only)."
     )
     parsed = _ask_claude_with_image(
@@ -515,7 +532,7 @@ def track_ball_with_ai(
     raw_results: list[dict] = []
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as ex:
         futures = [
-            ex.submit(_query_ball_locate, input_path, client, idx)
+            ex.submit(_query_ball_locate, input_path, client, idx, impact_frame)
             for idx in track_indices
         ]
         for fut in as_completed(futures):
@@ -525,6 +542,11 @@ def track_ball_with_ai(
     raw_results.sort(key=lambda r: r["frame"])
 
     # Filter to accepted in-flight anchors and scale into native coords.
+    # Defensive: even if Claude marks a pre-impact frame as found:true
+    # (ball at rest on tee), exclude it — the parabola fit needs in-flight
+    # samples or it'll arc through the ball's resting position and produce
+    # a nonsense trajectory. The 5-frame slack absorbs estimation jitter.
+    impact_cutoff = impact_frame - 5
     anchors: list[tuple[int, float, float]] = []
     for r in raw_results:
         info["anchors"].append({
@@ -532,6 +554,13 @@ def track_ball_with_ai(
             "x": r["x"], "y": r["y"], "notes": r["notes"],
         })
         if not r["found"] or r["confidence"] not in ACCEPTED_CONFIDENCE:
+            continue
+        if r["frame"] < impact_cutoff:
+            log.info(
+                "ai_tracer: dropping pre-impact anchor f%d (impact=%d) "
+                "even though found=true — likely the at-rest ball",
+                r["frame"], impact_frame,
+            )
             continue
         if r["x"] is None or r["y"] is None:
             continue
@@ -851,9 +880,12 @@ def _write_ai_debug_image(
         for idx, tile in enumerate(tiles):
             r, c = divmod(idx, cols)
             montage[r * th:(r + 1) * th, c * tw:(c + 1) * tw] = tile
-        cv2.imwrite(str(debug_path), montage, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        cv2.imwrite(str(debug_path), montage, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
     finally:
         cap.release()
+
+
+DEBUG_TILE_W = 240
 
 
 def _make_debug_tile(
@@ -862,7 +894,7 @@ def _make_debug_tile(
     """Build one labeled debug tile. If x/y are supplied (in API/sent
     coord space, with native_w/native_h provided for the source frame),
     draw a marker at the corresponding location on the tile."""
-    tile_w = 480
+    tile_w = DEBUG_TILE_W
     scale = tile_w / float(frame.shape[1])
     tile = cv2.resize(
         frame, (tile_w, int(round(frame.shape[0] * scale))),
@@ -874,10 +906,10 @@ def _make_debug_tile(
         api_h = int(round(native_h * api_scale))
         tile_x = int(round(float(x) / float(api_w) * tile_w))
         tile_y = int(round(float(y) / float(api_h) * tile.shape[0]))
-        cv2.circle(tile, (tile_x, tile_y), 10, color, 2, cv2.LINE_AA)
-    cv2.rectangle(tile, (0, 0), (tile.shape[1], 24), (0, 0, 0), -1)
+        cv2.circle(tile, (tile_x, tile_y), 6, color, 2, cv2.LINE_AA)
+    cv2.rectangle(tile, (0, 0), (tile.shape[1], 16), (0, 0, 0), -1)
     cv2.putText(
-        tile, label, (6, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+        tile, label, (4, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
         (255, 255, 255), 1, cv2.LINE_AA,
     )
     return tile
