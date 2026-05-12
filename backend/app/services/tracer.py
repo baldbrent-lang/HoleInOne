@@ -735,7 +735,7 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
                 ball_addr_native[0], ball_addr_native[1], len(detections),
             )
             direct_track = _track_ball_from_address(
-                ball_addr_native, detections,
+                ball_addr_native, detections, seeds,
                 total_frames_scanned, width, height,
             )
             if direct_track and len(direct_track) >= MIN_TRACK_LENGTH:
@@ -1553,7 +1553,7 @@ def _candidates_from_mask(fg_mask):
 
 
 def _track_ball_from_address(
-    ball_addr_native, detections, total_frames, frame_w, frame_h,
+    ball_addr_native, detections, seeds, total_frames, frame_w, frame_h,
 ):
     """Single-ball tracker anchored at the at-rest ball position.
 
@@ -1563,12 +1563,12 @@ def _track_ball_from_address(
     closest to the velocity-extrapolated prediction. Smooth velocity
     is updated after each accepted point.
 
-    This replaces the "build all possible chains, score them, pick"
-    approach when we have a confident ball anchor. It uses ALL
-    post-mask detections (green upward-streak survivors AND the
-    yellow non-streak detections that trail the ball past the apex),
-    so the trailing-yellow-dots signal the user identified is
-    naturally captured.
+    Impact frame is located from the UPWARD-STREAK SEEDS (green dots)
+    only — body fragments rarely participate in sustained upward
+    chains, so a seed near the ball is almost always a real
+    ball-flight detection. After impact, the tracker draws from ALL
+    post-mask detections (green AND yellow), so the trailing yellow
+    apex/descent dots are naturally captured.
 
     Returns a list of _Det in native coords, including the at-rest
     ball as the very first point. Empty list if no impact frame can
@@ -1581,21 +1581,27 @@ def _track_ball_from_address(
         by_frame.setdefault(int(d.frame), []).append(d)
     if not by_frame:
         return []
+    seeds_by_frame: dict[int, list[_Det]] = {}
+    for d in (seeds or ()):
+        seeds_by_frame.setdefault(int(d.frame), []).append(d)
 
     bx, by = float(ball_addr_native[0]), float(ball_addr_native[1])
 
-    # Step 1: find the impact frame — the first frame containing a
-    # detection that has clearly LIFTED off the ball position. Skip
-    # the immediate impact splash (detections within 20px of the ball
-    # are divot debris, not the ball). The ball at frame 1-2 after
-    # impact has moved 20-200px upward.
+    # Step 1: find the impact frame — the first SEED frame containing
+    # a detection that has clearly LIFTED off the ball position.
+    # Lateral tolerance tightened to 50px (was 100) so body fragments
+    # one body-width to the side of the ball don't qualify. Using
+    # seeds rather than all post-mask detections makes the cutoff
+    # automatic: seeds are detections that participated in an upward
+    # chain, which body fragments effectively never do.
     impact_frame = None
     impact_det = None
-    for f in sorted(by_frame):
-        for d in by_frame[f]:
+    impact_pool = seeds_by_frame if seeds_by_frame else by_frame
+    for f in sorted(impact_pool):
+        for d in impact_pool[f]:
             dx_v = abs(d.x - bx)
             dy_v = d.y - by  # negative when the detection sits above the ball
-            if dx_v < 100 and -250 < dy_v < -20:
+            if dx_v < 50 and -250 < dy_v < -20:
                 impact_frame = f
                 impact_det = d
                 break
@@ -1618,7 +1624,7 @@ def _track_ball_from_address(
     cur_x = float(impact_det.x)
     cur_y = float(impact_det.y)
     gap_count = 0
-    MAX_CONSECUTIVE_MISS = 10
+    MAX_CONSECUTIVE_MISS = 15
     EPS_BASE = 28.0
     EPS_GROWTH_PER_MISS = 3.0
     MARGIN = 60
