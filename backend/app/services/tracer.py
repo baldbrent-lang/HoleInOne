@@ -1585,32 +1585,6 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
         # detection it took as the first-ball-in-flight point. Lets the
         # operator visually verify the algorithm picked the right frame
         # and the right ball position.
-        if impact_frame_image is not None:
-            inset_h = 240
-            ih, iw = impact_frame_image.shape[:2]
-            inset_w = max(1, int(iw * inset_h / max(ih, 1)))
-            inset = cv2.resize(impact_frame_image, (inset_w, inset_h))
-            if impact_det_native is not None:
-                inset_cx = int(impact_det_native[0] * inset_w / iw)
-                inset_cy = int(impact_det_native[1] * inset_h / ih)
-                cv2.circle(inset, (inset_cx, inset_cy), 12, (0, 0, 255), 3, cv2.LINE_AA)
-                cv2.circle(inset, (inset_cx, inset_cy), 4, (0, 0, 255), -1, cv2.LINE_AA)
-            label = f"impact f{impact_frame_idx}" if impact_frame_idx is not None else "impact"
-            if tracker_stop_reason:
-                label += f"  stop:{tracker_stop_reason}"
-            cv2.rectangle(inset, (0, 0), (inset_w, 22), (0, 0, 0), -1)
-            cv2.putText(inset, label, (6, 16), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            # Top-right corner placement
-            x0 = max(0, base.shape[1] - inset_w - 12)
-            y0 = 50  # below the header bar
-            x1 = min(base.shape[1], x0 + inset_w)
-            y1 = min(base.shape[0], y0 + inset_h)
-            ih_clip = y1 - y0
-            iw_clip = x1 - x0
-            if ih_clip > 0 and iw_clip > 0:
-                base[y0:y1, x0:x1] = inset[:ih_clip, :iw_clip]
-                cv2.rectangle(base, (x0, y0), (x1, y1), (255, 255, 255), 2)
         if busiest_cands:
             for cx, cy, r in busiest_cands:
                 cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
