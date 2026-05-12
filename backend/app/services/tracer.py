@@ -646,6 +646,13 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     foot_y_cutoff = (
         body_bottom_det + 15 if body_bottom_det is not None else float("inf")
     )
+    # The body bbox bottom is often the bottom of the *feet*, but the
+    # ball at rest can sit a few px BELOW that on the grass (camera-
+    # angle dependent). Extend the cutoff to be at least 15 px below
+    # the ball-at-rest, so impact-area detections at ground level
+    # don't get foot-rejected.
+    if ball_addr_det is not None:
+        foot_y_cutoff = max(foot_y_cutoff, ball_addr_det[1] + 15)
     detections: list[_Det] = []
     hot_rejected = 0
     side_rejected = 0
@@ -1795,9 +1802,17 @@ def _smooth_track_for_render(track, ball_pos_native=None):
         vertex_frame = -b / (2.0 * a)
         if f_min < vertex_frame < f_max:
             f_max = int(round(vertex_frame))
+    anchor_frame = earliest_track_frame - 1 if ball_pos_native is not None else None
     out = []
     for f in range(f_min, f_max + 1):
-        out.append((f, int(np.polyval(x_coef, f)), int(np.polyval(y_coef, f))))
+        # Pin the first frame to the EXACT ball-at-rest position so
+        # the tracer line literally starts at the cyan ball ring,
+        # not a few px off from it (the least-squares fit doesn't
+        # pass exactly through any of its input points).
+        if anchor_frame is not None and f == anchor_frame:
+            out.append((f, int(ball_pos_native[0]), int(ball_pos_native[1])))
+        else:
+            out.append((f, int(np.polyval(x_coef, f)), int(np.polyval(y_coef, f))))
     return out
 
 
