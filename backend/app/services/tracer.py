@@ -250,8 +250,12 @@ CLUB_LOWER_NEAR_BODY_PX_BELOW = 100  # tolerated below body bottom
 
 # Require ball-address candidates to be near the detected clubhead.
 # Beyond this distance the blob is almost certainly a stray practice
-# ball or other bright object, not the ball being addressed.
-MAX_BALL_TO_CLUBHEAD_PX = 80
+# ball or other bright object, not the ball being addressed. Generous
+# because the Hough line's detected lower endpoint can land partway up
+# the shaft (10-30px above the actual clubhead) and the ball sits a
+# few px from the clubhead, so the actual ball-to-detected-clubhead
+# distance can be 60-100px on real clips.
+MAX_BALL_TO_CLUBHEAD_PX = 120
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
@@ -636,9 +640,28 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
                 frame_w=width, frame_h=height,
             )
 
-    # Debug image always emitted (even on linker failure / noise abort)
-    # so the operator can see what the algorithm saw. picked_track is
-    # whatever made it through — possibly empty.
+    # Use the picked track's earliest point as the canonical ball
+    # position when available — it's where the ball was at impact,
+    # which is within ~10px of its at-address position. More reliable
+    # than the bright-blob vote, which can miss the ball entirely in
+    # shadow / overcast lighting. Falls back to the address-time
+    # detection when no track exists yet (visualization-only).
+    picked_for_debug = track or seed_track
+    ball_pos_native = None
+    ball_pos_source = None
+    if picked_for_debug:
+        first = min(picked_for_debug, key=lambda p: p.frame)
+        ball_pos_native = (float(first.x), float(first.y))
+        ball_pos_source = "track"
+    elif ball_addr_det is not None and det_scale > 0:
+        ball_pos_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)
+        ball_pos_source = "address-vote"
+    log.info(
+        "tracer: ball_pos=%s (source=%s)",
+        f"({ball_pos_native[0]:.0f},{ball_pos_native[1]:.0f})" if ball_pos_native else "None",
+        ball_pos_source or "none",
+    )
+
     if debug_path is not None:
         filmstrip = _sample_filmstrip(input_path, total_frames_scanned)
         _write_debug(
@@ -650,7 +673,8 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             ball_addr_det=ball_addr_det, body_x_det=body_x_det,
             behind_side=behind_side,
             club_line_det=club_best_line, handedness=handedness,
-            body_bottom_det=body_bottom_det, picked_track=track or seed_track,
+            body_bottom_det=body_bottom_det, picked_track=picked_for_debug,
+            ball_pos_native=ball_pos_native, ball_pos_source=ball_pos_source,
         )
 
     if aborting_noise:
@@ -957,7 +981,8 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                  n_raw=None, hot_mask=None, det_scale=1.0, native_size=None,
                  ball_addr_det=None, body_x_det=None, behind_side=None,
                  club_line_det=None, handedness=None,
-                 body_bottom_det=None, picked_track=None):
+                 body_bottom_det=None, picked_track=None,
+                 ball_pos_native=None, ball_pos_source=None):
     """Diagnostic JPG composed of two parts stacked vertically.
 
     Top half = the busiest frame (most candidates seen) with:
@@ -1013,11 +1038,23 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                     base[:, body_x_native:] = (
                         0.65 * base[:, body_x_native:] + 0.35 * shade[:, body_x_native:]
                     ).astype(np.uint8)
-        if ball_addr_det is not None and det_scale > 0:
-            bx_native = int(ball_addr_det[0] / det_scale)
-            by_native = int(ball_addr_det[1] / det_scale)
-            cv2.circle(base, (bx_native, by_native), 12, (255, 220, 0), 2, cv2.LINE_AA)
-            cv2.circle(base, (bx_native, by_native), 3, (255, 220, 0), -1, cv2.LINE_AA)
+        if ball_pos_native is not None:
+            bx_native = int(ball_pos_native[0])
+            by_native = int(ball_pos_native[1])
+            # Solid cyan when the position came from the picked track
+            # (reliable — that's where the ball actually was at impact).
+            # Dashed-style smaller ring when it came from the address-
+            # time bright-blob vote (heuristic).
+            if ball_pos_source == "track":
+                cv2.circle(base, (bx_native, by_native), 14, (255, 220, 0), 3, cv2.LINE_AA)
+                cv2.circle(base, (bx_native, by_native), 4, (255, 220, 0), -1, cv2.LINE_AA)
+                cv2.putText(
+                    base, "ball", (bx_native + 18, by_native + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 0), 2, cv2.LINE_AA,
+                )
+            else:
+                cv2.circle(base, (bx_native, by_native), 12, (255, 220, 0), 2, cv2.LINE_AA)
+                cv2.circle(base, (bx_native, by_native), 3, (255, 220, 0), -1, cv2.LINE_AA)
         if club_line_det is not None and det_scale > 0:
             cx1, cy1, cx2, cy2 = club_line_det
             cv2.line(
