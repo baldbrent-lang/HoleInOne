@@ -65,14 +65,18 @@ class _Det:
 MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 
 # Pipeline shape:
-#   Pass 1 (impact finder): build a labeled montage of N_MONTAGE_FRAMES
-#       frames spanning the whole clip, ask Claude which frame is
-#       closest to ball impact (clubhead meeting ball). One API call.
+# Pipeline shape:
+#   Pass 1 (impact finder): grab N_IMPACT_FRAMES evenly-spaced frames,
+#       send them as INDIVIDUAL images in a single multi-image Claude
+#       request with each preceded by a "Frame {n}:" text block. Claude
+#       sees each frame at full resolution (not a tiny tile in a montage)
+#       and identifies the impact frame number. One API call.
 #   Pass 2 (tracker): sample N_TRACK_FRAMES frames in a window starting
 #       slightly before the estimated impact and extending TRACK_SECONDS
 #       afterwards. Query each in parallel for ball coordinates.
 #   Fit a parabola through the in_flight anchors and render.
-N_MONTAGE_FRAMES = 16          # 4x4 grid for the impact-finder pass
+N_IMPACT_FRAMES = 16           # individual labeled frames for impact-finder
+N_MONTAGE_FRAMES = N_IMPACT_FRAMES  # kept as alias for backward compat / tests
 N_TRACK_FRAMES = 10            # tracking anchors after impact
 TRACK_SECONDS = 1.35           # how far past impact to sample
 TRACK_LEAD_SECONDS = 0.15      # small back-pad: covers montage ±half-tile slop
@@ -80,12 +84,11 @@ TRACK_LEAD_SECONDS = 0.15      # small back-pad: covers montage ±half-tile slop
                                # samples on pre-flight frames. Combined window
                                # is ~1.5s.
 
-# Per-tile size in the impact montage. 4 cols * 384 = 1536 px wide —
-# stays under Anthropic's 1568-px sweet spot for token-efficient
-# vision processing while keeping each tile big enough to read.
-MONTAGE_TILE_W = 384
-MONTAGE_TILE_H = 216           # 16:9
-MONTAGE_LABEL_BAND_H = 28      # black strip at top of each tile with frame label
+# Per-tile size for the IMPACT FINDER frames sent to Claude. Keep them
+# generous — Claude needs to see club + ball details clearly to pinpoint
+# the impact instant. Anthropic auto-resizes images > 1568 px on the long
+# edge anyway, and 640 px is well below that ceiling per frame.
+IMPACT_FRAME_W = 640
 
 # Frames are downscaled to this max width before being sent so token
 # count stays bounded regardless of source resolution (4K GoPros etc.).
@@ -104,21 +107,26 @@ MAX_CONCURRENT_REQUESTS = 8
 
 
 IMPACT_PROMPT = (
-    "You are analyzing a montage of still frames from a par-3 golf tee "
-    "shot, arranged in a grid. Each tile has a label at the top showing "
-    "its frame number from the source video.\n\n"
+    "You are analyzing a series of still frames from a par-3 golf tee "
+    "shot. The user message will include each frame preceded by a "
+    'text block "Frame N:" giving its frame number from the source video. '
+    "Frames are presented in chronological order.\n\n"
     "Identify the SINGLE frame closest to the moment of IMPACT — when "
-    "the clubhead meets the ball (just before the ball launches). The "
-    "ball is still on the tee but the clubhead is right on it.\n\n"
+    "the clubhead meets the ball, just before launch. Look for:\n"
+    "- Clubhead at or right next to the ball (still on the tee)\n"
+    "- Arms extended through the downswing, just past the lowest point\n"
+    "- Body rotated through the shot but ball not yet visibly airborne\n\n"
+    "Treat the LATEST pre-flight frame (clubhead on / just past ball, "
+    "ball still on tee or just lifted) as impact. Never pick a frame "
+    "where the ball is clearly already airborne well above ground — "
+    "that's POST-impact.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
-    '  "impact_frame": <int frame number from the tile labels>,\n'
+    '  "impact_frame": <int — must equal one of the labeled frame numbers>,\n'
     '  "confidence": "high"|"medium"|"low",\n'
-    '  "notes": "<short reasoning, max 15 words>"\n'
+    '  "notes": "<short reasoning, max 20 words>"\n'
     "}\n"
-    "If no tile shows impact (e.g. all are pre-swing or all post-flight) "
-    "pick the closest tile — the next pass will refine the window. "
-    "Never invent a frame number that isn't shown on a tile."
+    "Never invent a frame number; pick from the labels you were shown."
 )
 
 BALL_LOCATE_PROMPT = (
@@ -277,76 +285,52 @@ def _ask_claude_with_image(
     return _extract_json("\n".join(text_chunks))
 
 
-def _build_impact_montage(
-    input_path: Path, total_frames: int,
-) -> tuple[bytes, list[int]] | None:
-    """Compose a labeled grid of N_MONTAGE_FRAMES frames into a single
-    JPEG for the impact-finder pass. Each tile has a black bar at the
-    top showing its frame number so Claude can reference it.
-
-    Returns (jpeg_bytes, frame_indices_in_grid_order) or None on failure.
-    """
-    indices = _sample_frame_indices(total_frames, N_MONTAGE_FRAMES)
-    if not indices:
-        return None
+def _grab_frames_for_impact(
+    input_path: Path, indices: list[int], frame_w: int = IMPACT_FRAME_W,
+) -> list[tuple[int, bytes]]:
+    """Extract a list of (frame_idx, jpeg_bytes) for the impact-finder
+    multi-image API call. Each frame is resized to `frame_w` wide so the
+    payload size stays reasonable but Claude still gets a clear view of
+    each frame's club/ball position. Frames that fail to read are simply
+    skipped (no None returned)."""
+    out: list[tuple[int, bytes]] = []
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
-        return None
+        return out
     try:
-        tiles: list[tuple[int, "np.ndarray"]] = []
         for idx in indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            tile = cv2.resize(
-                frame, (MONTAGE_TILE_W, MONTAGE_TILE_H),
-                interpolation=cv2.INTER_AREA,
-            )
-            # Black band at top with the frame number.
-            cv2.rectangle(
-                tile, (0, 0), (MONTAGE_TILE_W, MONTAGE_LABEL_BAND_H),
-                (0, 0, 0), -1,
-            )
-            cv2.putText(
-                tile, f"frame {idx}", (8, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
-            )
-            tiles.append((idx, tile))
-        if not tiles:
-            return None
+            h, w = frame.shape[:2]
+            if w > frame_w:
+                scale = frame_w / float(w)
+                frame = cv2.resize(
+                    frame, (frame_w, int(round(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+            if ok:
+                out.append((idx, bytes(buf)))
     finally:
         cap.release()
-
-    # Pack into a square-ish grid (cols = ceil(sqrt(N))).
-    n = len(tiles)
-    cols = int(np.ceil(np.sqrt(n)))
-    rows = int(np.ceil(n / cols))
-    canvas = np.zeros(
-        (rows * MONTAGE_TILE_H, cols * MONTAGE_TILE_W, 3),
-        dtype=np.uint8,
-    )
-    grid_order: list[int] = []
-    for i, (frame_idx, tile) in enumerate(tiles):
-        r, c = divmod(i, cols)
-        y0, y1 = r * MONTAGE_TILE_H, (r + 1) * MONTAGE_TILE_H
-        x0, x1 = c * MONTAGE_TILE_W, (c + 1) * MONTAGE_TILE_W
-        canvas[y0:y1, x0:x1] = tile
-        grid_order.append(frame_idx)
-    ok, buf = cv2.imencode(".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
-    if not ok:
-        return None
-    return bytes(buf), grid_order
+    return out
 
 
 def _find_impact_frame(
     client, input_path: Path, total_frames: int, fps: float,
 ) -> tuple[int | None, dict]:
-    """Build a labeled montage and ask Claude which frame is impact.
+    """Ask Claude which frame is the moment of impact.
 
-    Returns (impact_frame_index_or_None, diagnostics_dict). Diagnostics
-    includes the candidate frames shown to Claude, the raw response,
-    and the confidence — all useful for the debug UI.
+    Strategy: extract N_IMPACT_FRAMES frames spread across the clip and
+    send them as INDIVIDUAL labeled images in a single multi-image
+    request. Each frame is preceded by a "Frame N:" text block so Claude
+    can name it back in the response. This is the same shape that
+    claude.ai uses when you upload a short video and ask "which frame
+    is impact?" — far better resolution per frame than a tiled montage.
+
+    Returns (impact_frame_index_or_None, diagnostics_dict).
     """
     diag: dict = {
         "candidate_frames": [],
@@ -355,39 +339,91 @@ def _find_impact_frame(
         "notes": None,
         "raw_response": None,
     }
-    built = _build_impact_montage(input_path, total_frames)
-    if built is None:
-        diag["error"] = "montage_build_failed"
+    indices = _sample_frame_indices(total_frames, N_IMPACT_FRAMES)
+    frames = _grab_frames_for_impact(input_path, indices)
+    if not frames:
+        diag["error"] = "no_frames_extracted"
         return None, diag
-    jpeg_bytes, grid_order = built
-    diag["candidate_frames"] = grid_order
+    candidate_frames = [idx for idx, _ in frames]
+    diag["candidate_frames"] = candidate_frames
 
-    user_text = (
-        f"Montage of {len(grid_order)} frames from a golf swing video. "
-        f"Tile labels show frame numbers (range {grid_order[0]} - {grid_order[-1]}; "
-        "total clip length {tot} frames at {fps:.1f} fps). "
-        "Identify the frame closest to impact."
-    ).format(tot=total_frames, fps=fps)
+    # Build the interleaved text/image content. Each frame is announced
+    # with its number BEFORE the image so Claude associates label↔image.
+    content: list[dict] = [{
+        "type": "text",
+        "text": (
+            f"Below are {len(frames)} frames from a {total_frames}-frame "
+            f"clip at {fps:.1f} fps, in chronological order. Each image "
+            "is preceded by its frame number."
+        ),
+    }]
+    for idx, jpeg in frames:
+        content.append({"type": "text", "text": f"Frame {idx}:"})
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(jpeg).decode("ascii"),
+            },
+        })
+    content.append({
+        "type": "text",
+        "text": (
+            "Identify which of the labeled frame numbers shows the "
+            "moment of impact (clubhead striking the ball). "
+            f"Valid frame numbers: {candidate_frames}. Respond with JSON only."
+        ),
+    })
 
-    parsed = _ask_claude_with_image(
-        client, jpeg_bytes, IMPACT_PROMPT, user_text,
-        max_tokens=256, log_tag="impact-montage",
-    )
-    diag["raw_response"] = parsed
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system=[{
+                "type": "text",
+                "text": IMPACT_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as exc:
+        log.warning("ai_tracer: impact-finder API call failed: %s", exc)
+        diag["error"] = f"api_failed: {exc}"
+        return None, diag
+
+    text_chunks = [
+        b.text for b in resp.content
+        if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+    ]
+    raw_text = "\n".join(text_chunks)
+    parsed = _extract_json(raw_text)
+    diag["raw_response"] = parsed or raw_text[:400]
     if not parsed:
-        diag["error"] = "no_response"
+        diag["error"] = "no_json_in_response"
         return None, diag
+
     try:
         impact = int(parsed.get("impact_frame"))
     except (TypeError, ValueError):
         diag["error"] = "could_not_parse_impact_frame"
         return None, diag
+    # Claude must pick one of the labeled frames (don't invent one).
+    if impact not in candidate_frames:
+        # Soft recovery: snap to the nearest candidate.
+        nearest = min(candidate_frames, key=lambda f: abs(f - impact))
+        log.warning(
+            "ai_tracer: impact-finder returned frame %d not in candidates; "
+            "snapping to nearest candidate %d",
+            impact, nearest,
+        )
+        impact = nearest
     if impact < 0 or impact >= total_frames:
-        diag["error"] = f"impact_frame_out_of_range ({impact} not in [0,{total_frames}))"
+        diag["error"] = f"impact_frame_out_of_range ({impact})"
         return None, diag
     diag["impact_frame"] = impact
     diag["confidence"] = str(parsed.get("confidence") or "").lower()
-    diag["notes"] = str(parsed.get("notes") or "")[:120]
+    diag["notes"] = str(parsed.get("notes") or "")[:200]
     return impact, diag
 
 
