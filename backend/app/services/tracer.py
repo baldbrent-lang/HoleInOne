@@ -730,6 +730,39 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         # apex are naturally part of the trail.
         direct_info: dict = {}
         if ball_addr_native is not None:
+            # Primary: patch-based pixel tracker. Reads the source
+            # video, watches the small region around the ball's
+            # at-rest position, detects impact when the ball leaves
+            # that region, then walks forward each frame searching a
+            # window around the velocity-predicted next position for
+            # the brightest small spot. Completely independent of the
+            # pre-computed detection set.
+            log.info(
+                "tracer: patch tracker starting from ball=(%.0f,%.0f)...",
+                ball_addr_native[0], ball_addr_native[1],
+            )
+            patch_track, patch_info = _track_ball_patch_based(
+                input_path, ball_addr_native, fps, width, height,
+                max_frames=total_frames_scanned,
+            )
+            log.info(
+                "tracer: patch tracker: impact_frame=%s track_len=%d stop_reason=%s",
+                patch_info.get("impact_frame"), len(patch_track),
+                patch_info.get("stop_reason"),
+            )
+            if patch_track and len(patch_track) >= MIN_TRACK_LENGTH:
+                seed_track = patch_track
+                track = patch_track
+                direct_info = patch_info
+            else:
+                log.info(
+                    "tracer: patch tracker yielded %d points (< %d); "
+                    "falling back to detection-based tracker",
+                    len(patch_track), MIN_TRACK_LENGTH,
+                )
+
+        # Detection-based direct tracker as secondary path.
+        if not seed_track and ball_addr_native is not None:
             log.info(
                 "tracer: direct tracker starting from ball=(%.0f,%.0f) "
                 "on %d post-mask detections (%d seeds)...",
@@ -1598,6 +1631,138 @@ def _candidates_from_mask(fg_mask):
         scored.sort(key=lambda s: -s[0])
         scored = scored[:MAX_CANDIDATES_PER_FRAME]
     return [(cx, cy, r) for (_score, cx, cy, r) in scored]
+
+
+def _track_ball_patch_based(
+    input_path, ball_addr_native, fps, frame_w, frame_h, max_frames=None,
+):
+    """Patch-based ball tracker that looks at the actual frame pixels.
+
+    No reliance on the pre-computed detection set, no chain scoring,
+    no comparison against noisy "things that might be balls" lists.
+    Just open the video, watch the small region around the ball's
+    at-rest position, detect the moment it leaves (impact), then walk
+    forward each frame searching a window around the predicted next
+    position for the brightest small spot using top-hat morphology.
+
+    Returns (track, info_dict). info_dict carries impact_frame and
+    stop_reason for diagnostics.
+    """
+    info = {"impact_frame": None, "impact_det": None, "stop_reason": "no_impact"}
+    track: list[_Det] = []
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["stop_reason"] = "cap_failed"
+        return track, info
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if max_frames is None or max_frames <= 0:
+            max_frames = total
+        else:
+            max_frames = min(max_frames, total)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        cur_x = float(ball_addr_native[0])
+        cur_y = float(ball_addr_native[1])
+        vel_x = 0.0
+        vel_y = 0.0
+        gap_count = 0
+        MAX_MISS = 15
+        WIN_SIZE = 80
+        WIN_GROW = 12
+        MIN_TOPHAT = 25
+        REST_DISP_PX = 5  # below this displacement, ball still considered at rest
+        max_rest = int(fps * 3) if fps > 0 else 90
+
+        impact_found = False
+        rest_frames = 0
+
+        for f in range(max_frames):
+            ok, frame = cap.read()
+            if not ok:
+                info["stop_reason"] = "end_of_clip"
+                break
+
+            pred_x = cur_x + vel_x
+            pred_y = cur_y + vel_y
+
+            win = WIN_SIZE + WIN_GROW * gap_count
+            x0 = max(0, int(pred_x - win))
+            y0 = max(0, int(pred_y - win))
+            x1 = min(frame_w, int(pred_x + win))
+            y1 = min(frame_h, int(pred_y + win))
+            if x1 - x0 < 20 or y1 - y0 < 20:
+                if impact_found:
+                    info["stop_reason"] = "out_of_frame"
+                    break
+                continue
+
+            window = frame[y0:y1, x0:x1]
+            gray = cv2.cvtColor(window, cv2.COLOR_BGR2GRAY)
+            tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+            _, max_val, _, max_loc = cv2.minMaxLoc(tophat)
+
+            if max_val < MIN_TOPHAT:
+                gap_count += 1
+                if impact_found and gap_count > MAX_MISS:
+                    info["stop_reason"] = "max_miss"
+                    break
+                cur_x = pred_x
+                cur_y = pred_y
+                if not impact_found:
+                    rest_frames += 1
+                    if rest_frames > max_rest:
+                        info["stop_reason"] = "lost_at_rest"
+                        return [], info
+                continue
+
+            new_x = float(x0 + max_loc[0])
+            new_y = float(y0 + max_loc[1])
+
+            if not impact_found:
+                dx = abs(new_x - ball_addr_native[0])
+                dy = abs(new_y - ball_addr_native[1])
+                if dx < REST_DISP_PX and dy < REST_DISP_PX:
+                    # Ball still at rest. Snap to the detected position
+                    # so we follow micro-drift / auto-exposure jitter.
+                    cur_x = new_x
+                    cur_y = new_y
+                    rest_frames += 1
+                    if rest_frames > max_rest:
+                        info["stop_reason"] = "lost_at_rest"
+                        return [], info
+                    continue
+                # Ball has moved — impact!
+                impact_found = True
+                info["impact_frame"] = f
+                info["impact_det"] = (new_x, new_y)
+                vel_x = new_x - ball_addr_native[0]
+                vel_y = new_y - ball_addr_native[1]
+                track.append(_Det(
+                    max(0, f - 1),
+                    float(ball_addr_native[0]),
+                    float(ball_addr_native[1]),
+                    0.0,
+                ))
+                track.append(_Det(f, new_x, new_y, 5.0))
+                cur_x = new_x
+                cur_y = new_y
+                gap_count = 0
+                continue
+
+            # In-flight: accept and follow
+            track.append(_Det(f, new_x, new_y, 5.0))
+            new_vx = new_x - cur_x
+            new_vy = new_y - cur_y
+            vel_x = 0.6 * new_vx + 0.4 * vel_x
+            vel_y = 0.6 * new_vy + 0.4 * vel_y
+            cur_x = new_x
+            cur_y = new_y
+            gap_count = 0
+    finally:
+        cap.release()
+
+    return track, info
 
 
 def _track_ball_from_address(
