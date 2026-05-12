@@ -108,23 +108,22 @@ DETECT_MAX_WIDTH = 1280
 
 MAX_FRAME_GAP = 6
 MAX_PIXEL_JUMP_PER_FRAME = 90
-# Tracks shorter than this aren't considered real ball flight. Bumped
-# from 5 after _pick_best kept picking 5-6 point body/arm squiggles
-# over an obvious 30-point ball-flight column.
-MIN_TRACK_LENGTH = 8
-# Frame-parameterized RMS; a clean ball-flight chain runs ~3-12 px, a
-# chain with a couple of noise-pulled points ~15-25 px, beyond ~35 is
-# real noise. 22 was too tight on jittery clips where the linker
-# unavoidably touches an impact-splash divot or two.
-MAX_PARABOLA_RESIDUAL = 35.0
+# Tracks shorter than this aren't considered real ball flight. Lowered
+# from 8 — was hard-rejecting some real but partially-detected ball
+# flights. Score formula's length bonus + alignment bonus still
+# strongly prefer longer chains.
+MIN_TRACK_LENGTH = 6
+# Frame-parameterized RMS. Loosened to 50 — a real ball-flight chain
+# typically runs 5-20 px, but with the alignment bonus heavily
+# rewarding parabola-aligned yellow extensions, we can afford to let
+# slightly noisier chains through. The bonus will pick out the right
+# one anyway.
+MAX_PARABOLA_RESIDUAL = 50.0
 # A "trajectory" stuck in one corner of the sky (random noise) often
 # has tiny total displacement. A real ball flight covers a big chunk
 # of the frame. Reject anything whose total motion is smaller than
 # this (in pixels, measured as max of x-range or y-range).
-# Lowered from 60: extension grows short seed chains anyway, and 60
-# was hard-rejecting valid impact-area seeds (5-15 points clustered
-# near the ball before the linker walks them upward).
-MIN_TRAJECTORY_SPAN_PX = 30.0
+MIN_TRAJECTORY_SPAN_PX = 20.0
 
 # --- v3 noise reducers ------------------------------------------------------
 # Two stages added to address the "noise blanketing the whole frame" failure
@@ -1905,7 +1904,7 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
                 if 0 <= iy < bm_h and 0 <= ix < bm_w and body_mask_det[iy, ix] > 0:
                     inside_count += 1
             inside_pct = inside_count / len(t)
-            if inside_pct > 0.8:
+            if inside_pct > 0.9:
                 rejected_body += 1
                 continue
         score = r - 1.0 * len(t) + inside_pct * 30.0
@@ -1915,11 +1914,16 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
         # filter dropped (the yellows) still sit on the same parabola.
         if all_detections is not None:
             aligned = _count_aligned_detections(t, all_detections, eps=20.0)
-            score -= 0.3 * aligned
+            score -= 0.7 * aligned
         if ball_addr_native is not None:
             first = t[0]
             d = float(np.hypot(first.x - ball_addr_native[0], first.y - ball_addr_native[1]))
-            if d < 80:
+            if d < 50:
+                # Strong anchor when the chain literally starts at the
+                # ball. Ball flight starts at the ball; nothing else
+                # plausibly does.
+                score -= 25.0
+            elif d < 100:
                 score -= 10.0
             elif d > 200:
                 score += 5.0
