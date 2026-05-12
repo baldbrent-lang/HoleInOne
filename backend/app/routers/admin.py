@@ -717,7 +717,23 @@ def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, 
         probe.get("nb_frames"), probe.get("duration"),
         traced_path.stat().st_size,
     )
-    return f"{settings.app_base_url}/uploads/clips/{traced_name}", info, traced_path, debug_url
+    # Cache-bust the served URLs with the file mtime. Each retry rewrites
+    # the same filename, and some browsers refuse to re-init the <video>
+    # decoder when src stays identical — they sit on the old decoded
+    # state and the new bytes never get rendered. Appending a version
+    # query string forces the element to treat it as a new resource.
+    traced_mtime = int(traced_path.stat().st_mtime)
+    debug_mtime = int(debug_path.stat().st_mtime) if debug_path.exists() else traced_mtime
+    debug_url = (
+        f"{settings.app_base_url}/uploads/clips/{debug_name}?v={debug_mtime}"
+        if debug_path.exists() else None
+    )
+    return (
+        f"{settings.app_base_url}/uploads/clips/{traced_name}?v={traced_mtime}",
+        info,
+        traced_path,
+        debug_url,
+    )
 
 
 @router.post("/clips/upload")
