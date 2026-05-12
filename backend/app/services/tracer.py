@@ -658,7 +658,6 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         foot_y_cutoff = max(foot_y_cutoff, ball_addr_det[1] + 15)
     detections: list[_Det] = []
     hot_rejected = 0
-    side_rejected = 0
     foot_rejected = 0
     for f, cx, cy, r in raw_cands_det:
         if cy > foot_y_cutoff:
@@ -670,12 +669,6 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             if 0 <= iy < det_h and 0 <= ix < det_w and hot_mask[iy, ix]:
                 hot_rejected += 1
                 continue
-        if behind_side == "left" and body_x_det is not None and cx < body_x_det:
-            side_rejected += 1
-            continue
-        if behind_side == "right" and body_x_det is not None and cx > body_x_det:
-            side_rejected += 1
-            continue
         if M_inv is not None:
             cx_cur = float(M_inv[0, 0] * cx + M_inv[0, 1] * cy + M_inv[0, 2])
             cy_cur = float(M_inv[1, 0] * cx + M_inv[1, 1] * cy + M_inv[1, 2])
@@ -683,8 +676,8 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             cx_cur, cy_cur = cx, cy
         detections.append(_Det(f, cx_cur * inv, cy_cur * inv, r * inv))
     log.info(
-        "tracer: hot-mask rejected %d, foot rejected %d, side-filter rejected %d, kept %d / %d raw",
-        hot_rejected, foot_rejected, side_rejected, len(detections), len(raw_cands_det),
+        "tracer: hot-mask rejected %d, foot rejected %d, kept %d / %d raw",
+        hot_rejected, foot_rejected, len(detections), len(raw_cands_det),
     )
 
     # Stage B: prune candidates that aren't part of any short upward
@@ -1094,19 +1087,13 @@ def _find_hit_ball_from_snapshots(
     if not raw_candidates:
         return None
 
-    # Apply the same plausibility filters the vote-based fallback uses.
-    # Disappearance is a strong "this blob is gone" signal but doesn't
-    # know anything about where the actual ball-at-address would be.
+    # Filter disappearance candidates by clubhead proximity only.
+    # The left/right side filter was removed — the direct ball
+    # tracker handles wrong-side false positives implicitly by
+    # walking forward from whichever ball position is plausible.
     candidates: list[tuple[float, float, int]] = []
-    rejected_side = rejected_clubhead = 0
+    rejected_clubhead = 0
     for (cx, cy, count) in raw_candidates:
-        if body_x is not None and behind_side in ("left", "right"):
-            if behind_side == "left" and cx < body_x:
-                rejected_side += 1
-                continue
-            if behind_side == "right" and cx > body_x:
-                rejected_side += 1
-                continue
         if clubhead is not None:
             d = float(np.hypot(cx - clubhead[0], cy - clubhead[1]))
             if d > MAX_BALL_TO_CLUBHEAD_PX:
@@ -1114,8 +1101,8 @@ def _find_hit_ball_from_snapshots(
                 continue
         candidates.append((cx, cy, count))
     log.info(
-        "tracer:   disappearance: rejected %d on side, %d on clubhead-distance; %d kept",
-        rejected_side, rejected_clubhead, len(candidates),
+        "tracer:   disappearance: rejected %d on clubhead-distance; %d kept",
+        rejected_clubhead, len(candidates),
     )
     if not candidates:
         return None
@@ -1191,13 +1178,9 @@ def _pick_ball_addr(all_blobs, body_x=None, behind_side=None, clubhead=None):
     """
     if not all_blobs:
         return None
-    if body_x is not None and behind_side in ("left", "right"):
-        if behind_side == "left":
-            blobs = [(cx, cy) for (cx, cy) in all_blobs if cx >= body_x]
-        else:
-            blobs = [(cx, cy) for (cx, cy) in all_blobs if cx <= body_x]
-    else:
-        blobs = list(all_blobs)
+    # No left/right pre-filter — the direct tracker decides what's
+    # ball regardless of which side it's on.
+    blobs = list(all_blobs)
     if not blobs:
         return None
     tol = BALL_ADDR_POSITION_TOLERANCE_PX
@@ -1398,26 +1381,12 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
             tint[..., 2] = 200  # red in BGR
             mask3 = scaled.astype(bool)
             base[mask3] = (0.55 * base[mask3] + 0.45 * tint[mask3]).astype(np.uint8)
-        # Body x-center axis + side-filter shading. body_x_det is in
-        # detection-coord px, so scale up to native frame width for the
-        # overlay.
+        # Body x-center axis (informational only — no side shading now
+        # that the left/right blocking filter is gone).
         if body_x_det is not None and det_scale > 0:
             body_x_native = int(body_x_det / det_scale)
             cv2.line(base, (body_x_native, 0), (body_x_native, base.shape[0]),
                      (255, 220, 0), 2, cv2.LINE_AA)
-            if behind_side in ("left", "right"):
-                shade = np.zeros_like(base)
-                shade[..., 0] = 80  # blue tint on the rejected half
-                if behind_side == "left":
-                    shade[:, :body_x_native] = (60, 60, 60)
-                    base[:, :body_x_native] = (
-                        0.65 * base[:, :body_x_native] + 0.35 * shade[:, :body_x_native]
-                    ).astype(np.uint8)
-                else:
-                    shade[:, body_x_native:] = (60, 60, 60)
-                    base[:, body_x_native:] = (
-                        0.65 * base[:, body_x_native:] + 0.35 * shade[:, body_x_native:]
-                    ).astype(np.uint8)
         if ball_pos_native is not None:
             bx_native = int(ball_pos_native[0])
             by_native = int(ball_pos_native[1])
