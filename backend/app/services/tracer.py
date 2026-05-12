@@ -204,13 +204,15 @@ EXTEND_OUT_OF_FRAME_MARGIN_PX = 80
 # side — those are body silhouette fragments or background noise that
 # the ball physically can't be near.
 #
-# Loosened on the second pass after clip 62 retraces failed to find an
-# address at thresh=220 / 5-occurrence / 12-frame warmup: overcast
-# lighting puts dirty / slightly-shaded balls in the 180-210 range, the
-# golfer often settles for ~1s before swinging (so we can search beyond
-# warmup), and the iPhone's auto-exposure jitters the apparent ball
-# position by a few px frame-to-frame.
-BALL_ADDR_BRIGHT_THRESH = 180
+# v2 detection uses top-hat morphology rather than a fixed brightness
+# threshold. A golf ball on grass is a small *locally bright* feature
+# — significantly brighter than its surrounding green — but its
+# absolute brightness varies wildly with cloud cover, shadow, and
+# camera exposure. Top-hat (image minus its morphological opening with
+# a kernel bigger than the ball) isolates exactly that kind of
+# local-bright peak and ignores evenly-lit grass texture.
+BALL_ADDR_TOPHAT_KERNEL_PX = 15  # > expected ball diameter
+BALL_ADDR_TOPHAT_THRESH = 25     # min local contrast 0-255
 BALL_ADDR_MIN_OCCURRENCES = 3
 BALL_ADDR_POSITION_TOLERANCE_PX = 12
 BALL_ADDR_Y_TOP_FRACTION = 0.45  # only search below this fraction of the frame
@@ -647,22 +649,22 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
                 frame_w=width, frame_h=height,
             )
 
-    # Use the picked track's earliest point as the canonical ball
-    # position when available — it's where the ball was at impact,
-    # which is within ~10px of its at-address position. More reliable
-    # than the bright-blob vote, which can miss the ball entirely in
-    # shadow / overcast lighting. Falls back to the address-time
-    # detection when no track exists yet (visualization-only).
+    # Prefer the at-rest ball position from address-time detection.
+    # That's the *actual* ball before it was struck — what the user
+    # wants to see. track[0] is only the first frame where the linker
+    # caught the ball in motion, which can be several frames into the
+    # flight (already a few feet up). Fall back to it only when the
+    # address-time top-hat scan finds nothing.
     picked_for_debug = track or seed_track
     ball_pos_native = None
     ball_pos_source = None
-    if picked_for_debug:
+    if ball_addr_det is not None and det_scale > 0:
+        ball_pos_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)
+        ball_pos_source = "address-vote"
+    elif picked_for_debug:
         first = min(picked_for_debug, key=lambda p: p.frame)
         ball_pos_native = (float(first.x), float(first.y))
         ball_pos_source = "track"
-    elif ball_addr_det is not None and det_scale > 0:
-        ball_pos_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)
-        ball_pos_source = "address-vote"
     log.info(
         "tracer: ball_pos=%s (source=%s)",
         f"({ball_pos_native[0]:.0f},{ball_pos_native[1]:.0f})" if ball_pos_native else "None",
@@ -803,10 +805,22 @@ def _handedness_from_slopes(slopes):
 
 def _scan_for_ball_addr_blobs(det_frame):
     """Find small bright blobs in the lower portion of a single det-res
-    frame. Returns a list of (cx, cy) positions in detection coords.
-    Used during warmup to vote on the ball's address position."""
+    frame, likely to be a stationary golf ball at address.
+
+    Uses top-hat morphology: gray − opened(gray, kernel) leaves only
+    features smaller than the kernel that are brighter than their
+    surroundings. Robust to varied lighting (cloud cover, shadow) in a
+    way a fixed brightness threshold isn't — a ball at 150/255 gray on
+    grass at 100/255 has the same 50-unit local contrast as a ball at
+    220 on grass at 170, both of which top-hat catches.
+    """
     gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
-    _ret, bright = cv2.threshold(gray, BALL_ADDR_BRIGHT_THRESH, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (BALL_ADDR_TOPHAT_KERNEL_PX, BALL_ADDR_TOPHAT_KERNEL_PX),
+    )
+    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+    _ret, bright = cv2.threshold(tophat, BALL_ADDR_TOPHAT_THRESH, 255, cv2.THRESH_BINARY)
     contours, _h = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     h = det_frame.shape[0]
     y_floor = h * BALL_ADDR_Y_TOP_FRACTION
@@ -1048,11 +1062,9 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
         if ball_pos_native is not None:
             bx_native = int(ball_pos_native[0])
             by_native = int(ball_pos_native[1])
-            # Solid cyan when the position came from the picked track
-            # (reliable — that's where the ball actually was at impact).
-            # Dashed-style smaller ring when it came from the address-
-            # time bright-blob vote (heuristic).
-            if ball_pos_source == "track":
+            if ball_pos_source == "address-vote":
+                # Ball-at-rest directly detected — the most accurate
+                # signal. Solid cyan + "ball" label.
                 cv2.circle(base, (bx_native, by_native), 14, (255, 220, 0), 3, cv2.LINE_AA)
                 cv2.circle(base, (bx_native, by_native), 4, (255, 220, 0), -1, cv2.LINE_AA)
                 cv2.putText(
@@ -1060,8 +1072,15 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 0), 2, cv2.LINE_AA,
                 )
             else:
-                cv2.circle(base, (bx_native, by_native), 12, (255, 220, 0), 2, cv2.LINE_AA)
-                cv2.circle(base, (bx_native, by_native), 3, (255, 220, 0), -1, cv2.LINE_AA)
+                # Inferred from first frame of the picked track —
+                # approximate (might be already mid-flight). Smaller
+                # ring + "ball?" label so the operator knows it's
+                # a fallback estimate.
+                cv2.circle(base, (bx_native, by_native), 10, (180, 180, 255), 2, cv2.LINE_AA)
+                cv2.putText(
+                    base, "ball?", (bx_native + 14, by_native + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (180, 180, 255), 1, cv2.LINE_AA,
+                )
         if club_line_det is not None and det_scale > 0:
             cx1, cy1, cx2, cy2 = club_line_det
             cv2.line(
