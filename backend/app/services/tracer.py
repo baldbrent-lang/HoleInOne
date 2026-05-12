@@ -1881,6 +1881,7 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
     rejected_body = 0
     rejected_residual = 0
     rejected_span = 0
+    rejected_blob = 0
     if body_mask_det is not None:
         bm_h, bm_w = body_mask_det.shape[:2]
     for t in trajectories:
@@ -1890,9 +1891,21 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
             continue
         xs = [p.x for p in t]
         ys = [p.y for p in t]
-        span = max(max(xs) - min(xs), max(ys) - min(ys))
+        span_x = max(xs) - min(xs)
+        span_y = max(ys) - min(ys)
+        span = max(span_x, span_y)
         if span < MIN_TRAJECTORY_SPAN_PX:
             rejected_span += 1
+            continue
+        # Blob filter: a real ball flight is ELONGATED (motion span much
+        # larger than perpendicular span). A compact cluster of detection
+        # points in a small bbox has both spans similar — that's body /
+        # club / divot fragments mis-chained, not a trajectory. User's
+        # observation: "if there's a large blob shaped cluster, the
+        # tracer path is probably not within that."
+        elongation = span / max(min(span_x, span_y), 1.0)
+        if elongation < 2.0:
+            rejected_blob += 1
             continue
         # Reject body-resident tracks before they can win the score.
         # Pixel-accurate against the filled body silhouette (not bbox).
@@ -1932,9 +1945,9 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
     if not scored:
         log.info(
             "tracer: _pick_best: NO trajectory survived. of %d input chains: "
-            "rejected %d on residual>%.0f, %d on span<%d, %d on body-overlap>0.8",
+            "rejected %d on residual>%.0f, %d on span<%d, %d on blob (elongation<2), %d on body-overlap>0.9",
             len(trajectories), rejected_residual, MAX_PARABOLA_RESIDUAL,
-            rejected_span, int(MIN_TRAJECTORY_SPAN_PX), rejected_body,
+            rejected_span, int(MIN_TRAJECTORY_SPAN_PX), rejected_blob, rejected_body,
         )
         return []
     scored.sort(key=lambda s: s[0])
