@@ -529,8 +529,8 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # and as fallback signals. The primary handedness signal now comes
     # from the club shaft's slope, which is robust to stray practice
     # balls in the grass.
-    log.info("tracer: post-loop: computing body bbox...")
-    body_bbox_det = _hot_mask_body_bbox(hot_mask)
+    log.info("tracer: post-loop: computing body bbox + silhouette mask...")
+    body_bbox_det, body_mask_det = _hot_mask_body_components(hot_mask)
     body_x_det = (
         float((body_bbox_det[0] + body_bbox_det[2]) / 2.0)
         if body_bbox_det is not None else None
@@ -723,19 +723,14 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         ball_addr_native = None
         if ball_addr_det is not None and det_scale > 0:
             ball_addr_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)
-        body_bbox_native = None
-        if body_bbox_det is not None and det_scale > 0:
-            body_bbox_native = (
-                body_bbox_det[0] * inv, body_bbox_det[1] * inv,
-                body_bbox_det[2] * inv, body_bbox_det[3] * inv,
-            )
         log.info("tracer: _link starting on %d seeds...", len(seeds))
         linked = _link(seeds)
         log.info("tracer: _link produced %d trajectories; scoring...", len(linked))
         seed_track = _pick_best(
             linked,
             ball_addr_native=ball_addr_native,
-            body_bbox_native=body_bbox_native,
+            body_mask_det=body_mask_det,
+            det_scale=det_scale,
         )
         if seed_track:
             log.info(
@@ -1201,29 +1196,41 @@ def _pick_ball_addr(all_blobs, body_x=None, behind_side=None, clubhead=None):
     return (candidates[0][1], candidates[0][2])
 
 
-def _hot_mask_body_bbox(hot_mask):
-    """Bbox (x1, y1, x2, y2) of the golfer's body envelope in the hot
-    mask. Returns None if the mask is empty or too sparse.
+def _hot_mask_body_components(hot_mask):
+    """Return (bbox, filled_mask) for the golfer's body envelope.
 
-    Note: at the hot-mask dilation we use, the body silhouette often
-    breaks into multiple disconnected components (head, torso, arms,
-    legs each separate, with thin gaps between them). Taking the
-    largest single contour would give us just the torso, missing the
-    feet — which is exactly what we need for the foot-line cutoff. So
-    we morph-close first (kernel 25 px) to merge those pieces into one
-    body-shaped blob before extracting the bbox.
+    Bbox is the rectangular bounding box of the body's largest
+    connected component — used for the foot-line cutoff.
+    Filled mask is a uint8 image of just that connected component
+    drawn as a filled shape, used for *pixel-accurate* "is this point
+    inside the body" tests. A vertical ball flight passing just to the
+    left of the body's legs lives inside the rectangular bbox (the
+    bbox includes empty space around the body shape) but OUTSIDE the
+    filled mask. The filled-mask check correctly accepts that ball
+    flight; the bbox check falsely rejected it.
+
+    Returns (None, None) if no large enough component.
     """
     closed = cv2.morphologyEx(
         hot_mask, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8),
     )
     contours, _h = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return None
+        return None, None
     largest = max(contours, key=cv2.contourArea)
     if cv2.contourArea(largest) < 200:
-        return None
+        return None, None
     x, y, w, h = cv2.boundingRect(largest)
-    return (int(x), int(y), int(x + w), int(y + h))
+    body_mask = np.zeros(hot_mask.shape, dtype=np.uint8)
+    cv2.drawContours(body_mask, [largest], -1, 255, -1)
+    return (int(x), int(y), int(x + w), int(y + h)), body_mask
+
+
+def _hot_mask_body_bbox(hot_mask):
+    """Bbox-only convenience wrapper around _hot_mask_body_components.
+    Kept for callers that don't need the filled mask."""
+    bbox, _mask = _hot_mask_body_components(hot_mask)
+    return bbox
 
 
 def _hot_mask_x_center(hot_mask):
@@ -1794,7 +1801,7 @@ def _smooth_track_for_render(track, ball_pos_native=None):
     return out
 
 
-def _pick_best(trajectories, ball_addr_native=None, body_bbox_native=None):
+def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None, det_scale=1.0):
     """Pick the most likely ball-flight trajectory. Lower score = better.
 
     Score = residual_px − 1.0·len(track) + anchor adjustment + body
@@ -1803,10 +1810,11 @@ def _pick_best(trajectories, ball_addr_native=None, body_bbox_native=None):
     residual/span filters.
 
     Hard reject tracks whose points sit mostly inside the golfer's body
-    bbox — the ball physically can't pass through the golfer, so any
-    track that does is body/arm/club fragments mis-chained as a
-    trajectory. Tracks with some body overlap (but not majority) get a
-    proportional penalty.
+    silhouette — the ball physically can't pass through the golfer.
+    Uses the pixel-accurate filled body mask (in detection coords)
+    rather than its rectangular bounding box, so a vertical ball flight
+    passing just outside the body shape but inside the body's bbox
+    isn't falsely rejected.
 
     Anchor: chains that START near the at-rest ball position get a
     bonus, chains that start far from it get a penalty. The club's
@@ -1815,6 +1823,8 @@ def _pick_best(trajectories, ball_addr_native=None, body_bbox_native=None):
     """
     scored = []
     rejected_body = 0
+    if body_mask_det is not None:
+        bm_h, bm_w = body_mask_det.shape[:2]
     for t in trajectories:
         r = _residual(t)
         if r > MAX_PARABOLA_RESIDUAL:
@@ -1825,13 +1835,17 @@ def _pick_best(trajectories, ball_addr_native=None, body_bbox_native=None):
         if span < MIN_TRAJECTORY_SPAN_PX:
             continue
         # Reject body-resident tracks before they can win the score.
+        # Pixel-accurate against the filled body silhouette (not bbox),
+        # so a near-vertical ball flight passing alongside the body
+        # but inside its bbox is correctly accepted.
         inside_pct = 0.0
-        if body_bbox_native is not None:
-            x1, y1, x2, y2 = body_bbox_native
-            inside_count = sum(
-                1 for p in t
-                if x1 <= p.x <= x2 and y1 <= p.y <= y2
-            )
+        if body_mask_det is not None:
+            inside_count = 0
+            for p in t:
+                ix = int(p.x * det_scale)
+                iy = int(p.y * det_scale)
+                if 0 <= iy < bm_h and 0 <= ix < bm_w and body_mask_det[iy, ix] > 0:
+                    inside_count += 1
             inside_pct = inside_count / len(t)
             if inside_pct > 0.7:
                 rejected_body += 1
