@@ -523,18 +523,42 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         behind_side = "right"
 
     # Clubhead position (lower endpoint of detected club line) — used as
-    # a prior for ball-address picking, since the clubhead at address is
-    # right beside the ball.
+    # a prior for the vote-based ball-address picker if we fall back to it.
     clubhead_det = (
         (float(club_best_line[2]), float(club_best_line[3]))
         if club_best_line is not None else None
     )
-    ball_addr_det = _pick_ball_addr(
-        ball_addr_votes,
-        body_x=body_x_det,
-        behind_side=behind_side,
-        clubhead=clubhead_det,
+    # Primary ball detector: identify the white blob that's present in
+    # early frames but ABSENT in late frames. The hit ball is the only
+    # thing that disappears between address and follow-through — practice
+    # balls scattered in the foreground stay put. Unambiguous when it
+    # works.
+    ball_addr_det = _find_hit_ball_via_disappearance(
+        input_path, det_scale, det_w, det_h, fps,
     )
+    if ball_addr_det is not None:
+        log.info(
+            "tracer: ball found via disappearance check at (%.0f, %.0f)",
+            ball_addr_det[0], ball_addr_det[1],
+        )
+    else:
+        # Fallback: in-loop vote-based scan (top-hat across the address
+        # window). Less reliable than disappearance — confused by stray
+        # practice balls — but catches cases where the clip doesn't have
+        # a clear late-window "empty" state.
+        ball_addr_det = _pick_ball_addr(
+            ball_addr_votes,
+            body_x=body_x_det,
+            behind_side=behind_side,
+            clubhead=clubhead_det,
+        )
+        if ball_addr_det is not None:
+            log.info(
+                "tracer: ball found via address-vote fallback at (%.0f, %.0f)",
+                ball_addr_det[0], ball_addr_det[1],
+            )
+        else:
+            log.info("tracer: ball not found (both detectors failed)")
 
     # If the club gave no decisive handedness, fall back to inferring it
     # from the (now side-unfiltered) ball-address position.
@@ -829,6 +853,105 @@ def _handedness_from_slopes(slopes):
     if neg >= CLUB_MIN_VOTES and neg >= 2 * max(pos, 1):
         return "righty"
     return None
+
+
+def _cluster_positions(positions, tol):
+    """Group (x, y) positions whose pairwise Chebyshev distance is
+    within `tol` into clusters. Returns list of (mean_x, mean_y, count)
+    per cluster. Used by the hit-ball detector to find positions that
+    repeated stationarily across multiple sample frames.
+    """
+    if not positions:
+        return []
+    used = [False] * len(positions)
+    clusters = []
+    for i, (cx, cy) in enumerate(positions):
+        if used[i]:
+            continue
+        cluster = [(cx, cy)]
+        used[i] = True
+        for j in range(i + 1, len(positions)):
+            if used[j]:
+                continue
+            cx2, cy2 = positions[j]
+            if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
+                cluster.append((cx2, cy2))
+                used[j] = True
+        mean_x = sum(c[0] for c in cluster) / len(cluster)
+        mean_y = sum(c[1] for c in cluster) / len(cluster)
+        clusters.append((mean_x, mean_y, len(cluster)))
+    return clusters
+
+
+def _find_hit_ball_via_disappearance(input_path, det_scale, det_w, det_h, fps):
+    """Find the ball that was hit by comparing white-blob positions in
+    early vs late frames.
+
+    Logic: the ball at address sits stationary for the first ~1-2
+    seconds of the clip; after the swing it's gone (out of frame or far
+    enough to no longer register as a stationary blob). Practice balls
+    in the foreground are present in BOTH windows — same position. The
+    hit ball is the ONLY blob present in early frames but absent in
+    late frames.
+
+    Returns (cx, cy) in detection coords, or None if no blob unambiguously
+    disappeared.
+    """
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return None
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < int(fps * 2):
+            return None  # clip too short for distinct early/late windows
+
+        def scan_at(f):
+            if not (0 <= f < total_frames):
+                return []
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                return []
+            det_frame = cv2.resize(frame, (det_w, det_h)) if det_scale != 1.0 else frame
+            return _scan_for_ball_addr_blobs(det_frame)
+
+        # Sample 6 frames from the first ~1.5s (ball at address) and the
+        # last ~1.5s (ball gone). fps-scaled so this works at 30fps
+        # and 120fps alike.
+        early_times = (0.2, 0.4, 0.6, 0.8, 1.1, 1.4)
+        late_times = (1.5, 1.2, 0.9, 0.7, 0.5, 0.3)
+        early_blobs: list[tuple[float, float]] = []
+        late_blobs: list[tuple[float, float]] = []
+        for t in early_times:
+            early_blobs.extend(scan_at(int(t * fps)))
+        for t in late_times:
+            late_blobs.extend(scan_at(total_frames - int(t * fps)))
+
+        early_clusters = _cluster_positions(early_blobs, BALL_ADDR_POSITION_TOLERANCE_PX)
+        if not early_clusters:
+            return None
+
+        # An early cluster is "the hit ball" if no late blob falls
+        # within 2x tolerance of it. Practice balls match a late blob;
+        # only the actual hit ball disappears.
+        tol_late = BALL_ADDR_POSITION_TOLERANCE_PX * 2
+        candidates: list[tuple[float, float, int]] = []
+        for (cx, cy, count) in early_clusters:
+            if count < 2:  # require at least 2 occurrences to be stationary
+                continue
+            has_late_match = any(
+                abs(lcx - cx) <= tol_late and abs(lcy - cy) <= tol_late
+                for (lcx, lcy) in late_blobs
+            )
+            if not has_late_match:
+                candidates.append((cx, cy, count))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda c: -c[2])  # highest stationarity first
+        return (candidates[0][0], candidates[0][1])
+    finally:
+        cap.release()
 
 
 def _scan_for_ball_addr_blobs(det_frame):
