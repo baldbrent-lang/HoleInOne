@@ -215,7 +215,18 @@ EXTEND_OUT_OF_FRAME_MARGIN_PX = 80
 # a kernel bigger than the ball) isolates exactly that kind of
 # local-bright peak and ignores evenly-lit grass texture.
 BALL_ADDR_TOPHAT_KERNEL_PX = 15  # > expected ball diameter
-BALL_ADDR_TOPHAT_THRESH = 25     # min local contrast 0-255
+# Local-brightness contrast (0-255) a blob must exceed in the top-hat
+# output. Was 25 — that caught grass texture, cloud highlights, and
+# compression noise, producing ~1000 blobs/frame on busy outdoor
+# clips and making _find_hit_ball_from_snapshots' downstream matching
+# loops run on absurdly large blob sets. Real golf balls produce
+# top-hat values of 60-120, so 50 is a comfortable floor that keeps
+# the real ball and cuts background noise 5-10×.
+BALL_ADDR_TOPHAT_THRESH = 50
+# Reject non-circular blobs in the top-hat output. Grass texture and
+# compression artifacts produce elongated / irregular shapes; a real
+# ball is roughly circular even partially occluded.
+BALL_ADDR_MIN_CIRCULARITY = 0.5
 BALL_ADDR_MIN_OCCURRENCES = 3
 BALL_ADDR_POSITION_TOLERANCE_PX = 12
 BALL_ADDR_Y_TOP_FRACTION = 0.45  # only search below this fraction of the frame
@@ -903,11 +914,19 @@ def _handedness_from_slopes(slopes):
 def _cluster_positions(positions, tol):
     """Group (x, y) positions whose pairwise Chebyshev distance is
     within `tol` into clusters. Returns list of (mean_x, mean_y, count)
-    per cluster. Used by the hit-ball detector to find positions that
-    repeated stationarily across multiple sample frames.
+    per cluster.
+
+    Uses a spatial hash (grid of size `tol`) so worst-case runtime is
+    O(N · avg_bucket_size) instead of O(N²). On busy outdoor clips
+    that can yield thousands of input positions, the difference is
+    seconds vs. minutes.
     """
     if not positions:
         return []
+    cell = max(1, int(tol))
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for i, (cx, cy) in enumerate(positions):
+        buckets.setdefault((int(cx // cell), int(cy // cell)), []).append(i)
     used = [False] * len(positions)
     clusters = []
     for i, (cx, cy) in enumerate(positions):
@@ -915,17 +934,46 @@ def _cluster_positions(positions, tol):
             continue
         cluster = [(cx, cy)]
         used[i] = True
-        for j in range(i + 1, len(positions)):
-            if used[j]:
-                continue
-            cx2, cy2 = positions[j]
-            if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
-                cluster.append((cx2, cy2))
-                used[j] = True
+        bx, by = int(cx // cell), int(cy // cell)
+        # Members within `tol` (Chebyshev) of (cx, cy) can only live in
+        # the 3x3 neighbourhood of buckets around (bx, by).
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in buckets.get((bx + dx, by + dy), ()):
+                    if j == i or used[j]:
+                        continue
+                    cx2, cy2 = positions[j]
+                    if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
+                        cluster.append((cx2, cy2))
+                        used[j] = True
         mean_x = sum(c[0] for c in cluster) / len(cluster)
         mean_y = sum(c[1] for c in cluster) / len(cluster)
         clusters.append((mean_x, mean_y, len(cluster)))
     return clusters
+
+
+def _build_position_hash(positions, cell):
+    """Return a {(bx, by): [(cx, cy), ...]} grid for fast neighborhood
+    queries. `cell` is the grid size — should be the query tolerance,
+    so the 3x3 cell neighborhood of any query point covers all points
+    within that tolerance."""
+    buckets: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    for (cx, cy) in positions:
+        buckets.setdefault((int(cx // cell), int(cy // cell)), []).append((cx, cy))
+    return buckets
+
+
+def _has_position_within(hash_grid, cx, cy, tol):
+    """True iff hash_grid contains any position within Chebyshev `tol`
+    of (cx, cy). hash_grid must have been built with cell == tol."""
+    cell = tol
+    bx, by = int(cx // cell), int(cy // cell)
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for (cx2, cy2) in hash_grid.get((bx + dx, by + dy), ()):
+                if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
+                    return True
+    return False
 
 
 def _find_hit_ball_from_snapshots(early_snapshots, late_snapshots):
@@ -966,17 +1014,19 @@ def _find_hit_ball_from_snapshots(early_snapshots, late_snapshots):
     if not early_clusters:
         return None
 
+    # Spatial hash of late blobs for O(1) "is there a late blob near
+    # this cluster?" checks. Without this, on clips with thousands of
+    # blobs, the matching loop was O(clusters · late_blobs) and could
+    # take minutes.
     tol_late = BALL_ADDR_POSITION_TOLERANCE_PX * 2
+    late_hash = _build_position_hash(late_blobs, tol_late)
     candidates: list[tuple[float, float, int]] = []
     for (cx, cy, count) in early_clusters:
         if count < 2:
             continue
-        has_late_match = any(
-            abs(lcx - cx) <= tol_late and abs(lcy - cy) <= tol_late
-            for (lcx, lcy) in late_blobs
-        )
-        if not has_late_match:
+        if not _has_position_within(late_hash, cx, cy, tol_late):
             candidates.append((cx, cy, count))
+    log.info("tracer:   disappearance: %d candidates have no late match", len(candidates))
 
     if not candidates:
         return None
@@ -1015,6 +1065,15 @@ def _scan_for_ball_addr_blobs(det_frame):
             continue
         if cy < y_floor:
             continue
+        # Circularity gate: 4π·area / perimeter². 1.0 = perfect circle,
+        # < 0.5 is elongated / irregular — grass texture / compression
+        # noise that bright-thresholded into ball-sized blobs.
+        perimeter = cv2.arcLength(c, True)
+        if perimeter <= 0:
+            continue
+        circ = 4.0 * np.pi * area / (perimeter ** 2)
+        if circ < BALL_ADDR_MIN_CIRCULARITY:
+            continue
         blobs.append((float(cx), float(cy)))
     return blobs
 
@@ -1045,12 +1104,22 @@ def _pick_ball_addr(all_blobs, body_x=None, behind_side=None, clubhead=None):
     if not blobs:
         return None
     tol = BALL_ADDR_POSITION_TOLERANCE_PX
+    # Spatial hash so we only check the 3x3 cell neighborhood for each
+    # blob instead of every other blob. O(N) instead of O(N²) — busy
+    # outdoor clips can produce 100k+ votes across the warmup window
+    # and the original double loop was a multi-minute hang on those.
+    hash_grid: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    for (cx, cy) in blobs:
+        hash_grid.setdefault((int(cx // tol), int(cy // tol)), []).append((cx, cy))
     candidates: list[tuple[int, float, float]] = []
     for (cx, cy) in blobs:
+        bx, by = int(cx // tol), int(cy // tol)
         c = 0
-        for (cx2, cy2) in blobs:
-            if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
-                c += 1
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (cx2, cy2) in hash_grid.get((bx + dx, by + dy), ()):
+                    if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
+                        c += 1
         if c >= BALL_ADDR_MIN_OCCURRENCES:
             candidates.append((c, cx, cy))
     if not candidates:
