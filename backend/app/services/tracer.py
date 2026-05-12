@@ -195,7 +195,7 @@ EXTEND_EPS_GROWTH_PER_FRAME = 0.05
 # extension grabs almost every cand in the clip — dragging the fit
 # into a wild parabola spanning the whole frame.
 EXTEND_EPS_MAX_GROWTH = 2.0
-EXTEND_BACKWARD_FRAMES = 10
+EXTEND_BACKWARD_FRAMES = 60
 EXTEND_MAX_CONSECUTIVE_MISS = 5
 EXTEND_OUT_OF_FRAME_MARGIN_PX = 80
 
@@ -802,7 +802,12 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
     cap2 = cv2.VideoCapture(str(input_path))
-    smoothed = _smooth_track_for_render(track)
+    # Pass the at-rest ball position into smoothing only when it came
+    # from the disappearance / address-vote detector (the actual ball).
+    # For "track" source, ball_pos == track[0], so adding it as an
+    # anchor would be a no-op (or worse, slightly distort the fit).
+    smooth_anchor = ball_pos_native if ball_pos_source == "address-vote" else None
+    smoothed = _smooth_track_for_render(track, ball_pos_native=smooth_anchor)
     smooth_by_frame = {f: (x, y) for (f, x, y) in smoothed}
     smooth_frames = sorted(smooth_by_frame)
     detection_frames = {int(d.frame) for d in track}
@@ -1688,19 +1693,35 @@ def _extend_track(seed_track, all_detections, total_frames, frame_w=None, frame_
     return track
 
 
-def _smooth_track_for_render(track):
+def _smooth_track_for_render(track, ball_pos_native=None):
     """Return a list of integer-frame (frame, x, y) points sampled from
     the motion fit of `track`. Used in place of the raw detection points
     when rendering the dashed tracer line, so the line follows the
     underlying parabola rather than zigzagging between noisy detections.
+
+    When `ball_pos_native` is provided, it's added as an anchor at
+    track[0].frame - 1 so the fitted parabola is constrained to pass
+    through the ball's at-rest position. The rendered range extends to
+    cover that anchor frame, so the dashed line draws from the ball
+    position through every smoothed point of the flight.
     """
     if len(track) < 3:
         return [(int(d.frame), int(d.x), int(d.y)) for d in track]
-    y_coef, x_coef, _rms = _fit_motion(track)
+    points = list(track)
+    earliest_track_frame = min(int(d.frame) for d in track)
+    if ball_pos_native is not None:
+        ball_anchor = _Det(
+            earliest_track_frame - 1,
+            float(ball_pos_native[0]),
+            float(ball_pos_native[1]),
+            0.0,
+        )
+        points.insert(0, ball_anchor)
+    y_coef, x_coef, _rms = _fit_motion(points)
     if y_coef is None:
-        return [(int(d.frame), int(d.x), int(d.y)) for d in track]
-    f_min = min(int(d.frame) for d in track)
-    f_max = max(int(d.frame) for d in track)
+        return [(int(p.frame), int(p.x), int(p.y)) for p in track]
+    f_min = min(int(p.frame) for p in points)
+    f_max = max(int(p.frame) for p in points)
     out = []
     for f in range(f_min, f_max + 1):
         out.append((f, int(np.polyval(x_coef, f)), int(np.polyval(y_coef, f))))
