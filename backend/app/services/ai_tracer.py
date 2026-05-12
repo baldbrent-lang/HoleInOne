@@ -61,6 +61,15 @@ FRAME_W = 640
 # the shaft direction much easier for Claude to call.
 HANDEDNESS_FRAME_W = 1024
 
+# Impact-finder parameters. After address we scan a window of
+# IMPACT_WINDOW_SECONDS chronological frames and present
+# N_IMPACT_CANDIDATES of them to Claude alongside the address
+# reference, asking which one shows the clubhead back at the ball.
+# 2.0 s covers takeaway → top → downswing → impact for a normal-tempo
+# swing across the typical frame rates (30 / 60 / 120 fps).
+N_IMPACT_CANDIDATES = 12
+IMPACT_WINDOW_SECONDS = 2.0
+
 HANDEDNESS_FROM_ADDRESS_PROMPT = (
     "You are looking at a single still frame of a golfer at ADDRESS — "
     "set up over the ball, just before takeaway. The camera is "
@@ -140,6 +149,53 @@ ADDRESS_SYSTEM_PROMPT = (
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
     '  "address_frame": <int — must equal one of the labeled frame numbers>,\n'
+    '  "confidence": "high" | "medium" | "low",\n'
+    '  "notes": "<≤25 word reasoning citing why this frame over the others>"\n'
+    "}\n"
+    "Never invent a frame number; pick from the labels you were shown."
+)
+
+
+IMPACT_SYSTEM_PROMPT = (
+    "You are analyzing frames from a golf swing video. The camera is "
+    "behind the target line and the golfer is hitting AWAY from the "
+    "camera. The first image is a REFERENCE showing the golfer at "
+    "ADDRESS, set up over the ball, just before takeaway. After the "
+    "reference you will see a series of candidate frames from AFTER "
+    "address, in chronological order, each preceded by a 'Frame N:' "
+    "text block.\n\n"
+    "Your job: pick the SINGLE candidate frame closest to IMPACT — "
+    "the moment the clubhead has returned to the ball after the "
+    "backswing and is just about to or just making contact.\n\n"
+    "The swing progression is:\n"
+    "  address (reference) → takeaway (club moves back) → top of "
+    "backswing (club raised behind/above golfer) → downswing (club "
+    "swinging back toward ball) → IMPACT → follow-through.\n\n"
+    "IMPACT cues:\n"
+    "- The clubhead is back at the ball's starting position (compare "
+    "the candidate to the reference's ball position).\n"
+    "- The club shaft is roughly vertical, or just past vertical, "
+    "coming through the ball — NOT raised behind the golfer, NOT "
+    "high in the downswing.\n"
+    "- The golfer's arms are extended down toward the ball; hips have "
+    "rotated through.\n"
+    "- The ball is either still visible at the address position or "
+    "JUST struck (small motion blur near the ball position).\n\n"
+    "Do NOT pick:\n"
+    "- A backswing frame (club raised behind/above the golfer).\n"
+    "- An early downswing frame (club still high, hands not yet at "
+    "ball level).\n"
+    "- A post-impact frame where the ball is clearly gone and the "
+    "club has swung past where the ball was.\n"
+    "- A follow-through frame (club continuing across the golfer's "
+    "body).\n\n"
+    "If the actual impact moment falls BETWEEN two candidates (the "
+    "earlier one is mid-downswing and the next is already follow-"
+    "through), pick the earlier of the two — the one closest to "
+    "pre-impact.\n\n"
+    "Reply with ONE JSON object and nothing else:\n"
+    "{\n"
+    '  "impact_frame": <int — must equal one of the labeled candidate frame numbers>,\n'
     '  "confidence": "high" | "medium" | "low",\n'
     '  "notes": "<≤25 word reasoning citing why this frame over the others>"\n'
     "}\n"
@@ -612,4 +668,217 @@ def find_address_frame(
             info["saved_image"] = bool(ok)
         else:
             log.warning("ai_tracer: address — could not re-extract picked frame %d", addr)
+    return info
+
+
+def find_impact_frame_after_address(
+    input_path: Path, address_frame_idx: int,
+    output_image_path: Path | None = None,
+) -> dict:
+    """Find the impact frame — when the clubhead has returned to the
+    ball after the backswing.
+
+    Pipeline:
+      1. Sample ~12 frames evenly across [address+1, address+2s].
+      2. Send the address frame as a REFERENCE, then the candidates as
+         labeled images in a single multi-image API call.
+      3. Claude picks the candidate whose clubhead is back at the
+         reference's ball position.
+
+    If `output_image_path` is provided, the picked frame is written at
+    native resolution. Returns the same shape as find_address_frame()::
+
+        {
+          "ok": bool, "error": str | None,
+          "impact_frame": int | None,
+          "confidence": str | None, "notes": str | None,
+          "model": str,
+          "frames_sent": [int, ...],
+          "saved_image": bool,
+        }
+    """
+    info: dict = {
+        "ok": False,
+        "error": None,
+        "impact_frame": None,
+        "confidence": None,
+        "notes": None,
+        "model": MODEL,
+        "frames_sent": [],
+        "saved_image": False,
+    }
+
+    if not HAS_CV:
+        info["error"] = "opencv not installed"
+        return info
+    if not HAS_ANTHROPIC:
+        info["error"] = "anthropic SDK not installed"
+        return info
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        info["error"] = "ANTHROPIC_API_KEY not set in environment"
+        return info
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not open video"
+        return info
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    finally:
+        cap.release()
+    if total_frames <= 1:
+        info["error"] = "video has no frames"
+        return info
+
+    address_frame_idx = int(address_frame_idx)
+    window_frames = max(1, int(round(fps * IMPACT_WINDOW_SECONDS)))
+    lo = min(address_frame_idx + 1, total_frames - 1)
+    hi = min(address_frame_idx + window_frames, total_frames - 1)
+    if hi <= lo:
+        info["error"] = (
+            f"address frame {address_frame_idx} is too close to end of clip "
+            f"({total_frames} frames @ {fps:.1f} fps)"
+        )
+        return info
+
+    # Evenly-spaced candidate indices in [lo, hi].
+    n = N_IMPACT_CANDIDATES
+    if hi - lo + 1 <= n:
+        candidate_indices = list(range(lo, hi + 1))
+    else:
+        step = (hi - lo) / float(n - 1)
+        candidate_indices = sorted({
+            min(hi, max(lo, int(round(lo + i * step)))) for i in range(n)
+        })
+    info["frames_sent"] = candidate_indices
+
+    address_frames = _grab_frames_jpegs(input_path, [address_frame_idx])
+    if not address_frames:
+        info["error"] = f"could not extract address reference frame {address_frame_idx}"
+        return info
+    _, address_jpeg = address_frames[0]
+    candidate_frames = _grab_frames_jpegs(input_path, candidate_indices)
+    if not candidate_frames:
+        info["error"] = "could not extract any candidate frames"
+        return info
+
+    log.info(
+        "ai_tracer: impact — address ref frame %d, scanning %d candidates "
+        "%s of %d total @ %.1f fps",
+        address_frame_idx, len(candidate_frames),
+        [idx for idx, _ in candidate_frames], total_frames, fps,
+    )
+
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"REFERENCE — address frame (frame {address_frame_idx}). "
+                "The golfer is set up over the ball, just before takeaway. "
+                "Use this as the visual anchor for the ball's starting "
+                "position."
+            ),
+        },
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(address_jpeg).decode("ascii"),
+            },
+        },
+        {
+            "type": "text",
+            "text": (
+                f"Now {len(candidate_frames)} candidate frames from AFTER "
+                "address, in chronological order. Each is preceded by its "
+                "frame number."
+            ),
+        },
+    ]
+    for idx, jpeg in candidate_frames:
+        content.append({"type": "text", "text": f"Frame {idx}:"})
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(jpeg).decode("ascii"),
+            },
+        })
+    content.append({
+        "type": "text",
+        "text": (
+            "Identify the IMPACT frame — the moment the clubhead has "
+            "returned to the ball and is just about to or just making "
+            f"contact. Valid candidate frame numbers: {candidate_indices}. "
+            "JSON only."
+        ),
+    })
+
+    client = Anthropic()
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=400,
+            system=[{
+                "type": "text",
+                "text": IMPACT_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as exc:
+        log.warning("ai_tracer: impact API call failed: %s", exc)
+        info["error"] = f"api_failed: {exc}"
+        return info
+
+    text_chunks = [
+        b.text for b in resp.content
+        if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+    ]
+    raw = "\n".join(text_chunks)
+    parsed = _extract_json(raw)
+    if not parsed:
+        log.warning("ai_tracer: impact — no JSON in response: %s", raw[:200])
+        info["error"] = "no_json_in_response"
+        return info
+
+    try:
+        impact = int(parsed.get("impact_frame"))
+    except (TypeError, ValueError):
+        info["error"] = "could_not_parse_impact_frame"
+        return info
+    if impact not in candidate_indices:
+        nearest = min(candidate_indices, key=lambda f: abs(f - impact))
+        log.warning(
+            "ai_tracer: impact — Claude returned frame %d not in candidates; "
+            "snapping to nearest candidate %d",
+            impact, nearest,
+        )
+        impact = nearest
+    if impact < 0 or impact >= total_frames:
+        info["error"] = f"impact_frame_out_of_range ({impact})"
+        return info
+
+    info["ok"] = True
+    info["impact_frame"] = impact
+    info["confidence"] = str(parsed.get("confidence") or "").lower() or None
+    info["notes"] = str(parsed.get("notes") or "")[:300] or None
+    log.info(
+        "ai_tracer: impact — frame=%d confidence=%s notes=%s",
+        impact, info["confidence"], info["notes"],
+    )
+
+    if output_image_path is not None:
+        full_frame = _grab_frame(input_path, impact)
+        if full_frame is not None:
+            ok = cv2.imwrite(
+                str(output_image_path), full_frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 90],
+            )
+            info["saved_image"] = bool(ok)
+        else:
+            log.warning("ai_tracer: impact — could not re-extract picked frame %d", impact)
     return info

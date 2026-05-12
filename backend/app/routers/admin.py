@@ -43,6 +43,7 @@ from ..services.ai_tracer import (
     find_address_frame,
     detect_handedness_at_address,
     annotate_address_with_shaft,
+    find_impact_frame_after_address,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
@@ -581,16 +582,19 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
         image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
 
     # Step 3: once we have the address frame, ask Claude what handedness
-    # the golfer is. Claude reports the (x, y) of hands + clubhead so we
+    # the golfer is. Claude reports the (x, y) of hands + ball so we
     # can overlay the shaft on the displayed address frame and visually
     # verify what Claude saw.
     handedness_info: dict | None = None
+    impact_info: dict | None = None
+    impact_image_url: str | None = None
+    addr_idx_int: int | None = None
     if address_info.get("ok") and address_info.get("address_frame") is not None:
-        addr_idx = int(address_info["address_frame"])
-        handedness_info = detect_handedness_at_address(fpath, addr_idx)
+        addr_idx_int = int(address_info["address_frame"])
+        handedness_info = detect_handedness_at_address(fpath, addr_idx_int)
         if handedness_info.get("ok"):
             wrote = annotate_address_with_shaft(
-                fpath, addr_idx, handedness_info, image_path,
+                fpath, addr_idx_int, handedness_info, image_path,
             )
             if wrote and image_path.exists():
                 # Refresh the cache-buster so the browser picks up the
@@ -599,9 +603,26 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                 mtime = int(image_path.stat().st_mtime)
                 image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
 
+        # Step 4: find the impact frame — the moment the clubhead has
+        # returned to the ball after the backswing.
+        impact_image_name = f"{fpath.stem}_impact.jpg"
+        impact_image_path = CLIPS_DIR / impact_image_name
+        impact_info = find_impact_frame_after_address(
+            fpath, addr_idx_int, output_image_path=impact_image_path,
+        )
+        if impact_info.get("saved_image") and impact_image_path.exists():
+            impact_mtime = int(impact_image_path.stat().st_mtime)
+            impact_image_url = (
+                f"{settings.app_base_url}/uploads/clips/{impact_image_name}?v={impact_mtime}"
+            )
+
     db.add(AuditLog(
         actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
-        detail=str({"address": address_info, "handedness": handedness_info}),
+        detail=str({
+            "address": address_info,
+            "handedness": handedness_info,
+            "impact": impact_info,
+        }),
     ))
     db.commit()
 
@@ -611,6 +632,8 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
         "address": address_info,
         "address_image_url": image_url,
         "handedness": handedness_info,
+        "impact": impact_info,
+        "impact_image_url": impact_image_url,
     }
 
 

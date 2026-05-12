@@ -78,14 +78,16 @@ export default function AdminClipsAi() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>AI tracer — step 2: address frame</h3>
+        <h3 style={{ marginBottom: 4 }}>AI tracer — address → handedness → impact</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
-          Camera is assumed to be <b>behind the golfer</b>, hitting toward a
-          target away from the camera. Hitting <b>Find address frame</b> sends
-          12 evenly-spaced frames to Claude in one request and asks it to
-          pick the single frame closest to address (set up over the ball,
-          just before takeaway). The picked frame appears next to the
-          source video for visual verification.
+          Camera is assumed to be <b>behind the target line</b>, golfer hitting
+          away from camera. Each Run does three sequential Claude calls:
+          (1) find the <b>address frame</b> from 12 evenly-spaced frames;
+          (2) on that frame, locate the hands + ball and infer <b>handedness</b>;
+          (3) starting from address, scan ~12 candidate frames over the next
+          ~2 s and pick the <b>impact frame</b> — where the clubhead has
+          returned to the ball after the backswing. Address frame is shown
+          with the shaft overlay, impact frame underneath.
         </p>
       </div>
 
@@ -108,6 +110,8 @@ export default function AdminClipsAi() {
         const addr = result?.address;
         const addrImage = result?.address_image_url;
         const hand = result?.handedness;
+        const impact = result?.impact;
+        const impactImage = result?.impact_image_url;
         const isComposite = (c.source_url || "").includes("_composite");
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
@@ -254,6 +258,43 @@ export default function AdminClipsAi() {
               </div>
             )}
 
+            {(impact || impactImage) && (
+              <div style={{ marginTop: 12 }}>
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  Impact frame
+                  {impact?.impact_frame != null && (
+                    <span className="muted" style={{ marginLeft: 6 }}>
+                      · frame <code>{impact.impact_frame}</code>
+                    </span>
+                  )}
+                </div>
+                {impactImage ? (
+                  <img
+                    src={impactImage}
+                    alt="Claude's pick for the impact frame"
+                    style={{ width: "100%", maxWidth: 800, borderRadius: 8, background: "#000", display: "block" }}
+                  />
+                ) : impact?.error ? (
+                  <div className="err-text small">
+                    Impact failed: <code>{impact.error}</code>
+                  </div>
+                ) : null}
+                {impact?.ok && (
+                  <div className="small muted" style={{ marginTop: 6 }}>
+                    Confidence: <b>{impact.confidence || "—"}</b>
+                    {impact.notes && (
+                      <>{" "}— <i>{impact.notes}</i></>
+                    )}
+                  </div>
+                )}
+                {impact?.frames_sent && (
+                  <div className="tiny muted" style={{ marginTop: 2 }}>
+                    Candidates: [{impact.frames_sent.join(", ")}] · model {impact.model}
+                  </div>
+                )}
+              </div>
+            )}
+
             {result?.error && (
               <p className="small err-text" style={{ marginTop: 8 }}>
                 Request failed: <code>{result.error}</code>
@@ -264,10 +305,10 @@ export default function AdminClipsAi() {
               <button
                 onClick={() => runOne(c.id)}
                 disabled={!!running[c.id] || isComposite}
-                title={isComposite ? "Composite clips not supported" : "Ask Claude to find the address frame"}
+                title={isComposite ? "Composite clips not supported" : "Run address + handedness + impact pipeline"}
               >
                 <Icon name="play" size={14} />{" "}
-                {running[c.id] ? "Running…" : "Find address frame"}
+                {running[c.id] ? "Running…" : "Run AI analysis"}
               </button>
               {isComposite && (
                 <span className="small muted" style={{ alignSelf: "center" }}>
