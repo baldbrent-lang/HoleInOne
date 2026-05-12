@@ -605,7 +605,8 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # ball that got kicked/hidden mid-clip can't pass as the hit ball.
     ball_addr_det = _find_hit_ball_from_snapshots(
         early_snapshots, late_snapshots,
-        body_x=body_x_det, behind_side=behind_side, clubhead=clubhead_det,
+        body_x=body_x_det, body_bbox=body_bbox_det,
+        behind_side=behind_side, clubhead=clubhead_det,
     )
     if ball_addr_det is not None:
         log.info(
@@ -1110,104 +1111,144 @@ def _has_position_within(hash_grid, cx, cy, tol):
 
 def _find_hit_ball_from_snapshots(
     early_snapshots, late_snapshots,
-    body_x=None, behind_side=None, clubhead=None,
+    body_x=None, body_bbox=None, behind_side=None, clubhead=None,
 ):
-    """Find the ball that was hit by comparing white-blob positions in
-    cached early vs late snapshot frames.
+    """Score-based ball-at-rest detection using THREE independent clues:
 
-    Logic: the ball at address sits stationary in the early window; by
-    the late window it's gone. Practice balls in the foreground stay
-    put (same position in both windows). The hit ball is the ONLY blob
-    present early and absent late.
+      Clue 1 (address): Candidate sits close to where the golfer is
+        addressing the ball — near the clubhead, at ground level under
+        the body's stance, within a body-width or two of the body
+        centerline.
+      Clue 2 (stationary): Candidate appears repeatedly at the same
+        position across early-window snapshots (high persistence ratio).
+      Clue 3 (gone post-impact): Candidate is absent from late-window
+        snapshots — the hit ball is the ONE thing that disappears.
 
-    Disappearance alone isn't enough on a busy driving range — a
-    practice ball that got kicked or hidden by the golfer walking
-    through can also satisfy the "early-yes, late-no" condition. So
-    candidates that survive disappearance are additionally filtered
-    by:
-      - `clubhead` proximity (within MAX_BALL_TO_CLUBHEAD_PX). The
-        actual ball sits right next to the clubhead at address.
-      - `behind_side` + `body_x` (reject the side of the body that's
-        away from the ball-flight direction). A righty's ball is on
-        the left of the body; if disappearance returns a right-side
-        blob, it's a wrong-side false positive.
+    Each clue contributes points independently. Highest total score
+    wins, provided it clears a sanity threshold. A strong showing on
+    two clues can override a weak one on the third — important when
+    e.g. clubhead detection fails or the late window doesn't actually
+    show an empty tee. Returns (cx, cy) in detection coords, or None.
 
-    Snapshots are passed in as {frame_idx: det_frame} dicts populated by
-    the main detection loop — no extra video IO or HEVC random-access
-    seeks (which are slow enough on .mov files to hang the request).
-
-    Returns (cx, cy) in detection coords, or None.
+    Snapshots are passed in as {frame_idx: det_frame} dicts populated
+    by the main detection loop — no extra video IO.
     """
-    if not late_snapshots or not early_snapshots:
-        log.info("tracer:   disappearance: skipping (early=%d late=%d)",
-                 len(early_snapshots) if early_snapshots else 0,
-                 len(late_snapshots) if late_snapshots else 0)
+    if not early_snapshots:
+        log.info("tracer:   ball-at-rest: no early snapshots, skipping")
         return None
+
     early_blobs: list[tuple[float, float]] = []
     for snap in early_snapshots.values():
         early_blobs.extend(_scan_for_ball_addr_blobs(snap))
-    log.info("tracer:   disappearance: %d early blobs across %d snapshots",
-             len(early_blobs), len(early_snapshots))
-    late_blobs: list[tuple[float, float]] = []
-    for snap in late_snapshots.values():
-        late_blobs.extend(_scan_for_ball_addr_blobs(snap))
-    log.info("tracer:   disappearance: %d late blobs across %d snapshots",
-             len(late_blobs), len(late_snapshots))
-
+    log.info(
+        "tracer:   ball-at-rest: %d early blobs across %d snapshots",
+        len(early_blobs), len(early_snapshots),
+    )
     early_clusters = _cluster_positions(early_blobs, BALL_ADDR_POSITION_TOLERANCE_PX)
-    log.info("tracer:   disappearance: %d early clusters", len(early_clusters))
+    log.info("tracer:   ball-at-rest: %d early clusters", len(early_clusters))
     if not early_clusters:
         return None
 
-    # Spatial hash of late blobs for O(1) "is there a late blob near
-    # this cluster?" checks. Without this, on clips with thousands of
-    # blobs, the matching loop was O(clusters · late_blobs) and could
-    # take minutes.
+    late_blobs: list[tuple[float, float]] = []
+    if late_snapshots:
+        for snap in late_snapshots.values():
+            late_blobs.extend(_scan_for_ball_addr_blobs(snap))
     tol_late = BALL_ADDR_POSITION_TOLERANCE_PX * 2
     late_hash = _build_position_hash(late_blobs, tol_late)
-    raw_candidates: list[tuple[float, float, int]] = []
-    for (cx, cy, count) in early_clusters:
-        if count < 2:
-            continue
-        if not _has_position_within(late_hash, cx, cy, tol_late):
-            raw_candidates.append((cx, cy, count))
     log.info(
-        "tracer:   disappearance: %d candidates have no late match",
-        len(raw_candidates),
+        "tracer:   ball-at-rest: %d late blobs across %d snapshots",
+        len(late_blobs), len(late_snapshots) if late_snapshots else 0,
     )
 
-    if not raw_candidates:
-        return None
+    n_early = max(1, len(early_snapshots))
+    scored: list[tuple] = []
 
-    # Filter disappearance candidates by clubhead proximity only.
-    # The left/right side filter was removed — the direct ball
-    # tracker handles wrong-side false positives implicitly by
-    # walking forward from whichever ball position is plausible.
-    candidates: list[tuple[float, float, int]] = []
-    rejected_clubhead = 0
-    for (cx, cy, count) in raw_candidates:
+    for (cx, cy, count) in early_clusters:
+        # --- Clue 2: stationarity in the early window ---------------
+        # persistence_ratio ≈ 1.0 means the cluster has as many hits as
+        # there are early snapshots (i.e. the position is rock-stable).
+        persistence_ratio = count / float(n_early)
+        # Cheap pre-filter: 1-2 isolated blobs aren't real evidence of
+        # a stationary object. Real address ball appears 5-15+ times.
+        if count < 2 and persistence_ratio < 0.4:
+            continue
+        clue_2_score = min(persistence_ratio, 1.5) * 20.0
+
+        # --- Clue 3: gone in late window ----------------------------
+        has_late = _has_position_within(late_hash, cx, cy, tol_late)
+        clue_3_score = 0.0 if has_late else 20.0
+
+        # --- Clue 1: address position -------------------------------
+        # 1a: proximity to detected clubhead. Decays with distance.
+        clue_1a = 0.0
         if clubhead is not None:
             d = float(np.hypot(cx - clubhead[0], cy - clubhead[1]))
-            if d > MAX_BALL_TO_CLUBHEAD_PX:
-                rejected_clubhead += 1
-                continue
-        candidates.append((cx, cy, count))
-    log.info(
-        "tracer:   disappearance: rejected %d on clubhead-distance; %d kept",
-        rejected_clubhead, len(candidates),
-    )
-    if not candidates:
-        return None
+            if d <= 30:
+                clue_1a = 25.0
+            elif d <= 60:
+                clue_1a = 18.0
+            elif d <= 100:
+                clue_1a = 8.0
+            elif d <= 150:
+                clue_1a = 2.0
+            # No penalty for being far — body-stance below catches that.
 
-    # Prefer the candidate closest to the clubhead when we have one;
-    # otherwise pick the most stationary (highest occurrence count).
-    if clubhead is not None:
-        candidates.sort(
-            key=lambda c: float(np.hypot(c[0] - clubhead[0], c[1] - clubhead[1]))
+        # 1b: body-stance proximity. The address ball sits at ground
+        # level, slightly outside the body centerline. Independent of
+        # clubhead detection — useful when the club-line gate fails.
+        clue_1b = 0.0
+        if body_x is not None:
+            stance_dx = abs(cx - body_x)
+            if stance_dx < 150:
+                clue_1b += 8.0
+            elif stance_dx < 250:
+                clue_1b += 3.0
+        if body_bbox is not None:
+            body_bottom = float(body_bbox[3])
+            dy = abs(cy - body_bottom)
+            if dy < 60:
+                clue_1b += 10.0
+            elif dy < 120:
+                clue_1b += 4.0
+            # Also require the candidate is BELOW the body's bottom
+            # (or very close to it) — a "candidate" in the body's
+            # head/torso region is almost certainly a body fragment.
+            if cy < body_bbox[1]:  # above the body top — wrong place entirely
+                clue_1b -= 15.0
+
+        clue_1_score = clue_1a + clue_1b
+        total = clue_1_score + clue_2_score + clue_3_score
+        scored.append((
+            total, cx, cy, count, clue_1_score, clue_2_score, clue_3_score, has_late,
+        ))
+
+    if not scored:
+        log.info("tracer:   ball-at-rest: no scoreable clusters")
+        return None
+    scored.sort(key=lambda s: -s[0])
+    log.info(
+        "tracer:   ball-at-rest: top 3 of %d candidates: %s",
+        len(scored),
+        " | ".join(
+            f"(x={s[1]:.0f},y={s[2]:.0f}) total={s[0]:.0f} "
+            f"[addr={s[4]:.0f} stat={s[5]:.0f} gone={s[6]:.0f}] "
+            f"count={s[3]} late={s[7]}"
+            for s in scored[:3]
+        ),
+    )
+
+    # Sanity threshold: a strong single clue (~20 points) alone isn't
+    # enough — we need at least two clues firing, or one very strong
+    # clue plus a partial second. 25 ≈ "clubhead-proximity + half a
+    # disappearance" or "persistence + stance".
+    best = scored[0]
+    if best[0] < 25.0:
+        log.info(
+            "tracer:   ball-at-rest: best score %.1f below threshold 25.0; rejecting",
+            best[0],
         )
-    else:
-        candidates.sort(key=lambda c: -c[2])
-    return (candidates[0][0], candidates[0][1])
+        return None
+    return (best[1], best[2])
 
 
 def _scan_for_ball_addr_blobs(det_frame):
