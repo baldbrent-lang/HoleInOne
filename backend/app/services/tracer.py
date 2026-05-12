@@ -179,21 +179,35 @@ MAX_CANDIDATES_PER_FRAME = 40
 # apex comes into view.
 EXTEND_EPS_MIN_PX = 15.0
 EXTEND_EPS_MULT = 3.0
-EXTEND_EPS_GROWTH_PER_FRAME = 0.10
+EXTEND_EPS_GROWTH_PER_FRAME = 0.05
+# Eps caps at base * (1 + EXTEND_EPS_MAX_GROWTH). Without this cap a
+# 400-frame forward extension lets eps balloon to base * 40 and the
+# extension grabs almost every cand in the clip — dragging the fit
+# into a wild parabola spanning the whole frame.
+EXTEND_EPS_MAX_GROWTH = 2.0
 EXTEND_BACKWARD_FRAMES = 10
-EXTEND_MAX_CONSECUTIVE_MISS = 10
+EXTEND_MAX_CONSECUTIVE_MISS = 5
+EXTEND_OUT_OF_FRAME_MARGIN_PX = 80
 
 # Ball-address detection. During the warmup frames the ball is stationary
 # at address. Find it by looking for a small bright blob in the lower
-# half of the frame that appears in multiple consecutive warmup frames
-# at the same position. Once we know which side of the body's x-center
-# the ball sits on, we can reject post-mask candidates on the opposite
+# half of the frame that appears in multiple consecutive frames at the
+# same position. Once we know which side of the body's x-center the
+# ball sits on, we can reject post-mask candidates on the opposite
 # side — those are body silhouette fragments or background noise that
 # the ball physically can't be near.
-BALL_ADDR_BRIGHT_THRESH = 220
-BALL_ADDR_MIN_OCCURRENCES = 5
-BALL_ADDR_POSITION_TOLERANCE_PX = 8
+#
+# Loosened on the second pass after clip 62 retraces failed to find an
+# address at thresh=220 / 5-occurrence / 12-frame warmup: overcast
+# lighting puts dirty / slightly-shaded balls in the 180-210 range, the
+# golfer often settles for ~1s before swinging (so we can search beyond
+# warmup), and the iPhone's auto-exposure jitters the apparent ball
+# position by a few px frame-to-frame.
+BALL_ADDR_BRIGHT_THRESH = 180
+BALL_ADDR_MIN_OCCURRENCES = 3
+BALL_ADDR_POSITION_TOLERANCE_PX = 12
 BALL_ADDR_Y_TOP_FRACTION = 0.45  # only search below this fraction of the frame
+BALL_ADDR_SEARCH_FRAMES = 30     # search the first N frames (warmup or not)
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
@@ -332,10 +346,12 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             bg_input = det_frame
 
         fg_mask = bg.apply(bg_input)
-        if idx < WARMUP_FRAMES:
-            # Use warmup frames (when the ball is still at address) to
-            # vote on its stationary position. Cheap — no MOG2 dependency.
+        # Address-position vote while the ball is plausibly still at
+        # address. Independent of MOG2 warmup — the ball typically
+        # stays motionless for ~1s while the golfer settles.
+        if idx < BALL_ADDR_SEARCH_FRAMES:
             ball_addr_votes.extend(_scan_for_ball_addr_blobs(det_frame))
+        if idx < WARMUP_FRAMES:
             idx += 1
             continue
         # Heatmap only accumulates when fg_mask lives in a consistent
@@ -502,7 +518,10 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         "tracer: seed track %d points, residual %.2fpx",
         len(seed_track), _residual(seed_track),
     )
-    track = _extend_track(seed_track, detections, total_frames_scanned)
+    track = _extend_track(
+        seed_track, detections, total_frames_scanned,
+        frame_w=width, frame_h=height,
+    )
     if len(track) > len(seed_track):
         log.info(
             "tracer: extended track %d → %d points (residual %.2fpx)",
@@ -926,7 +945,7 @@ def _fit_motion(track):
     return y_coef, x_coef, rms
 
 
-def _extend_track(seed_track, all_detections, total_frames):
+def _extend_track(seed_track, all_detections, total_frames, frame_w=None, frame_h=None):
     """Extend a confident seed track (rising arc) with apex + descent
     detections from `all_detections`, using *incremental refitting*.
 
@@ -936,6 +955,10 @@ def _extend_track(seed_track, all_detections, total_frames):
     distance, and refit. The refit step is the key — a fit on rising-only
     seeds has uncertain curvature, but every apex-region point we add
     sharpens the parabola and improves subsequent predictions.
+
+    Stops extending in either direction once the predicted position
+    leaves the frame (with a margin), since there can't be a real
+    ball detection at impossible coordinates.
     """
     if len(seed_track) < 5:
         return list(seed_track)
@@ -955,26 +978,31 @@ def _extend_track(seed_track, all_detections, total_frames):
         by_frame.setdefault(f, []).append(d)
 
     track = list(seed_track)
+    m = EXTEND_OUT_OF_FRAME_MARGIN_PX
 
     def _try_extend(frame_iter, anchor_frame):
         """Walk frame_iter, predicting from the current fit, adding any
-        detection within an eps that grows with |frame - anchor_frame|.
-        Stops after EXTEND_MAX_CONSECUTIVE_MISS frames with no acceptance."""
+        detection within an eps that grows with |frame - anchor_frame|
+        (capped). Stops after EXTEND_MAX_CONSECUTIVE_MISS misses or when
+        the predicted point leaves the frame."""
         nonlocal y_coef, x_coef, rms
         consecutive_miss = 0
         for f in frame_iter:
             distance = abs(f - anchor_frame)
-            local_eps = max(EXTEND_EPS_MIN_PX, EXTEND_EPS_MULT * rms) * (
-                1.0 + EXTEND_EPS_GROWTH_PER_FRAME * distance
-            )
+            growth = min(EXTEND_EPS_GROWTH_PER_FRAME * distance, EXTEND_EPS_MAX_GROWTH)
+            local_eps = max(EXTEND_EPS_MIN_PX, EXTEND_EPS_MULT * rms) * (1.0 + growth)
+            py = float(np.polyval(y_coef, f))
+            px = float(np.polyval(x_coef, f))
+            if frame_w is not None and frame_h is not None and (
+                px < -m or px > frame_w + m or py < -m or py > frame_h + m
+            ):
+                break
             cands = by_frame.get(f, [])
             if not cands:
                 consecutive_miss += 1
                 if consecutive_miss > EXTEND_MAX_CONSECUTIVE_MISS:
                     break
                 continue
-            py = float(np.polyval(y_coef, f))
-            px = float(np.polyval(x_coef, f))
             best = None
             best_err = float("inf")
             for d in cands:
