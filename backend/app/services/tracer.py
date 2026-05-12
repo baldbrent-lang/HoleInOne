@@ -28,7 +28,6 @@ except Exception:  # pragma: no cover
     np = None  # type: ignore
     HAS_CV = False
 
-from . import ai_tracer as _ai_tracer
 
 
 # Kept in sync with tools/tracer_spike.py — tune both files together if
@@ -733,38 +732,7 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     track: list[_Det] = []
     direct_info: dict = {}
 
-    # Primary path: AI vision tracker. Sends ~8 evenly-spaced frames to
-    # Claude, has it identify the ball in each, fits a parabola through
-    # the anchor points, and emits a dense track. Handles busy
-    # backgrounds, bright sky, motion blur, and ball-vs-shoe confusion
-    # far more reliably than the classical CV pipeline below. Falls
-    # through silently if ANTHROPIC_API_KEY isn't set or the call fails.
-    ai_info: dict = {}
-    if _ai_tracer.have_ai_tracer():
-        try:
-            ai_track, ai_info = _ai_tracer.track_ball_with_ai(
-                input_path, fps, width, height,
-            )
-        except Exception as exc:  # pragma: no cover
-            log.warning("tracer: AI tracker raised: %s", exc)
-            ai_track, ai_info = [], {"stop_reason": f"exception: {exc}"}
-        log.info(
-            "tracer: AI tracker: anchors=%d/%d stop=%s track_len=%d",
-            ai_info.get("n_anchors_returned", 0),
-            ai_info.get("n_anchors_requested", 0),
-            ai_info.get("stop_reason"),
-            len(ai_track),
-        )
-        # Convert ai_tracer._Det -> local _Det (same field names; shape
-        # match but distinct dataclass classes from separate modules).
-        if ai_track and len(ai_track) >= MIN_TRACK_LENGTH:
-            converted = [_Det(d.frame, d.x, d.y, d.radius) for d in ai_track]
-            seed_track = converted
-            track = converted
-    else:
-        log.info("tracer: AI tracker unavailable (no ANTHROPIC_API_KEY or anthropic SDK)")
-
-    if not seed_track and not aborting_noise:
+    if not aborting_noise:
         ball_addr_native = None
         if ball_addr_det is not None and det_scale > 0:
             ball_addr_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)

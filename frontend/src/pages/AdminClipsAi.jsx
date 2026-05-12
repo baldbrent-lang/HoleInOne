@@ -7,10 +7,12 @@ const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
 
 /**
- * AI-only tracer iteration page. Runs the Claude Vision tracer end-to-end
- * with NO classical CV fallback. The intent is to evaluate the pure AI
- * pipeline in isolation so we can tune prompt + sampling strategy
- * without classical results muddying the comparison.
+ * AI tracer test bench — step 1: detect handedness.
+ *
+ * The plan is to build the AI tracer up one capability at a time. This
+ * page currently exercises just one thing: send a few frames to Claude
+ * and ask whether the golfer is right- or left-handed. Each subsequent
+ * step (ball at rest, impact, tracking, render) will be layered in.
  */
 export default function AdminClipsAi() {
   const adminPassword =
@@ -19,8 +21,8 @@ export default function AdminClipsAi() {
     "";
   const [clips, setClips] = useState(null);
   const [error, setError] = useState(null);
-  const [running, setRunning] = useState({});  // {clip_id: true}
-  const [results, setResults] = useState({});  // {clip_id: payload}
+  const [running, setRunning] = useState({});
+  const [results, setResults] = useState({});
 
   async function load() {
     try {
@@ -36,7 +38,7 @@ export default function AdminClipsAi() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function aiTraceOne(clipId) {
+  async function runOne(clipId) {
     setRunning((r) => ({ ...r, [clipId]: true }));
     try {
       const data = await api.aiTrace(adminPassword, clipId);
@@ -75,15 +77,13 @@ export default function AdminClipsAi() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>AI tracer test bench</h3>
+        <h3 style={{ marginBottom: 4 }}>AI tracer — step 1: handedness</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
-          Runs the Claude Vision tracer with <b>no classical CV fallback</b>.
-          Pipeline: (1) send a labeled 16-frame montage spanning the clip and
-          ask Claude which frame is impact; (2) sample ~10 frames over the
-          next 2.5s and ask Claude for ball coordinates in each; (3) fit a
-          parabola through the verified anchors and render the dashed overlay.
-          Cyan rings mark frames Claude verified directly. ~11 API calls
-          per clip, typically 10-15s wall time.
+          Rebuilding the AI tracer one step at a time. Right now, hitting
+          <b> Run</b> sends a few sampled frames to Claude and asks whether
+          the golfer is right- or left-handed. That's it. We'll layer in
+          ball-at-rest, impact detection, tracking, and rendering one
+          step at a time — each verified before moving on.
         </p>
       </div>
 
@@ -103,15 +103,8 @@ export default function AdminClipsAi() {
 
       {clips?.map((c) => {
         const result = results[c.id];
-        const aiUrl = result?.ai_tracer_url;
-        const info = result?.ai_info;
-        const aiDebugUrl = result?.ai_debug_url;
+        const hand = result?.handedness;
         const isComposite = (c.source_url || "").includes("_composite");
-        const anchors = info?.ai_info?.anchors || [];
-        const impactFrame = info?.ai_info?.impact_frame;
-        const impactDiag = info?.ai_info?.impact_diag || {};
-        const stopReason = info?.ai_info?.stop_reason;
-        const model = info?.ai_info?.model;
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
             <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
@@ -144,121 +137,69 @@ export default function AdminClipsAi() {
               </div>
               <div>
                 <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  AI tracer
-                  {info?.n_points != null && (
-                    <span className="muted" style={{ marginLeft: 6 }}>
-                      · {info.n_points} pts
-                      {info.frame_range && <> · frames {info.frame_range[0]}–{info.frame_range[1]}</>}
-                    </span>
+                  Handedness
+                </div>
+                <div
+                  style={{
+                    aspectRatio: "16/9",
+                    display: "grid",
+                    placeItems: "center",
+                    border: "2px dashed var(--border)",
+                    borderRadius: 8,
+                    padding: 16,
+                    textAlign: "center",
+                  }}
+                >
+                  {running[c.id] ? (
+                    <div className="muted">Asking Claude…</div>
+                  ) : hand?.ok ? (
+                    <div>
+                      <div style={{ fontSize: 32, fontWeight: 700, textTransform: "uppercase" }}>
+                        {hand.handedness}
+                      </div>
+                      <div className="small muted" style={{ marginTop: 6 }}>
+                        confidence: <b>{hand.confidence || "—"}</b>
+                      </div>
+                      {hand.notes && (
+                        <div className="small muted" style={{ marginTop: 4, fontStyle: "italic" }}>
+                          {hand.notes}
+                        </div>
+                      )}
+                      {hand.frames_sent && (
+                        <div className="tiny muted" style={{ marginTop: 6 }}>
+                          Frames sent: [{hand.frames_sent.join(", ")}] · model {hand.model}
+                        </div>
+                      )}
+                    </div>
+                  ) : hand?.error ? (
+                    <div className="err-text small">
+                      Error: <code>{hand.error}</code>
+                    </div>
+                  ) : (
+                    <div className="muted">No result yet</div>
                   )}
                 </div>
-                {aiUrl ? (
-                  <video
-                    src={aiUrl}
-                    controls
-                    style={{ width: "100%", borderRadius: 8, background: "#000" }}
-                  />
-                ) : (
-                  <div className="muted center" style={{
-                    aspectRatio: "16/9", display: "grid", placeItems: "center",
-                    border: "2px dashed var(--border)", borderRadius: 8,
-                  }}>
-                    {running[c.id] ? "Running Claude…" : "No AI trace yet"}
-                  </div>
-                )}
               </div>
             </div>
 
-            {(model || stopReason || impactFrame != null) && (
-              <div className="small muted" style={{ marginTop: 8 }}>
-                {model && <>Model: <code>{model}</code> · </>}
-                {impactFrame != null && (
-                  <>Impact frame: <code>{impactFrame}</code>
-                    {impactDiag.confidence && <> ({impactDiag.confidence})</>}
-                    {impactDiag.notes && <> — <i>{impactDiag.notes}</i></>}
-                    {" · "}
-                  </>
-                )}
-                {stopReason && <>Stop: <code>{stopReason}</code></>}
-              </div>
-            )}
-
-            {anchors.length > 0 && (
-              <details style={{ marginTop: 8 }}>
-                <summary className="small muted" style={{ cursor: "pointer" }}>
-                  Per-frame tracking results ({anchors.filter(a => a.found).length}/{anchors.length} found)
-                </summary>
-                <div style={{ marginTop: 8, fontSize: 12 }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead>
-                      <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
-                        <th style={{ padding: "4px 8px" }}>Frame</th>
-                        <th style={{ padding: "4px 8px" }}>Found</th>
-                        <th style={{ padding: "4px 8px" }}>Confidence</th>
-                        <th style={{ padding: "4px 8px" }}>Coords</th>
-                        <th style={{ padding: "4px 8px" }}>Notes</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {anchors.map((a, i) => (
-                        <tr key={`${a.frame}-${i}`} style={{ borderBottom: "1px solid var(--border)" }}>
-                          <td style={{ padding: "4px 8px" }}><code>{a.frame}</code></td>
-                          <td style={{ padding: "4px 8px" }}>
-                            <span className={`pill small ${a.found ? "ok" : "warn"}`}>
-                              {a.found ? "ball" : "no ball"}
-                            </span>
-                          </td>
-                          <td style={{ padding: "4px 8px" }}>{a.confidence}</td>
-                          <td style={{ padding: "4px 8px" }}>
-                            {a.x != null && a.y != null ? `(${a.x}, ${a.y})` : "—"}
-                          </td>
-                          <td style={{ padding: "4px 8px" }} className="muted">{a.notes}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </details>
-            )}
-
-            {aiDebugUrl && (
-              <div style={{ marginTop: 10 }}>
-                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  AI anchor montage
-                </div>
-                <img
-                  src={aiDebugUrl}
-                  alt="Claude anchor frames"
-                  style={{ width: "100%", maxWidth: 1200, borderRadius: 8, border: "1px solid var(--border)" }}
-                />
-              </div>
-            )}
-
             {result?.error && (
               <p className="small err-text" style={{ marginTop: 8 }}>
-                AI trace failed: <code>{result.error}</code>
-              </p>
-            )}
-
-            {info && info.ok === false && !result?.error && (
-              <p className="small muted" style={{ marginTop: 8 }}>
-                AI tracer couldn't find a flight
-                {info.error ? <> — <code>{info.error}</code></> : null}.
+                Request failed: <code>{result.error}</code>
               </p>
             )}
 
             <div className="row" style={{ marginTop: 12 }}>
               <button
-                onClick={() => aiTraceOne(c.id)}
+                onClick={() => runOne(c.id)}
                 disabled={!!running[c.id] || isComposite}
-                title={isComposite ? "Composite clips need raw halves" : "Run AI-only tracer (no classical CV fallback)"}
+                title={isComposite ? "Composite clips not supported" : "Ask Claude whether this golfer is right- or left-handed"}
               >
                 <Icon name="play" size={14} />{" "}
-                {running[c.id] ? "Running Claude…" : "Run AI tracer"}
+                {running[c.id] ? "Running…" : "Run handedness check"}
               </button>
               {isComposite && (
                 <span className="small muted" style={{ alignSelf: "center" }}>
-                  Composite — AI tracer doesn't support stitched halves
+                  Composite — not supported
                 </span>
               )}
             </div>
@@ -268,4 +209,3 @@ export default function AdminClipsAi() {
     </div>
   );
 }
-

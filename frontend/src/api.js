@@ -187,11 +187,11 @@ export const api = {
       method: "POST", adminPassword: key, timeoutMs: 240_000,
     }),
   aiTrace: (key, clipId) =>
-    // AI tracer does ~20 Claude calls (scout + dense). Each call is a
-    // few seconds; with parallelism the typical run is 15-30s but can
-    // stretch on retries. 4 min is plenty.
+    // Currently a single Claude call (handedness check). Step-by-step
+    // rebuild — future steps will add more, but for now the runtime
+    // is ~3-5s. Generous timeout in case the API is slow.
     request(`/api/admin/clips/${clipId}/ai-trace`, {
-      method: "POST", adminPassword: key, timeoutMs: 240_000,
+      method: "POST", adminPassword: key, timeoutMs: 120_000,
     }),
   listParticipants: (key, params = {}) => {
     const qs = new URLSearchParams();
