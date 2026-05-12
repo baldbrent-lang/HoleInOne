@@ -1896,6 +1896,66 @@ TRACER_GAP_LEN = 10
 TRACER_BALL_RING = (0, 230, 255)         # yellow — ball at current frame
 TRACER_REST_RING = (255, 60, 0)          # blue — ball-at-rest marker
 
+# Trajectory smoothing: a golf ball flies on a parabola, so we fit a
+# quadratic in y vs frame and a line in x vs frame to the anchor
+# points (rest position + every per-frame detection), then sample
+# that fit at every integer frame to get the rendered tracer line.
+# Anchors with residual > TRAJ_OUTLIER_PX after fit are dropped as
+# misidentifications and the curve refits without them.
+TRAJ_OUTLIER_PX = 80
+TRAJ_OUTLIER_MAX_ITERS = 6
+# How many frames past the last accepted anchor to extend the smoothed
+# line so the tracer carries its natural direction a beat instead of
+# stopping the instant Claude lost the ball.
+TRACER_EXTRAPOLATION_FRAMES = 12
+
+
+def _robust_quadratic_fit(
+    anchors: list[tuple[int, int, int]],
+    threshold_px: float = TRAJ_OUTLIER_PX,
+    max_iters: int = TRAJ_OUTLIER_MAX_ITERS,
+):
+    """Fit y = a·f² + b·f + c and x = m·f + k to `anchors`
+    (list of (frame, x, y)), iteratively dropping the anchor with the
+    largest residual until every kept residual is ≤ threshold_px or
+    fewer than 3 anchors remain.
+
+    Returns (x_coef, y_coef, rejected_indices_set) on success, or
+    None when fewer than 3 anchors are usable or numpy is missing.
+    """
+    if not HAS_NP or len(anchors) < 3:
+        return None
+    rejected: set[int] = set()
+    last_coefs = None
+    for _ in range(max_iters):
+        kept_idxs = [i for i in range(len(anchors)) if i not in rejected]
+        if len(kept_idxs) < 3:
+            break
+        frames = np.array([anchors[i][0] for i in kept_idxs], dtype=float)
+        xs = np.array([anchors[i][1] for i in kept_idxs], dtype=float)
+        ys = np.array([anchors[i][2] for i in kept_idxs], dtype=float)
+        try:
+            y_coef = np.polyfit(frames, ys, 2)
+            x_coef = np.polyfit(frames, xs, 1)
+        except Exception:
+            return None
+        last_coefs = (x_coef, y_coef)
+        x_pred = np.polyval(x_coef, frames)
+        y_pred = np.polyval(y_coef, frames)
+        residuals = np.sqrt((xs - x_pred) ** 2 + (ys - y_pred) ** 2)
+        worst_local = int(np.argmax(residuals))
+        worst_residual = float(residuals[worst_local])
+        if worst_residual > threshold_px and len(kept_idxs) > 3:
+            rejected.add(kept_idxs[worst_local])
+            continue
+        return x_coef, y_coef, rejected
+    # Loop fell out without converging — return the last successful fit
+    # if it exists and we still have ≥3 anchors.
+    kept_after = [i for i in range(len(anchors)) if i not in rejected]
+    if last_coefs is None or len(kept_after) < 3:
+        return None
+    return last_coefs[0], last_coefs[1], rejected
+
 
 def _draw_dashed_tracer(img, points: list[tuple[int, int]]) -> None:
     """Draw a dashed polyline through `points` with a halo behind it.
@@ -2034,9 +2094,49 @@ def render_tracer_video(
     for f in sorted(points_by_frame):
         x, y = points_by_frame[f]
         anchors.append((f, x, y))
-    info["n_points"] = len(anchors)
-    if anchors:
-        info["frame_range"] = [int(anchors[0][0]), int(anchors[-1][0])]
+
+    # Fit a smooth parabola through the anchors, with iterative
+    # outlier rejection to throw out frames where Claude latched onto
+    # something that isn't the ball. The rendered tracer is sampled
+    # from this fit at every frame — not from the raw anchors — so
+    # the line is a smooth arc instead of a kinked polyline, AND a
+    # single bad detection won't yank it at right angles.
+    smoothed_points: list[tuple[int, int, int]] = []  # (frame, x, y)
+    rejected_frames: set[int] = set()
+    fit = _robust_quadratic_fit(anchors)
+    if fit is not None:
+        x_coef, y_coef, rejected_indices = fit
+        rejected_frames = {anchors[i][0] for i in rejected_indices}
+        kept = [a for i, a in enumerate(anchors) if i not in rejected_indices]
+        if kept:
+            first_frame = kept[0][0]
+            last_kept_frame = kept[-1][0]
+            # Extend past the last kept anchor for the natural-fade
+            # tail. Clip the moment the parabola walks out of the
+            # image bounds so we don't render off-screen segments.
+            for f in range(first_frame, last_kept_frame + TRACER_EXTRAPOLATION_FRAMES + 1):
+                x = int(round(float(np.polyval(x_coef, f))))
+                y = int(round(float(np.polyval(y_coef, f))))
+                if x < 0 or x >= width or y < 0 or y >= height:
+                    break
+                smoothed_points.append((f, x, y))
+        log.info(
+            "ai_tracer: tracer fit — %d anchors, %d rejected as outliers, "
+            "%d smoothed render points",
+            len(anchors), len(rejected_indices), len(smoothed_points),
+        )
+    else:
+        # Not enough anchors for a stable fit (or numpy missing).
+        # Fall back to the raw point-to-point line.
+        smoothed_points = list(anchors)
+        log.info(
+            "ai_tracer: tracer — falling back to raw %d anchors (no fit)",
+            len(anchors),
+        )
+
+    info["n_points"] = len(smoothed_points)
+    if smoothed_points:
+        info["frame_range"] = [int(smoothed_points[0][0]), int(smoothed_points[-1][0])]
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
@@ -2059,9 +2159,9 @@ def render_tracer_video(
             if not ok:
                 break
             # Draw the tracer once we've reached the impact frame.
-            if anchors and frame_idx >= anchors[0][0]:
+            if smoothed_points and frame_idx >= smoothed_points[0][0]:
                 visible = [
-                    (x, y) for f, x, y in anchors if f <= frame_idx
+                    (x, y) for f, x, y in smoothed_points if f <= frame_idx
                 ]
                 if len(visible) >= 2:
                     _draw_dashed_tracer(frame, visible)
@@ -2069,10 +2169,11 @@ def render_tracer_video(
                     cv2.circle(frame, rest_xy, 12, (0, 0, 0), 4, cv2.LINE_AA)
                     cv2.circle(frame, rest_xy, 10, TRACER_REST_RING, 3, cv2.LINE_AA)
             # Highlight the ball on frames where the tracker has a
-            # fresh position. (We skip frames where the ball was lost
-            # — the tracer line up to the last known point stays
-            # rendered, which is the right behaviour visually.)
-            if frame_idx in points_by_frame:
+            # fresh position — but skip outliers (where Claude
+            # mis-identified the ball), since drawing a ring at a
+            # rejected position would visually contradict the
+            # smoothed line.
+            if frame_idx in points_by_frame and frame_idx not in rejected_frames:
                 x, y = points_by_frame[frame_idx]
                 cv2.circle(frame, (x, y), 18, (0, 0, 0), 4, cv2.LINE_AA)
                 cv2.circle(frame, (x, y), 16, TRACER_BALL_RING, 3, cv2.LINE_AA)
@@ -2084,4 +2185,6 @@ def render_tracer_video(
 
     info["ok"] = True
     info["saved_path"] = str(output_path)
+    info["n_outliers_rejected"] = len(rejected_frames)
+    info["rejected_frames"] = sorted(rejected_frames)
     return info

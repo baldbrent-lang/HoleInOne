@@ -213,9 +213,12 @@ export default function AdminClipsAi() {
                   AI tracer video
                   {tracerVideo?.n_points != null && (
                     <span className="muted" style={{ marginLeft: 6 }}>
-                      · <code>{tracerVideo.n_points}</code> anchors
+                      · <code>{tracerVideo.n_points}</code> smoothed pts
                       {tracerVideo.frame_range && (
                         <> · frames {tracerVideo.frame_range[0]}–{tracerVideo.frame_range[1]}</>
+                      )}
+                      {tracerVideo.n_outliers_rejected > 0 && (
+                        <> · {tracerVideo.n_outliers_rejected} outlier{tracerVideo.n_outliers_rejected === 1 ? "" : "s"} rejected</>
                       )}
                     </span>
                   )}
