@@ -78,17 +78,16 @@ export default function AdminClipsAi() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>AI tracer — address → handedness → impact (rough → refined)</h3>
+        <h3 style={{ marginBottom: 4 }}>AI tracer — address → handedness → impact → ball flight</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
           Camera is assumed to be <b>behind the target line</b>, golfer hitting
-          away from camera. Each Run does four sequential Claude calls:
-          (1) find the <b>address frame</b> from 12 evenly-spaced frames;
-          (2) on that frame, locate hands + ball and infer <b>handedness</b>;
-          (3) rough <b>impact</b> — scan 12 candidates over the ~2 s after
-          address and pick the frame where the clubhead has returned to the
-          ball; (4) <b>refine</b> — examine ±5 frames around the rough pick,
-          choose the one whose shaft is closest to pointing at the ball,
-          and locate the hands + clubhead so the shaft can be overlaid.
+          away from camera. Each Run executes five steps via Claude:
+          (1) find the <b>address frame</b>; (2) on that frame locate hands +
+          ball and infer <b>handedness</b>; (3) rough <b>impact</b> across 12
+          candidates over ~2 s after address; (4) <b>refine</b> the impact
+          frame ±5 and locate the shaft on it; (5) <b>track the ball</b>
+          forward frame-by-frame from impact until it leaves view, with
+          a yellow highlight ring drawn on each native-resolution output.
         </p>
       </div>
 
@@ -114,6 +113,8 @@ export default function AdminClipsAi() {
         const impact = result?.impact;
         const impactRefined = result?.impact_refined;
         const impactImage = result?.impact_image_url;
+        const ballTrack = result?.ball_track;
+        const ballTrackFrames = result?.ball_track_frames || [];
         const isComposite = (c.source_url || "").includes("_composite");
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
@@ -322,6 +323,80 @@ export default function AdminClipsAi() {
                 {impact?.frames_sent && (
                   <div className="tiny muted" style={{ marginTop: 2 }}>
                     Rough candidates: [{impact.frames_sent.join(", ")}] · model {impact.model}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(ballTrack || ballTrackFrames.length > 0) && (
+              <div style={{ marginTop: 14 }}>
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  Ball flight
+                  {ballTrack?.n_frames_found != null && (
+                    <span className="muted" style={{ marginLeft: 6 }}>
+                      · ball found in <code>{ballTrack.n_frames_found}</code>
+                      {" of "}<code>{ballTrack.n_frames_processed}</code> frames
+                      {ballTrack.first_lost_run_start != null && (
+                        <> · lost from frame <code>{ballTrack.first_lost_run_start}</code></>
+                      )}
+                    </span>
+                  )}
+                </div>
+                {ballTrack?.error && (
+                  <div className="small err-text" style={{ marginBottom: 6 }}>
+                    Tracking error: <code>{ballTrack.error}</code>
+                  </div>
+                )}
+                {ballTrackFrames.length > 0 && (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                      gap: 6,
+                    }}
+                  >
+                    {ballTrackFrames.map((rec) => (
+                      <div key={rec.frame} style={{ position: "relative" }}>
+                        {rec.image_url ? (
+                          <a
+                            href={rec.image_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`Frame ${rec.frame} · ball at (${rec.x}, ${rec.y}) · ${rec.confidence || "—"}${rec.notes ? ` — ${rec.notes}` : ""}`}
+                          >
+                            <img
+                              src={rec.image_url}
+                              alt={`Frame ${rec.frame}`}
+                              style={{ width: "100%", display: "block", borderRadius: 4, background: "#000" }}
+                            />
+                          </a>
+                        ) : (
+                          <div
+                            style={{
+                              aspectRatio: "16/9",
+                              display: "grid",
+                              placeItems: "center",
+                              border: "1px dashed var(--border)",
+                              borderRadius: 4,
+                              fontSize: 11,
+                              padding: 4,
+                              textAlign: "center",
+                            }}
+                            className="muted"
+                            title={rec.notes || ""}
+                          >
+                            f{rec.frame}<br />no ball
+                          </div>
+                        )}
+                        <div
+                          className="tiny muted"
+                          style={{ position: "absolute", left: 4, top: 4, background: "rgba(0,0,0,0.55)", color: "#fff", padding: "1px 4px", borderRadius: 3, fontSize: 10 }}
+                        >
+                          f{rec.frame}
+                          {rec.found && rec.confidence && <> · {rec.confidence}</>}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

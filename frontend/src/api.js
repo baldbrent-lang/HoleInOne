@@ -187,11 +187,12 @@ export const api = {
       method: "POST", adminPassword: key, timeoutMs: 240_000,
     }),
   aiTrace: (key, clipId) =>
-    // Three sequential Claude calls (address, handedness, impact).
-    // Total runtime typically 10-20 s. Give a comfortable timeout in
-    // case the API is slow.
+    // Five Claude steps: address, handedness, rough impact, refined
+    // impact, ball-track. The track step is up to 60 parallel calls
+    // and dominates wall time (~30-60 s on a typical swing). Cap at
+    // 5 min so we don't time out the UI mid-track.
     request(`/api/admin/clips/${clipId}/ai-trace`, {
-      method: "POST", adminPassword: key, timeoutMs: 180_000,
+      method: "POST", adminPassword: key, timeoutMs: 300_000,
     }),
   listParticipants: (key, params = {}) => {
     const qs = new URLSearchParams();

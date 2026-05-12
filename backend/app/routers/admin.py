@@ -45,6 +45,7 @@ from ..services.ai_tracer import (
     annotate_address_with_shaft,
     find_impact_frame_after_address,
     refine_impact_frame,
+    track_ball_after_impact,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
@@ -590,6 +591,8 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
     impact_info: dict | None = None
     refined_impact_info: dict | None = None
     impact_image_url: str | None = None
+    ball_track_info: dict | None = None
+    ball_track_frames_out: list[dict] = []
     addr_idx_int: int | None = None
     if address_info.get("ok") and address_info.get("address_frame") is not None:
         addr_idx_int = int(address_info["address_frame"])
@@ -651,6 +654,39 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                     f"{settings.app_base_url}/uploads/clips/{impact_image_name}?v={impact_mtime}"
                 )
 
+        # Step 5: track the ball forward frame-by-frame from impact
+        # until it leaves the frame. Each frame gets its own Claude
+        # call (parallelized); successful ones are saved at native
+        # resolution with a yellow highlight ring on the ball.
+        if refined_impact_info and refined_impact_info.get("ok"):
+            track_prefix = f"{fpath.stem}_track"
+            ball_track_info = track_ball_after_impact(
+                fpath,
+                int(refined_impact_info["impact_frame"]),
+                output_dir=CLIPS_DIR,
+                output_prefix=track_prefix,
+            )
+            if ball_track_info.get("ok"):
+                for rec in ball_track_info.get("frames", []):
+                    out_record = {
+                        "frame": rec.get("frame"),
+                        "found": rec.get("found"),
+                        "x": rec.get("x"),
+                        "y": rec.get("y"),
+                        "confidence": rec.get("confidence"),
+                        "notes": rec.get("notes"),
+                        "image_url": None,
+                    }
+                    filename = rec.get("image_filename")
+                    if filename:
+                        file_path = CLIPS_DIR / filename
+                        if file_path.exists():
+                            mtime = int(file_path.stat().st_mtime)
+                            out_record["image_url"] = (
+                                f"{settings.app_base_url}/uploads/clips/{filename}?v={mtime}"
+                            )
+                    ball_track_frames_out.append(out_record)
+
     db.add(AuditLog(
         actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
         detail=str({
@@ -658,9 +694,20 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
             "handedness": handedness_info,
             "impact": impact_info,
             "impact_refined": refined_impact_info,
+            "ball_track": {
+                k: v for k, v in (ball_track_info or {}).items()
+                if k != "frames"
+            },
+            "n_track_frames_with_image": len(ball_track_frames_out),
         }),
     ))
     db.commit()
+
+    ball_track_summary = None
+    if ball_track_info is not None:
+        ball_track_summary = {
+            k: v for k, v in ball_track_info.items() if k != "frames"
+        }
 
     return {
         "clip_id": clip.id,
@@ -671,6 +718,8 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
         "impact": impact_info,
         "impact_refined": refined_impact_info,
         "impact_image_url": impact_image_url,
+        "ball_track": ball_track_summary,
+        "ball_track_frames": ball_track_frames_out,
     }
 
 

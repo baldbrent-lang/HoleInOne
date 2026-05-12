@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 log = logging.getLogger("golfreelz.ai_tracer")
@@ -158,6 +159,46 @@ ADDRESS_SYSTEM_PROMPT = (
 
 
 REFINE_IMPACT_FRAME_W = 768
+
+# Ball-tracking pass parameters. After impact we step through every
+# frame and ask Claude to locate the ball, until it leaves the view.
+# Each frame is sent at BALL_TRACK_FRAME_W wide; 1568 is Anthropic's
+# vision tile threshold — above that, images get internally resized
+# without benefit, so we sit right at the sweet spot. Parallel calls
+# keep wall time manageable across the typical 30-60 frame flight.
+BALL_TRACK_FRAME_W = 1568
+BALL_TRACK_MAX_FRAMES = 60
+BALL_TRACK_CONCURRENCY = 8
+
+
+BALL_TRACK_PROMPT = (
+    "You are looking at a single still frame from a golf swing video. "
+    "The ball was struck a fraction of a second ago and is now in "
+    "flight, travelling AWAY from the camera and arcing upward toward "
+    "the target.\n\n"
+    "Your only job: locate the airborne golf BALL in this frame.\n\n"
+    "Cues:\n"
+    "- A small bright white spot (3-15 pixels across) or a short "
+    "motion-blur streak in the direction of motion.\n"
+    "- Against grass: white-on-green. Against sky: bright speck OR "
+    "(overcast) a small darker silhouette.\n"
+    "- The ball is rising as it flies, so it usually sits in the "
+    "upper portion of the frame above the tee.\n"
+    "- DO NOT confuse with: shoes, belt, hands, club head, range "
+    "balls on the ground at the tee, leaves, flags, course markers, "
+    "or clouds.\n\n"
+    "If you cannot clearly see the airborne ball in this frame (it "
+    "has left the frame, gone behind something, or is too small to "
+    "pick out reliably), set found=false.\n\n"
+    "Reply with ONE JSON object only:\n"
+    "{\n"
+    '  "found": true | false,\n'
+    '  "x": <int pixel x, or null>,\n'
+    '  "y": <int pixel y, or null>,\n'
+    '  "confidence": "high" | "medium" | "low",\n'
+    '  "notes": "<≤15 word description>"\n'
+    "}"
+)
 
 
 REFINE_IMPACT_SYSTEM_PROMPT = (
@@ -1257,4 +1298,248 @@ def refine_impact_frame(
             log.warning(
                 "ai_tracer: refine_impact — could not re-extract picked frame %d", impact,
             )
+    return info
+
+
+def track_ball_after_impact(
+    input_path: Path,
+    impact_frame_idx: int,
+    output_dir: Path,
+    output_prefix: str,
+    max_frames: int = BALL_TRACK_MAX_FRAMES,
+    send_width: int = BALL_TRACK_FRAME_W,
+    concurrency: int = BALL_TRACK_CONCURRENCY,
+) -> dict:
+    """Track the ball forward frame-by-frame from `impact_frame_idx`.
+
+    Runs up to `max_frames` parallel Claude calls — one per frame —
+    each asking for the ball's pixel coordinates. For every frame where
+    Claude reports found=true with usable coords, the function writes a
+    JPEG at native resolution to `output_dir / {output_prefix}_f{N}.jpg`
+    with a yellow circle drawn at the ball's position.
+
+    Returns::
+
+        {
+          "ok": bool,
+          "error": str | None,
+          "frames": [
+            {
+              "frame": int,
+              "found": bool,
+              "x": int | None,    # native pixel x (None if not found)
+              "y": int | None,    # native pixel y
+              "confidence": str | None,
+              "notes": str | None,
+              "image_filename": str | None,
+            },
+            ...
+          ],
+          "n_frames_processed": int,
+          "n_frames_found": int,
+          "first_lost_run_start": int | None,  # frame at start of first
+                                               # ≥3 consecutive losses
+          "model": str,
+        }
+    """
+    info: dict = {
+        "ok": False,
+        "error": None,
+        "frames": [],
+        "n_frames_processed": 0,
+        "n_frames_found": 0,
+        "first_lost_run_start": None,
+        "model": MODEL,
+    }
+
+    if not HAS_CV:
+        info["error"] = "opencv not installed"
+        return info
+    if not HAS_ANTHROPIC:
+        info["error"] = "anthropic SDK not installed"
+        return info
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        info["error"] = "ANTHROPIC_API_KEY not set in environment"
+        return info
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not open video"
+        return info
+    try:
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    finally:
+        cap.release()
+    if total_frames <= 1:
+        info["error"] = "video has no frames"
+        return info
+
+    impact_frame_idx = int(impact_frame_idx)
+    last_frame = min(total_frames - 1, impact_frame_idx + max_frames - 1)
+    frame_indices = list(range(impact_frame_idx, last_frame + 1))
+    if not frame_indices:
+        info["error"] = "no frames to process"
+        return info
+    info["n_frames_processed"] = len(frame_indices)
+    log.info(
+        "ai_tracer: ball_track — tracking %d frames [%d..%d] from impact",
+        len(frame_indices), frame_indices[0], frame_indices[-1],
+    )
+
+    # Extract all frames once up front: keep both a resized JPEG (for
+    # the API) and the native ndarray (for drawing the highlight when
+    # the ball is found, without a second cv2.VideoCapture pass).
+    frames_data: dict[int, tuple[bytes, int, int, "np.ndarray"]] = {}
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not re-open video"
+        return info
+    try:
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            native_h, native_w = frame.shape[:2]
+            if native_w > send_width:
+                scale = send_width / float(native_w)
+                resized = cv2.resize(
+                    frame, (send_width, int(round(native_h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            else:
+                resized = frame
+            ok, buf = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
+            if ok:
+                # Store sent dims (for landmark scaling) + native frame
+                # (for native-res annotation).
+                frames_data[idx] = (
+                    bytes(buf),
+                    resized.shape[1], resized.shape[0],
+                    frame.copy(),
+                )
+    finally:
+        cap.release()
+    if not frames_data:
+        info["error"] = "could not extract any frames"
+        return info
+
+    client = Anthropic()
+
+    def _query(idx: int) -> tuple[int, dict]:
+        jpeg_bytes, sent_w, sent_h, _native = frames_data[idx]
+        b64 = base64.standard_b64encode(jpeg_bytes).decode("ascii")
+        user_text = (
+            f"Frame {idx}. Image size {sent_w}x{sent_h} px. "
+            "Locate the airborne golf ball. JSON only."
+        )
+        try:
+            resp = client.messages.create(
+                model=MODEL,
+                max_tokens=200,
+                system=[{
+                    "type": "text",
+                    "text": BALL_TRACK_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": b64,
+                            },
+                        },
+                        {"type": "text", "text": user_text},
+                    ],
+                }],
+            )
+        except Exception as exc:
+            log.warning("ai_tracer: ball_track frame %d API failed: %s", idx, exc)
+            return idx, {"_error": str(exc)}
+        text_chunks = [
+            b.text for b in resp.content
+            if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+        ]
+        parsed = _extract_json("\n".join(text_chunks))
+        return idx, (parsed or {"_error": "no_json_in_response"})
+
+    raw_results: list[tuple[int, dict]] = []
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futures = [ex.submit(_query, idx) for idx in frames_data]
+        for fut in as_completed(futures):
+            try:
+                raw_results.append(fut.result())
+            except Exception as exc:
+                log.warning("ai_tracer: ball_track worker exception: %s", exc)
+    raw_results.sort(key=lambda r: r[0])
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n_found = 0
+    consec_lost = 0
+    first_lost_run_start: int | None = None
+    for idx, parsed in raw_results:
+        record: dict = {
+            "frame": idx,
+            "found": False,
+            "x": None,
+            "y": None,
+            "confidence": None,
+            "notes": None,
+            "image_filename": None,
+        }
+        if "_error" not in parsed:
+            found = bool(parsed.get("found"))
+            confidence = str(parsed.get("confidence") or "").lower() or None
+            notes = str(parsed.get("notes") or "")[:200] or None
+            record["found"] = found
+            record["confidence"] = confidence
+            record["notes"] = notes
+            sx = parsed.get("x")
+            sy = parsed.get("y")
+            if found and sx is not None and sy is not None:
+                try:
+                    sent_x = int(sx)
+                    sent_y = int(sy)
+                except (TypeError, ValueError):
+                    sent_x = sent_y = None
+                if sent_x is not None and sent_y is not None:
+                    jpeg_bytes, sent_w, sent_h, native_frame = frames_data[idx]
+                    nh, nw = native_frame.shape[:2]
+                    native_x = int(round(sent_x * nw / float(sent_w)))
+                    native_y = int(round(sent_y * nh / float(sent_h)))
+                    record["x"] = native_x
+                    record["y"] = native_y
+                    # Annotate native frame and save.
+                    annotated = native_frame.copy()
+                    cv2.circle(annotated, (native_x, native_y), 22, (0, 0, 0), 5, cv2.LINE_AA)
+                    cv2.circle(annotated, (native_x, native_y), 20, (0, 230, 255), 4, cv2.LINE_AA)
+                    cv2.circle(annotated, (native_x, native_y), 4, (0, 230, 255), -1, cv2.LINE_AA)
+                    filename = f"{output_prefix}_f{idx:05d}.jpg"
+                    out_path = output_dir / filename
+                    ok = cv2.imwrite(
+                        str(out_path), annotated,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+                    )
+                    if ok:
+                        record["image_filename"] = filename
+                        n_found += 1
+        info["frames"].append(record)
+        if record["found"] and record["image_filename"]:
+            consec_lost = 0
+        else:
+            consec_lost += 1
+            if consec_lost == 3 and first_lost_run_start is None:
+                first_lost_run_start = idx - 2
+
+    info["n_frames_found"] = n_found
+    info["first_lost_run_start"] = first_lost_run_start
+    info["ok"] = True
+    log.info(
+        "ai_tracer: ball_track — found ball in %d/%d frames; first_lost_run_start=%s",
+        n_found, len(frame_indices), first_lost_run_start,
+    )
     return info
