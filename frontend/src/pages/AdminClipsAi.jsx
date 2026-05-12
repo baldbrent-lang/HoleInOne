@@ -78,11 +78,12 @@ export default function AdminClipsAi() {
         <h3 style={{ marginBottom: 4 }}>AI tracer test bench</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
           Runs the Claude Vision tracer with <b>no classical CV fallback</b>.
-          Claude classifies frames as <code>at_rest</code> / <code>in_flight</code>{" "}
-          / <code>gone</code>, fits a parabola through the in-flight anchors, and
-          renders the dashed overlay. Cyan rings mark frames Claude verified
-          directly (vs interpolated by the parabola fit). Each run is ~20 API
-          calls; budget 15-30s and a few cents per clip.
+          Pipeline: (1) send a labeled 16-frame montage spanning the clip and
+          ask Claude which frame is impact; (2) sample ~10 frames over the
+          next 2.5s and ask Claude for ball coordinates in each; (3) fit a
+          parabola through the verified anchors and render the dashed overlay.
+          Cyan rings mark frames Claude verified directly. ~11 API calls
+          per clip, typically 10-15s wall time.
         </p>
       </div>
 
@@ -107,7 +108,8 @@ export default function AdminClipsAi() {
         const aiDebugUrl = result?.ai_debug_url;
         const isComposite = (c.source_url || "").includes("_composite");
         const anchors = info?.ai_info?.anchors || [];
-        const scoutHits = info?.ai_info?.scout_hits || [];
+        const impactFrame = info?.ai_info?.impact_frame;
+        const impactDiag = info?.ai_info?.impact_diag || {};
         const stopReason = info?.ai_info?.stop_reason;
         const model = info?.ai_info?.model;
         return (
@@ -167,25 +169,31 @@ export default function AdminClipsAi() {
               </div>
             </div>
 
-            {(model || stopReason) && (
+            {(model || stopReason || impactFrame != null) && (
               <div className="small muted" style={{ marginTop: 8 }}>
                 {model && <>Model: <code>{model}</code> · </>}
-                {stopReason && <>Stop reason: <code>{stopReason}</code></>}
-                {scoutHits.length > 0 && <> · Scout in-flight frames: <code>[{scoutHits.join(", ")}]</code></>}
+                {impactFrame != null && (
+                  <>Impact frame: <code>{impactFrame}</code>
+                    {impactDiag.confidence && <> ({impactDiag.confidence})</>}
+                    {impactDiag.notes && <> — <i>{impactDiag.notes}</i></>}
+                    {" · "}
+                  </>
+                )}
+                {stopReason && <>Stop: <code>{stopReason}</code></>}
               </div>
             )}
 
             {anchors.length > 0 && (
               <details style={{ marginTop: 8 }}>
                 <summary className="small muted" style={{ cursor: "pointer" }}>
-                  Claude's per-frame classifications ({anchors.length})
+                  Per-frame tracking results ({anchors.filter(a => a.found).length}/{anchors.length} found)
                 </summary>
                 <div style={{ marginTop: 8, fontSize: 12 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
                         <th style={{ padding: "4px 8px" }}>Frame</th>
-                        <th style={{ padding: "4px 8px" }}>State</th>
+                        <th style={{ padding: "4px 8px" }}>Found</th>
                         <th style={{ padding: "4px 8px" }}>Confidence</th>
                         <th style={{ padding: "4px 8px" }}>Coords</th>
                         <th style={{ padding: "4px 8px" }}>Notes</th>
@@ -196,7 +204,9 @@ export default function AdminClipsAi() {
                         <tr key={`${a.frame}-${i}`} style={{ borderBottom: "1px solid var(--border)" }}>
                           <td style={{ padding: "4px 8px" }}><code>{a.frame}</code></td>
                           <td style={{ padding: "4px 8px" }}>
-                            <span className={`pill small ${stateClass(a.state)}`}>{a.state || "?"}</span>
+                            <span className={`pill small ${a.found ? "ok" : "warn"}`}>
+                              {a.found ? "ball" : "no ball"}
+                            </span>
                           </td>
                           <td style={{ padding: "4px 8px" }}>{a.confidence}</td>
                           <td style={{ padding: "4px 8px" }}>
@@ -259,11 +269,3 @@ export default function AdminClipsAi() {
   );
 }
 
-function stateClass(state) {
-  switch (state) {
-    case "in_flight": return "ok";
-    case "at_rest":   return "";
-    case "gone":      return "warn";
-    default:          return "";
-  }
-}
