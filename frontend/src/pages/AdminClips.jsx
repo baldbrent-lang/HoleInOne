@@ -117,6 +117,9 @@ export default function AdminClips() {
                   {c.fps != null && (
                     <> · <code>{c.fps}</code> fps</>
                   )}
+                  {c.source_device && (
+                    <> · {c.source_device}</>
+                  )}
                 </span>
               </div>
               <div className="inline" style={{ gap: 8 }}>

@@ -47,7 +47,7 @@ from ..services.ai_tracer import (
     refine_impact_frame,
     track_ball_after_impact,
 )
-from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_video_info
+from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -487,16 +487,18 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
     for c in clips:
         course = courses.get(c.course_id)
         participant = participants.get(c.participant_id) if c.participant_id else None
-        # Lightweight header read of each source file to surface FPS on
-        # the list. cv2 just reads the container header — no decode,
-        # no subprocess — so this is fine to do per-clip.
+        # Lightweight header read of each source file to surface FPS and
+        # the recording device (when discoverable). cv2 for FPS (no
+        # subprocess), one ffprobe call for the device tags.
         fps_val: float | None = None
+        source_device: str | None = None
         if c.source_url:
             fname = c.source_url.rstrip("/").rsplit("/", 1)[-1]
             if fname:
                 source_path = CLIPS_DIR / fname
                 if source_path.exists():
                     fps_val = probe_fps(source_path)
+                    source_device = probe_source_device(source_path)
         out.append({
             "id": c.id,
             "course_id": c.course_id,
@@ -513,6 +515,7 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
             "participant_id": c.participant_id,
             "participant_name": participant.name if participant else None,
             "fps": round(fps_val, 1) if fps_val is not None else None,
+            "source_device": source_device,
         })
     return out
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -189,6 +190,80 @@ def probe_fps(path: Path) -> float | None:
     except (TypeError, ValueError):
         return None
     return fps_f if fps_f > 0 else None
+
+
+def probe_source_device(path: Path) -> str | None:
+    """Best-effort guess at the recording device from container metadata.
+
+    Returns a short human-readable label like 'iPhone 14 Pro' or
+    'GoPro Hero 11', or None when no useful metadata is present.
+    Uses ffprobe; if ffmpeg isn't on PATH, returns None silently.
+    Cheap enough to call per-row on list endpoints — one ffprobe
+    subprocess that only reads container headers.
+    """
+    if not have_ffmpeg():
+        return None
+    try:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format_tags:stream_tags",
+                "-of", "json", str(path),
+            ],
+            stderr=subprocess.STDOUT,
+            timeout=10,
+        )
+        data = json.loads(out)
+    except Exception:
+        return None
+
+    # Flatten tags from the format and every stream into a single dict
+    # so the order of iPhone-vs-GoPro probing below doesn't depend on
+    # where the tag happens to live in the container.
+    tags: dict[str, str] = {}
+    fmt_tags = (data.get("format") or {}).get("tags") or {}
+    for k, v in fmt_tags.items():
+        tags[str(k).lower()] = str(v)
+    for stream in data.get("streams") or []:
+        for k, v in (stream.get("tags") or {}).items():
+            tags.setdefault(str(k).lower(), str(v))
+
+    # iPhone: Apple writes com.apple.quicktime.{make,model,software}.
+    # The model is already nicely formatted ("iPhone 15 Pro"), no need
+    # to splice with make.
+    model = tags.get("com.apple.quicktime.model") or tags.get("model")
+    if model:
+        return model.strip()
+
+    # GoPro: doesn't write a clean model tag the way Apple does. The
+    # encoder / firmware string almost always contains "GoPro". Try to
+    # pull out the model number if present, otherwise return "GoPro".
+    for v in tags.values():
+        if "gopro" in v.lower():
+            m = re.search(
+                r"GoPro\s+(?:Hero\s*\d+(?:\s+\w+)?|Max|Fusion)", v, re.IGNORECASE,
+            )
+            if m:
+                return m.group(0).strip()
+            return "GoPro"
+
+    # Android: com.android.{manufacturer,model,version}
+    android_make = tags.get("com.android.manufacturer")
+    android_model = tags.get("com.android.model")
+    if android_make and android_model:
+        return f"{android_make} {android_model}".strip()
+    if android_model:
+        return android_model.strip()
+
+    # DJI / Sony / Canon / generic — surface a sanitized encoder string
+    # only if it doesn't look like a generic muxer (libav/lavf/x264).
+    encoder = tags.get("com.apple.quicktime.software") or tags.get("encoder")
+    if encoder:
+        e = encoder.strip()
+        bad = ("lavf", "libavformat", "libav", "x264", "x265", "ffmpeg")
+        if not any(b in e.lower() for b in bad) and len(e) < 60:
+            return e
+    return None
 
 
 def probe_video_info(path: Path) -> dict:
