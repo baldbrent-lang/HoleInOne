@@ -75,10 +75,12 @@ MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 N_ANCHOR_FRAMES = 8  # legacy single-pass count (still used as a fallback)
 N_ANCHORS_SCOUT = 10
 N_ANCHORS_DENSE = 10
-# How far on either side of a "ball found" scout frame we densify.
-# 0.5s in clip-time is wide enough to cover the rest of the flight
-# even if the scout caught only one end of it.
-DENSE_WINDOW_SEC = 1.5
+# How far on either side of the inferred flight bracket we densify.
+# Small because we don't want to spend the dense pass budget querying
+# frames clearly before/after the flight — e.g. when scout finds the
+# at_rest→gone transition, the flight is BETWEEN those frames, not
+# outside. A small pad just accounts for transition-boundary slop.
+DENSE_WINDOW_SEC = 0.4
 
 # Frames are downscaled to this max width before being sent so token
 # count stays bounded regardless of source resolution (4K GoPros etc.).
@@ -98,31 +100,38 @@ MAX_CONCURRENT_REQUESTS = 8
 
 
 SYSTEM_PROMPT = (
-    "You are a sports-vision assistant identifying the precise pixel "
-    "location of a golf ball in flight in still frames from a par-3 tee "
-    "shot. The camera sits behind a right- or left-handed golfer; the "
-    "ball travels away from the camera, rising and arcing toward the green.\n\n"
-    "For each frame, locate the ball:\n"
-    "- It appears as a small bright white dot or short motion-blur streak. "
-    "Typical size 3-15 pixels wide.\n"
-    "- Against grass: white-on-green. Against sky: a small bright speck "
-    "OR (overcast) a darker silhouette — still small and round/oblong.\n"
-    "- DO NOT confuse the ball with: the golfer's shoes, belt buckle, "
+    "You are a sports-vision assistant analyzing still frames from a "
+    "par-3 tee shot. The camera sits behind a right- or left-handed "
+    "golfer; when the ball is struck it travels away from the camera, "
+    "rising and arcing toward the green.\n\n"
+    "Classify the frame's state and, if a ball is visible, locate it.\n\n"
+    "State values:\n"
+    "- 'at_rest': the ball is still sitting on the tee (or ground), not "
+    "yet struck. Backswing / address / takeaway are all 'at_rest'.\n"
+    "- 'in_flight': the ball is airborne after being struck. Appears as "
+    "a small bright dot or short motion-blur streak, 3-15 px wide. "
+    "Against grass: white-on-green. Against sky: bright speck OR (overcast) "
+    "darker silhouette — still small and round/oblong.\n"
+    "- 'gone': the ball has been struck and has already left the frame "
+    "(or landed and is no longer visibly airborne). Use this for any "
+    "post-swing frame where you can tell the shot happened but no "
+    "airborne ball is visible.\n"
+    "- 'unknown': you cannot tell what state the frame is in.\n\n"
+    "Do NOT confuse the ball with: the golfer's shoes, belt buckle, "
     "hands, club head, range balls on the tee mat, divots, leaves, "
-    "clouds, course markers, or background props.\n"
-    "- The ball at address (sitting on the tee) is NOT in flight — set "
-    "found=false for those frames.\n"
-    "- If you cannot clearly see a single airborne ball, set found=false.\n\n"
+    "clouds, course markers, or background props.\n\n"
     "Reply with ONE JSON object and nothing else, matching this schema:\n"
     "{\n"
-    '  "found": true|false,\n'
-    '  "x": <int pixel x, 0 = left, or null if not found>,\n'
-    '  "y": <int pixel y, 0 = top,  or null if not found>,\n'
+    '  "state": "at_rest"|"in_flight"|"gone"|"unknown",\n'
+    '  "x": <int pixel x of the ball center, or null if no ball visible>,\n'
+    '  "y": <int pixel y of the ball center, or null if no ball visible>,\n'
     '  "confidence": "high"|"medium"|"low",\n'
     '  "notes": "<short reasoning, max 12 words>"\n'
     "}\n"
-    "Coordinates are in the IMAGE coordinate system provided (the image "
-    "may be resized before you see it). Aim for the center of the ball."
+    "Provide x/y for BOTH 'at_rest' and 'in_flight' when you can see the "
+    "ball; use null for 'gone' or 'unknown'. Coordinates are in the IMAGE "
+    "coordinate system provided (the image may have been resized before "
+    "you see it). Aim for the center of the ball."
 )
 
 
@@ -273,9 +282,10 @@ def _run_pass(
     input_path: Path, client, indices: list[int],
     frame_w: int, frame_h: int, info: dict,
 ) -> list[tuple[int, float, float]]:
-    """Query Claude for each frame in `indices`, return accepted anchors
-    in NATIVE coords. Appends per-frame Claude responses to info["anchors"]
-    for diagnostics."""
+    """Query Claude for each frame in `indices`, return accepted
+    in_flight anchors in NATIVE coords. Appends per-frame Claude
+    responses (including at_rest / gone classifications) to
+    info["anchors"] for diagnostics and downstream windowing."""
     raw_results: list[tuple[int, dict | None, int, int, int, int]] = []
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as ex:
         futures = [
@@ -292,16 +302,21 @@ def _run_pass(
     for frame_idx, parsed, native_w, native_h, sent_w, sent_h in raw_results:
         if not parsed:
             continue
-        found = bool(parsed.get("found"))
+        # Accept both the new "state" schema and the legacy "found" bool
+        # in case any cached / mid-deploy responses come back in the old
+        # shape — never throw, just record what we got.
+        state = str(parsed.get("state") or "").lower()
+        if not state:
+            state = "in_flight" if parsed.get("found") else "gone"
         confidence = str(parsed.get("confidence") or "low").lower()
         x = parsed.get("x")
         y = parsed.get("y")
         notes = str(parsed.get("notes") or "")[:80]
         info["anchors"].append({
-            "frame": frame_idx, "found": found, "confidence": confidence,
+            "frame": frame_idx, "state": state, "confidence": confidence,
             "x": x, "y": y, "notes": notes,
         })
-        if not found or confidence not in ACCEPTED_CONFIDENCE:
+        if state != "in_flight" or confidence not in ACCEPTED_CONFIDENCE:
             continue
         if x is None or y is None:
             continue
@@ -403,28 +418,56 @@ def track_ball_with_ai(
 
     anchors: list[tuple[int, float, float]] = list(scout_anchors)
 
-    # --- Pass 2: densify around the hit window ----------------------
+    # --- Pass 2: densify around the inferred flight window ----------
+    # Three ways to determine the dense window, in order of preference:
+    #   1. Scout had in_flight hits — bracket [min, max] of those hits.
+    #   2. Scout has the transition at_rest → gone — flight is between
+    #      the latest at_rest frame and the earliest gone frame after it.
+    #      Common case for slow-mo clips where flight is < 1 of total.
+    #   3. No bracket — give up; classical CV will pick this up.
+    dense_lo: int | None = None
+    dense_hi: int | None = None
     if scout_anchors:
-        hit_lo = min(a[0] for a in scout_anchors)
-        hit_hi = max(a[0] for a in scout_anchors)
-        dense_indices = _dense_indices_around(
-            hit_lo, hit_hi, total_frames, fps, N_ANCHORS_DENSE,
+        dense_lo = min(a[0] for a in scout_anchors)
+        dense_hi = max(a[0] for a in scout_anchors)
+        log.info("ai_tracer: dense window from in_flight hits [%d, %d]", dense_lo, dense_hi)
+    else:
+        at_rest_frames = sorted(
+            a["frame"] for a in info["anchors"]
+            if a["state"] == "at_rest" and a["confidence"] in ACCEPTED_CONFIDENCE
         )
-        # Don't re-query frames already scouted (the dict in info["anchors"]
-        # tracks every frame_idx we've seen).
+        gone_frames = sorted(
+            a["frame"] for a in info["anchors"]
+            if a["state"] == "gone" and a["confidence"] in ACCEPTED_CONFIDENCE
+        )
+        if at_rest_frames and gone_frames:
+            latest_rest = at_rest_frames[-1]
+            earliest_gone = next((f for f in gone_frames if f > latest_rest), None)
+            if earliest_gone is not None:
+                dense_lo = latest_rest
+                dense_hi = earliest_gone
+                log.info(
+                    "ai_tracer: dense window from at_rest→gone transition [%d, %d]",
+                    dense_lo, dense_hi,
+                )
+
+    if dense_lo is not None and dense_hi is not None:
+        dense_indices = _dense_indices_around(
+            dense_lo, dense_hi, total_frames, fps, N_ANCHORS_DENSE,
+        )
         seen_frames = {a["frame"] for a in info["anchors"]}
         dense_indices = [i for i in dense_indices if i not in seen_frames]
         if dense_indices:
             log.info(
                 "ai_tracer: DENSE — querying %d frames in window [%d, %d]",
-                len(dense_indices), hit_lo, hit_hi,
+                len(dense_indices), dense_lo, dense_hi,
             )
             dense_anchors = _run_pass(
                 input_path, client, dense_indices, frame_w, frame_h, info,
             )
             anchors.extend(dense_anchors)
             log.info(
-                "ai_tracer: DENSE — %d/%d additional hits",
+                "ai_tracer: DENSE — %d/%d additional in_flight hits",
                 len(dense_anchors), len(dense_indices),
             )
 
