@@ -67,44 +67,50 @@ HANDEDNESS_FROM_ADDRESS_PROMPT = (
     "positioned BEHIND the target line, and the golfer is hitting "
     "AWAY from the camera (target is down the image, beyond the "
     "golfer).\n\n"
-    "Your only job: determine whether the golfer is RIGHT-handed or "
-    "LEFT-handed.\n\n"
+    "Your job: locate the golfer's HANDS and the GOLF BALL on the "
+    "ground, then determine whether the golfer is RIGHT-handed or "
+    "LEFT-handed from the shaft direction between them.\n\n"
     "Reason in this exact order — do NOT skip steps:\n"
-    "Step 1. Locate the golfer's HANDS gripping the club. Note their "
-    "approximate (x, y) pixel coordinates in the image. (Image "
-    "dimensions are given in the user message; x=0 is left, y=0 "
-    "is top.)\n"
-    "Step 2. Locate the CLUBHEAD resting on the ground at the ball. "
-    "Note its approximate (x, y) pixel coordinates.\n"
-    "Step 3. Compare: clubhead_x vs hands_x.\n"
-    "  - If clubhead_x < hands_x (clubhead is to the LEFT of the "
-    "hands in the image), the shaft drops down-and-LEFT, and the "
-    "golfer is LEFT-handed.\n"
-    "  - If clubhead_x > hands_x (clubhead is to the RIGHT of the "
-    "hands in the image), the shaft drops down-and-RIGHT, and the "
-    "golfer is RIGHT-handed.\n"
+    "Step 1. Locate the golfer's HANDS gripping the club (the upper "
+    "end of the shaft). Note their approximate (x, y) pixel "
+    "coordinates in the image. (Image dimensions are given in the "
+    "user message; x=0 is left, y=0 is top.)\n"
+    "Step 2. Locate the GOLF BALL on the ground. The ball is whatever "
+    "the club shaft is pointing toward — at address the clubhead "
+    "rests right against the ball, so the ball is at (or within a "
+    "few pixels of) the lower end of the shaft. Report the ball's "
+    "approximate (x, y) pixel coordinates. (If the clubhead obscures "
+    "the ball, just use the clubhead position; that's the ball "
+    "location for our purposes.)\n"
+    "Step 3. Compare: ball_x vs hands_x.\n"
+    "  - If ball_x < hands_x (ball is to the LEFT of the hands in "
+    "the image), the shaft points down-and-LEFT, and the golfer is "
+    "LEFT-handed.\n"
+    "  - If ball_x > hands_x (ball is to the RIGHT of the hands in "
+    "the image), the shaft points down-and-RIGHT, and the golfer is "
+    "RIGHT-handed.\n"
     "This rule holds because the camera sits behind the target line. "
-    "A right-handed golfer's clubhead rests in front of his lead "
-    "(left) foot on his target side; from a behind-the-line camera "
-    "that target side appears on the image-RIGHT, so the clubhead "
-    "is RIGHT of the hands and the shaft drops down-and-right. "
-    "Left-handed is the mirror.\n\n"
+    "A right-handed golfer's ball rests in front of his lead (left) "
+    "foot on his target side; from a behind-the-line camera that "
+    "target side appears on the image-RIGHT, so the ball is RIGHT of "
+    "the hands and the shaft points down-and-right. Left-handed is "
+    "the mirror.\n\n"
     "Apply the comparison literally. Do NOT second-guess it with "
     "ball-position reasoning or assumptions about typical setups. "
-    "The clubhead_x-vs-hands_x comparison IS the answer.\n\n"
+    "The ball_x-vs-hands_x comparison IS the answer.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
     '  "hands_x": <int approximate pixel x of the hands>,\n'
     '  "hands_y": <int approximate pixel y of the hands>,\n'
-    '  "clubhead_x": <int approximate pixel x of the clubhead at ground level>,\n'
-    '  "clubhead_y": <int approximate pixel y of the clubhead at ground level>,\n'
+    '  "ball_x": <int approximate pixel x of the ball on the ground>,\n'
+    '  "ball_y": <int approximate pixel y of the ball on the ground>,\n'
     '  "shaft_direction": "down_left" | "down_right" | "vertical",\n'
     '  "handedness": "right" | "left" | "unknown",\n'
     '  "confidence": "high" | "medium" | "low",\n'
     '  "notes": "<≤25 word description of the two landmarks and the resulting shaft direction>"\n'
     "}\n"
-    "Use 'unknown' only if the hands or clubhead are genuinely not "
-    "visible enough to estimate their x-coordinates."
+    "Use 'unknown' only if the hands or ball are genuinely not "
+    "visible enough to estimate their pixel coordinates."
 )
 
 
@@ -241,10 +247,10 @@ def annotate_address_with_shaft(
     if not HAS_CV:
         return False
     hx, hy = handedness_info.get("hands_x"), handedness_info.get("hands_y")
-    cx, cy = handedness_info.get("clubhead_x"), handedness_info.get("clubhead_y")
+    bx, by = handedness_info.get("ball_x"), handedness_info.get("ball_y")
     sent_w = handedness_info.get("image_width") or 0
     sent_h = handedness_info.get("image_height") or 0
-    if None in (hx, hy, cx, cy) or sent_w <= 0 or sent_h <= 0:
+    if None in (hx, hy, bx, by) or sent_w <= 0 or sent_h <= 0:
         return False
 
     cap = cv2.VideoCapture(str(input_path))
@@ -262,16 +268,16 @@ def annotate_address_with_shaft(
     sx = nw / float(sent_w)
     sy = nh / float(sent_h)
     p_hands = (int(round(hx * sx)), int(round(hy * sy)))
-    p_club = (int(round(cx * sx)), int(round(cy * sy)))
+    p_ball = (int(round(bx * sx)), int(round(by * sy)))
 
     # Halo behind the shaft for legibility on busy backgrounds.
-    cv2.line(frame, p_hands, p_club, (0, 0, 0), 8, cv2.LINE_AA)
-    cv2.line(frame, p_hands, p_club, (0, 230, 255), 4, cv2.LINE_AA)
+    cv2.line(frame, p_hands, p_ball, (0, 0, 0), 8, cv2.LINE_AA)
+    cv2.line(frame, p_hands, p_ball, (0, 230, 255), 4, cv2.LINE_AA)
     # Landmark dots.
     cv2.circle(frame, p_hands, 12, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.circle(frame, p_hands, 9, (0, 230, 255), -1, cv2.LINE_AA)
-    cv2.circle(frame, p_club, 12, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.circle(frame, p_club, 9, (255, 80, 80), -1, cv2.LINE_AA)
+    cv2.circle(frame, p_ball, 12, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.circle(frame, p_ball, 9, (255, 80, 80), -1, cv2.LINE_AA)
     # Short text labels.
     cv2.putText(
         frame, "hands", (p_hands[0] + 14, p_hands[1] - 6),
@@ -282,11 +288,11 @@ def annotate_address_with_shaft(
         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 230, 255), 1, cv2.LINE_AA,
     )
     cv2.putText(
-        frame, "clubhead", (p_club[0] + 14, p_club[1] + 18),
+        frame, "ball start", (p_ball[0] + 14, p_ball[1] + 18),
         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA,
     )
     cv2.putText(
-        frame, "clubhead", (p_club[0] + 14, p_club[1] + 18),
+        frame, "ball start", (p_ball[0] + 14, p_ball[1] + 18),
         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 80, 80), 1, cv2.LINE_AA,
     )
     ok = cv2.imwrite(
@@ -326,8 +332,8 @@ def detect_handedness_at_address(
         "notes": None,
         "hands_x": None,
         "hands_y": None,
-        "clubhead_x": None,
-        "clubhead_y": None,
+        "ball_x": None,
+        "ball_y": None,
         "shaft_direction": None,
         "image_width": None,
         "image_height": None,
@@ -344,7 +350,7 @@ def detect_handedness_at_address(
         return info
 
     # Re-read the frame so we can record the actual sent width Claude
-    # will see — used to make the hands_x / clubhead_x reasoning explicit.
+    # will see — used to make the hands_x / ball_x reasoning explicit.
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         info["error"] = "could not open video for handedness call"
@@ -379,8 +385,8 @@ def detect_handedness_at_address(
             "text": (
                 f"Address frame ({address_frame_idx}) from the clip. "
                 f"Image is {sent_w}x{sent_h} pixels. "
-                "Locate the hands and clubhead, then determine handedness "
-                "from clubhead_x vs hands_x as instructed. JSON only."
+                "Locate the hands and the golf ball, then determine handedness "
+                "from ball_x vs hands_x as instructed. JSON only."
             ),
         },
         {
@@ -427,7 +433,7 @@ def detect_handedness_at_address(
     info["handedness"] = handedness
     info["confidence"] = str(parsed.get("confidence") or "").lower() or None
     info["notes"] = str(parsed.get("notes") or "")[:300] or None
-    for key in ("hands_x", "hands_y", "clubhead_x", "clubhead_y"):
+    for key in ("hands_x", "hands_y", "ball_x", "ball_y"):
         try:
             info[key] = int(parsed[key])
         except (KeyError, TypeError, ValueError):
@@ -436,9 +442,9 @@ def detect_handedness_at_address(
     info["shaft_direction"] = sd if sd in {"down_left", "down_right", "vertical"} else None
     log.info(
         "ai_tracer: handedness at address frame %d — %s (%s) "
-        "hands=(%s,%s) clubhead=(%s,%s) shaft=%s — %s",
+        "hands=(%s,%s) ball=(%s,%s) shaft=%s — %s",
         address_frame_idx, info["handedness"], info["confidence"],
-        info["hands_x"], info["hands_y"], info["clubhead_x"], info["clubhead_y"],
+        info["hands_x"], info["hands_y"], info["ball_x"], info["ball_y"],
         info["shaft_direction"], info["notes"],
     )
     return info

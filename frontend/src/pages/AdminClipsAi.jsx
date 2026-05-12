@@ -230,10 +230,10 @@ export default function AdminClipsAi() {
                     <span className="small muted">
                       confidence: <b>{hand.confidence || "—"}</b>
                     </span>
-                    {(hand.hands_x != null || hand.clubhead_x != null) && (
+                    {(hand.hands_x != null || hand.ball_x != null) && (
                       <div className="tiny muted" style={{ marginTop: 4 }}>
                         hands=<code>({hand.hands_x ?? "—"}, {hand.hands_y ?? "—"})</code>{" · "}
-                        clubhead=<code>({hand.clubhead_x ?? "—"}, {hand.clubhead_y ?? "—"})</code>{" · "}
+                        ball start=<code>({hand.ball_x ?? "—"}, {hand.ball_y ?? "—"})</code>{" · "}
                         shaft=<code>{hand.shaft_direction ?? "—"}</code>
                         {hand.image_width != null && (
                           <> · image <code>{hand.image_width}×{hand.image_height ?? "—"}</code>px</>
