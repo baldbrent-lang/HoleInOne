@@ -61,14 +61,13 @@ FRAME_W = 640
 # the shaft direction much easier for Claude to call.
 HANDEDNESS_FRAME_W = 1024
 
-# Impact-finder parameters. After address we scan a window of
-# IMPACT_WINDOW_SECONDS chronological frames and present
-# N_IMPACT_CANDIDATES of them to Claude alongside the address
-# reference, asking which one shows the clubhead back at the ball.
-# 2.0 s covers takeaway → top → downswing → impact for a normal-tempo
-# swing across the typical frame rates (30 / 60 / 120 fps).
-N_IMPACT_CANDIDATES = 12
-IMPACT_WINDOW_SECONDS = 2.0
+# Impact-finder parameters. After address we sample 8 frames at fixed
+# small offsets from the address frame — empirically, a normal-tempo
+# swing puts impact 10-25 frames after address. Each candidate has
+# the ball's starting position drawn on it as a blue circle so Claude
+# can pick the frame whose club shaft is closest to pointing at that
+# circle (i.e., the clubhead has returned to the ball).
+IMPACT_OFFSETS = [12, 14, 16, 18, 20, 22, 24, 26]
 
 HANDEDNESS_FROM_ADDRESS_PROMPT = (
     "You are looking at a single still frame of a golfer at ADDRESS — "
@@ -157,49 +156,35 @@ ADDRESS_SYSTEM_PROMPT = (
 
 
 IMPACT_SYSTEM_PROMPT = (
-    "You are analyzing frames from a golf swing video. The camera is "
-    "behind the target line and the golfer is hitting AWAY from the "
-    "camera. The first image is a REFERENCE showing the golfer at "
-    "ADDRESS, set up over the ball, just before takeaway. After the "
-    "reference you will see a series of candidate frames from AFTER "
-    "address, in chronological order, each preceded by a 'Frame N:' "
-    "text block.\n\n"
-    "Your job: pick the SINGLE candidate frame closest to IMPACT — "
-    "the moment the clubhead has returned to the ball after the "
-    "backswing and is just about to or just making contact.\n\n"
-    "The swing progression is:\n"
-    "  address (reference) → takeaway (club moves back) → top of "
-    "backswing (club raised behind/above golfer) → downswing (club "
-    "swinging back toward ball) → IMPACT → follow-through.\n\n"
-    "IMPACT cues:\n"
-    "- The clubhead is back at the ball's starting position (compare "
-    "the candidate to the reference's ball position).\n"
-    "- The club shaft is roughly vertical, or just past vertical, "
-    "coming through the ball — NOT raised behind the golfer, NOT "
-    "high in the downswing.\n"
-    "- The golfer's arms are extended down toward the ball; hips have "
-    "rotated through.\n"
-    "- The ball is either still visible at the address position or "
-    "JUST struck (small motion blur near the ball position).\n\n"
-    "Do NOT pick:\n"
-    "- A backswing frame (club raised behind/above the golfer).\n"
-    "- An early downswing frame (club still high, hands not yet at "
-    "ball level).\n"
-    "- A post-impact frame where the ball is clearly gone and the "
-    "club has swung past where the ball was.\n"
-    "- A follow-through frame (club continuing across the golfer's "
-    "body).\n\n"
-    "If the actual impact moment falls BETWEEN two candidates (the "
-    "earlier one is mid-downswing and the next is already follow-"
-    "through), pick the earlier of the two — the one closest to "
-    "pre-impact.\n\n"
+    "You are analyzing a small set of candidate frames from a golf "
+    "swing video. The camera is behind the target line and the golfer "
+    "is hitting AWAY from the camera. Frames are presented in "
+    "chronological order, each preceded by a 'Frame N:' text block.\n\n"
+    "Each frame has a BLUE CIRCLE drawn on it marking the ball's "
+    "STARTING POSITION (the exact pixel where the ball was sitting at "
+    "address, before the swing began). The blue circle is fixed in "
+    "the same image location across every candidate.\n\n"
+    "Your job: pick the SINGLE candidate frame whose club shaft is "
+    "CLOSEST to pointing back at the blue circle — i.e., the clubhead "
+    "has returned to (or is just about to reach) the ball. This is "
+    "the IMPACT frame.\n\n"
+    "How to judge:\n"
+    "- Trace the club shaft from the golfer's hands DOWN to the "
+    "clubhead. The clubhead is the bottom end of the shaft.\n"
+    "- Compare the clubhead position to the blue circle. The candidate "
+    "where the clubhead is on (or nearest to) the circle wins.\n"
+    "- Earlier candidates typically still have the club above the ball "
+    "(mid-downswing). Later candidates have the club past the ball "
+    "(follow-through). The winner is the transition point.\n"
+    "- If two candidates look equally close, prefer the EARLIER one — "
+    "true impact is the last frame before the ball leaves.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
-    '  "impact_frame": <int — must equal one of the labeled candidate frame numbers>,\n'
+    '  "impact_frame": <int — must be one of the labeled candidate frame numbers>,\n'
     '  "confidence": "high" | "medium" | "low",\n'
-    '  "notes": "<≤25 word reasoning citing why this frame over the others>"\n'
+    '  "notes": "<≤25 word reasoning describing where the clubhead is relative to the blue circle>"\n'
     "}\n"
-    "Never invent a frame number; pick from the labels you were shown."
+    "Never invent a frame number; pick from the candidates shown."
 )
 
 
@@ -673,29 +658,33 @@ def find_address_frame(
 
 def find_impact_frame_after_address(
     input_path: Path, address_frame_idx: int,
+    ball_xy_sent: tuple[float, float] | None = None,
+    ball_sent_dims: tuple[int, int] | None = None,
     output_image_path: Path | None = None,
 ) -> dict:
     """Find the impact frame — when the clubhead has returned to the
     ball after the backswing.
 
     Pipeline:
-      1. Sample ~12 frames evenly across [address+1, address+2s].
-      2. Send the address frame as a REFERENCE, then the candidates as
-         labeled images in a single multi-image API call.
-      3. Claude picks the candidate whose clubhead is back at the
-         reference's ball position.
+      1. Sample 8 frames at fixed offsets [+12, +14, ..., +26] from
+         the address frame. A normal-tempo swing puts impact in this
+         window; sampling every 2 frames gives Claude tight resolution
+         to pick the exact contact point.
+      2. If `ball_xy_sent` + `ball_sent_dims` are provided (typically
+         from the handedness pass, which records ball position at its
+         sent-image scale), draw a BLUE CIRCLE on every candidate
+         frame at the ball's starting position. Coords are scaled to
+         the source video's native resolution internally so the
+         circle lands on the right pixel regardless of what size the
+         handedness pass used. The fixed circle is the visual anchor
+         Claude compares the clubhead position to.
+      3. Send the 8 annotated frames in a single multi-image API call.
+         Claude picks the candidate whose clubhead is closest to the
+         blue circle.
 
-    If `output_image_path` is provided, the picked frame is written at
-    native resolution. Returns the same shape as find_address_frame()::
-
-        {
-          "ok": bool, "error": str | None,
-          "impact_frame": int | None,
-          "confidence": str | None, "notes": str | None,
-          "model": str,
-          "frames_sent": [int, ...],
-          "saved_image": bool,
-        }
+    Returns the same shape as find_address_frame(). The written
+    output_image_path file is the native-resolution impact frame with
+    the same blue ball-circle drawn on it.
     """
     info: dict = {
         "ok": False,
@@ -724,7 +713,8 @@ def find_impact_frame_after_address(
         return info
     try:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        native_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        native_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     finally:
         cap.release()
     if total_frames <= 1:
@@ -732,72 +722,88 @@ def find_impact_frame_after_address(
         return info
 
     address_frame_idx = int(address_frame_idx)
-    window_frames = max(1, int(round(fps * IMPACT_WINDOW_SECONDS)))
-    lo = min(address_frame_idx + 1, total_frames - 1)
-    hi = min(address_frame_idx + window_frames, total_frames - 1)
-    if hi <= lo:
+    candidate_indices = [
+        address_frame_idx + off for off in IMPACT_OFFSETS
+        if 0 <= address_frame_idx + off < total_frames
+    ]
+    if not candidate_indices:
         info["error"] = (
-            f"address frame {address_frame_idx} is too close to end of clip "
-            f"({total_frames} frames @ {fps:.1f} fps)"
+            f"address frame {address_frame_idx} too close to end of clip "
+            f"({total_frames} frames) — no candidates at offsets {IMPACT_OFFSETS}"
         )
         return info
-
-    # Evenly-spaced candidate indices in [lo, hi].
-    n = N_IMPACT_CANDIDATES
-    if hi - lo + 1 <= n:
-        candidate_indices = list(range(lo, hi + 1))
-    else:
-        step = (hi - lo) / float(n - 1)
-        candidate_indices = sorted({
-            min(hi, max(lo, int(round(lo + i * step)))) for i in range(n)
-        })
     info["frames_sent"] = candidate_indices
 
-    address_frames = _grab_frames_jpegs(input_path, [address_frame_idx])
-    if not address_frames:
-        info["error"] = f"could not extract address reference frame {address_frame_idx}"
+    # Resolve the ball position to native pixel coords. Callers pass
+    # ball_xy_sent in whatever resolution their pass used (e.g. 1024px
+    # from the handedness call); we scale it up to native here so the
+    # circle lands on the right pixel of each candidate frame.
+    ball_xy_native: tuple[float, float] | None = None
+    if (
+        ball_xy_sent is not None and ball_sent_dims is not None
+        and ball_sent_dims[0] > 0 and ball_sent_dims[1] > 0
+        and native_w > 0 and native_h > 0
+    ):
+        sw, sh = ball_sent_dims
+        ball_xy_native = (
+            float(ball_xy_sent[0]) * native_w / float(sw),
+            float(ball_xy_sent[1]) * native_h / float(sh),
+        )
+
+    # Grab + annotate each candidate. Annotation is done at native res
+    # so the circle lands precisely; then the frame is resized to
+    # FRAME_W for the API payload.
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not re-open video for candidate extraction"
         return info
-    _, address_jpeg = address_frames[0]
-    candidate_frames = _grab_frames_jpegs(input_path, candidate_indices)
-    if not candidate_frames:
+    annotated_jpegs: list[tuple[int, bytes]] = []
+    try:
+        for idx in candidate_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            if ball_xy_native is not None:
+                bx = int(round(ball_xy_native[0]))
+                by = int(round(ball_xy_native[1]))
+                # Black halo for contrast, then blue ring on top.
+                cv2.circle(frame, (bx, by), 18, (0, 0, 0), 5, cv2.LINE_AA)
+                cv2.circle(frame, (bx, by), 16, (255, 60, 0), 4, cv2.LINE_AA)
+            h, w = frame.shape[:2]
+            if w > FRAME_W:
+                scale = FRAME_W / float(w)
+                frame = cv2.resize(
+                    frame, (FRAME_W, int(round(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+            if ok:
+                annotated_jpegs.append((idx, bytes(buf)))
+    finally:
+        cap.release()
+
+    if not annotated_jpegs:
         info["error"] = "could not extract any candidate frames"
         return info
+    candidate_indices_actual = [idx for idx, _ in annotated_jpegs]
 
     log.info(
-        "ai_tracer: impact — address ref frame %d, scanning %d candidates "
-        "%s of %d total @ %.1f fps",
-        address_frame_idx, len(candidate_frames),
-        [idx for idx, _ in candidate_frames], total_frames, fps,
+        "ai_tracer: impact — address=%d candidates=%s ball_native=%s",
+        address_frame_idx, candidate_indices_actual, ball_xy_native,
     )
 
-    content: list[dict] = [
-        {
-            "type": "text",
-            "text": (
-                f"REFERENCE — address frame (frame {address_frame_idx}). "
-                "The golfer is set up over the ball, just before takeaway. "
-                "Use this as the visual anchor for the ball's starting "
-                "position."
-            ),
-        },
-        {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": base64.standard_b64encode(address_jpeg).decode("ascii"),
-            },
-        },
-        {
-            "type": "text",
-            "text": (
-                f"Now {len(candidate_frames)} candidate frames from AFTER "
-                "address, in chronological order. Each is preceded by its "
-                "frame number."
-            ),
-        },
-    ]
-    for idx, jpeg in candidate_frames:
+    content: list[dict] = [{
+        "type": "text",
+        "text": (
+            f"Below are {len(annotated_jpegs)} candidate frames from a "
+            "golf swing, in chronological order, each labeled with its "
+            "frame number. Each frame has a BLUE CIRCLE at the ball's "
+            "starting position. Pick the frame whose club shaft points "
+            "closest at the blue circle."
+        ),
+    }]
+    for idx, jpeg in annotated_jpegs:
         content.append({"type": "text", "text": f"Frame {idx}:"})
         content.append({
             "type": "image",
@@ -810,10 +816,9 @@ def find_impact_frame_after_address(
     content.append({
         "type": "text",
         "text": (
-            "Identify the IMPACT frame — the moment the clubhead has "
-            "returned to the ball and is just about to or just making "
-            f"contact. Valid candidate frame numbers: {candidate_indices}. "
-            "JSON only."
+            "Identify the IMPACT frame — the candidate where the "
+            "clubhead is closest to the blue circle. Valid frame "
+            f"numbers: {candidate_indices_actual}. JSON only."
         ),
     })
 
@@ -821,7 +826,7 @@ def find_impact_frame_after_address(
     try:
         resp = client.messages.create(
             model=MODEL,
-            max_tokens=400,
+            max_tokens=300,
             system=[{
                 "type": "text",
                 "text": IMPACT_SYSTEM_PROMPT,
@@ -850,17 +855,14 @@ def find_impact_frame_after_address(
     except (TypeError, ValueError):
         info["error"] = "could_not_parse_impact_frame"
         return info
-    if impact not in candidate_indices:
-        nearest = min(candidate_indices, key=lambda f: abs(f - impact))
+    if impact not in candidate_indices_actual:
+        nearest = min(candidate_indices_actual, key=lambda f: abs(f - impact))
         log.warning(
             "ai_tracer: impact — Claude returned frame %d not in candidates; "
             "snapping to nearest candidate %d",
             impact, nearest,
         )
         impact = nearest
-    if impact < 0 or impact >= total_frames:
-        info["error"] = f"impact_frame_out_of_range ({impact})"
-        return info
 
     info["ok"] = True
     info["impact_frame"] = impact
@@ -871,9 +873,16 @@ def find_impact_frame_after_address(
         impact, info["confidence"], info["notes"],
     )
 
+    # Save the picked frame at native resolution with the same blue
+    # ball-circle annotation drawn on it.
     if output_image_path is not None:
         full_frame = _grab_frame(input_path, impact)
         if full_frame is not None:
+            if ball_xy_native is not None:
+                bx = int(round(ball_xy_native[0]))
+                by = int(round(ball_xy_native[1]))
+                cv2.circle(full_frame, (bx, by), 22, (0, 0, 0), 5, cv2.LINE_AA)
+                cv2.circle(full_frame, (bx, by), 20, (255, 60, 0), 4, cv2.LINE_AA)
             ok = cv2.imwrite(
                 str(output_image_path), full_frame,
                 [int(cv2.IMWRITE_JPEG_QUALITY), 90],

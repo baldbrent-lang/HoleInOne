@@ -603,12 +603,28 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                 mtime = int(image_path.stat().st_mtime)
                 image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
 
-        # Step 4: find the impact frame — the moment the clubhead has
-        # returned to the ball after the backswing.
+        # Step 4: find the impact frame. Pass the ball's starting
+        # position from the handedness pass (in its sent-image coords)
+        # so the impact function can draw a blue circle at that spot
+        # on each candidate frame.
+        ball_xy_sent = None
+        ball_sent_dims = None
+        if handedness_info and handedness_info.get("ok"):
+            bx = handedness_info.get("ball_x")
+            by = handedness_info.get("ball_y")
+            sw = handedness_info.get("image_width")
+            sh = handedness_info.get("image_height")
+            if bx is not None and by is not None and sw and sh:
+                ball_xy_sent = (float(bx), float(by))
+                ball_sent_dims = (int(sw), int(sh))
+
         impact_image_name = f"{fpath.stem}_impact.jpg"
         impact_image_path = CLIPS_DIR / impact_image_name
         impact_info = find_impact_frame_after_address(
-            fpath, addr_idx_int, output_image_path=impact_image_path,
+            fpath, addr_idx_int,
+            ball_xy_sent=ball_xy_sent,
+            ball_sent_dims=ball_sent_dims,
+            output_image_path=impact_image_path,
         )
         if impact_info.get("saved_image") and impact_image_path.exists():
             impact_mtime = int(impact_image_path.stat().st_mtime)
