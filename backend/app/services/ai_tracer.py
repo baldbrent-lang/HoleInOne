@@ -167,7 +167,7 @@ REFINE_IMPACT_FRAME_W = 768
 # without benefit, so we sit right at the sweet spot. Parallel calls
 # keep wall time manageable across the typical 30-60 frame flight.
 BALL_TRACK_FRAME_W = 1568
-BALL_TRACK_MAX_FRAMES = 60
+BALL_TRACK_MAX_FRAMES = 20
 BALL_TRACK_CONCURRENCY = 8
 
 
@@ -1306,17 +1306,31 @@ def track_ball_after_impact(
     impact_frame_idx: int,
     output_dir: Path,
     output_prefix: str,
+    ball_xy_sent: tuple[float, float] | None = None,
+    ball_sent_dims: tuple[int, int] | None = None,
     max_frames: int = BALL_TRACK_MAX_FRAMES,
     send_width: int = BALL_TRACK_FRAME_W,
     concurrency: int = BALL_TRACK_CONCURRENCY,
 ) -> dict:
     """Track the ball forward frame-by-frame from `impact_frame_idx`.
 
-    Runs up to `max_frames` parallel Claude calls — one per frame —
-    each asking for the ball's pixel coordinates. For every frame where
-    Claude reports found=true with usable coords, the function writes a
-    JPEG at native resolution to `output_dir / {output_prefix}_f{N}.jpg`
-    with a yellow circle drawn at the ball's position.
+    Two-phase strategy:
+      Phase 1 — fan out up to `max_frames` parallel Claude calls, each
+        asking for the ball's pixel coordinates on one frame. If the
+        ball's at-rest position from address is supplied via
+        ball_xy_sent + ball_sent_dims, it's passed as an initial hint
+        (helpful on the first few frames where the ball is still near
+        rest).
+      Phase 2 — for every frame Claude couldn't find, look at the
+        nearest neighbor where it WAS found. Re-query that frame in
+        parallel with the neighbor position as a "look near here"
+        hint. The ball doesn't move much frame-to-frame, so a rough
+        anchor usually rescues a missed call.
+
+    Every frame in the window gets a JPEG written to
+    `output_dir / {output_prefix}_f{N}.jpg` — annotated with a yellow
+    highlight ring when Claude found the ball, plain otherwise — so
+    the operator can see exactly what was queried.
 
     Returns::
 
@@ -1331,14 +1345,15 @@ def track_ball_after_impact(
               "y": int | None,    # native pixel y
               "confidence": str | None,
               "notes": str | None,
-              "image_filename": str | None,
+              "image_filename": str | None,    # always set if frame readable
+              "retry": bool,                   # True iff found via the hint pass
             },
             ...
           ],
           "n_frames_processed": int,
           "n_frames_found": int,
-          "first_lost_run_start": int | None,  # frame at start of first
-                                               # ≥3 consecutive losses
+          "n_frames_found_via_retry": int,
+          "first_lost_run_start": int | None,
           "model": str,
         }
     """
@@ -1348,6 +1363,7 @@ def track_ball_after_impact(
         "frames": [],
         "n_frames_processed": 0,
         "n_frames_found": 0,
+        "n_frames_found_via_retry": 0,
         "first_lost_run_start": None,
         "model": MODEL,
     }
@@ -1426,12 +1442,38 @@ def track_ball_after_impact(
 
     client = Anthropic()
 
-    def _query(idx: int) -> tuple[int, dict]:
+    # Pre-compute the ball-at-rest hint in each frame's sent-coord space
+    # so we can include it as initial context on Phase 1 calls. The
+    # handedness pass recorded ball position at HANDEDNESS_FRAME_W; the
+    # track pass sends at BALL_TRACK_FRAME_W. We scale via fractions to
+    # avoid having to know the exact sent dimensions for each frame.
+    rest_hint_fraction: tuple[float, float] | None = None
+    if (
+        ball_xy_sent is not None and ball_sent_dims is not None
+        and ball_sent_dims[0] > 0 and ball_sent_dims[1] > 0
+    ):
+        rest_hint_fraction = (
+            float(ball_xy_sent[0]) / float(ball_sent_dims[0]),
+            float(ball_xy_sent[1]) / float(ball_sent_dims[1]),
+        )
+
+    def _hint_for_rest(sent_w: int, sent_h: int) -> str:
+        if rest_hint_fraction is None:
+            return ""
+        hx = int(round(rest_hint_fraction[0] * sent_w))
+        hy = int(round(rest_hint_fraction[1] * sent_h))
+        return (
+            f" The ball started at rest at approximately ({hx}, {hy}); "
+            "soon after impact it is still near there, then arcs up and "
+            "to one side as it flies."
+        )
+
+    def _query(idx: int, hint_text: str = "") -> tuple[int, dict]:
         jpeg_bytes, sent_w, sent_h, _native = frames_data[idx]
         b64 = base64.standard_b64encode(jpeg_bytes).decode("ascii")
         user_text = (
-            f"Frame {idx}. Image size {sent_w}x{sent_h} px. "
-            "Locate the airborne golf ball. JSON only."
+            f"Frame {idx}. Image size {sent_w}x{sent_h} px."
+            f"{hint_text} Locate the airborne golf ball. JSON only."
         )
         try:
             resp = client.messages.create(
@@ -1467,21 +1509,106 @@ def track_ball_after_impact(
         parsed = _extract_json("\n".join(text_chunks))
         return idx, (parsed or {"_error": "no_json_in_response"})
 
-    raw_results: list[tuple[int, dict]] = []
+    # --- Phase 1: parallel pass with the rest-position hint ---
+    phase1_results: dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        futures = [ex.submit(_query, idx) for idx in frames_data]
+        futures = []
+        for idx in frames_data:
+            _jb, sw, sh, _nf = frames_data[idx]
+            futures.append(ex.submit(_query, idx, _hint_for_rest(sw, sh)))
         for fut in as_completed(futures):
             try:
-                raw_results.append(fut.result())
+                idx, parsed = fut.result()
+                phase1_results[idx] = parsed
             except Exception as exc:
-                log.warning("ai_tracer: ball_track worker exception: %s", exc)
-    raw_results.sort(key=lambda r: r[0])
+                log.warning("ai_tracer: ball_track phase-1 exception: %s", exc)
 
+    # Extract sent-coord positions of frames found in Phase 1 — used as
+    # hint anchors for Phase 2 retries on missed frames.
+    found_sent: dict[int, tuple[int, int, int, int]] = {}
+    for idx, parsed in phase1_results.items():
+        if "_error" in parsed or not parsed.get("found"):
+            continue
+        sx, sy = parsed.get("x"), parsed.get("y")
+        if sx is None or sy is None:
+            continue
+        try:
+            sent_x, sent_y = int(sx), int(sy)
+        except (TypeError, ValueError):
+            continue
+        _jb, sw, sh, _nf = frames_data[idx]
+        found_sent[idx] = (sent_x, sent_y, sw, sh)
+    log.info(
+        "ai_tracer: ball_track phase-1 — found %d / %d frames",
+        len(found_sent), len(frames_data),
+    )
+
+    # --- Phase 2: retry missed frames using the nearest Phase-1 hit ---
+    retry_results: dict[int, dict] = {}
+    retry_targets = [
+        idx for idx in frames_data
+        if idx not in found_sent
+    ]
+    if found_sent and retry_targets:
+        def _retry(idx: int) -> tuple[int, dict]:
+            # Choose the closest found frame as the anchor. The ball
+            # moves a small amount per frame so even a 3-4 frame gap is
+            # usually a useful prior.
+            nearest = min(found_sent, key=lambda f: abs(f - idx))
+            anchor_sent_x, anchor_sent_y, anchor_sw, anchor_sh = found_sent[nearest]
+            _jb, sw, sh, _nf = frames_data[idx]
+            # Scale the anchor pixel coords to this frame's sent dims.
+            hint_x = int(round(anchor_sent_x * sw / float(anchor_sw)))
+            hint_y = int(round(anchor_sent_y * sh / float(anchor_sh)))
+            hint = (
+                f" HINT: in nearby frame {nearest} the ball was at "
+                f"approximately ({hint_x}, {hint_y}). The ball typically "
+                "moves less than ~50 px between adjacent frames; look in "
+                "that area first, then check the surrounding region. If "
+                "you genuinely cannot see the ball, return found=false."
+            )
+            return _query(idx, hint)
+
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = [ex.submit(_retry, idx) for idx in retry_targets]
+            for fut in as_completed(futures):
+                try:
+                    idx, parsed = fut.result()
+                    retry_results[idx] = parsed
+                except Exception as exc:
+                    log.warning("ai_tracer: ball_track phase-2 exception: %s", exc)
+        n_retry_hits = sum(
+            1 for p in retry_results.values()
+            if "_error" not in p and p.get("found")
+            and p.get("x") is not None and p.get("y") is not None
+        )
+        log.info(
+            "ai_tracer: ball_track phase-2 retried %d frames; %d additional hits",
+            len(retry_results), n_retry_hits,
+        )
+
+    # --- Save annotated images for every frame and build records ---
     output_dir.mkdir(parents=True, exist_ok=True)
     n_found = 0
+    n_retry_found = 0
     consec_lost = 0
     first_lost_run_start: int | None = None
-    for idx, parsed in raw_results:
+    for idx in sorted(frames_data):
+        parsed1 = phase1_results.get(idx, {"_error": "missing"})
+        parsed2 = retry_results.get(idx)
+        # Prefer Phase 1 if it found the ball; else Phase 2 if it did.
+        chosen = None
+        via_retry = False
+        if "_error" not in parsed1 and parsed1.get("found"):
+            chosen = parsed1
+        elif parsed2 is not None and "_error" not in parsed2 and parsed2.get("found"):
+            chosen = parsed2
+            via_retry = True
+        elif "_error" not in parsed1:
+            chosen = parsed1  # carries Claude's "not found" notes
+        elif parsed2 is not None and "_error" not in parsed2:
+            chosen = parsed2
+
         record: dict = {
             "frame": idx,
             "found": False,
@@ -1490,45 +1617,55 @@ def track_ball_after_impact(
             "confidence": None,
             "notes": None,
             "image_filename": None,
+            "retry": False,
         }
-        if "_error" not in parsed:
-            found = bool(parsed.get("found"))
-            confidence = str(parsed.get("confidence") or "").lower() or None
-            notes = str(parsed.get("notes") or "")[:200] or None
-            record["found"] = found
-            record["confidence"] = confidence
-            record["notes"] = notes
-            sx = parsed.get("x")
-            sy = parsed.get("y")
-            if found and sx is not None and sy is not None:
+        if chosen is not None:
+            found_flag = bool(chosen.get("found"))
+            record["found"] = found_flag
+            record["confidence"] = str(chosen.get("confidence") or "").lower() or None
+            record["notes"] = str(chosen.get("notes") or "")[:200] or None
+            sx = chosen.get("x")
+            sy = chosen.get("y")
+            if found_flag and sx is not None and sy is not None:
                 try:
                     sent_x = int(sx)
                     sent_y = int(sy)
                 except (TypeError, ValueError):
                     sent_x = sent_y = None
                 if sent_x is not None and sent_y is not None:
-                    jpeg_bytes, sent_w, sent_h, native_frame = frames_data[idx]
+                    _jb, sw, sh, native_frame = frames_data[idx]
                     nh, nw = native_frame.shape[:2]
-                    native_x = int(round(sent_x * nw / float(sent_w)))
-                    native_y = int(round(sent_y * nh / float(sent_h)))
+                    native_x = int(round(sent_x * nw / float(sw)))
+                    native_y = int(round(sent_y * nh / float(sh)))
                     record["x"] = native_x
                     record["y"] = native_y
-                    # Annotate native frame and save.
-                    annotated = native_frame.copy()
-                    cv2.circle(annotated, (native_x, native_y), 22, (0, 0, 0), 5, cv2.LINE_AA)
-                    cv2.circle(annotated, (native_x, native_y), 20, (0, 230, 255), 4, cv2.LINE_AA)
-                    cv2.circle(annotated, (native_x, native_y), 4, (0, 230, 255), -1, cv2.LINE_AA)
-                    filename = f"{output_prefix}_f{idx:05d}.jpg"
-                    out_path = output_dir / filename
-                    ok = cv2.imwrite(
-                        str(out_path), annotated,
-                        [int(cv2.IMWRITE_JPEG_QUALITY), 88],
-                    )
-                    if ok:
-                        record["image_filename"] = filename
-                        n_found += 1
+                    record["retry"] = via_retry
+
+        # Always write a JPEG for this frame so the operator can see
+        # what Claude was actually looking at, even when the ball was
+        # not found. Annotated when found, plain otherwise.
+        _jb, sw, sh, native_frame = frames_data[idx]
+        annotated = native_frame.copy()
+        if record["found"] and record["x"] is not None and record["y"] is not None:
+            ring_color = (0, 230, 255) if not record["retry"] else (255, 200, 0)
+            cv2.circle(annotated, (record["x"], record["y"]), 22, (0, 0, 0), 5, cv2.LINE_AA)
+            cv2.circle(annotated, (record["x"], record["y"]), 20, ring_color, 4, cv2.LINE_AA)
+            cv2.circle(annotated, (record["x"], record["y"]), 4, ring_color, -1, cv2.LINE_AA)
+        filename = f"{output_prefix}_f{idx:05d}.jpg"
+        out_path = output_dir / filename
+        ok = cv2.imwrite(
+            str(out_path), annotated,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+        )
+        if ok:
+            record["image_filename"] = filename
+            if record["found"]:
+                n_found += 1
+                if via_retry:
+                    n_retry_found += 1
+
         info["frames"].append(record)
-        if record["found"] and record["image_filename"]:
+        if record["found"]:
             consec_lost = 0
         else:
             consec_lost += 1
@@ -1536,6 +1673,7 @@ def track_ball_after_impact(
                 first_lost_run_start = idx - 2
 
     info["n_frames_found"] = n_found
+    info["n_frames_found_via_retry"] = n_retry_found
     info["first_lost_run_start"] = first_lost_run_start
     info["ok"] = True
     log.info(

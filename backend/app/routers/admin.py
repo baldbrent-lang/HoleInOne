@@ -676,6 +676,8 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                 int(refined_impact_info["impact_frame"]),
                 output_dir=CLIPS_DIR,
                 output_prefix=track_prefix,
+                ball_xy_sent=ball_xy_sent,
+                ball_sent_dims=ball_sent_dims,
             )
             if ball_track_info.get("ok"):
                 for rec in ball_track_info.get("frames", []):
@@ -686,6 +688,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                         "y": rec.get("y"),
                         "confidence": rec.get("confidence"),
                         "notes": rec.get("notes"),
+                        "retry": rec.get("retry", False),
                         "image_url": None,
                     }
                     filename = rec.get("image_filename")

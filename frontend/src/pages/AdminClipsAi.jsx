@@ -339,6 +339,9 @@ export default function AdminClipsAi() {
                     <span className="muted" style={{ marginLeft: 6 }}>
                       · ball found in <code>{ballTrack.n_frames_found}</code>
                       {" of "}<code>{ballTrack.n_frames_processed}</code> frames
+                      {ballTrack.n_frames_found_via_retry > 0 && (
+                        <> (incl. <code>{ballTrack.n_frames_found_via_retry}</code> via hint retry)</>
+                      )}
                       {ballTrack.first_lost_run_start != null && (
                         <> · lost from frame <code>{ballTrack.first_lost_run_start}</code></>
                       )}
@@ -358,48 +361,74 @@ export default function AdminClipsAi() {
                       gap: 6,
                     }}
                   >
-                    {ballTrackFrames.map((rec) => (
-                      <div key={rec.frame} style={{ position: "relative" }}>
-                        {rec.image_url ? (
-                          <a
-                            href={rec.image_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            title={`Frame ${rec.frame} · ball at (${rec.x}, ${rec.y}) · ${rec.confidence || "—"}${rec.notes ? ` — ${rec.notes}` : ""}`}
-                          >
-                            <img
-                              src={rec.image_url}
-                              alt={`Frame ${rec.frame}`}
-                              style={{ width: "100%", display: "block", borderRadius: 4, background: "#000" }}
-                            />
-                          </a>
-                        ) : (
+                    {ballTrackFrames.map((rec) => {
+                      const tooltip = rec.found
+                        ? `Frame ${rec.frame} · ball at (${rec.x}, ${rec.y}) · ${rec.confidence || "—"}${rec.retry ? " · via retry" : ""}${rec.notes ? `\n${rec.notes}` : ""}`
+                        : `Frame ${rec.frame} · ball NOT FOUND${rec.notes ? `\n${rec.notes}` : ""}`;
+                      const badgeBg = rec.found
+                        ? (rec.retry ? "rgba(255,170,0,0.85)" : "rgba(40,150,80,0.85)")
+                        : "rgba(180,40,40,0.85)";
+                      const badgeText = rec.found
+                        ? (rec.retry ? `f${rec.frame} · retry` : `f${rec.frame}${rec.confidence ? ` · ${rec.confidence}` : ""}`)
+                        : `f${rec.frame} · no ball`;
+                      return (
+                        <div key={rec.frame} style={{ position: "relative" }}>
+                          {rec.image_url ? (
+                            <a
+                              href={rec.image_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={tooltip}
+                            >
+                              <img
+                                src={rec.image_url}
+                                alt={`Frame ${rec.frame}`}
+                                style={{
+                                  width: "100%",
+                                  display: "block",
+                                  borderRadius: 4,
+                                  background: "#000",
+                                  opacity: rec.found ? 1 : 0.65,
+                                }}
+                              />
+                            </a>
+                          ) : (
+                            <div
+                              style={{
+                                aspectRatio: "16/9",
+                                display: "grid",
+                                placeItems: "center",
+                                border: "1px dashed var(--border)",
+                                borderRadius: 4,
+                                fontSize: 11,
+                                padding: 4,
+                                textAlign: "center",
+                              }}
+                              className="muted"
+                              title={tooltip}
+                            >
+                              f{rec.frame}<br />no image
+                            </div>
+                          )}
                           <div
                             style={{
-                              aspectRatio: "16/9",
-                              display: "grid",
-                              placeItems: "center",
-                              border: "1px dashed var(--border)",
-                              borderRadius: 4,
-                              fontSize: 11,
-                              padding: 4,
-                              textAlign: "center",
+                              position: "absolute",
+                              left: 4,
+                              top: 4,
+                              background: badgeBg,
+                              color: "#fff",
+                              padding: "1px 5px",
+                              borderRadius: 3,
+                              fontSize: 10,
+                              fontWeight: 600,
+                              letterSpacing: 0.2,
                             }}
-                            className="muted"
-                            title={rec.notes || ""}
                           >
-                            f{rec.frame}<br />no ball
+                            {badgeText}
                           </div>
-                        )}
-                        <div
-                          className="tiny muted"
-                          style={{ position: "absolute", left: 4, top: 4, background: "rgba(0,0,0,0.55)", color: "#fff", padding: "1px 4px", borderRadius: 3, fontSize: 10 }}
-                        >
-                          f{rec.frame}
-                          {rec.found && rec.confidence && <> · {rec.confidence}</>}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
