@@ -817,21 +817,18 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # smoothed parabola. Only do this for the verified at-rest position
     # (source=address-vote) — when source=track, ball_pos == track[0]
     # already so prepending is a no-op.
-    ball_at_rest_int = None
-    if ball_pos_native is not None and ball_pos_source == "address-vote":
-        ball_at_rest_int = (int(ball_pos_native[0]), int(ball_pos_native[1]))
-    impact_frame = min(smooth_frames) if smooth_frames else None
+    # The smoothing function (_smooth_track_for_render) now anchors the
+    # parabola at the ball's at-rest position when source == "address-vote",
+    # so the smoothed curve already starts at the ball. No prepend
+    # needed here — prepending an exact-ball-position point on top of
+    # the fitted-at-anchor point would create a small kink between
+    # the two slightly-different positions.
     i = 0
     while True:
         ok, frame = cap2.read()
         if not ok:
             break
         seen = [smooth_by_frame[f] for f in smooth_frames if f <= i]
-        # Once the ball is in flight (i.e., we have any smoothed
-        # point ≤ i), bridge from the at-rest position to the start
-        # of the smoothed curve.
-        if seen and ball_at_rest_int is not None:
-            seen = [ball_at_rest_int] + seen
         _draw_dashed(frame, seen)
         if i in detection_frames and i in smooth_by_frame:
             cv2.circle(frame, smooth_by_frame[i], 7, BALL_HIGHLIGHT_COLOR, 2, cv2.LINE_AA)
@@ -1704,6 +1701,10 @@ def _smooth_track_for_render(track, ball_pos_native=None):
     through the ball's at-rest position. The rendered range extends to
     cover that anchor frame, so the dashed line draws from the ball
     position through every smoothed point of the flight.
+
+    The rendered range is also truncated at the apex (vertex of the
+    y(frame) parabola) so the tracer doesn't loop back down for the
+    descent — real golf tracers only show impact → apex.
     """
     if len(track) < 3:
         return [(int(d.frame), int(d.x), int(d.y)) for d in track]
@@ -1722,6 +1723,16 @@ def _smooth_track_for_render(track, ball_pos_native=None):
         return [(int(p.frame), int(p.x), int(p.y)) for p in track]
     f_min = min(int(p.frame) for p in points)
     f_max = max(int(p.frame) for p in points)
+    # Apex truncation: if y(frame) opens upward in math (a > 0, which
+    # in image-y-down coords means the ball goes UP then comes back
+    # DOWN), the vertex frame is the apex. Cut the rendered range
+    # there — no descent rendered. If the apex is outside the data
+    # range, render everything we have.
+    a, b, _c = float(y_coef[0]), float(y_coef[1]), float(y_coef[2])
+    if a > 1e-9:
+        vertex_frame = -b / (2.0 * a)
+        if f_min < vertex_frame < f_max:
+            f_max = int(round(vertex_frame))
     out = []
     for f in range(f_min, f_max + 1):
         out.append((f, int(np.polyval(x_coef, f)), int(np.polyval(y_coef, f))))
