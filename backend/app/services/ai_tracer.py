@@ -1543,34 +1543,151 @@ def track_ball_after_impact(
         len(found_sent), len(frames_data),
     )
 
-    # --- Phase 2: retry missed frames using the nearest Phase-1 hit ---
+    # --- Phase 2: crop-and-zoom retry on missed frames ---
+    # For each frame Phase 1 missed, predict the ball's position via
+    # linear interpolation through the nearest found neighbors, crop a
+    # ~600 px square out of the native frame centered on that
+    # prediction, and ask Claude to find the ball in just that crop.
+    # Going from a 1568×N image with a 5-px ball to a 600×600 crop
+    # with the ball near center turns "needle in a haystack" into a
+    # routine vision task.
+    BALL_TRACK_CROP_SIZE = 600
     retry_results: dict[int, dict] = {}
-    retry_targets = [
-        idx for idx in frames_data
-        if idx not in found_sent
-    ]
+    retry_targets = [idx for idx in frames_data if idx not in found_sent]
     if found_sent and retry_targets:
-        def _retry(idx: int) -> tuple[int, dict]:
-            # Choose the closest found frame as the anchor. The ball
-            # moves a small amount per frame so even a 3-4 frame gap is
-            # usually a useful prior.
-            nearest = min(found_sent, key=lambda f: abs(f - idx))
-            anchor_sent_x, anchor_sent_y, anchor_sw, anchor_sh = found_sent[nearest]
-            _jb, sw, sh, _nf = frames_data[idx]
-            # Scale the anchor pixel coords to this frame's sent dims.
-            hint_x = int(round(anchor_sent_x * sw / float(anchor_sw)))
-            hint_y = int(round(anchor_sent_y * sh / float(anchor_sh)))
-            hint = (
-                f" HINT: in nearby frame {nearest} the ball was at "
-                f"approximately ({hint_x}, {hint_y}). The ball typically "
-                "moves less than ~50 px between adjacent frames; look in "
-                "that area first, then check the surrounding region. If "
-                "you genuinely cannot see the ball, return found=false."
+        # Resolve every Phase-1 found position to NATIVE coords once,
+        # so prediction math is in a single coordinate system.
+        found_native: list[tuple[int, tuple[int, int]]] = []
+        for fidx, (sx, sy, sw, sh) in found_sent.items():
+            _jb, _isw, _ish, nf = frames_data[fidx]
+            nh, nw = nf.shape[:2]
+            found_native.append((
+                fidx,
+                (
+                    int(round(sx * nw / float(sw))),
+                    int(round(sy * nh / float(sh))),
+                ),
+            ))
+        found_native.sort(key=lambda t: t[0])
+
+        def _predict_native(target_idx: int) -> tuple[int, int] | None:
+            """Linearly interpolate the ball's native pixel position at
+            `target_idx` from the nearest found neighbors. Returns None
+            when no neighbors exist."""
+            prev_n = None
+            next_n = None
+            for fidx, fpos in found_native:
+                if fidx < target_idx:
+                    prev_n = (fidx, fpos)
+                elif fidx > target_idx:
+                    next_n = (fidx, fpos)
+                    break
+            if prev_n and next_n:
+                pidx, (px, py) = prev_n
+                nidx, (nx, ny) = next_n
+                if nidx == pidx:
+                    return (px, py)
+                t = (target_idx - pidx) / float(nidx - pidx)
+                return (
+                    int(round(px + t * (nx - px))),
+                    int(round(py + t * (ny - py))),
+                )
+            if prev_n:
+                return prev_n[1]
+            if next_n:
+                return next_n[1]
+            return None
+
+        def _retry_crop(idx: int) -> tuple[int, dict]:
+            pred = _predict_native(idx)
+            if pred is None:
+                return idx, {"_error": "no neighbor for prediction"}
+            _jb, _sw, _sh, native_frame = frames_data[idx]
+            nh, nw = native_frame.shape[:2]
+            half = BALL_TRACK_CROP_SIZE // 2
+            x0 = max(0, pred[0] - half)
+            y0 = max(0, pred[1] - half)
+            x1 = min(nw, pred[0] + half)
+            y1 = min(nh, pred[1] + half)
+            if x1 <= x0 or y1 <= y0:
+                return idx, {"_error": "empty crop"}
+            crop = native_frame[y0:y1, x0:x1]
+            crop_h, crop_w = crop.shape[:2]
+            ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            if not ok:
+                return idx, {"_error": "crop encode failed"}
+            b64 = base64.standard_b64encode(bytes(buf)).decode("ascii")
+            user_text = (
+                f"Frame {idx} — ZOOMED CROP. You are seeing a "
+                f"{crop_w}x{crop_h} px region cropped out of a "
+                f"{nw}x{nh} native frame, centered on the ball's "
+                f"predicted position (native pixel {pred[0]},{pred[1]}). "
+                "The ball should be NEAR THE CENTER of this crop. The "
+                "system-prompt rule about \"upper portion of the image\" "
+                "does not apply here — find the ball wherever it is in "
+                "this crop. Return (x, y) in the CROP's coordinate "
+                "system (top-left = 0,0). JSON only."
             )
-            return _query(idx, hint)
+            try:
+                resp = client.messages.create(
+                    model=MODEL,
+                    max_tokens=200,
+                    system=[{
+                        "type": "text",
+                        "text": BALL_TRACK_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": b64,
+                                },
+                            },
+                            {"type": "text", "text": user_text},
+                        ],
+                    }],
+                )
+            except Exception as exc:
+                log.warning(
+                    "ai_tracer: ball_track phase-2 frame %d API failed: %s", idx, exc,
+                )
+                return idx, {"_error": str(exc)}
+            text_chunks = [
+                b.text for b in resp.content
+                if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+            ]
+            parsed = _extract_json("\n".join(text_chunks)) or {
+                "_error": "no_json_in_response",
+            }
+            # Translate any returned coords from crop-space to native-frame
+            # space and flag the record as already-native so the
+            # downstream save loop skips the sent→native scaling step.
+            if (
+                "_error" not in parsed and parsed.get("found")
+                and parsed.get("x") is not None and parsed.get("y") is not None
+            ):
+                try:
+                    cx_in = int(parsed["x"])
+                    cy_in = int(parsed["y"])
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    parsed["x"] = cx_in + x0
+                    parsed["y"] = cy_in + y0
+                    parsed["_native_coords"] = True
+                    parsed["_crop"] = {
+                        "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+                        "pred_x": pred[0], "pred_y": pred[1],
+                    }
+            return idx, parsed
 
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures = [ex.submit(_retry, idx) for idx in retry_targets]
+            futures = [ex.submit(_retry_crop, idx) for idx in retry_targets]
             for fut in as_completed(futures):
                 try:
                     idx, parsed = fut.result()
@@ -1633,10 +1750,16 @@ def track_ball_after_impact(
                 except (TypeError, ValueError):
                     sent_x = sent_y = None
                 if sent_x is not None and sent_y is not None:
-                    _jb, sw, sh, native_frame = frames_data[idx]
-                    nh, nw = native_frame.shape[:2]
-                    native_x = int(round(sent_x * nw / float(sw)))
-                    native_y = int(round(sent_y * nh / float(sh)))
+                    if chosen.get("_native_coords"):
+                        # Phase 2 crop retries already translated to
+                        # native-frame coords inside _retry_crop.
+                        native_x = sent_x
+                        native_y = sent_y
+                    else:
+                        _jb, sw, sh, native_frame = frames_data[idx]
+                        nh, nw = native_frame.shape[:2]
+                        native_x = int(round(sent_x * nw / float(sw)))
+                        native_y = int(round(sent_y * nh / float(sh)))
                     record["x"] = native_x
                     record["y"] = native_y
                     record["retry"] = via_retry
