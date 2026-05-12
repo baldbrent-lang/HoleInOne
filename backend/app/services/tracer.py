@@ -585,8 +585,13 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # early frames but ABSENT in late frames. The hit ball is the only
     # thing that disappears between address and follow-through — practice
     # balls scattered in the foreground stay put. Uses snapshots cached
-    # in the main loop above, so no extra video IO.
-    ball_addr_det = _find_hit_ball_from_snapshots(early_snapshots, late_snapshots)
+    # in the main loop above, so no extra video IO. Additionally
+    # filtered by clubhead proximity + behind_side so a stray practice
+    # ball that got kicked/hidden mid-clip can't pass as the hit ball.
+    ball_addr_det = _find_hit_ball_from_snapshots(
+        early_snapshots, late_snapshots,
+        body_x=body_x_det, behind_side=behind_side, clubhead=clubhead_det,
+    )
     if ball_addr_det is not None:
         log.info(
             "tracer: ball found via disappearance check at (%.0f, %.0f)  "
@@ -978,7 +983,10 @@ def _has_position_within(hash_grid, cx, cy, tol):
     return False
 
 
-def _find_hit_ball_from_snapshots(early_snapshots, late_snapshots):
+def _find_hit_ball_from_snapshots(
+    early_snapshots, late_snapshots,
+    body_x=None, behind_side=None, clubhead=None,
+):
     """Find the ball that was hit by comparing white-blob positions in
     cached early vs late snapshot frames.
 
@@ -987,13 +995,23 @@ def _find_hit_ball_from_snapshots(early_snapshots, late_snapshots):
     put (same position in both windows). The hit ball is the ONLY blob
     present early and absent late.
 
+    Disappearance alone isn't enough on a busy driving range — a
+    practice ball that got kicked or hidden by the golfer walking
+    through can also satisfy the "early-yes, late-no" condition. So
+    candidates that survive disappearance are additionally filtered
+    by:
+      - `clubhead` proximity (within MAX_BALL_TO_CLUBHEAD_PX). The
+        actual ball sits right next to the clubhead at address.
+      - `behind_side` + `body_x` (reject the side of the body that's
+        away from the ball-flight direction). A righty's ball is on
+        the left of the body; if disappearance returns a right-side
+        blob, it's a wrong-side false positive.
+
     Snapshots are passed in as {frame_idx: det_frame} dicts populated by
     the main detection loop — no extra video IO or HEVC random-access
     seeks (which are slow enough on .mov files to hang the request).
 
-    Returns (cx, cy) in detection coords, or None if disappearance can't
-    be determined (no late snapshots, no stationary early cluster, or
-    no early cluster lacks a late counterpart).
+    Returns (cx, cy) in detection coords, or None.
     """
     if not late_snapshots or not early_snapshots:
         log.info("tracer:   disappearance: skipping (early=%d late=%d)",
@@ -1022,17 +1040,54 @@ def _find_hit_ball_from_snapshots(early_snapshots, late_snapshots):
     # take minutes.
     tol_late = BALL_ADDR_POSITION_TOLERANCE_PX * 2
     late_hash = _build_position_hash(late_blobs, tol_late)
-    candidates: list[tuple[float, float, int]] = []
+    raw_candidates: list[tuple[float, float, int]] = []
     for (cx, cy, count) in early_clusters:
         if count < 2:
             continue
         if not _has_position_within(late_hash, cx, cy, tol_late):
-            candidates.append((cx, cy, count))
-    log.info("tracer:   disappearance: %d candidates have no late match", len(candidates))
+            raw_candidates.append((cx, cy, count))
+    log.info(
+        "tracer:   disappearance: %d candidates have no late match",
+        len(raw_candidates),
+    )
 
+    if not raw_candidates:
+        return None
+
+    # Apply the same plausibility filters the vote-based fallback uses.
+    # Disappearance is a strong "this blob is gone" signal but doesn't
+    # know anything about where the actual ball-at-address would be.
+    candidates: list[tuple[float, float, int]] = []
+    rejected_side = rejected_clubhead = 0
+    for (cx, cy, count) in raw_candidates:
+        if body_x is not None and behind_side in ("left", "right"):
+            if behind_side == "left" and cx < body_x:
+                rejected_side += 1
+                continue
+            if behind_side == "right" and cx > body_x:
+                rejected_side += 1
+                continue
+        if clubhead is not None:
+            d = float(np.hypot(cx - clubhead[0], cy - clubhead[1]))
+            if d > MAX_BALL_TO_CLUBHEAD_PX:
+                rejected_clubhead += 1
+                continue
+        candidates.append((cx, cy, count))
+    log.info(
+        "tracer:   disappearance: rejected %d on side, %d on clubhead-distance; %d kept",
+        rejected_side, rejected_clubhead, len(candidates),
+    )
     if not candidates:
         return None
-    candidates.sort(key=lambda c: -c[2])
+
+    # Prefer the candidate closest to the clubhead when we have one;
+    # otherwise pick the most stationary (highest occurrence count).
+    if clubhead is not None:
+        candidates.sort(
+            key=lambda c: float(np.hypot(c[0] - clubhead[0], c[1] - clubhead[1]))
+        )
+    else:
+        candidates.sort(key=lambda c: -c[2])
     return (candidates[0][0], candidates[0][1])
 
 
