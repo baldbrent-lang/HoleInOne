@@ -726,32 +726,66 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     seed_track: list[_Det] = []
     track: list[_Det] = []
     if not aborting_noise:
-        log.info(
-            "tracer: linking %d seeds (post-hot-mask: %d, raw: %d)...",
-            len(seeds), len(detections), len(raw_cands_det),
-        )
         ball_addr_native = None
         if ball_addr_det is not None and det_scale > 0:
             ball_addr_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)
-        log.info("tracer: _link starting on %d seeds...", len(seeds))
-        linked = _link(seeds)
-        log.info("tracer: _link produced %d trajectories; scoring...", len(linked))
-        seed_track = _pick_best(
-            linked,
-            ball_addr_native=ball_addr_native,
-            body_mask_det=body_mask_det,
-            det_scale=det_scale,
-            all_detections=detections,
-        )
-        if seed_track:
+
+        # Primary path: when we have a confident ball-at-rest anchor,
+        # walk forward from it frame-by-frame instead of running the
+        # multi-chain pick-best gauntlet. The tracker uses ALL
+        # post-mask detections, so the trailing yellow dots past the
+        # apex are naturally part of the trail.
+        if ball_addr_native is not None:
             log.info(
-                "tracer: seed track %d points, residual %.2fpx",
-                len(seed_track), _residual(seed_track),
+                "tracer: direct tracker starting from ball=(%.0f,%.0f) "
+                "on %d post-mask detections...",
+                ball_addr_native[0], ball_addr_native[1], len(detections),
             )
-            track = _extend_track(
-                seed_track, detections, total_frames_scanned,
-                frame_w=width, frame_h=height,
+            direct_track = _track_ball_from_address(
+                ball_addr_native, detections,
+                total_frames_scanned, width, height,
             )
+            if direct_track and len(direct_track) >= MIN_TRACK_LENGTH:
+                log.info(
+                    "tracer: direct tracker built %d-point track",
+                    len(direct_track),
+                )
+                seed_track = direct_track
+                track = direct_track
+            else:
+                log.info(
+                    "tracer: direct tracker yielded %d points (< %d); "
+                    "falling back to _link/_pick_best",
+                    len(direct_track), MIN_TRACK_LENGTH,
+                )
+
+        # Fallback path: legacy build-all-chains + score + pick + extend.
+        # Used when there's no ball anchor or the direct tracker couldn't
+        # form a long enough trail.
+        if not seed_track:
+            log.info(
+                "tracer: linking %d seeds (post-hot-mask: %d, raw: %d)...",
+                len(seeds), len(detections), len(raw_cands_det),
+            )
+            log.info("tracer: _link starting on %d seeds...", len(seeds))
+            linked = _link(seeds)
+            log.info("tracer: _link produced %d trajectories; scoring...", len(linked))
+            seed_track = _pick_best(
+                linked,
+                ball_addr_native=ball_addr_native,
+                body_mask_det=body_mask_det,
+                det_scale=det_scale,
+                all_detections=detections,
+            )
+            if seed_track:
+                log.info(
+                    "tracer: seed track %d points, residual %.2fpx",
+                    len(seed_track), _residual(seed_track),
+                )
+                track = _extend_track(
+                    seed_track, detections, total_frames_scanned,
+                    frame_w=width, frame_h=height,
+                )
 
     # Prefer the at-rest ball position from address-time detection.
     # That's the *actual* ball before it was struck — what the user
@@ -1547,6 +1581,125 @@ def _candidates_from_mask(fg_mask):
         scored.sort(key=lambda s: -s[0])
         scored = scored[:MAX_CANDIDATES_PER_FRAME]
     return [(cx, cy, r) for (_score, cx, cy, r) in scored]
+
+
+def _track_ball_from_address(
+    ball_addr_native, detections, total_frames, frame_w, frame_h,
+):
+    """Single-ball tracker anchored at the at-rest ball position.
+
+    Starts from a KNOWN ball-at-rest position (already detected via
+    disappearance check / vote-based scan), walks forward in time
+    frame-by-frame, and at each step picks the post-mask detection
+    closest to the velocity-extrapolated prediction. Smooth velocity
+    is updated after each accepted point.
+
+    This replaces the "build all possible chains, score them, pick"
+    approach when we have a confident ball anchor. It uses ALL
+    post-mask detections (green upward-streak survivors AND the
+    yellow non-streak detections that trail the ball past the apex),
+    so the trailing-yellow-dots signal the user identified is
+    naturally captured.
+
+    Returns a list of _Det in native coords, including the at-rest
+    ball as the very first point. Empty list if no impact frame can
+    be located.
+    """
+    if ball_addr_native is None or not detections:
+        return []
+    by_frame: dict[int, list[_Det]] = {}
+    for d in detections:
+        by_frame.setdefault(int(d.frame), []).append(d)
+    if not by_frame:
+        return []
+
+    bx, by = float(ball_addr_native[0]), float(ball_addr_native[1])
+
+    # Step 1: find the impact frame — the first frame containing a
+    # detection that has clearly LIFTED off the ball position. Skip
+    # the immediate impact splash (detections within 20px of the ball
+    # are divot debris, not the ball). The ball at frame 1-2 after
+    # impact has moved 20-200px upward.
+    impact_frame = None
+    impact_det = None
+    for f in sorted(by_frame):
+        for d in by_frame[f]:
+            dx_v = abs(d.x - bx)
+            dy_v = d.y - by  # negative when the detection sits above the ball
+            if dx_v < 100 and -250 < dy_v < -20:
+                impact_frame = f
+                impact_det = d
+                break
+        if impact_frame is not None:
+            break
+
+    if impact_frame is None or impact_det is None:
+        return []
+
+    # Step 2: seed the tracker with (ball at impact-1, first impact det)
+    track: list[_Det] = [
+        _Det(max(0, impact_frame - 1), bx, by, 0.0),
+        impact_det,
+    ]
+    vel_x = float(impact_det.x - bx)
+    vel_y = float(impact_det.y - by)
+
+    # Step 3: walk forward, predicting + matching each frame
+    cur_frame = impact_frame
+    cur_x = float(impact_det.x)
+    cur_y = float(impact_det.y)
+    gap_count = 0
+    MAX_CONSECUTIVE_MISS = 10
+    EPS_BASE = 28.0
+    EPS_GROWTH_PER_MISS = 3.0
+    MARGIN = 60
+
+    while cur_frame < total_frames - 1:
+        next_frame = cur_frame + 1
+        pred_x = cur_x + vel_x
+        pred_y = cur_y + vel_y
+
+        # Bail if the prediction has left the frame entirely.
+        if (
+            pred_x < -MARGIN or pred_x > frame_w + MARGIN
+            or pred_y < -MARGIN or pred_y > frame_h + MARGIN
+        ):
+            break
+
+        cands = by_frame.get(next_frame, [])
+        eps = EPS_BASE + EPS_GROWTH_PER_MISS * gap_count
+
+        best = None
+        best_dist = float("inf")
+        for d in cands:
+            dist = float(np.hypot(d.x - pred_x, d.y - pred_y))
+            if dist <= eps and dist < best_dist:
+                best = d
+                best_dist = dist
+
+        if best is not None:
+            track.append(best)
+            new_vx = float(best.x - cur_x)
+            new_vy = float(best.y - cur_y)
+            # Velocity smoothing (60% new, 40% prior) so a single noisy
+            # accepted point doesn't derail the predictor.
+            vel_x = 0.6 * new_vx + 0.4 * vel_x
+            vel_y = 0.6 * new_vy + 0.4 * vel_y
+            cur_x = float(best.x)
+            cur_y = float(best.y)
+            cur_frame = next_frame
+            gap_count = 0
+        else:
+            # No match — keep predicting forward but tolerate only so
+            # many misses before declaring the trail dead.
+            cur_x = pred_x
+            cur_y = pred_y
+            cur_frame = next_frame
+            gap_count += 1
+            if gap_count > MAX_CONSECUTIVE_MISS:
+                break
+
+    return track
 
 
 def _link(detections):
