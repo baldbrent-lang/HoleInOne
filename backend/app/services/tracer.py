@@ -518,12 +518,17 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # and as fallback signals. The primary handedness signal now comes
     # from the club shaft's slope, which is robust to stray practice
     # balls in the grass.
+    log.info("tracer: post-loop: computing body bbox...")
     body_bbox_det = _hot_mask_body_bbox(hot_mask)
     body_x_det = (
         float((body_bbox_det[0] + body_bbox_det[2]) / 2.0)
         if body_bbox_det is not None else None
     )
     body_bottom_det = float(body_bbox_det[3]) if body_bbox_det is not None else None
+    log.info(
+        "tracer: post-loop: body_bbox=%s, filtering %d club-line candidates...",
+        body_bbox_det, len(club_line_candidates),
+    )
 
     # Filter club-line candidates by body-bbox proximity: a real club
     # ends at the clubhead near the body's feet, not inside the body
@@ -558,6 +563,12 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     clubhead_det = (
         (float(club_best_line[2]), float(club_best_line[3]))
         if club_best_line is not None else None
+    )
+    log.info(
+        "tracer: post-loop: handedness=%s, behind_side=%s, clubhead=%s; "
+        "running disappearance detector on %d early + %d late snapshots",
+        handedness or "unknown", behind_side or "none", clubhead_det,
+        len(early_snapshots), len(late_snapshots),
     )
     # Primary ball detector: identify the white blob that's present in
     # early frames but ABSENT in late frames. The hit ball is the only
@@ -702,8 +713,11 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
                 body_bbox_det[0] * inv, body_bbox_det[1] * inv,
                 body_bbox_det[2] * inv, body_bbox_det[3] * inv,
             )
+        log.info("tracer: _link starting on %d seeds...", len(seeds))
+        linked = _link(seeds)
+        log.info("tracer: _link produced %d trajectories; scoring...", len(linked))
         seed_track = _pick_best(
-            _link(seeds),
+            linked,
             ball_addr_native=ball_addr_native,
             body_bbox_native=body_bbox_native,
         )
@@ -932,15 +946,23 @@ def _find_hit_ball_from_snapshots(early_snapshots, late_snapshots):
     no early cluster lacks a late counterpart).
     """
     if not late_snapshots or not early_snapshots:
+        log.info("tracer:   disappearance: skipping (early=%d late=%d)",
+                 len(early_snapshots) if early_snapshots else 0,
+                 len(late_snapshots) if late_snapshots else 0)
         return None
     early_blobs: list[tuple[float, float]] = []
     for snap in early_snapshots.values():
         early_blobs.extend(_scan_for_ball_addr_blobs(snap))
+    log.info("tracer:   disappearance: %d early blobs across %d snapshots",
+             len(early_blobs), len(early_snapshots))
     late_blobs: list[tuple[float, float]] = []
     for snap in late_snapshots.values():
         late_blobs.extend(_scan_for_ball_addr_blobs(snap))
+    log.info("tracer:   disappearance: %d late blobs across %d snapshots",
+             len(late_blobs), len(late_snapshots))
 
     early_clusters = _cluster_positions(early_blobs, BALL_ADDR_POSITION_TOLERANCE_PX)
+    log.info("tracer:   disappearance: %d early clusters", len(early_clusters))
     if not early_clusters:
         return None
 
