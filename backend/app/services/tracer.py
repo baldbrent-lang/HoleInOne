@@ -207,7 +207,7 @@ BALL_ADDR_BRIGHT_THRESH = 180
 BALL_ADDR_MIN_OCCURRENCES = 3
 BALL_ADDR_POSITION_TOLERANCE_PX = 12
 BALL_ADDR_Y_TOP_FRACTION = 0.45  # only search below this fraction of the frame
-BALL_ADDR_SEARCH_FRAMES = 30     # search the first N frames (warmup or not)
+BALL_ADDR_SEARCH_SECONDS = 1.0   # convert to frames at runtime: int(fps * seconds)
 
 # Club-shaft handedness detection. At address the club shaft is a long
 # diagonal line extending from the golfer's hands (upper-middle of body)
@@ -224,7 +224,7 @@ BALL_ADDR_SEARCH_FRAMES = 30     # search the first N frames (warmup or not)
 # For tee-cam from behind, target lies on the side of the body the
 # clubhead points to, so "behind the golfer" = the OPPOSITE side, which
 # is where we want to reject post-mask candidates.
-CLUB_DETECT_SEARCH_FRAMES = 30
+CLUB_DETECT_SEARCH_SECONDS = 1.0  # convert to frames at runtime: int(fps * seconds)
 CLUB_MIN_LINE_LEN_PX = 40
 CLUB_CANNY_LOW = 50
 CLUB_CANNY_HIGH = 150
@@ -346,6 +346,16 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     club_best_line = None
     club_best_line_len = 0.0
 
+    # Per-clip windows scaled by fps. At 120fps a 1s address phase is
+    # 120 frames; at 30fps it's 30. Constant frame counts would either
+    # cut high-fps clips short or over-extend low-fps ones.
+    ball_addr_search_n = max(WARMUP_FRAMES, int(round(fps * BALL_ADDR_SEARCH_SECONDS)))
+    club_detect_search_n = max(WARMUP_FRAMES, int(round(fps * CLUB_DETECT_SEARCH_SECONDS)))
+    # Per-frame upward-motion threshold also scales — the ball travels
+    # 4× less per frame at 120fps than at 30fps, so a fixed 6px floor
+    # filters out everything past the steepest rising portion.
+    min_upward_dy = MIN_UPWARD_DY_PER_FRAME * (30.0 / max(fps, 1.0))
+
     aborted_early = False
     idx = 0
     while True:
@@ -388,12 +398,12 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         # Address-position vote while the ball is plausibly still at
         # address. Independent of MOG2 warmup — the ball typically
         # stays motionless for ~1s while the golfer settles.
-        if idx < BALL_ADDR_SEARCH_FRAMES:
+        if idx < ball_addr_search_n:
             ball_addr_votes.extend(_scan_for_ball_addr_blobs(det_frame))
         # Club-shaft slope vote during the same address window. Used
         # to infer handedness for the side filter regardless of whether
         # ball-address detection succeeds.
-        if idx < CLUB_DETECT_SEARCH_FRAMES:
+        if idx < club_detect_search_n:
             line, slope = _detect_club_in_frame(det_frame)
             if slope is not None and line is not None:
                 club_slope_votes.append(slope)
@@ -546,9 +556,11 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # streak. Done AFTER hot-mask so the upward filter operates on a
     # sparse field (no static-corridor noise contaminating the streaks).
     if USE_UPWARD_STREAK_FILTER and detections:
-        seeds = _find_upward_seeds(detections)
-        log.info("tracer: upward-streak filter kept %d/%d candidates",
-                 len(seeds), len(detections))
+        seeds = _find_upward_seeds(detections, min_dy_per_frame=min_upward_dy)
+        log.info(
+            "tracer: upward-streak filter (min_dy=%.2fpx @ %.1ffps) kept %d/%d candidates",
+            min_upward_dy, fps, len(seeds), len(detections),
+        )
     else:
         seeds = detections
 
@@ -802,10 +814,21 @@ def _pick_ball_addr(all_blobs, body_x=None, behind_side=None, clubhead=None):
 
 
 def _hot_mask_body_bbox(hot_mask):
-    """Bbox (x1, y1, x2, y2) of the largest connected component of the
-    hot mask — typically the golfer's body envelope. Returns None if the
-    mask is empty or too sparse to extract a meaningful bbox."""
-    contours, _h = cv2.findContours(hot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    """Bbox (x1, y1, x2, y2) of the golfer's body envelope in the hot
+    mask. Returns None if the mask is empty or too sparse.
+
+    Note: at the hot-mask dilation we use, the body silhouette often
+    breaks into multiple disconnected components (head, torso, arms,
+    legs each separate, with thin gaps between them). Taking the
+    largest single contour would give us just the torso, missing the
+    feet — which is exactly what we need for the foot-line cutoff. So
+    we morph-close first (kernel 25 px) to merge those pieces into one
+    body-shaped blob before extracting the bbox.
+    """
+    closed = cv2.morphologyEx(
+        hot_mask, cv2.MORPH_CLOSE, np.ones((25, 25), np.uint8),
+    )
+    contours, _h = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
     largest = max(contours, key=cv2.contourArea)
@@ -1149,15 +1172,29 @@ def _link(detections):
 
 
 def _residual(track):
+    """RMS deviation of the track from a frame-parameterized motion
+    model: y is quadratic in frame (gravity), x is linear in frame.
+
+    Previously this fit y = f(x) as a quadratic, which returns infinity
+    for near-vertical trajectories — exactly the shape a tee-cam
+    captures for a straight shot. _pick_best would then reject the real
+    ball flight column and grab a noisier chain with more lateral
+    spread instead. Parameterizing by frame avoids the issue: a
+    vertical chain has nearly-constant x and a clean y(t) parabola
+    both fit perfectly.
+    """
     if len(track) < 3:
         return float("inf")
-    xs = np.array([p.x for p in track])
-    ys = np.array([p.y for p in track])
-    if np.ptp(xs) < 5:
+    frames = np.array([p.frame for p in track], dtype=np.float64)
+    xs = np.array([p.x for p in track], dtype=np.float64)
+    ys = np.array([p.y for p in track], dtype=np.float64)
+    if float(frames.max() - frames.min()) < 2:
         return float("inf")
-    coeffs = np.polyfit(xs, ys, 2)
-    pred = np.polyval(coeffs, xs)
-    return float(np.sqrt(np.mean((ys - pred) ** 2)))
+    x_coef = np.polyfit(frames, xs, 1)
+    y_coef = np.polyfit(frames, ys, 2)
+    x_pred = np.polyval(x_coef, frames)
+    y_pred = np.polyval(y_coef, frames)
+    return float(np.sqrt(np.mean((xs - x_pred) ** 2 + (ys - y_pred) ** 2)))
 
 
 def _fit_motion(track):
@@ -1389,23 +1426,28 @@ def _estimate_cur_to_ref(ref_gray, cur_gray):
         return None
 
 
-def _find_upward_seeds(detections):
+def _find_upward_seeds(detections, min_dy_per_frame=None):
     """Subset of `detections` that participate in a temporally-consistent
     upward chain of length >= MIN_UPWARD_CHAIN_LEN.
+
+    `min_dy_per_frame` is the upward-motion threshold per frame; the
+    caller should scale it with fps (a ball at 30fps moves 4× as far per
+    frame as the same ball at 120fps), otherwise high-fps clips lose
+    almost the entire ball trajectory near the apex where per-frame dy
+    drops below the threshold. Defaults to the module constant when
+    not provided.
 
     Algorithm: DP in both directions. fwd[d] = longest upward chain
     starting at d going forward; bwd[d] = longest ending at d coming
     from earlier frames. A detection is kept iff fwd[d] + bwd[d] - 1 >=
     MIN_UPWARD_CHAIN_LEN — i.e., d sits somewhere on a chain that long.
 
-    "Upward" means y_next < y_cur - MIN_UPWARD_DY_PER_FRAME * frame_gap
+    "Upward" means y_next < y_cur - min_dy_per_frame * frame_gap
     (image coords: smaller y = higher on screen). Spatial gate reuses
     MAX_PIXEL_JUMP_PER_FRAME so we don't link blobs across the frame.
-
-    Cost: O(N * UPWARD_SEARCH_FRAMES * avg_cands_per_frame). At 60K
-    candidates and ~300 cands/frame this is well under a second on a
-    laptop CPU.
     """
+    if min_dy_per_frame is None:
+        min_dy_per_frame = MIN_UPWARD_DY_PER_FRAME
     by_frame: dict[int, list[_Det]] = {}
     for d in detections:
         by_frame.setdefault(d.frame, []).append(d)
@@ -1419,7 +1461,7 @@ def _find_upward_seeds(detections):
             best = 1
             for df in range(1, UPWARD_SEARCH_FRAMES + 1):
                 for nd in by_frame.get(f + df, ()):
-                    if d.y - nd.y < MIN_UPWARD_DY_PER_FRAME * df:
+                    if d.y - nd.y < min_dy_per_frame * df:
                         continue
                     if abs(nd.x - d.x) > MAX_PIXEL_JUMP_PER_FRAME * df:
                         continue
@@ -1436,7 +1478,7 @@ def _find_upward_seeds(detections):
             best = 1
             for df in range(1, UPWARD_SEARCH_FRAMES + 1):
                 for pd in by_frame.get(f - df, ()):
-                    if pd.y - d.y < MIN_UPWARD_DY_PER_FRAME * df:
+                    if pd.y - d.y < min_dy_per_frame * df:
                         continue
                     if abs(pd.x - d.x) > MAX_PIXEL_JUMP_PER_FRAME * df:
                         continue
