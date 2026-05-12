@@ -49,10 +49,17 @@ MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 # dense enough to catch address even if it's brief.
 N_FRAMES = 12
 
-# Per-frame width sent to Claude. Anthropic auto-resizes images above
-# ~1568 px on the long edge anyway; 640 px gives Claude clear visibility
-# of the golfer's stance and club position without bloating payload.
+# Per-frame width sent to Claude for general use (impact/address pass).
+# Anthropic auto-resizes images above ~1568 px on the long edge anyway;
+# 640 px gives Claude clear visibility of the golfer's stance and club
+# position without bloating payload.
 FRAME_W = 640
+
+# Per-frame width sent for the dedicated handedness call. Higher than
+# FRAME_W because handedness reads off a very specific feature — the
+# club shaft, which is just a few pixels wide. Extra resolution makes
+# the shaft direction much easier for Claude to call.
+HANDEDNESS_FRAME_W = 1024
 
 HANDEDNESS_FROM_ADDRESS_PROMPT = (
     "You are looking at a single still frame of a golfer at ADDRESS — "
@@ -62,32 +69,39 @@ HANDEDNESS_FROM_ADDRESS_PROMPT = (
     "golfer).\n\n"
     "Your only job: determine whether the golfer is RIGHT-handed or "
     "LEFT-handed.\n\n"
-    "PRIMARY CUE — club shaft direction in the image:\n"
-    "Find the golf club shaft connecting the golfer's hands (upper "
-    "end of the shaft) to the clubhead resting on the ground (lower "
-    "end of the shaft). Trace the shaft FROM hands DOWN to clubhead.\n"
-    "  - If the shaft angles DOWN AND TO THE LEFT in the image, the "
+    "Reason in this exact order — do NOT skip steps:\n"
+    "Step 1. Locate the golfer's HANDS gripping the club. Note their "
+    "approximate horizontal pixel x-coordinate in the image. (The "
+    "image width is given in the user message.)\n"
+    "Step 2. Locate the CLUBHEAD resting on the ground at the ball. "
+    "Note its approximate horizontal pixel x-coordinate.\n"
+    "Step 3. Compare: clubhead_x vs hands_x.\n"
+    "  - If clubhead_x < hands_x (clubhead is to the LEFT of the "
+    "hands in the image), the shaft drops down-and-LEFT, and the "
     "golfer is LEFT-handed.\n"
-    "  - If the shaft angles DOWN AND TO THE RIGHT in the image, the "
+    "  - If clubhead_x > hands_x (clubhead is to the RIGHT of the "
+    "hands in the image), the shaft drops down-and-RIGHT, and the "
     "golfer is RIGHT-handed.\n"
     "This rule holds because the camera sits behind the target line. "
-    "A right-handed golfer's clubhead rests in front of his LEFT "
-    "(lead) foot, which is on his target side; from a behind-the-line "
-    "camera that target side is on the IMAGE-RIGHT, so the shaft "
-    "drops from the hands down-and-right to the clubhead. A "
-    "left-handed golfer is the mirror image — clubhead on the "
-    "IMAGE-LEFT side of the body, shaft down-and-left.\n\n"
-    "Apply the shaft-direction rule literally — do NOT second-guess "
-    "it using ball-position reasoning, image-left-vs-right confusion, "
-    "or any other heuristic. The shaft direction is the answer.\n\n"
+    "A right-handed golfer's clubhead rests in front of his lead "
+    "(left) foot on his target side; from a behind-the-line camera "
+    "that target side appears on the image-RIGHT, so the clubhead "
+    "is RIGHT of the hands and the shaft drops down-and-right. "
+    "Left-handed is the mirror.\n\n"
+    "Apply the comparison literally. Do NOT second-guess it with "
+    "ball-position reasoning or assumptions about typical setups. "
+    "The clubhead_x-vs-hands_x comparison IS the answer.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
+    '  "hands_x": <int approximate pixel x of the hands>,\n'
+    '  "clubhead_x": <int approximate pixel x of the clubhead at ground level>,\n'
+    '  "shaft_direction": "down_left" | "down_right" | "vertical",\n'
     '  "handedness": "right" | "left" | "unknown",\n'
     '  "confidence": "high" | "medium" | "low",\n'
-    '  "notes": "<≤25 word reasoning describing the observed shaft direction, e.g. \'shaft drops down-and-left from hands to clubhead\'>"\n'
+    '  "notes": "<≤25 word description of the two landmarks and the resulting shaft direction>"\n'
     "}\n"
-    "Use 'unknown' only if the shaft is genuinely not visible enough "
-    "to call a left/right tilt."
+    "Use 'unknown' only if the hands or clubhead are genuinely not "
+    "visible enough to estimate their x-coordinates."
 )
 
 
@@ -210,7 +224,8 @@ def _grab_frames_jpegs(
 
 
 def detect_handedness_at_address(
-    input_path: Path, address_frame_idx: int, frame_w: int = FRAME_W,
+    input_path: Path, address_frame_idx: int,
+    frame_w: int = HANDEDNESS_FRAME_W,
 ) -> dict:
     """Single-frame Claude call: given the picked address frame index,
     ask whether the golfer is right- or left-handed. Camera is assumed
@@ -236,6 +251,10 @@ def detect_handedness_at_address(
         "handedness": None,
         "confidence": None,
         "notes": None,
+        "hands_x": None,
+        "clubhead_x": None,
+        "shaft_direction": None,
+        "image_width": None,
         "model": MODEL,
     }
     if not HAS_CV:
@@ -248,14 +267,45 @@ def detect_handedness_at_address(
         info["error"] = "ANTHROPIC_API_KEY not set in environment"
         return info
 
-    frames = _grab_frames_jpegs(input_path, [int(address_frame_idx)], frame_w=frame_w)
-    if not frames:
-        info["error"] = f"could not extract address frame {address_frame_idx}"
+    # Re-read the frame so we can record the actual sent width Claude
+    # will see — used to make the hands_x / clubhead_x reasoning explicit.
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not open video for handedness call"
         return info
-    _idx, jpeg = frames[0]
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(address_frame_idx))
+        ok, raw = cap.read()
+    finally:
+        cap.release()
+    if not ok or raw is None:
+        info["error"] = f"could not read address frame {address_frame_idx}"
+        return info
+    h, w = raw.shape[:2]
+    if w > frame_w:
+        scale = frame_w / float(w)
+        raw = cv2.resize(
+            raw, (frame_w, int(round(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    sent_h, sent_w = raw.shape[:2]
+    info["image_width"] = sent_w
+    ok, buf = cv2.imencode(".jpg", raw, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        info["error"] = "could not jpeg-encode address frame"
+        return info
+    jpeg = bytes(buf)
 
     content: list[dict] = [
-        {"type": "text", "text": f"Address frame ({_idx}) from the clip:"},
+        {
+            "type": "text",
+            "text": (
+                f"Address frame ({address_frame_idx}) from the clip. "
+                f"Image is {sent_w}x{sent_h} pixels. "
+                "Locate the hands and clubhead, then determine handedness "
+                "from clubhead_x vs hands_x as instructed. JSON only."
+            ),
+        },
         {
             "type": "image",
             "source": {
@@ -263,10 +313,6 @@ def detect_handedness_at_address(
                 "media_type": "image/jpeg",
                 "data": base64.standard_b64encode(jpeg).decode("ascii"),
             },
-        },
-        {
-            "type": "text",
-            "text": "Right-handed or left-handed? JSON only.",
         },
     ]
 
@@ -304,9 +350,21 @@ def detect_handedness_at_address(
     info["handedness"] = handedness
     info["confidence"] = str(parsed.get("confidence") or "").lower() or None
     info["notes"] = str(parsed.get("notes") or "")[:300] or None
+    try:
+        info["hands_x"] = int(parsed["hands_x"])
+    except (KeyError, TypeError, ValueError):
+        info["hands_x"] = None
+    try:
+        info["clubhead_x"] = int(parsed["clubhead_x"])
+    except (KeyError, TypeError, ValueError):
+        info["clubhead_x"] = None
+    sd = str(parsed.get("shaft_direction") or "").lower()
+    info["shaft_direction"] = sd if sd in {"down_left", "down_right", "vertical"} else None
     log.info(
-        "ai_tracer: handedness at address frame %d — %s (%s) — %s",
-        _idx, info["handedness"], info["confidence"], info["notes"],
+        "ai_tracer: handedness at address frame %d — %s (%s) hands_x=%s clubhead_x=%s shaft=%s — %s",
+        address_frame_idx, info["handedness"], info["confidence"],
+        info["hands_x"], info["clubhead_x"], info["shaft_direction"],
+        info["notes"],
     )
     return info
 
