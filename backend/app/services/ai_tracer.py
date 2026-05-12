@@ -30,6 +30,13 @@ except Exception:  # pragma: no cover
     HAS_CV = False
 
 try:
+    import numpy as np  # type: ignore
+    HAS_NP = True
+except Exception:  # pragma: no cover
+    np = None  # type: ignore
+    HAS_NP = False
+
+try:
     from anthropic import Anthropic  # type: ignore
     HAS_ANTHROPIC = True
 except Exception:  # pragma: no cover
@@ -169,6 +176,14 @@ REFINE_IMPACT_FRAME_W = 768
 BALL_TRACK_FRAME_W = 1568
 BALL_TRACK_MAX_FRAMES = 20
 BALL_TRACK_CONCURRENCY = 8
+
+# Phase-2 retry sends a crop. Crop size is in NATIVE pixels (how much
+# of the source frame around the prediction we hand to Claude); send
+# size is the upscaled width we encode to JPEG before sending. The
+# upscale turns a ~600 px region into a ~1024 px image — same content,
+# more vision tiles, ball appears with ~1.7× more pixels per side.
+BALL_TRACK_CROP_NATIVE_SIZE = 600
+BALL_TRACK_CROP_SEND_W = 1024
 
 
 BALL_TRACK_PROMPT = (
@@ -1551,7 +1566,7 @@ def track_ball_after_impact(
     # Going from a 1568×N image with a 5-px ball to a 600×600 crop
     # with the ball near center turns "needle in a haystack" into a
     # routine vision task.
-    BALL_TRACK_CROP_SIZE = 600
+    BALL_TRACK_CROP_SIZE = BALL_TRACK_CROP_NATIVE_SIZE
     retry_results: dict[int, dict] = {}
     retry_targets = [idx for idx in frames_data if idx not in found_sent]
     if found_sent and retry_targets:
@@ -1571,9 +1586,34 @@ def track_ball_after_impact(
         found_native.sort(key=lambda t: t[0])
 
         def _predict_native(target_idx: int) -> tuple[int, int] | None:
-            """Linearly interpolate the ball's native pixel position at
-            `target_idx` from the nearest found neighbors. Returns None
-            when no neighbors exist."""
+            """Predict the ball's native pixel position at `target_idx`.
+
+            With ≥3 found points, fit a quadratic separately in x and y
+            against frame index — the ball flies on a parabolic arc so
+            this hugs the curve much more tightly than linear interp,
+            especially near the apex. With 2 points, linear interpolate
+            (clamped to the segment between them). With 1 point, return
+            it. With 0, return None.
+            """
+            if not found_native:
+                return None
+            if len(found_native) >= 3 and HAS_NP:
+                try:
+                    frames = np.array([t[0] for t in found_native], dtype=float)
+                    xs = np.array([t[1][0] for t in found_native], dtype=float)
+                    ys = np.array([t[1][1] for t in found_native], dtype=float)
+                    px = np.polyfit(frames, xs, 2)
+                    py = np.polyfit(frames, ys, 2)
+                    return (
+                        int(round(float(np.polyval(px, target_idx)))),
+                        int(round(float(np.polyval(py, target_idx)))),
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "ai_tracer: parabolic prediction failed (%s), "
+                        "falling back to linear", exc,
+                    )
+            # Fall through: 1-2 points, no numpy, or polyfit failed.
             prev_n = None
             next_n = None
             for fidx, fpos in found_native:
@@ -1583,14 +1623,14 @@ def track_ball_after_impact(
                     next_n = (fidx, fpos)
                     break
             if prev_n and next_n:
-                pidx, (px, py) = prev_n
-                nidx, (nx, ny) = next_n
+                pidx, (px_, py_) = prev_n
+                nidx, (nx_, ny_) = next_n
                 if nidx == pidx:
-                    return (px, py)
+                    return (px_, py_)
                 t = (target_idx - pidx) / float(nidx - pidx)
                 return (
-                    int(round(px + t * (nx - px))),
-                    int(round(py + t * (ny - py))),
+                    int(round(px_ + t * (nx_ - px_))),
+                    int(round(py_ + t * (ny_ - py_))),
                 )
             if prev_n:
                 return prev_n[1]
@@ -1613,20 +1653,38 @@ def track_ball_after_impact(
                 return idx, {"_error": "empty crop"}
             crop = native_frame[y0:y1, x0:x1]
             crop_h, crop_w = crop.shape[:2]
-            ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            # Upscale the crop before sending so the ball occupies a
+            # larger pixel footprint AND Anthropic processes it with
+            # more vision tiles (~3 instead of ~1). Same content, more
+            # attention budget spent on it. Coords returned will be in
+            # the upscaled image space — convert back below.
+            send_target_w = BALL_TRACK_CROP_SEND_W
+            if crop_w > 0 and crop_w < send_target_w:
+                scale_up = send_target_w / float(crop_w)
+                send_w = send_target_w
+                send_h = int(round(crop_h * scale_up))
+                send_crop = cv2.resize(
+                    crop, (send_w, send_h), interpolation=cv2.INTER_CUBIC,
+                )
+            else:
+                send_crop = crop
+                send_w = crop_w
+                send_h = crop_h
+            ok, buf = cv2.imencode(".jpg", send_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
             if not ok:
                 return idx, {"_error": "crop encode failed"}
             b64 = base64.standard_b64encode(bytes(buf)).decode("ascii")
             user_text = (
                 f"Frame {idx} — ZOOMED CROP. You are seeing a "
-                f"{crop_w}x{crop_h} px region cropped out of a "
-                f"{nw}x{nh} native frame, centered on the ball's "
-                f"predicted position (native pixel {pred[0]},{pred[1]}). "
-                "The ball should be NEAR THE CENTER of this crop. The "
+                f"{send_w}x{send_h} px image (a {crop_w}x{crop_h} region "
+                f"of a {nw}x{nh} native frame, upscaled for clarity), "
+                f"centered on the ball's predicted position. The ball "
+                "should be NEAR THE CENTER of this image. The "
                 "system-prompt rule about \"upper portion of the image\" "
                 "does not apply here — find the ball wherever it is in "
-                "this crop. Return (x, y) in the CROP's coordinate "
-                "system (top-left = 0,0). JSON only."
+                "this image. Return (x, y) in THIS image's coordinate "
+                f"system (top-left = 0,0, width {send_w}, height {send_h}). "
+                "JSON only."
             )
             try:
                 resp = client.messages.create(
@@ -1664,25 +1722,29 @@ def track_ball_after_impact(
             parsed = _extract_json("\n".join(text_chunks)) or {
                 "_error": "no_json_in_response",
             }
-            # Translate any returned coords from crop-space to native-frame
-            # space and flag the record as already-native so the
-            # downstream save loop skips the sent→native scaling step.
+            # Translate returned coords: upscaled-image space → native
+            # crop space → native frame. Flag the record so the
+            # downstream save loop skips the usual sent→native scaling
+            # (we already did the math here).
             if (
                 "_error" not in parsed and parsed.get("found")
                 and parsed.get("x") is not None and parsed.get("y") is not None
             ):
                 try:
-                    cx_in = int(parsed["x"])
-                    cy_in = int(parsed["y"])
+                    send_x = float(parsed["x"])
+                    send_y = float(parsed["y"])
                 except (TypeError, ValueError):
                     pass
                 else:
-                    parsed["x"] = cx_in + x0
-                    parsed["y"] = cy_in + y0
+                    crop_x = send_x * (crop_w / float(send_w)) if send_w > 0 else send_x
+                    crop_y = send_y * (crop_h / float(send_h)) if send_h > 0 else send_y
+                    parsed["x"] = int(round(crop_x + x0))
+                    parsed["y"] = int(round(crop_y + y0))
                     parsed["_native_coords"] = True
                     parsed["_crop"] = {
                         "x0": x0, "y0": y0, "x1": x1, "y1": y1,
                         "pred_x": pred[0], "pred_y": pred[1],
+                        "send_w": send_w, "send_h": send_h,
                     }
             return idx, parsed
 
