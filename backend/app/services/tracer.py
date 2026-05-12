@@ -273,12 +273,15 @@ CLUB_LOWER_NEAR_BODY_PX_BELOW = 100  # tolerated below body bottom
 
 # Require ball-address candidates to be near the detected clubhead.
 # Beyond this distance the blob is almost certainly a stray practice
-# ball or other bright object, not the ball being addressed. Generous
-# because the Hough line's detected lower endpoint can land partway up
-# the shaft (10-30px above the actual clubhead) and the ball sits a
-# few px from the clubhead, so the actual ball-to-detected-clubhead
-# distance can be 60-100px on real clips.
-MAX_BALL_TO_CLUBHEAD_PX = 120
+# ball / shoe / belt-buckle reflection, not the ball being addressed.
+# Tightened 120 → 80 after a clip where the golfer's white shoe at
+# ~100 px from the clubhead won the disappearance vote, putting the
+# ball anchor on the wrong side of the body and corrupting the picked
+# trajectory. The actual ball sits within ~50 px of the clubhead even
+# when the Hough line's lower endpoint lands slightly up the shaft,
+# so 80 px gives the real ball headroom without admitting the
+# off-axis false positives.
+MAX_BALL_TO_CLUBHEAD_PX = 80
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
