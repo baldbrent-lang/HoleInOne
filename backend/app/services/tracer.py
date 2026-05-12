@@ -713,12 +713,27 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     smooth_by_frame = {f: (x, y) for (f, x, y) in smoothed}
     smooth_frames = sorted(smooth_by_frame)
     detection_frames = {int(d.frame) for d in track}
+    # If we know the ball-at-rest position, prepend it to the rendered
+    # polyline so the dashed line starts at the actual ball, draws a
+    # straight segment up to track[0], and then curves through the
+    # smoothed parabola. Only do this for the verified at-rest position
+    # (source=address-vote) — when source=track, ball_pos == track[0]
+    # already so prepending is a no-op.
+    ball_at_rest_int = None
+    if ball_pos_native is not None and ball_pos_source == "address-vote":
+        ball_at_rest_int = (int(ball_pos_native[0]), int(ball_pos_native[1]))
+    impact_frame = min(smooth_frames) if smooth_frames else None
     i = 0
     while True:
         ok, frame = cap2.read()
         if not ok:
             break
         seen = [smooth_by_frame[f] for f in smooth_frames if f <= i]
+        # Once the ball is in flight (i.e., we have any smoothed
+        # point ≤ i), bridge from the at-rest position to the start
+        # of the smoothed curve.
+        if seen and ball_at_rest_int is not None:
+            seen = [ball_at_rest_int] + seen
         _draw_dashed(frame, seen)
         if i in detection_frames and i in smooth_by_frame:
             cv2.circle(frame, smooth_by_frame[i], 7, BALL_HIGHLIGHT_COLOR, 2, cv2.LINE_AA)
