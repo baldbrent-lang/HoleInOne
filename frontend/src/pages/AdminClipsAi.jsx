@@ -78,16 +78,19 @@ export default function AdminClipsAi() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>AI tracer — address → handedness → impact → ball flight</h3>
+        <h3 style={{ marginBottom: 4 }}>AI tracer — address → handedness → impact → ball flight → tracer video</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
           Camera is assumed to be <b>behind the target line</b>, golfer hitting
-          away from camera. Each Run executes five steps via Claude:
+          away from camera. Each Run executes six steps:
           (1) find the <b>address frame</b>; (2) on that frame locate hands +
           ball and infer <b>handedness</b>; (3) rough <b>impact</b> across 12
           candidates over ~2 s after address; (4) <b>refine</b> the impact
           frame ±5 and locate the shaft on it; (5) <b>track the ball</b>
-          forward frame-by-frame from impact until it leaves view, with
-          a yellow highlight ring drawn on each native-resolution output.
+          forward frame-by-frame from impact until it leaves view, with a
+          phase-2 crop+upscale retry on missed frames; (6) render the
+          <b>tracer video</b> — source clip with a progressive dashed
+          orange line from the ball-at-rest position through each tracked
+          ball position.
         </p>
       </div>
 
@@ -115,6 +118,8 @@ export default function AdminClipsAi() {
         const impactImage = result?.impact_image_url;
         const ballTrack = result?.ball_track;
         const ballTrackFrames = result?.ball_track_frames || [];
+        const tracerVideo = result?.tracer_video;
+        const tracerVideoUrl = result?.tracer_video_url;
         const isComposite = (c.source_url || "").includes("_composite");
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
@@ -201,6 +206,33 @@ export default function AdminClipsAi() {
                 )}
               </div>
             </div>
+
+            {(tracerVideoUrl || tracerVideo?.error) && (
+              <div style={{ marginTop: 12 }}>
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  AI tracer video
+                  {tracerVideo?.n_points != null && (
+                    <span className="muted" style={{ marginLeft: 6 }}>
+                      · <code>{tracerVideo.n_points}</code> anchors
+                      {tracerVideo.frame_range && (
+                        <> · frames {tracerVideo.frame_range[0]}–{tracerVideo.frame_range[1]}</>
+                      )}
+                    </span>
+                  )}
+                </div>
+                {tracerVideoUrl ? (
+                  <video
+                    src={tracerVideoUrl}
+                    controls
+                    style={{ width: "100%", borderRadius: 8, background: "#000" }}
+                  />
+                ) : tracerVideo?.error ? (
+                  <div className="err-text small">
+                    Tracer render failed: <code>{tracerVideo.error}</code>
+                  </div>
+                ) : null}
+              </div>
+            )}
 
             {addr?.ok && (
               <div className="small muted" style={{ marginTop: 8 }}>

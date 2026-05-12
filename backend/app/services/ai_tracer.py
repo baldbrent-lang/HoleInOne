@@ -1866,3 +1866,205 @@ def track_ball_after_impact(
         n_found, len(frame_indices), first_lost_run_start,
     )
     return info
+
+
+# Visual style for the final tracer-overlay render. Mirrors the
+# classical tracer in services/tracer.py so the two outputs look at
+# home next to each other.
+TRACER_LINE_COLOR = (0, 140, 255)        # bright orange (BGR)
+TRACER_LINE_HALO = (40, 90, 200)         # darker orange halo behind
+TRACER_LINE_THICKNESS = 5
+TRACER_DASH_LEN = 14
+TRACER_GAP_LEN = 10
+TRACER_BALL_RING = (0, 230, 255)         # yellow — ball at current frame
+TRACER_REST_RING = (255, 60, 0)          # blue — ball-at-rest marker
+
+
+def _draw_dashed_tracer(img, points: list[tuple[int, int]]) -> None:
+    """Draw a dashed polyline through `points` with a halo behind it.
+    No-op when fewer than 2 points are provided. Style matches the
+    classical tracer so the visual language is consistent."""
+    if len(points) < 2:
+        return
+    if HAS_NP:
+        cv2.polylines(
+            img, [np.array(points, dtype=np.int32)],
+            False, TRACER_LINE_HALO,
+            TRACER_LINE_THICKNESS + 4, cv2.LINE_AA,
+        )
+    accumulated = 0.0
+    drawing = True
+    for i in range(1, len(points)):
+        x0, y0 = points[i - 1]
+        x1, y1 = points[i]
+        dx = float(x1 - x0)
+        dy = float(y1 - y0)
+        seg_len = (dx * dx + dy * dy) ** 0.5
+        if seg_len == 0:
+            continue
+        ux = dx / seg_len
+        uy = dy / seg_len
+        traveled = 0.0
+        cur_x = float(x0)
+        cur_y = float(y0)
+        while traveled < seg_len:
+            target_seg = TRACER_DASH_LEN if drawing else TRACER_GAP_LEN
+            remaining = target_seg - accumulated
+            step = min(remaining, seg_len - traveled)
+            nx = cur_x + ux * step
+            ny = cur_y + uy * step
+            if drawing:
+                cv2.line(
+                    img,
+                    (int(cur_x), int(cur_y)), (int(nx), int(ny)),
+                    TRACER_LINE_COLOR, TRACER_LINE_THICKNESS, cv2.LINE_AA,
+                )
+            cur_x = nx
+            cur_y = ny
+            traveled += step
+            accumulated += step
+            if accumulated >= target_seg:
+                drawing = not drawing
+                accumulated = 0.0
+
+
+def render_tracer_video(
+    input_path: Path,
+    output_path: Path,
+    ball_rest_xy_native: tuple[float, float] | None,
+    impact_frame_idx: int,
+    track_frames: list[dict],
+) -> dict:
+    """Render an MP4 of the source video with a progressive dashed
+    tracer line overlaid.
+
+    The tracer:
+      - Starts at the ball's at-rest position (anchored at the impact
+        frame so the line begins right where the ball was struck).
+      - Extends through each subsequent frame's found ball position.
+      - Holds the last-known geometry on frames where the ball wasn't
+        found, so the line doesn't flicker.
+      - A small blue ring continuously marks the at-rest position so
+        the operator can see where the ball started.
+      - A yellow ring on the current frame marks the live ball location
+        when the tracker has one.
+
+    `track_frames` is the per-frame list from track_ball_after_impact:
+    each entry has `frame`, `found`, and (when found) native pixel
+    `x`/`y`.
+
+    Returns::
+
+        {
+          "ok": bool,
+          "error": str | None,
+          "n_points": int,      # length of the rendered tracer line
+          "frame_range": [int, int] | None,
+          "fps": float | None,
+          "saved_path": str | None,
+        }
+
+    The written file is raw mp4v from OpenCV; caller is responsible
+    for transcoding to H.264 (e.g. via services.video.compress_for_email)
+    before serving to browsers.
+    """
+    info: dict = {
+        "ok": False,
+        "error": None,
+        "n_points": 0,
+        "frame_range": None,
+        "fps": None,
+        "saved_path": None,
+    }
+
+    if not HAS_CV:
+        info["error"] = "opencv not installed"
+        return info
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not open source video"
+        return info
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    info["fps"] = float(fps)
+
+    # Build {frame_idx: (x, y)} for every successfully-located ball.
+    points_by_frame: dict[int, tuple[int, int]] = {}
+    for rec in track_frames or []:
+        if not rec.get("found"):
+            continue
+        x = rec.get("x")
+        y = rec.get("y")
+        f = rec.get("frame")
+        if f is None or x is None or y is None:
+            continue
+        try:
+            points_by_frame[int(f)] = (int(x), int(y))
+        except (TypeError, ValueError):
+            continue
+
+    # The full ordered list of tracer anchors: rest position first,
+    # then every found-ball position in chronological order.
+    anchors: list[tuple[int, int, int]] = []  # (frame, x, y)
+    if ball_rest_xy_native is not None:
+        anchors.append((
+            int(impact_frame_idx),
+            int(round(float(ball_rest_xy_native[0]))),
+            int(round(float(ball_rest_xy_native[1]))),
+        ))
+    for f in sorted(points_by_frame):
+        x, y = points_by_frame[f]
+        anchors.append((f, x, y))
+    info["n_points"] = len(anchors)
+    if anchors:
+        info["frame_range"] = [int(anchors[0][0]), int(anchors[-1][0])]
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        info["error"] = "VideoWriter failed to open output path"
+        return info
+
+    rest_xy: tuple[int, int] | None = None
+    if ball_rest_xy_native is not None:
+        rest_xy = (
+            int(round(float(ball_rest_xy_native[0]))),
+            int(round(float(ball_rest_xy_native[1]))),
+        )
+
+    try:
+        frame_idx = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            # Draw the tracer once we've reached the impact frame.
+            if anchors and frame_idx >= anchors[0][0]:
+                visible = [
+                    (x, y) for f, x, y in anchors if f <= frame_idx
+                ]
+                if len(visible) >= 2:
+                    _draw_dashed_tracer(frame, visible)
+                if rest_xy is not None:
+                    cv2.circle(frame, rest_xy, 12, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.circle(frame, rest_xy, 10, TRACER_REST_RING, 3, cv2.LINE_AA)
+            # Highlight the ball on frames where the tracker has a
+            # fresh position. (We skip frames where the ball was lost
+            # — the tracer line up to the last known point stays
+            # rendered, which is the right behaviour visually.)
+            if frame_idx in points_by_frame:
+                x, y = points_by_frame[frame_idx]
+                cv2.circle(frame, (x, y), 18, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.circle(frame, (x, y), 16, TRACER_BALL_RING, 3, cv2.LINE_AA)
+            writer.write(frame)
+            frame_idx += 1
+    finally:
+        cap.release()
+        writer.release()
+
+    info["ok"] = True
+    info["saved_path"] = str(output_path)
+    return info

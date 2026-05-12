@@ -46,6 +46,7 @@ from ..services.ai_tracer import (
     find_impact_frame_after_address,
     refine_impact_frame,
     track_ball_after_impact,
+    render_tracer_video,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
 
@@ -607,6 +608,8 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
     impact_image_url: str | None = None
     ball_track_info: dict | None = None
     ball_track_frames_out: list[dict] = []
+    tracer_video_info: dict | None = None
+    tracer_video_url: str | None = None
     addr_idx_int: int | None = None
     if address_info.get("ok") and address_info.get("address_frame") is not None:
         addr_idx_int = int(address_info["address_frame"])
@@ -704,6 +707,66 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                             )
                     ball_track_frames_out.append(out_record)
 
+            # Step 6: render the final tracer overlay. We have the rest
+            # ball position (from handedness), the impact frame, and a
+            # set of confirmed ball positions across the post-impact
+            # frames — enough to lay a dashed line from address through
+            # the visible flight on top of the source video. cv2 writes
+            # mp4v; compress_for_email transcodes to H.264 + faststart
+            # so the browser can play it inline.
+            ball_rest_xy_native: tuple[float, float] | None = None
+            sw = handedness_info.get("image_width") if handedness_info else 0
+            sh = handedness_info.get("image_height") if handedness_info else 0
+            bx = handedness_info.get("ball_x") if handedness_info else None
+            by = handedness_info.get("ball_y") if handedness_info else None
+            if (
+                handedness_info and handedness_info.get("ok")
+                and bx is not None and by is not None
+                and sw and sh
+            ):
+                # Convert from the handedness pass's sent-image coords
+                # to native pixels using a fresh capture for dimensions.
+                import cv2 as _cv  # local import — admin.py avoids cv2 elsewhere
+                _cap = _cv.VideoCapture(str(fpath))
+                try:
+                    if _cap.isOpened():
+                        nw = int(_cap.get(_cv.CAP_PROP_FRAME_WIDTH))
+                        nh = int(_cap.get(_cv.CAP_PROP_FRAME_HEIGHT))
+                        if nw > 0 and nh > 0:
+                            ball_rest_xy_native = (
+                                float(bx) * nw / float(sw),
+                                float(by) * nh / float(sh),
+                            )
+                finally:
+                    _cap.release()
+
+            tracer_name = f"{fpath.stem}_ai_tracer.mp4"
+            tracer_path = CLIPS_DIR / tracer_name
+            tracer_video_info = render_tracer_video(
+                fpath, tracer_path,
+                ball_rest_xy_native=ball_rest_xy_native,
+                impact_frame_idx=int(refined_impact_info["impact_frame"]),
+                track_frames=(ball_track_info or {}).get("frames") or [],
+            )
+            if tracer_video_info.get("ok"):
+                compressed = compress_for_email(tracer_path)
+                if not compressed:
+                    log.warning(
+                        "ai_tracer: compress_for_email returned False for %s — "
+                        "browser playback may fail", tracer_path.name,
+                    )
+                if tracer_path.exists() and tracer_path.stat().st_size > 0:
+                    mtime = int(tracer_path.stat().st_mtime)
+                    tracer_video_url = (
+                        f"{settings.app_base_url}/uploads/clips/{tracer_name}?v={mtime}"
+                    )
+                else:
+                    tracer_video_info = {
+                        **tracer_video_info,
+                        "ok": False,
+                        "error": "post-encode produced empty file",
+                    }
+
     db.add(AuditLog(
         actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
         detail=str({
@@ -716,6 +779,7 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
                 if k != "frames"
             },
             "n_track_frames_with_image": len(ball_track_frames_out),
+            "tracer_video": tracer_video_info,
         }),
     ))
     db.commit()
@@ -737,6 +801,8 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
         "impact_image_url": impact_image_url,
         "ball_track": ball_track_summary,
         "ball_track_frames": ball_track_frames_out,
+        "tracer_video": tracer_video_info,
+        "tracer_video_url": tracer_video_url,
     }
 
 
