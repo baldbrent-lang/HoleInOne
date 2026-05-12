@@ -282,8 +282,9 @@ CLUB_LOWER_NEAR_BODY_PX_BELOW = 100  # tolerated below body bottom
 # off-axis false positives.
 MAX_BALL_TO_CLUBHEAD_PX = 80
 
-TRACER_COLOR = (240, 240, 240)
-TRACER_THICKNESS = 3
+TRACER_COLOR = (0, 140, 255)        # bright orange (BGR)
+TRACER_HALO_COLOR = (40, 90, 200)   # dimmer orange behind the dashes
+TRACER_THICKNESS = 5
 DASH_LENGTH = 14
 GAP_LENGTH = 10
 BALL_HIGHLIGHT_COLOR = (0, 230, 255)
@@ -1951,7 +1952,7 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
 def _draw_dashed(img, points):
     if len(points) < 2:
         return
-    cv2.polylines(img, [np.array(points, dtype=np.int32)], False, (255, 255, 255), TRACER_THICKNESS + 4, cv2.LINE_AA)
+    cv2.polylines(img, [np.array(points, dtype=np.int32)], False, TRACER_HALO_COLOR, TRACER_THICKNESS + 4, cv2.LINE_AA)
     accumulated = 0.0
     drawing = True
     for i in range(1, len(points)):
