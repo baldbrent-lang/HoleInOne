@@ -99,7 +99,7 @@ HOT_MASK_DILATE_PX = 5
 # long clips and the browser request times out before the server
 # finishes. These caps trade some coverage for keeping the round-trip
 # under ~2 minutes on Replit's shared CPU.
-MAX_FRAMES_PROCESS = 900     # ~15s @ 60fps, ~30s @ 30fps
+MAX_FRAMES_PROCESS = 1800    # ~15s @ 120fps, ~30s @ 60fps, ~60s @ 30fps
 MAX_TOTAL_CANDIDATES = 60000  # Early abort if drowning in noise
 # Downsample to at most this wide for detection. Track coordinates
 # are scaled back to native resolution before rendering so the
