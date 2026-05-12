@@ -450,24 +450,42 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         100.0 * hot_pixels / max(1, det_w * det_h),
     )
 
-    # Ball address (detection-coord) + body x-center → kept for display
-    # and as a fallback signal. The primary handedness signal now comes
+    # Ball address (detection-coord) + body bbox → kept for display
+    # and as fallback signals. The primary handedness signal now comes
     # from the club shaft's slope, which is robust to stray practice
     # balls in the grass.
-    ball_addr_det = _pick_ball_addr(ball_addr_votes)
-    body_x_det = _hot_mask_x_center(hot_mask)
+    body_bbox_det = _hot_mask_body_bbox(hot_mask)
+    body_x_det = (
+        float((body_bbox_det[0] + body_bbox_det[2]) / 2.0)
+        if body_bbox_det is not None else None
+    )
+    body_bottom_det = float(body_bbox_det[3]) if body_bbox_det is not None else None
     handedness = _handedness_from_slopes(club_slope_votes)
 
+    # Decide handedness / behind_side from the club first.
     behind_side: str | None = None
     if handedness == "lefty":
-        # Clubhead points right → target on right → ball flies right →
-        # left half of frame is behind.
         behind_side = "left"
     elif handedness == "righty":
         behind_side = "right"
-    elif ball_addr_det is not None and body_x_det is not None:
-        # Fallback: trust the ball-address position only if we couldn't
-        # resolve handedness from the club.
+
+    # Clubhead position (lower endpoint of detected club line) — used as
+    # a prior for ball-address picking, since the clubhead at address is
+    # right beside the ball.
+    clubhead_det = (
+        (float(club_best_line[2]), float(club_best_line[3]))
+        if club_best_line is not None else None
+    )
+    ball_addr_det = _pick_ball_addr(
+        ball_addr_votes,
+        body_x=body_x_det,
+        behind_side=behind_side,
+        clubhead=clubhead_det,
+    )
+
+    # If the club gave no decisive handedness, fall back to inferring it
+    # from the (now side-unfiltered) ball-address position.
+    if behind_side is None and ball_addr_det is not None and body_x_det is not None:
         if ball_addr_det[0] < body_x_det - 1:
             behind_side = "right"
         elif ball_addr_det[0] > body_x_det + 1:
@@ -483,25 +501,30 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         behind_side or "none",
     )
 
-    # One-shot pass: filter by hot mask in ref coords, optionally reject
-    # the half of the frame behind the golfer, then unwarp the survivor
-    # back to current-frame coords and scale to native. Frames where
-    # motion-comp failed keep their cand (no reliable hot-mask filtering
-    # possible) and skip the unwarp.
+    # One-shot pass: filter by hot mask, foot line (everything below the
+    # body bbox is divot debris / practice balls / shadow), the
+    # behind-the-golfer half, then unwarp the survivor back to
+    # current-frame coords and scale to native. Frames where motion-comp
+    # failed keep their cand (no reliable hot-mask filtering possible)
+    # and skip the unwarp.
     inv = 1.0 / det_scale if det_scale != 0 else 1.0
+    foot_y_cutoff = (
+        body_bottom_det + 15 if body_bottom_det is not None else float("inf")
+    )
     detections: list[_Det] = []
     hot_rejected = 0
     side_rejected = 0
+    foot_rejected = 0
     for f, cx, cy, r in raw_cands_det:
+        if cy > foot_y_cutoff:
+            foot_rejected += 1
+            continue
         M_inv = frame_M_inv.get(f) if USE_MOTION_COMPENSATION else None
         if M_inv is not None or not USE_MOTION_COMPENSATION:
             iy, ix = int(cy), int(cx)
             if 0 <= iy < det_h and 0 <= ix < det_w and hot_mask[iy, ix]:
                 hot_rejected += 1
                 continue
-        # Side filter: cand position is in ref-coord det res (same as
-        # body_x_det), so we can compare directly. Centered shots
-        # (behind_side is None) skip this gate.
         if behind_side == "left" and body_x_det is not None and cx < body_x_det:
             side_rejected += 1
             continue
@@ -515,8 +538,8 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             cx_cur, cy_cur = cx, cy
         detections.append(_Det(f, cx_cur * inv, cy_cur * inv, r * inv))
     log.info(
-        "tracer: hot-mask rejected %d, side-filter rejected %d, kept %d / %d raw",
-        hot_rejected, side_rejected, len(detections), len(raw_cands_det),
+        "tracer: hot-mask rejected %d, foot rejected %d, side-filter rejected %d, kept %d / %d raw",
+        hot_rejected, foot_rejected, side_rejected, len(detections), len(raw_cands_det),
     )
 
     # Stage B: prune candidates that aren't part of any short upward
@@ -545,6 +568,38 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         busiest_candidates = [(d.x, d.y, d.radius) for d in bf]
         busiest_frame = _grab_frame(input_path, busiest_frame_idx)
 
+    # Skip linking only when we hit the noise ceiling AND can't form a
+    # minimum-length seed chain anyway.
+    aborting_noise = (
+        aborted_early
+        and len(raw_cands_det) >= MAX_TOTAL_CANDIDATES
+        and len(seeds) < MIN_TRACK_LENGTH
+    )
+
+    seed_track: list[_Det] = []
+    track: list[_Det] = []
+    if not aborting_noise:
+        log.info(
+            "tracer: linking %d seeds (post-hot-mask: %d, raw: %d)...",
+            len(seeds), len(detections), len(raw_cands_det),
+        )
+        ball_addr_native = None
+        if ball_addr_det is not None and det_scale > 0:
+            ball_addr_native = (ball_addr_det[0] * inv, ball_addr_det[1] * inv)
+        seed_track = _pick_best(_link(seeds), ball_addr_native=ball_addr_native)
+        if seed_track:
+            log.info(
+                "tracer: seed track %d points, residual %.2fpx",
+                len(seed_track), _residual(seed_track),
+            )
+            track = _extend_track(
+                seed_track, detections, total_frames_scanned,
+                frame_w=width, frame_h=height,
+            )
+
+    # Debug image always emitted (even on linker failure / noise abort)
+    # so the operator can see what the algorithm saw. picked_track is
+    # whatever made it through — possibly empty.
     if debug_path is not None:
         filmstrip = _sample_filmstrip(input_path, total_frames_scanned)
         _write_debug(
@@ -556,24 +611,16 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             ball_addr_det=ball_addr_det, body_x_det=body_x_det,
             behind_side=behind_side,
             club_line_det=club_best_line, handedness=handedness,
+            body_bottom_det=body_bottom_det, picked_track=track or seed_track,
         )
 
-    # Abort only if every filter failed to rescue a usable seed set —
-    # hot-mask + upward-streak might cut noise enough even on a clip
-    # that blew past the raw-candidate ceiling.
-    if aborted_early and len(raw_cands_det) >= MAX_TOTAL_CANDIDATES and len(seeds) < MIN_TRACK_LENGTH:
+    if aborting_noise:
         return {
             "ok": False,
             "error": f"noise overwhelming ({len(raw_cands_det)}+ candidates pre-mask) — check the debug image for the source (rain on lens, camera shake, etc.)",
             "n_candidates": len(detections),
             "n_points": 0,
         }
-
-    log.info(
-        "tracer: linking %d seeds (post-hot-mask: %d, raw: %d)...",
-        len(seeds), len(detections), len(raw_cands_det),
-    )
-    seed_track = _pick_best(_link(seeds))
     if not seed_track:
         return {
             "ok": False,
@@ -581,14 +628,6 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             "n_candidates": len(detections),
             "n_points": 0,
         }
-    log.info(
-        "tracer: seed track %d points, residual %.2fpx",
-        len(seed_track), _residual(seed_track),
-    )
-    track = _extend_track(
-        seed_track, detections, total_frames_scanned,
-        frame_w=width, frame_h=height,
-    )
     if len(track) > len(seed_track):
         log.info(
             "tracer: extended track %d → %d points (residual %.2fpx)",
@@ -717,40 +756,71 @@ def _scan_for_ball_addr_blobs(det_frame):
     return blobs
 
 
-def _pick_ball_addr(all_blobs):
-    """Pick the (cx, cy) position that appears in the most warmup
-    samples within a small position tolerance. Returns None if no
-    position recurs enough times to look like a stationary ball."""
+def _pick_ball_addr(all_blobs, body_x=None, behind_side=None, clubhead=None):
+    """Pick the (cx, cy) ball-address position from voted warmup blobs.
+
+    Priors (applied in order):
+      - `behind_side` + `body_x`: drop blobs on the side already filtered
+        out by the handedness call. Practice balls scattered on the
+        rejected half (the body's side away from target) get excluded.
+      - `clubhead`: if multiple position clusters satisfy the minimum
+        occurrence count, prefer the one closest to the clubhead's
+        detected position. The real ball at address is right beside
+        the clubhead.
+      - Fallback: among clusters meeting the occurrence threshold,
+        pick the one with the most votes.
+    """
     if not all_blobs:
         return None
-    best = None
-    best_count = 0
+    if body_x is not None and behind_side in ("left", "right"):
+        if behind_side == "left":
+            blobs = [(cx, cy) for (cx, cy) in all_blobs if cx >= body_x]
+        else:
+            blobs = [(cx, cy) for (cx, cy) in all_blobs if cx <= body_x]
+    else:
+        blobs = list(all_blobs)
+    if not blobs:
+        return None
     tol = BALL_ADDR_POSITION_TOLERANCE_PX
-    for (cx, cy) in all_blobs:
-        count = 0
-        for (cx2, cy2) in all_blobs:
+    candidates: list[tuple[int, float, float]] = []
+    for (cx, cy) in blobs:
+        c = 0
+        for (cx2, cy2) in blobs:
             if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
-                count += 1
-        if count > best_count:
-            best_count = count
-            best = (cx, cy)
-    if best_count >= BALL_ADDR_MIN_OCCURRENCES:
-        return best
-    return None
+                c += 1
+        if c >= BALL_ADDR_MIN_OCCURRENCES:
+            candidates.append((c, cx, cy))
+    if not candidates:
+        return None
+    if clubhead is not None:
+        candidates.sort(
+            key=lambda x: float(np.hypot(x[1] - clubhead[0], x[2] - clubhead[1]))
+        )
+    else:
+        candidates.sort(key=lambda x: -x[0])
+    return (candidates[0][1], candidates[0][2])
 
 
-def _hot_mask_x_center(hot_mask):
-    """X-center of the largest connected component of the hot mask —
-    typically the golfer's body envelope. Returns None if the mask is
-    empty or too sparse to extract a body bbox."""
+def _hot_mask_body_bbox(hot_mask):
+    """Bbox (x1, y1, x2, y2) of the largest connected component of the
+    hot mask — typically the golfer's body envelope. Returns None if the
+    mask is empty or too sparse to extract a meaningful bbox."""
     contours, _h = cv2.findContours(hot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
     largest = max(contours, key=cv2.contourArea)
     if cv2.contourArea(largest) < 200:
         return None
-    x, _y, w, _h2 = cv2.boundingRect(largest)
-    return float(x + w / 2.0)
+    x, y, w, h = cv2.boundingRect(largest)
+    return (int(x), int(y), int(x + w), int(y + h))
+
+
+def _hot_mask_x_center(hot_mask):
+    """X-center of the body bbox (back-compat wrapper)."""
+    bbox = _hot_mask_body_bbox(hot_mask)
+    if bbox is None:
+        return None
+    return float((bbox[0] + bbox[2]) / 2.0)
 
 
 def _build_hot_mask(heatmap, counted_frames: int):
@@ -827,7 +897,8 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                  all_detections, seed_detections, filmstrip, total_frames, fps,
                  n_raw=None, hot_mask=None, det_scale=1.0, native_size=None,
                  ball_addr_det=None, body_x_det=None, behind_side=None,
-                 club_line_det=None, handedness=None):
+                 club_line_det=None, handedness=None,
+                 body_bottom_det=None, picked_track=None):
     """Diagnostic JPG composed of two parts stacked vertically.
 
     Top half = the busiest frame (most candidates seen) with:
@@ -902,11 +973,28 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                 (int(cx2 / det_scale) + 10, int(cy2 / det_scale) - 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2, cv2.LINE_AA,
             )
+        # Foot-line cutoff: anything below this y was rejected as
+        # divot debris / practice balls / shadow.
+        if body_bottom_det is not None and det_scale > 0:
+            foot_y_native = int((body_bottom_det + 15) / det_scale)
+            cv2.line(
+                base, (0, foot_y_native), (base.shape[1], foot_y_native),
+                (255, 100, 200), 2, cv2.LINE_AA,
+            )
         for d in all_detections:
             cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
         # Surviving upward-streak seeds: bigger, brighter, opaque green.
         for d in seed_detections:
             cv2.circle(base, (int(d.x), int(d.y)), 4, (0, 255, 0), -1, cv2.LINE_AA)
+        # Picked track (what the rendered tracer will follow). Drawn in
+        # magenta so the operator can spot when the linker chose the
+        # club arc or some other chain over the obvious ball flight.
+        if picked_track:
+            pts = [(int(d.x), int(d.y)) for d in sorted(picked_track, key=lambda p: p.frame)]
+            for i in range(1, len(pts)):
+                cv2.line(base, pts[i - 1], pts[i], (255, 0, 255), 3, cv2.LINE_AA)
+            for px, py in pts:
+                cv2.circle(base, (px, py), 5, (255, 0, 255), 2, cv2.LINE_AA)
         if busiest_cands:
             for cx, cy, r in busiest_cands:
                 cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
@@ -1199,7 +1287,16 @@ def _smooth_track_for_render(track):
     return out
 
 
-def _pick_best(trajectories):
+def _pick_best(trajectories, ball_addr_native=None):
+    """Pick the most likely ball-flight trajectory. Lower score = better.
+
+    Base score = residual_px - 0.5 * len(track). When a ball-address
+    position is known, chains that START near the address get a bonus
+    and chains that start far from it get a penalty. The club's
+    follow-through arc can otherwise outscore the real ball flight on
+    pure residual + length, since the clubhead also traces a smooth
+    curve over many frames — but it doesn't start at the ball.
+    """
     scored = []
     for t in trajectories:
         r = _residual(t)
@@ -1211,7 +1308,15 @@ def _pick_best(trajectories):
         if span < MIN_TRAJECTORY_SPAN_PX:
             # Stuck-in-corner noise. Real ball flight sweeps across the frame.
             continue
-        scored.append((r - 0.5 * len(t), t))
+        score = r - 0.5 * len(t)
+        if ball_addr_native is not None:
+            first = t[0]
+            d = float(np.hypot(first.x - ball_addr_native[0], first.y - ball_addr_native[1]))
+            if d < 80:
+                score -= 10.0
+            elif d > 200:
+                score += 5.0
+        scored.append((score, t))
     if not scored:
         return []
     scored.sort(key=lambda s: s[0])
