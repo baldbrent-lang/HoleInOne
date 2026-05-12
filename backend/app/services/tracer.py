@@ -1162,6 +1162,14 @@ def _candidates_from_mask(fg_mask):
 
 
 def _link(detections):
+    """Greedy nearest-neighbor link of detections into per-starting-point
+    trajectories. Each detection can start its own chain — chains are
+    allowed to overlap, because the alternative (a cross-chain `used`
+    set that consumed a point once it appeared in any accepted track)
+    chops a real long ball-flight curve into 4-5 short fragments.
+    _pick_best already scores by residual - 0.5*len, so the longest
+    cleanest chain wins regardless of overlap.
+    """
     by_frame: dict[int, list[_Det]] = {}
     for d in detections:
         by_frame.setdefault(d.frame, []).append(d)
@@ -1169,12 +1177,12 @@ def _link(detections):
     if not frames:
         return []
     trajectories: list[list[_Det]] = []
-    used: set[tuple[int, int]] = set()
     for sf in frames:
         for si, start in enumerate(by_frame[sf]):
-            if (sf, si) in used:
-                continue
             track = [start]
+            # track_used prevents picking the same point twice WITHIN
+            # one chain (different frames may have the same _Det
+            # object if linking allowed re-entry).
             track_used = {(sf, si)}
             cur = start
             for nf in frames:
@@ -1187,7 +1195,7 @@ def _link(detections):
                 best_dist = float("inf")
                 best_idx = -1
                 for ci, cand in enumerate(by_frame[nf]):
-                    if (nf, ci) in used or (nf, ci) in track_used:
+                    if (nf, ci) in track_used:
                         continue
                     dist = float(np.hypot(cand.x - cur.x, cand.y - cur.y))
                     if dist > MAX_PIXEL_JUMP_PER_FRAME * gap:
@@ -1203,7 +1211,6 @@ def _link(detections):
                 cur = best
             if len(track) >= MIN_TRACK_LENGTH:
                 trajectories.append(track)
-                used.update(track_used)
     return trajectories
 
 
