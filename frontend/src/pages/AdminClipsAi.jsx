@@ -153,17 +153,45 @@ export default function AdminClipsAi() {
                   {running[c.id] ? (
                     <div className="muted">Asking Claude…</div>
                   ) : hand?.ok ? (
-                    <div>
+                    <div style={{ width: "100%" }}>
                       <div style={{ fontSize: 32, fontWeight: 700, textTransform: "uppercase" }}>
                         {hand.handedness}
                       </div>
                       <div className="small muted" style={{ marginTop: 6 }}>
                         confidence: <b>{hand.confidence || "—"}</b>
+                        {hand.camera_position && (
+                          <> · camera: <b>{hand.camera_position}</b></>
+                        )}
                       </div>
                       {hand.notes && (
                         <div className="small muted" style={{ marginTop: 4, fontStyle: "italic" }}>
                           {hand.notes}
                         </div>
+                      )}
+                      {Array.isArray(hand.per_frame) && hand.per_frame.length > 0 && (
+                        <details style={{ marginTop: 8, textAlign: "left" }}>
+                          <summary className="small muted" style={{ cursor: "pointer" }}>
+                            Per-frame reasoning ({hand.per_frame.length})
+                          </summary>
+                          <table style={{ width: "100%", marginTop: 6, fontSize: 12, borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
+                                <th style={{ padding: "3px 6px" }}>Frame</th>
+                                <th style={{ padding: "3px 6px" }}>Phase</th>
+                                <th style={{ padding: "3px 6px" }}>Evidence</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {hand.per_frame.map((pf, i) => (
+                                <tr key={`${pf.frame}-${i}`} style={{ borderBottom: "1px solid var(--border)" }}>
+                                  <td style={{ padding: "3px 6px" }}><code>{pf.frame}</code></td>
+                                  <td style={{ padding: "3px 6px" }}>{pf.phase}</td>
+                                  <td style={{ padding: "3px 6px" }} className="muted">{pf.evidence}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </details>
                       )}
                       {hand.frames_sent && (
                         <div className="tiny muted" style={{ marginTop: 6 }}>

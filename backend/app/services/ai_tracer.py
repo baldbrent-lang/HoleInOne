@@ -42,10 +42,13 @@ except Exception:  # pragma: no cover
 MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 
 # Number of frames sampled across the clip and shown to Claude in a
-# single multi-image API call. 3 covers address / mid-swing /
-# follow-through which gives Claude enough context to be confident
-# about handedness without sending unnecessary tokens.
-N_FRAMES = 3
+# single multi-image API call. 6 frames covers address through
+# follow-through with high probability of catching the backswing apex
+# — the single most unambiguous cue for handedness. 3 was too few:
+# evenly-spaced samples sometimes only captured address/follow-through
+# poses where Claude has to guess from subtle grip/stance details that
+# flip depending on camera orientation.
+N_FRAMES = 6
 
 # Per-frame resolution we send to Claude. 640 px wide gives the model
 # enough detail to see the golfer's stance and grip clearly while
@@ -55,29 +58,61 @@ FRAME_W = 640
 
 HANDEDNESS_SYSTEM_PROMPT = (
     "You are analyzing still frames from a golf swing video. Your only "
-    "job is to determine whether the golfer in the frames is "
-    "right-handed or left-handed.\n\n"
-    "Cues:\n"
-    "- A RIGHT-handed golfer addresses the ball with the LEFT hand on "
-    "top of the grip, ball positioned to the LEFT of their stance from "
-    "the camera's perspective (when the camera is behind them).\n"
-    "- A LEFT-handed golfer is the mirror image: RIGHT hand on top, "
-    "ball positioned to the RIGHT of the stance.\n"
-    "- If the camera is in front of or to the side of the golfer the "
-    "left/right reference is reversed — reason about the golfer's body "
-    "orientation in each frame, not the on-screen sides.\n"
-    "- The backswing direction is the strongest single cue: a "
-    "right-handed golfer swings the club back over the RIGHT shoulder "
-    "(toward the right side of their own body), then through to the "
-    "left. Left-handed is the mirror.\n\n"
+    "job is to determine whether the golfer is right-handed or "
+    "left-handed.\n\n"
+    "CRITICAL — left/right reference frame:\n"
+    "All cues below are in the GOLFER'S body frame, NOT the camera's "
+    "image frame. The golfer's left hand is on the same side of HIS "
+    "body regardless of where the camera sits. When the camera is in "
+    "front of the golfer (you see his chest/face), the golfer's LEFT "
+    "side appears on the RIGHT side of the image, and vice versa. When "
+    "the camera is behind the golfer (you see his back), the sides "
+    "match the image. ALWAYS reason about the GOLFER'S body sides — "
+    "translate to image-side only at the very end, and only as a "
+    "sanity check.\n\n"
+    "Step 1: Identify the camera position relative to the golfer "
+    "(behind / in-front / down-the-line / face-on / mixed).\n\n"
+    "Step 2: For each frame, identify which swing phase it shows "
+    "(address / takeaway / backswing-apex / downswing / impact / "
+    "follow-through). Backswing-apex is the most informative for "
+    "handedness; address and follow-through are second.\n\n"
+    "Step 3: Apply the cues (in golfer's-body frame):\n"
+    "  STRONGEST CUE — backswing direction:\n"
+    "    - RIGHT-HANDED golfer: club travels back over his RIGHT "
+    "shoulder; at the top, the clubhead is on his RIGHT side, "
+    "high and behind.\n"
+    "    - LEFT-HANDED golfer: mirror image — club travels back "
+    "over his LEFT shoulder; clubhead at the top is on his LEFT side.\n"
+    "  GRIP — at address the TOP hand on the grip (the one closer to "
+    "the body, furthest from the clubhead) is:\n"
+    "    - RIGHT-HANDED: LEFT hand on top.\n"
+    "    - LEFT-HANDED: RIGHT hand on top.\n"
+    "  STANCE — at address the ball sits roughly in front of the "
+    "golfer's lead foot:\n"
+    "    - RIGHT-HANDED: ball near his LEFT foot (lead is left).\n"
+    "    - LEFT-HANDED: ball near his RIGHT foot (lead is right).\n"
+    "  FOLLOW-THROUGH:\n"
+    "    - RIGHT-HANDED: finishes facing target, club ends behind "
+    "and above his LEFT shoulder.\n"
+    "    - LEFT-HANDED: mirror — finishes with club behind his RIGHT "
+    "shoulder.\n\n"
+    "Step 4: Weight the evidence across frames. If backswing-apex is "
+    "visible, that single frame should dominate. Disagree only if you "
+    "have strong contrary evidence in another frame.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
-    '  "handedness": "right" | "left" | "unknown",\n'
-    '  "confidence": "high" | "medium" | "low",\n'
-    '  "notes": "<short reasoning, max 25 words>"\n'
+    '  "camera_position": "behind"|"in_front"|"down_the_line"|"face_on"|"mixed",\n'
+    '  "per_frame": [\n'
+    '    {"frame": <int>, "phase": "address|takeaway|backswing_apex|downswing|impact|follow_through|other",\n'
+    '     "evidence": "<≤15 word note about what side of the golfer\'s body the club is on>"}\n'
+    "  ],\n"
+    '  "handedness": "right"|"left"|"unknown",\n'
+    '  "confidence": "high"|"medium"|"low",\n'
+    '  "notes": "<≤30 word summary citing the single strongest cue>"\n'
     "}\n"
-    "Use 'unknown' only if the frames genuinely don't show enough of "
-    "the golfer to tell."
+    "Use 'unknown' only if you genuinely cannot see the golfer's body "
+    "in any frame. The per_frame array must include one entry per "
+    "frame you were shown, in the same order."
 )
 
 
@@ -178,6 +213,8 @@ def detect_handedness(input_path: Path) -> dict:
         "handedness": None,
         "confidence": None,
         "notes": None,
+        "camera_position": None,
+        "per_frame": [],
         "model": MODEL,
         "frames_sent": [],
     }
@@ -277,9 +314,26 @@ def detect_handedness(input_path: Path) -> dict:
     info["ok"] = True
     info["handedness"] = handedness
     info["confidence"] = str(parsed.get("confidence") or "").lower() or None
-    info["notes"] = str(parsed.get("notes") or "")[:200] or None
+    info["notes"] = str(parsed.get("notes") or "")[:300] or None
+    info["camera_position"] = str(parsed.get("camera_position") or "").lower() or None
+    per_frame = parsed.get("per_frame")
+    if isinstance(per_frame, list):
+        info["per_frame"] = [
+            {
+                "frame": pf.get("frame"),
+                "phase": str(pf.get("phase") or "").lower(),
+                "evidence": str(pf.get("evidence") or "")[:200],
+            }
+            for pf in per_frame if isinstance(pf, dict)
+        ]
     log.info(
-        "ai_tracer: handedness — %s (%s) — %s",
-        info["handedness"], info["confidence"], info["notes"],
+        "ai_tracer: handedness — %s (%s) camera=%s — %s",
+        info["handedness"], info["confidence"],
+        info["camera_position"], info["notes"],
     )
+    for pf in info["per_frame"]:
+        log.info(
+            "ai_tracer:   frame %s phase=%s evidence=%s",
+            pf.get("frame"), pf.get("phase"), pf.get("evidence"),
+        )
     return info
