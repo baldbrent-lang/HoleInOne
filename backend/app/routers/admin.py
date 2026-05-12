@@ -39,7 +39,7 @@ from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
 from ..services.tracer import have_tracer, render_tracer
-from ..services.ai_tracer import find_address_frame
+from ..services.ai_tracer import find_address_frame, detect_handedness_at_address
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -569,24 +569,34 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
 
     image_name = f"{fpath.stem}_address.jpg"
     image_path = CLIPS_DIR / image_name
-    info = find_address_frame(fpath, output_image_path=image_path)
+    address_info = find_address_frame(fpath, output_image_path=image_path)
 
     image_url = None
-    if info.get("saved_image") and image_path.exists():
+    if address_info.get("saved_image") and image_path.exists():
         mtime = int(image_path.stat().st_mtime)
         image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
 
+    # Step 3: once we have the address frame, ask Claude what handedness
+    # the golfer is. Camera is assumed to be behind the golfer so the
+    # body-side ↔ image-side mapping is the identity (no mirror flip).
+    handedness_info: dict | None = None
+    if address_info.get("ok") and address_info.get("address_frame") is not None:
+        handedness_info = detect_handedness_at_address(
+            fpath, int(address_info["address_frame"]),
+        )
+
     db.add(AuditLog(
         actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
-        detail=str(info),
+        detail=str({"address": address_info, "handedness": handedness_info}),
     ))
     db.commit()
 
     return {
         "clip_id": clip.id,
         "source_url": clip.source_url,
-        "address": info,
+        "address": address_info,
         "address_image_url": image_url,
+        "handedness": handedness_info,
     }
 
 

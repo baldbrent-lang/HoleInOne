@@ -54,6 +54,41 @@ N_FRAMES = 12
 # of the golfer's stance and club position without bloating payload.
 FRAME_W = 640
 
+HANDEDNESS_FROM_ADDRESS_PROMPT = (
+    "You are looking at a single still frame of a golfer at ADDRESS — "
+    "set up over the ball, just before takeaway. The camera is BEHIND "
+    "the golfer; you see his back. The target is away from the camera "
+    "(down the image).\n\n"
+    "Determine whether the golfer is RIGHT-handed or LEFT-handed.\n\n"
+    "Because the camera is behind the golfer:\n"
+    "- The golfer's LEFT side appears on the LEFT of the image.\n"
+    "- The golfer's RIGHT side appears on the RIGHT of the image.\n"
+    "(No mirror flip — unlike a face-on camera.)\n\n"
+    "STRONGEST CUE — ball position relative to the body centerline:\n"
+    "- RIGHT-handed: ball is in front of the golfer's LEFT foot (the "
+    "lead foot). In the image, the ball sits to the LEFT of the "
+    "golfer's vertical centerline.\n"
+    "- LEFT-handed: mirror image — ball is in front of the RIGHT foot, "
+    "and in the image the ball sits to the RIGHT of the centerline.\n\n"
+    "Backup cues:\n"
+    "- Club shaft angle: shaft runs from the hands down to the "
+    "clubhead. For a righty the hands are above-and-to-the-RIGHT of "
+    "the ball; the shaft angles down-and-LEFT to reach it. Lefty "
+    "is the mirror.\n"
+    "- Grip orientation: the top hand on the grip is on the OPPOSITE "
+    "side from the ball. Righty has hands above-and-right; lefty has "
+    "them above-and-left.\n\n"
+    "Reply with ONE JSON object and nothing else:\n"
+    "{\n"
+    '  "handedness": "right" | "left" | "unknown",\n'
+    '  "confidence": "high" | "medium" | "low",\n'
+    '  "notes": "<≤25 word reasoning, citing ball position relative to body centerline>"\n'
+    "}\n"
+    "Use 'unknown' only if the frame genuinely doesn't show the golfer "
+    "+ ball clearly enough to tell."
+)
+
+
 ADDRESS_SYSTEM_PROMPT = (
     "You are analyzing still frames from a golf swing video. The camera "
     "is positioned BEHIND the golfer; the golfer hits toward a target "
@@ -170,6 +205,108 @@ def _grab_frames_jpegs(
     finally:
         cap.release()
     return out
+
+
+def detect_handedness_at_address(
+    input_path: Path, address_frame_idx: int, frame_w: int = FRAME_W,
+) -> dict:
+    """Single-frame Claude call: given the picked address frame index,
+    ask whether the golfer is right- or left-handed. Camera is assumed
+    to be behind the golfer (which it always is per the upstream
+    assumption).
+
+    Returns::
+
+        {
+          "ok": bool,
+          "error": str | None,
+          "handedness": "right" | "left" | "unknown" | None,
+          "confidence": "high" | "medium" | "low" | None,
+          "notes": str | None,
+          "model": str,
+        }
+
+    Never raises.
+    """
+    info: dict = {
+        "ok": False,
+        "error": None,
+        "handedness": None,
+        "confidence": None,
+        "notes": None,
+        "model": MODEL,
+    }
+    if not HAS_CV:
+        info["error"] = "opencv not installed"
+        return info
+    if not HAS_ANTHROPIC:
+        info["error"] = "anthropic SDK not installed"
+        return info
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        info["error"] = "ANTHROPIC_API_KEY not set in environment"
+        return info
+
+    frames = _grab_frames_jpegs(input_path, [int(address_frame_idx)], frame_w=frame_w)
+    if not frames:
+        info["error"] = f"could not extract address frame {address_frame_idx}"
+        return info
+    _idx, jpeg = frames[0]
+
+    content: list[dict] = [
+        {"type": "text", "text": f"Address frame ({_idx}) from the clip:"},
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(jpeg).decode("ascii"),
+            },
+        },
+        {
+            "type": "text",
+            "text": "Right-handed or left-handed? JSON only.",
+        },
+    ]
+
+    client = Anthropic()
+    try:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=200,
+            system=[{
+                "type": "text",
+                "text": HANDEDNESS_FROM_ADDRESS_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": content}],
+        )
+    except Exception as exc:
+        log.warning("ai_tracer: handedness API call failed: %s", exc)
+        info["error"] = f"api_failed: {exc}"
+        return info
+
+    text_chunks = [
+        b.text for b in resp.content
+        if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+    ]
+    parsed = _extract_json("\n".join(text_chunks))
+    if not parsed:
+        info["error"] = "no_json_in_response"
+        return info
+
+    handedness = str(parsed.get("handedness") or "").lower()
+    if handedness not in {"right", "left", "unknown"}:
+        info["error"] = f"unexpected handedness value: {handedness!r}"
+        return info
+    info["ok"] = True
+    info["handedness"] = handedness
+    info["confidence"] = str(parsed.get("confidence") or "").lower() or None
+    info["notes"] = str(parsed.get("notes") or "")[:300] or None
+    log.info(
+        "ai_tracer: handedness at address frame %d — %s (%s) — %s",
+        _idx, info["handedness"], info["confidence"], info["notes"],
+    )
+    return info
 
 
 def find_address_frame(

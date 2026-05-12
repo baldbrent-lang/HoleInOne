@@ -107,6 +107,7 @@ export default function AdminClipsAi() {
         const result = results[c.id];
         const addr = result?.address;
         const addrImage = result?.address_image_url;
+        const hand = result?.handedness;
         const isComposite = (c.source_url || "").includes("_composite");
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
@@ -190,7 +191,7 @@ export default function AdminClipsAi() {
 
             {addr?.ok && (
               <div className="small muted" style={{ marginTop: 8 }}>
-                Confidence: <b>{addr.confidence || "—"}</b>
+                Address confidence: <b>{addr.confidence || "—"}</b>
                 {addr.notes && (
                   <>{" "}— <i>{addr.notes}</i></>
                 )}
@@ -199,6 +200,47 @@ export default function AdminClipsAi() {
             {addr?.frames_sent && (
               <div className="tiny muted" style={{ marginTop: 4 }}>
                 Candidate frames sent: [{addr.frames_sent.join(", ")}] · model {addr.model}
+              </div>
+            )}
+
+            {hand && (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 10,
+                  borderRadius: 8,
+                  background: "var(--surface-2, rgba(0,0,0,0.03))",
+                }}
+              >
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  Handedness (from address frame)
+                </div>
+                {hand.ok ? (
+                  <div>
+                    <span
+                      style={{
+                        fontSize: 22,
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        marginRight: 10,
+                      }}
+                    >
+                      {hand.handedness}
+                    </span>
+                    <span className="small muted">
+                      confidence: <b>{hand.confidence || "—"}</b>
+                    </span>
+                    {hand.notes && (
+                      <div className="small muted" style={{ marginTop: 4, fontStyle: "italic" }}>
+                        {hand.notes}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="small err-text">
+                    Handedness failed: <code>{hand.error}</code>
+                  </div>
+                )}
               </div>
             )}
 
