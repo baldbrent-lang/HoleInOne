@@ -1,13 +1,14 @@
-"""AI-powered golf analysis. Step 1: detect handedness.
+"""AI-powered golf analysis. Step 2: find the address frame.
 
-This module is intentionally narrow — the broader plan is to build the
-AI tracer up one capability at a time, verifying each step before
-moving on. This file currently does ONE thing: given an uploaded clip,
-ask Claude whether the golfer in the video is right- or left-handed.
+Camera is always behind the golfer; golfer hits toward a target away
+from the camera. This module's only job (for now) is to identify the
+single frame closest to ADDRESS — the golfer standing over the ball,
+club at rest behind/next to the ball, just before takeaway begins.
 
-The classical CV tracer in services/tracer.py is independent of this
-module — `/admin/clips` runs only the classical pipeline; this module
-is exercised exclusively from `/admin/clips/ai`.
+Future steps will layer in ball-at-rest detection, impact frame, ball
+tracking, and the dashed-overlay render — each verified before moving
+on. The classical CV tracer in services/tracer.py is independent of
+this module.
 """
 from __future__ import annotations
 
@@ -41,78 +42,48 @@ except Exception:  # pragma: no cover
 # vision task.
 MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 
-# Number of frames sampled across the clip and shown to Claude in a
-# single multi-image API call. 6 frames covers address through
-# follow-through with high probability of catching the backswing apex
-# — the single most unambiguous cue for handedness. 3 was too few:
-# evenly-spaced samples sometimes only captured address/follow-through
-# poses where Claude has to guess from subtle grip/stance details that
-# flip depending on camera orientation.
-N_FRAMES = 6
+# Number of frames sampled across the clip and sent to Claude in one
+# multi-image API call. 12 gives Claude a clear timeline view of the
+# whole swing while keeping per-request token usage bounded; with
+# typical clips of 3-10 seconds that's ~one sample every 250-800 ms,
+# dense enough to catch address even if it's brief.
+N_FRAMES = 12
 
-# Per-frame resolution we send to Claude. 640 px wide gives the model
-# enough detail to see the golfer's stance and grip clearly while
-# staying under Anthropic's 1568-px efficient-token threshold and
-# keeping per-request payload small.
+# Per-frame width sent to Claude. Anthropic auto-resizes images above
+# ~1568 px on the long edge anyway; 640 px gives Claude clear visibility
+# of the golfer's stance and club position without bloating payload.
 FRAME_W = 640
 
-HANDEDNESS_SYSTEM_PROMPT = (
-    "You are analyzing still frames from a golf swing video. Your only "
-    "job is to determine whether the golfer is right-handed or "
-    "left-handed.\n\n"
-    "CRITICAL — left/right reference frame:\n"
-    "All cues below are in the GOLFER'S body frame, NOT the camera's "
-    "image frame. The golfer's left hand is on the same side of HIS "
-    "body regardless of where the camera sits. When the camera is in "
-    "front of the golfer (you see his chest/face), the golfer's LEFT "
-    "side appears on the RIGHT side of the image, and vice versa. When "
-    "the camera is behind the golfer (you see his back), the sides "
-    "match the image. ALWAYS reason about the GOLFER'S body sides — "
-    "translate to image-side only at the very end, and only as a "
-    "sanity check.\n\n"
-    "Step 1: Identify the camera position relative to the golfer "
-    "(behind / in-front / down-the-line / face-on / mixed).\n\n"
-    "Step 2: For each frame, identify which swing phase it shows "
-    "(address / takeaway / backswing-apex / downswing / impact / "
-    "follow-through). Backswing-apex is the most informative for "
-    "handedness; address and follow-through are second.\n\n"
-    "Step 3: Apply the cues (in golfer's-body frame):\n"
-    "  STRONGEST CUE — backswing direction:\n"
-    "    - RIGHT-HANDED golfer: club travels back over his RIGHT "
-    "shoulder; at the top, the clubhead is on his RIGHT side, "
-    "high and behind.\n"
-    "    - LEFT-HANDED golfer: mirror image — club travels back "
-    "over his LEFT shoulder; clubhead at the top is on his LEFT side.\n"
-    "  GRIP — at address the TOP hand on the grip (the one closer to "
-    "the body, furthest from the clubhead) is:\n"
-    "    - RIGHT-HANDED: LEFT hand on top.\n"
-    "    - LEFT-HANDED: RIGHT hand on top.\n"
-    "  STANCE — at address the ball sits roughly in front of the "
-    "golfer's lead foot:\n"
-    "    - RIGHT-HANDED: ball near his LEFT foot (lead is left).\n"
-    "    - LEFT-HANDED: ball near his RIGHT foot (lead is right).\n"
-    "  FOLLOW-THROUGH:\n"
-    "    - RIGHT-HANDED: finishes facing target, club ends behind "
-    "and above his LEFT shoulder.\n"
-    "    - LEFT-HANDED: mirror — finishes with club behind his RIGHT "
-    "shoulder.\n\n"
-    "Step 4: Weight the evidence across frames. If backswing-apex is "
-    "visible, that single frame should dominate. Disagree only if you "
-    "have strong contrary evidence in another frame.\n\n"
+ADDRESS_SYSTEM_PROMPT = (
+    "You are analyzing still frames from a golf swing video. The camera "
+    "is positioned BEHIND the golfer; the golfer hits toward a target "
+    "that is away from the camera (down the page). Frames are presented "
+    "in chronological order with their frame numbers shown in a text "
+    "block immediately before each image.\n\n"
+    "Your job: pick the SINGLE frame that best shows the golfer at "
+    "ADDRESS — the moment he is set up over the ball, club resting "
+    "behind or next to the ball, just before he starts his takeaway "
+    "(backswing). Cues for address:\n"
+    "- Golfer is stationary, feet planted, bent at the hips over the ball.\n"
+    "- Club is at the ball or just behind it (NOT raised, NOT mid-swing).\n"
+    "- Hands are at waist or thigh level, not lifted.\n"
+    "- The shoulders / hips have not yet rotated for the swing.\n\n"
+    "Do NOT pick:\n"
+    "- A frame where the club is already moving (any part of backswing, "
+    "downswing, impact, or follow-through).\n"
+    "- A frame where the golfer is still walking up or hasn't set his "
+    "stance yet.\n"
+    "- A frame after the ball has been struck.\n\n"
+    "If multiple frames look like address (the golfer may waggle the "
+    "club or hold the address position for a moment), pick the LAST "
+    "one immediately before the club starts moving back.\n\n"
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
-    '  "camera_position": "behind"|"in_front"|"down_the_line"|"face_on"|"mixed",\n'
-    '  "per_frame": [\n'
-    '    {"frame": <int>, "phase": "address|takeaway|backswing_apex|downswing|impact|follow_through|other",\n'
-    '     "evidence": "<≤15 word note about what side of the golfer\'s body the club is on>"}\n'
-    "  ],\n"
-    '  "handedness": "right"|"left"|"unknown",\n'
-    '  "confidence": "high"|"medium"|"low",\n'
-    '  "notes": "<≤30 word summary citing the single strongest cue>"\n'
+    '  "address_frame": <int — must equal one of the labeled frame numbers>,\n'
+    '  "confidence": "high" | "medium" | "low",\n'
+    '  "notes": "<≤25 word reasoning citing why this frame over the others>"\n'
     "}\n"
-    "Use 'unknown' only if you genuinely cannot see the golfer's body "
-    "in any frame. The per_frame array must include one entry per "
-    "frame you were shown, in the same order."
+    "Never invent a frame number; pick from the labels you were shown."
 )
 
 
@@ -125,7 +96,6 @@ _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 def _extract_json(text: str) -> dict | None:
-    """Pull the first {...} block out of Claude's reply and parse it."""
     if not text:
         return None
     m = _JSON_OBJECT_RE.search(text)
@@ -138,7 +108,7 @@ def _extract_json(text: str) -> dict | None:
 
 
 def _sample_frame_indices(total_frames: int, n_samples: int) -> list[int]:
-    """Pick `n_samples` evenly-spaced indices, avoiding the very first
+    """Pick n_samples evenly-spaced indices, avoiding the very first
     and last few frames where the golfer may not be in shot."""
     if total_frames <= 1:
         return [0]
@@ -159,11 +129,24 @@ def _sample_frame_indices(total_frames: int, n_samples: int) -> list[int]:
     return out
 
 
-def _grab_frames(
+def _grab_frame(input_path: Path, frame_idx: int):
+    """Return the raw BGR ndarray for one frame, or None on failure."""
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return None
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+        ok, frame = cap.read()
+        return frame if ok else None
+    finally:
+        cap.release()
+
+
+def _grab_frames_jpegs(
     input_path: Path, indices: list[int], frame_w: int = FRAME_W,
 ) -> list[tuple[int, bytes]]:
-    """Extract (frame_idx, jpeg_bytes) for each requested index, resized
-    to frame_w wide. Frames that fail to read are skipped silently."""
+    """Return (frame_idx, jpeg_bytes) for each requested index, resized
+    to frame_w wide. Failed reads are skipped silently."""
     out: list[tuple[int, bytes]] = []
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -189,34 +172,38 @@ def _grab_frames(
     return out
 
 
-def detect_handedness(input_path: Path) -> dict:
-    """Ask Claude whether the golfer in this clip is right- or left-handed.
+def find_address_frame(
+    input_path: Path, output_image_path: Path | None = None,
+) -> dict:
+    """Ask Claude which frame in the clip is the golfer at address.
 
     Returns a dict::
 
         {
           "ok": bool,
           "error": str | None,
-          "handedness": "right" | "left" | "unknown" | None,
+          "address_frame": int | None,
           "confidence": "high" | "medium" | "low" | None,
           "notes": str | None,
           "model": str,
-          "frames_sent": [int, ...],
+          "frames_sent": [int, ...],   # frame indices shown to Claude
+          "saved_image": bool,         # True if output_image_path was written
         }
 
-    Never raises — any failure (no API key, no SDK, clip unreadable,
-    API error, parse failure) is reflected in `ok=False` + `error`.
+    If `output_image_path` is provided AND Claude returned a frame
+    index, the full-resolution version of that frame is written to
+    disk so the caller can serve it for display. Never raises — every
+    failure path ends with ok=False + a descriptive error.
     """
     info: dict = {
         "ok": False,
         "error": None,
-        "handedness": None,
+        "address_frame": None,
         "confidence": None,
         "notes": None,
-        "camera_position": None,
-        "per_frame": [],
         "model": MODEL,
         "frames_sent": [],
+        "saved_image": False,
     }
 
     if not HAS_CV:
@@ -243,25 +230,23 @@ def detect_handedness(input_path: Path) -> dict:
         return info
 
     indices = _sample_frame_indices(total_frames, N_FRAMES)
-    frames = _grab_frames(input_path, indices)
+    frames = _grab_frames_jpegs(input_path, indices)
     if not frames:
         info["error"] = "could not extract any frames"
         return info
-    info["frames_sent"] = [idx for idx, _ in frames]
+    candidate_frames = [idx for idx, _ in frames]
+    info["frames_sent"] = candidate_frames
     log.info(
-        "ai_tracer: handedness — sending %d frames %s of %d total @ %.1f fps to %s",
-        len(frames), info["frames_sent"], total_frames, fps, MODEL,
+        "ai_tracer: address — sending %d frames %s of %d total @ %.1f fps to %s",
+        len(frames), candidate_frames, total_frames, fps, MODEL,
     )
 
-    # Build a single multi-image user message, labelling each frame so
-    # Claude can refer to them in its reasoning.
     content: list[dict] = [{
         "type": "text",
         "text": (
-            f"Below are {len(frames)} frames from a golf swing video, in "
-            f"chronological order, sampled across a {total_frames}-frame "
-            f"clip at {fps:.1f} fps. Each image is preceded by its frame "
-            "number."
+            f"Below are {len(frames)} frames from a {total_frames}-frame "
+            f"clip at {fps:.1f} fps, in chronological order. Each image "
+            "is preceded by its frame number."
         ),
     }]
     for idx, jpeg in frames:
@@ -276,7 +261,11 @@ def detect_handedness(input_path: Path) -> dict:
         })
     content.append({
         "type": "text",
-        "text": "Determine the golfer's handedness. Respond with JSON only.",
+        "text": (
+            "Identify which of the labeled frame numbers shows the "
+            f"golfer at ADDRESS, just before takeoff. Valid frame "
+            f"numbers: {candidate_frames}. Respond with JSON only."
+        ),
     })
 
     client = Anthropic()
@@ -286,13 +275,13 @@ def detect_handedness(input_path: Path) -> dict:
             max_tokens=256,
             system=[{
                 "type": "text",
-                "text": HANDEDNESS_SYSTEM_PROMPT,
+                "text": ADDRESS_SYSTEM_PROMPT,
                 "cache_control": {"type": "ephemeral"},
             }],
             messages=[{"role": "user", "content": content}],
         )
     except Exception as exc:
-        log.warning("ai_tracer: handedness API call failed: %s", exc)
+        log.warning("ai_tracer: address API call failed: %s", exc)
         info["error"] = f"api_failed: {exc}"
         return info
 
@@ -303,37 +292,46 @@ def detect_handedness(input_path: Path) -> dict:
     raw = "\n".join(text_chunks)
     parsed = _extract_json(raw)
     if not parsed:
-        log.warning("ai_tracer: handedness — no JSON in response: %s", raw[:200])
+        log.warning("ai_tracer: address — no JSON in response: %s", raw[:200])
         info["error"] = "no_json_in_response"
         return info
 
-    handedness = str(parsed.get("handedness") or "").lower()
-    if handedness not in {"right", "left", "unknown"}:
-        info["error"] = f"unexpected handedness value: {handedness!r}"
+    try:
+        addr = int(parsed.get("address_frame"))
+    except (TypeError, ValueError):
+        info["error"] = "could_not_parse_address_frame"
         return info
+    # Snap to the nearest candidate if Claude returned something off-list.
+    if addr not in candidate_frames:
+        nearest = min(candidate_frames, key=lambda f: abs(f - addr))
+        log.warning(
+            "ai_tracer: address — Claude returned frame %d not in candidates; "
+            "snapping to nearest candidate %d",
+            addr, nearest,
+        )
+        addr = nearest
+    if addr < 0 or addr >= total_frames:
+        info["error"] = f"address_frame_out_of_range ({addr})"
+        return info
+
     info["ok"] = True
-    info["handedness"] = handedness
+    info["address_frame"] = addr
     info["confidence"] = str(parsed.get("confidence") or "").lower() or None
     info["notes"] = str(parsed.get("notes") or "")[:300] or None
-    info["camera_position"] = str(parsed.get("camera_position") or "").lower() or None
-    per_frame = parsed.get("per_frame")
-    if isinstance(per_frame, list):
-        info["per_frame"] = [
-            {
-                "frame": pf.get("frame"),
-                "phase": str(pf.get("phase") or "").lower(),
-                "evidence": str(pf.get("evidence") or "")[:200],
-            }
-            for pf in per_frame if isinstance(pf, dict)
-        ]
     log.info(
-        "ai_tracer: handedness — %s (%s) camera=%s — %s",
-        info["handedness"], info["confidence"],
-        info["camera_position"], info["notes"],
+        "ai_tracer: address — frame=%d confidence=%s notes=%s",
+        addr, info["confidence"], info["notes"],
     )
-    for pf in info["per_frame"]:
-        log.info(
-            "ai_tracer:   frame %s phase=%s evidence=%s",
-            pf.get("frame"), pf.get("phase"), pf.get("evidence"),
-        )
+
+    # Save the picked frame at native resolution so the UI can display it.
+    if output_image_path is not None:
+        full_frame = _grab_frame(input_path, addr)
+        if full_frame is not None:
+            ok = cv2.imwrite(
+                str(output_image_path), full_frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 90],
+            )
+            info["saved_image"] = bool(ok)
+        else:
+            log.warning("ai_tracer: address — could not re-extract picked frame %d", addr)
     return info

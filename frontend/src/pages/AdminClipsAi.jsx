@@ -7,12 +7,13 @@ const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
 
 /**
- * AI tracer test bench — step 1: detect handedness.
+ * AI tracer test bench — step 2: identify the address frame.
  *
- * The plan is to build the AI tracer up one capability at a time. This
- * page currently exercises just one thing: send a few frames to Claude
- * and ask whether the golfer is right- or left-handed. Each subsequent
- * step (ball at rest, impact, tracking, render) will be layered in.
+ * Camera is always behind the golfer. Pressing the button sends ~12
+ * frames spanning the clip to Claude and asks it to pick the single
+ * frame closest to address (golfer set up over the ball, just before
+ * takeaway begins). The picked frame is rendered next to the source
+ * video so we can verify visually.
  */
 export default function AdminClipsAi() {
   const adminPassword =
@@ -77,13 +78,14 @@ export default function AdminClipsAi() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>AI tracer — step 1: handedness</h3>
+        <h3 style={{ marginBottom: 4 }}>AI tracer — step 2: address frame</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
-          Rebuilding the AI tracer one step at a time. Right now, hitting
-          <b> Run</b> sends a few sampled frames to Claude and asks whether
-          the golfer is right- or left-handed. That's it. We'll layer in
-          ball-at-rest, impact detection, tracking, and rendering one
-          step at a time — each verified before moving on.
+          Camera is assumed to be <b>behind the golfer</b>, hitting toward a
+          target away from the camera. Hitting <b>Find address frame</b> sends
+          12 evenly-spaced frames to Claude in one request and asks it to
+          pick the single frame closest to address (set up over the ball,
+          just before takeaway). The picked frame appears next to the
+          source video for visual verification.
         </p>
       </div>
 
@@ -103,7 +105,8 @@ export default function AdminClipsAi() {
 
       {clips?.map((c) => {
         const result = results[c.id];
-        const hand = result?.handedness;
+        const addr = result?.address;
+        const addrImage = result?.address_image_url;
         const isComposite = (c.source_url || "").includes("_composite");
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
@@ -137,78 +140,67 @@ export default function AdminClipsAi() {
               </div>
               <div>
                 <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  Handedness
-                </div>
-                <div
-                  style={{
-                    aspectRatio: "16/9",
-                    display: "grid",
-                    placeItems: "center",
-                    border: "2px dashed var(--border)",
-                    borderRadius: 8,
-                    padding: 16,
-                    textAlign: "center",
-                  }}
-                >
-                  {running[c.id] ? (
-                    <div className="muted">Asking Claude…</div>
-                  ) : hand?.ok ? (
-                    <div style={{ width: "100%" }}>
-                      <div style={{ fontSize: 32, fontWeight: 700, textTransform: "uppercase" }}>
-                        {hand.handedness}
-                      </div>
-                      <div className="small muted" style={{ marginTop: 6 }}>
-                        confidence: <b>{hand.confidence || "—"}</b>
-                        {hand.camera_position && (
-                          <> · camera: <b>{hand.camera_position}</b></>
-                        )}
-                      </div>
-                      {hand.notes && (
-                        <div className="small muted" style={{ marginTop: 4, fontStyle: "italic" }}>
-                          {hand.notes}
-                        </div>
-                      )}
-                      {Array.isArray(hand.per_frame) && hand.per_frame.length > 0 && (
-                        <details style={{ marginTop: 8, textAlign: "left" }}>
-                          <summary className="small muted" style={{ cursor: "pointer" }}>
-                            Per-frame reasoning ({hand.per_frame.length})
-                          </summary>
-                          <table style={{ width: "100%", marginTop: 6, fontSize: 12, borderCollapse: "collapse" }}>
-                            <thead>
-                              <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
-                                <th style={{ padding: "3px 6px" }}>Frame</th>
-                                <th style={{ padding: "3px 6px" }}>Phase</th>
-                                <th style={{ padding: "3px 6px" }}>Evidence</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {hand.per_frame.map((pf, i) => (
-                                <tr key={`${pf.frame}-${i}`} style={{ borderBottom: "1px solid var(--border)" }}>
-                                  <td style={{ padding: "3px 6px" }}><code>{pf.frame}</code></td>
-                                  <td style={{ padding: "3px 6px" }}>{pf.phase}</td>
-                                  <td style={{ padding: "3px 6px" }} className="muted">{pf.evidence}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </details>
-                      )}
-                      {hand.frames_sent && (
-                        <div className="tiny muted" style={{ marginTop: 6 }}>
-                          Frames sent: [{hand.frames_sent.join(", ")}] · model {hand.model}
-                        </div>
-                      )}
-                    </div>
-                  ) : hand?.error ? (
-                    <div className="err-text small">
-                      Error: <code>{hand.error}</code>
-                    </div>
-                  ) : (
-                    <div className="muted">No result yet</div>
+                  Address frame
+                  {addr?.address_frame != null && (
+                    <span className="muted" style={{ marginLeft: 6 }}>
+                      · frame <code>{addr.address_frame}</code>
+                    </span>
                   )}
                 </div>
+                {running[c.id] ? (
+                  <div
+                    style={{
+                      aspectRatio: "16/9", display: "grid", placeItems: "center",
+                      border: "2px dashed var(--border)", borderRadius: 8,
+                    }}
+                    className="muted"
+                  >
+                    Asking Claude…
+                  </div>
+                ) : addrImage ? (
+                  <img
+                    src={addrImage}
+                    alt="Claude's pick for address frame"
+                    style={{ width: "100%", borderRadius: 8, background: "#000", display: "block" }}
+                  />
+                ) : addr?.error ? (
+                  <div
+                    style={{
+                      aspectRatio: "16/9", display: "grid", placeItems: "center",
+                      border: "2px dashed var(--border)", borderRadius: 8,
+                      padding: 16, textAlign: "center",
+                    }}
+                    className="err-text small"
+                  >
+                    Error: <code>{addr.error}</code>
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      aspectRatio: "16/9", display: "grid", placeItems: "center",
+                      border: "2px dashed var(--border)", borderRadius: 8,
+                    }}
+                    className="muted"
+                  >
+                    No result yet
+                  </div>
+                )}
               </div>
             </div>
+
+            {addr?.ok && (
+              <div className="small muted" style={{ marginTop: 8 }}>
+                Confidence: <b>{addr.confidence || "—"}</b>
+                {addr.notes && (
+                  <>{" "}— <i>{addr.notes}</i></>
+                )}
+              </div>
+            )}
+            {addr?.frames_sent && (
+              <div className="tiny muted" style={{ marginTop: 4 }}>
+                Candidate frames sent: [{addr.frames_sent.join(", ")}] · model {addr.model}
+              </div>
+            )}
 
             {result?.error && (
               <p className="small err-text" style={{ marginTop: 8 }}>
@@ -220,10 +212,10 @@ export default function AdminClipsAi() {
               <button
                 onClick={() => runOne(c.id)}
                 disabled={!!running[c.id] || isComposite}
-                title={isComposite ? "Composite clips not supported" : "Ask Claude whether this golfer is right- or left-handed"}
+                title={isComposite ? "Composite clips not supported" : "Ask Claude to find the address frame"}
               >
                 <Icon name="play" size={14} />{" "}
-                {running[c.id] ? "Running…" : "Run handedness check"}
+                {running[c.id] ? "Running…" : "Find address frame"}
               </button>
               {isComposite && (
                 <span className="small muted" style={{ alignSelf: "center" }}>

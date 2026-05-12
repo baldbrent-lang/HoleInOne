@@ -39,7 +39,7 @@ from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
 from ..services.tracer import have_tracer, render_tracer
-from ..services.ai_tracer import detect_handedness
+from ..services.ai_tracer import find_address_frame
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -544,12 +544,12 @@ def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
 
 @router.post("/clips/{clip_id}/ai-trace")
 def ai_trace(clip_id: int, db: Session = Depends(get_db)):
-    """AI analysis — step 1: detect the golfer's handedness.
+    """AI analysis — step 2: identify the golfer's address frame.
 
-    The /admin/clips/ai page is being rebuilt one capability at a time.
-    Currently this endpoint just asks Claude whether the golfer in the
-    clip is right- or left-handed. Future steps will add ball-at-rest,
-    impact frame, ball tracking, etc.
+    Camera is always behind the golfer. This endpoint asks Claude
+    which frame in the clip shows the golfer at address (set up
+    over the ball, just before takeaway). The picked frame is
+    saved as a JPEG so the page can display it.
     """
     clip = db.get(VideoClip, clip_id)
     if not clip:
@@ -567,10 +567,17 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
     if not fpath.exists():
         raise HTTPException(404, f"source file missing on disk: {fname}")
 
-    info = detect_handedness(fpath)
+    image_name = f"{fpath.stem}_address.jpg"
+    image_path = CLIPS_DIR / image_name
+    info = find_address_frame(fpath, output_image_path=image_path)
+
+    image_url = None
+    if info.get("saved_image") and image_path.exists():
+        mtime = int(image_path.stat().st_mtime)
+        image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
 
     db.add(AuditLog(
-        actor="admin", action="ai_trace_handedness", target=f"clip:{clip.id}",
+        actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
         detail=str(info),
     ))
     db.commit()
@@ -578,7 +585,8 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
     return {
         "clip_id": clip.id,
         "source_url": clip.source_url,
-        "handedness": info,
+        "address": info,
+        "address_image_url": image_url,
     }
 
 
