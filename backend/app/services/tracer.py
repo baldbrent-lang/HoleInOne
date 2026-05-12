@@ -728,21 +728,27 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         # multi-chain pick-best gauntlet. The tracker uses ALL
         # post-mask detections, so the trailing yellow dots past the
         # apex are naturally part of the trail.
+        direct_info: dict = {}
         if ball_addr_native is not None:
             log.info(
                 "tracer: direct tracker starting from ball=(%.0f,%.0f) "
-                "on %d post-mask detections...",
-                ball_addr_native[0], ball_addr_native[1], len(detections),
+                "on %d post-mask detections (%d seeds)...",
+                ball_addr_native[0], ball_addr_native[1],
+                len(detections), len(seeds),
             )
-            direct_track = _track_ball_from_address(
+            direct_track, direct_info = _track_ball_from_address(
                 ball_addr_native, detections, seeds,
                 total_frames_scanned, width, height,
+                body_mask_det=body_mask_det, det_scale=det_scale,
+            )
+            log.info(
+                "tracer: direct tracker: impact_frame=%s impact_det=%s "
+                "track_len=%d stop_reason=%s",
+                direct_info.get("impact_frame"),
+                direct_info.get("impact_det"),
+                len(direct_track), direct_info.get("stop_reason"),
             )
             if direct_track and len(direct_track) >= MIN_TRACK_LENGTH:
-                log.info(
-                    "tracer: direct tracker built %d-point track",
-                    len(direct_track),
-                )
                 seed_track = direct_track
                 track = direct_track
             else:
@@ -804,6 +810,11 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
 
     if debug_path is not None:
         filmstrip = _sample_filmstrip(input_path, total_frames_scanned)
+        # Grab the impact frame snapshot for the debug-image inset, if
+        # the direct tracker identified one.
+        impact_frame_idx = direct_info.get("impact_frame") if direct_info else None
+        impact_det_pos = direct_info.get("impact_det") if direct_info else None
+        impact_snapshot = _grab_frame(input_path, impact_frame_idx) if impact_frame_idx is not None else None
         _write_debug(
             debug_path, busiest_frame, busiest_frame_idx, busiest_candidates,
             first_frame_snapshot, detections, seeds, filmstrip,
@@ -815,6 +826,10 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             club_line_det=club_best_line, handedness=handedness,
             body_bottom_det=body_bottom_det, picked_track=picked_for_debug,
             ball_pos_native=ball_pos_native, ball_pos_source=ball_pos_source,
+            impact_frame_image=impact_snapshot,
+            impact_frame_idx=impact_frame_idx,
+            impact_det_native=impact_det_pos,
+            tracker_stop_reason=direct_info.get("stop_reason") if direct_info else None,
         )
 
     if aborting_noise:
@@ -1345,7 +1360,9 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                  ball_addr_det=None, body_x_det=None, behind_side=None,
                  club_line_det=None, handedness=None,
                  body_bottom_det=None, picked_track=None,
-                 ball_pos_native=None, ball_pos_source=None):
+                 ball_pos_native=None, ball_pos_source=None,
+                 impact_frame_image=None, impact_frame_idx=None,
+                 impact_det_native=None, tracker_stop_reason=None):
     """Diagnostic JPG composed of two parts stacked vertically.
 
     Top half = the busiest frame (most candidates seen) with:
@@ -1445,6 +1462,37 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                 cv2.line(base, pts[i - 1], pts[i], (255, 0, 255), 3, cv2.LINE_AA)
             for px, py in pts:
                 cv2.circle(base, (px, py), 5, (255, 0, 255), 2, cv2.LINE_AA)
+        # Impact-frame inset: small thumbnail of the frame the tracker
+        # identified as the moment of impact, with a red ring at the
+        # detection it took as the first-ball-in-flight point. Lets the
+        # operator visually verify the algorithm picked the right frame
+        # and the right ball position.
+        if impact_frame_image is not None:
+            inset_h = 240
+            ih, iw = impact_frame_image.shape[:2]
+            inset_w = max(1, int(iw * inset_h / max(ih, 1)))
+            inset = cv2.resize(impact_frame_image, (inset_w, inset_h))
+            if impact_det_native is not None:
+                inset_cx = int(impact_det_native[0] * inset_w / iw)
+                inset_cy = int(impact_det_native[1] * inset_h / ih)
+                cv2.circle(inset, (inset_cx, inset_cy), 12, (0, 0, 255), 3, cv2.LINE_AA)
+                cv2.circle(inset, (inset_cx, inset_cy), 4, (0, 0, 255), -1, cv2.LINE_AA)
+            label = f"impact f{impact_frame_idx}" if impact_frame_idx is not None else "impact"
+            if tracker_stop_reason:
+                label += f"  stop:{tracker_stop_reason}"
+            cv2.rectangle(inset, (0, 0), (inset_w, 22), (0, 0, 0), -1)
+            cv2.putText(inset, label, (6, 16), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            # Top-right corner placement
+            x0 = max(0, base.shape[1] - inset_w - 12)
+            y0 = 50  # below the header bar
+            x1 = min(base.shape[1], x0 + inset_w)
+            y1 = min(base.shape[0], y0 + inset_h)
+            ih_clip = y1 - y0
+            iw_clip = x1 - x0
+            if ih_clip > 0 and iw_clip > 0:
+                base[y0:y1, x0:x1] = inset[:ih_clip, :iw_clip]
+                cv2.rectangle(base, (x0, y0), (x1, y1), (255, 255, 255), 2)
         if busiest_cands:
             for cx, cy, r in busiest_cands:
                 cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
@@ -1554,64 +1602,77 @@ def _candidates_from_mask(fg_mask):
 
 def _track_ball_from_address(
     ball_addr_native, detections, seeds, total_frames, frame_w, frame_h,
+    body_mask_det=None, det_scale=1.0,
 ):
     """Single-ball tracker anchored at the at-rest ball position.
 
-    Starts from a KNOWN ball-at-rest position (already detected via
-    disappearance check / vote-based scan), walks forward in time
-    frame-by-frame, and at each step picks the post-mask detection
-    closest to the velocity-extrapolated prediction. Smooth velocity
-    is updated after each accepted point.
+    Starts from a KNOWN ball-at-rest position, finds the impact frame
+    (first upward-streak seed that's clearly above the ball, NOT inside
+    the body silhouette), then walks forward frame-by-frame picking the
+    post-mask detection closest to the velocity-extrapolated prediction.
 
-    Impact frame is located from the UPWARD-STREAK SEEDS (green dots)
-    only — body fragments rarely participate in sustained upward
-    chains, so a seed near the ball is almost always a real
-    ball-flight detection. After impact, the tracker draws from ALL
-    post-mask detections (green AND yellow), so the trailing yellow
-    apex/descent dots are naturally captured.
-
-    Returns a list of _Det in native coords, including the at-rest
-    ball as the very first point. Empty list if no impact frame can
-    be located.
+    Returns a tuple (track, info_dict). info_dict carries diagnostics
+    used to render the debug image — specifically impact_frame and a
+    stop_reason explaining why the tracker stopped walking forward.
     """
+    info: dict = {
+        "impact_frame": None,
+        "impact_det": None,
+        "stop_reason": "no_impact",
+    }
     if ball_addr_native is None or not detections:
-        return []
+        return [], info
     by_frame: dict[int, list[_Det]] = {}
     for d in detections:
         by_frame.setdefault(int(d.frame), []).append(d)
     if not by_frame:
-        return []
+        return [], info
     seeds_by_frame: dict[int, list[_Det]] = {}
     for d in (seeds or ()):
         seeds_by_frame.setdefault(int(d.frame), []).append(d)
 
     bx, by = float(ball_addr_native[0]), float(ball_addr_native[1])
 
-    # Step 1: find the impact frame — the first SEED frame containing
-    # a detection that has clearly LIFTED off the ball position.
-    # Lateral tolerance tightened to 50px (was 100) so body fragments
-    # one body-width to the side of the ball don't qualify. Using
-    # seeds rather than all post-mask detections makes the cutoff
-    # automatic: seeds are detections that participated in an upward
-    # chain, which body fragments effectively never do.
+    def _in_body_mask(p):
+        if body_mask_det is None:
+            return False
+        h, w = body_mask_det.shape[:2]
+        ix = int(p.x * det_scale)
+        iy = int(p.y * det_scale)
+        if 0 <= iy < h and 0 <= ix < w:
+            return body_mask_det[iy, ix] > 0
+        return False
+
+    # Step 1: locate impact_det as the first upward-streak SEED that:
+    #   - sits 20-250 px above the at-rest ball (clearly lifted off)
+    #   - within 50 px laterally of the ball (the ball doesn't shoot
+    #     sideways in one frame)
+    #   - NOT inside the body silhouette mask (body fragments can pass
+    #     the upward-streak filter during swing motion, but they live
+    #     inside the body silhouette; the actual ball doesn't)
     impact_frame = None
     impact_det = None
     impact_pool = seeds_by_frame if seeds_by_frame else by_frame
     for f in sorted(impact_pool):
         for d in impact_pool[f]:
             dx_v = abs(d.x - bx)
-            dy_v = d.y - by  # negative when the detection sits above the ball
-            if dx_v < 50 and -250 < dy_v < -20:
-                impact_frame = f
-                impact_det = d
-                break
+            dy_v = d.y - by
+            if not (dx_v < 50 and -250 < dy_v < -20):
+                continue
+            if _in_body_mask(d):
+                continue
+            impact_frame = f
+            impact_det = d
+            break
         if impact_frame is not None:
             break
 
     if impact_frame is None or impact_det is None:
-        return []
+        return [], info
+    info["impact_frame"] = int(impact_frame)
+    info["impact_det"] = (float(impact_det.x), float(impact_det.y))
 
-    # Step 2: seed the tracker with (ball at impact-1, first impact det)
+    # Step 2: seed the tracker with [ball at rest, first impact det]
     track: list[_Det] = [
         _Det(max(0, impact_frame - 1), bx, by, 0.0),
         impact_det,
@@ -1628,17 +1689,18 @@ def _track_ball_from_address(
     EPS_BASE = 28.0
     EPS_GROWTH_PER_MISS = 3.0
     MARGIN = 60
+    stop_reason = "end_of_clip"
 
     while cur_frame < total_frames - 1:
         next_frame = cur_frame + 1
         pred_x = cur_x + vel_x
         pred_y = cur_y + vel_y
 
-        # Bail if the prediction has left the frame entirely.
         if (
             pred_x < -MARGIN or pred_x > frame_w + MARGIN
             or pred_y < -MARGIN or pred_y > frame_h + MARGIN
         ):
+            stop_reason = "out_of_frame"
             break
 
         cands = by_frame.get(next_frame, [])
@@ -1656,8 +1718,6 @@ def _track_ball_from_address(
             track.append(best)
             new_vx = float(best.x - cur_x)
             new_vy = float(best.y - cur_y)
-            # Velocity smoothing (60% new, 40% prior) so a single noisy
-            # accepted point doesn't derail the predictor.
             vel_x = 0.6 * new_vx + 0.4 * vel_x
             vel_y = 0.6 * new_vy + 0.4 * vel_y
             cur_x = float(best.x)
@@ -1665,16 +1725,16 @@ def _track_ball_from_address(
             cur_frame = next_frame
             gap_count = 0
         else:
-            # No match — keep predicting forward but tolerate only so
-            # many misses before declaring the trail dead.
             cur_x = pred_x
             cur_y = pred_y
             cur_frame = next_frame
             gap_count += 1
             if gap_count > MAX_CONSECUTIVE_MISS:
+                stop_reason = "max_miss"
                 break
 
-    return track
+    info["stop_reason"] = stop_reason
+    return track, info
 
 
 def _link(detections):
