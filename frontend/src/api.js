@@ -186,6 +186,13 @@ export const api = {
     request(`/api/admin/clips/${clipId}/retry-tracer`, {
       method: "POST", adminPassword: key, timeoutMs: 240_000,
     }),
+  aiTrace: (key, clipId) =>
+    // AI tracer does ~20 Claude calls (scout + dense). Each call is a
+    // few seconds; with parallelism the typical run is 15-30s but can
+    // stretch on retries. 4 min is plenty.
+    request(`/api/admin/clips/${clipId}/ai-trace`, {
+      method: "POST", adminPassword: key, timeoutMs: 240_000,
+    }),
   listParticipants: (key, params = {}) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {

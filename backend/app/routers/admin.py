@@ -39,6 +39,7 @@ from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
 from ..services.tracer import have_tracer, render_tracer
+from ..services.ai_tracer import render_ai_tracer
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -538,6 +539,74 @@ def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
         "tracer_url": clip.tracer_url,
         "tracer_info": tracer_info,
         "tracer_debug_url": tracer_debug_url,
+    }
+
+
+@router.post("/clips/{clip_id}/ai-trace")
+def ai_trace(clip_id: int, db: Session = Depends(get_db)):
+    """Run the AI-only ball tracer on an existing clip's source file.
+
+    Unlike /retry-tracer, this endpoint does NOT fall back to classical
+    CV. If Claude can't find the ball it returns ok=False with a clear
+    error string. Output is rendered to a distinct filename
+    ({stem}_ai_traced.mp4) so it doesn't overwrite the classical
+    tracer's output and both can be compared side-by-side.
+    """
+    clip = db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+    if not clip.source_url:
+        raise HTTPException(400, "clip has no source_url")
+    fname = clip.source_url.rstrip("/").rsplit("/", 1)[-1]
+    if not fname:
+        raise HTTPException(400, "could not parse filename from source_url")
+    if "_composite" in fname:
+        raise HTTPException(
+            400, "ai-trace doesn't support composite clips (need raw halves)",
+        )
+    fpath = CLIPS_DIR / fname
+    if not fpath.exists():
+        raise HTTPException(404, f"source file missing on disk: {fname}")
+
+    traced_name = f"{fpath.stem}_ai_traced.mp4"
+    traced_path = CLIPS_DIR / traced_name
+    debug_name = f"{fpath.stem}_ai_debug.jpg"
+    debug_path = CLIPS_DIR / debug_name
+
+    info = render_ai_tracer(fpath, traced_path, debug_path)
+    debug_url = None
+    if debug_path.exists():
+        debug_mtime = int(debug_path.stat().st_mtime)
+        debug_url = f"{settings.app_base_url}/uploads/clips/{debug_name}?v={debug_mtime}"
+
+    ai_url = None
+    if info.get("ok"):
+        compressed = compress_for_email(traced_path)
+        if not compressed:
+            log.warning(
+                "ai-trace: compress_for_email returned False for %s — file likely still mp4v",
+                traced_path.name,
+            )
+        if traced_path.exists() and traced_path.stat().st_size > 0:
+            mtime = int(traced_path.stat().st_mtime)
+            ai_url = f"{settings.app_base_url}/uploads/clips/{traced_name}?v={mtime}"
+        else:
+            info = {**info, "ok": False, "error": "post-encode produced empty file"}
+    else:
+        traced_path.unlink(missing_ok=True)
+
+    db.add(AuditLog(
+        actor="admin", action="ai_trace", target=f"clip:{clip.id}",
+        detail=str({k: v for k, v in info.items() if k != "ai_info"}),
+    ))
+    db.commit()
+
+    return {
+        "clip_id": clip.id,
+        "source_url": clip.source_url,
+        "ai_tracer_url": ai_url,
+        "ai_info": info,
+        "ai_debug_url": debug_url,
     }
 
 

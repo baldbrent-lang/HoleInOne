@@ -7,19 +7,20 @@ const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
 
 /**
- * Iteration page: every uploaded clip, with a Retry-tracer button on
- * each row so we can re-run the detector after threshold changes
- * without re-uploading footage every time.
+ * AI-only tracer iteration page. Runs the Claude Vision tracer end-to-end
+ * with NO classical CV fallback. The intent is to evaluate the pure AI
+ * pipeline in isolation so we can tune prompt + sampling strategy
+ * without classical results muddying the comparison.
  */
-export default function AdminClips() {
+export default function AdminClipsAi() {
   const adminPassword =
     localStorage.getItem(ADMIN_PW_STORAGE) ||
     localStorage.getItem(LEGACY_ADMIN_PW_STORAGE) ||
     "";
   const [clips, setClips] = useState(null);
   const [error, setError] = useState(null);
-  const [retrying, setRetrying] = useState({});      // {clip_id: true}
-  const [results, setResults] = useState({});        // {clip_id: {tracer_url, tracer_info, tracer_debug_url}}
+  const [running, setRunning] = useState({});  // {clip_id: true}
+  const [results, setResults] = useState({});  // {clip_id: payload}
 
   async function load() {
     try {
@@ -35,19 +36,15 @@ export default function AdminClips() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function retryOne(clipId) {
-    setRetrying((r) => ({ ...r, [clipId]: true }));
+  async function aiTraceOne(clipId) {
+    setRunning((r) => ({ ...r, [clipId]: true }));
     try {
-      const data = await api.retryTracer(adminPassword, clipId);
+      const data = await api.aiTrace(adminPassword, clipId);
       setResults((r) => ({ ...r, [clipId]: data }));
-      // Patch the clip in-place so the row reflects new tracer_url
-      setClips((cs) =>
-        (cs || []).map((c) => (c.id === clipId ? { ...c, tracer_url: data.tracer_url } : c))
-      );
     } catch (e) {
       setResults((r) => ({ ...r, [clipId]: { error: e.message } }));
     } finally {
-      setRetrying((r) => ({ ...r, [clipId]: false }));
+      setRunning((r) => ({ ...r, [clipId]: false }));
     }
   }
 
@@ -71,18 +68,21 @@ export default function AdminClips() {
         <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/upload">Upload clip</Link>
         <Link to="/admin/long-upload">Long upload</Link>
-        <Link to="/admin/clips" className="active">All clips</Link>
-        <Link to="/admin/clips/ai">AI tracer</Link>
+        <Link to="/admin/clips">All clips</Link>
+        <Link to="/admin/clips/ai" className="active">AI tracer</Link>
         <Link to="/admin/showcase">Home videos</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>All uploaded reelz</h3>
+        <h3 style={{ marginBottom: 4 }}>AI tracer test bench</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
-          Re-run the tracer on any clip without re-uploading. Useful while we're
-          iterating on the detector — tune thresholds in the code, push, then
-          hit Retry on a clip you've already uploaded to see the new result.
+          Runs the Claude Vision tracer with <b>no classical CV fallback</b>.
+          Claude classifies frames as <code>at_rest</code> / <code>in_flight</code>{" "}
+          / <code>gone</code>, fits a parabola through the in-flight anchors, and
+          renders the dashed overlay. Cyan rings mark frames Claude verified
+          directly (vs interpolated by the parabola fit). Each run is ~20 API
+          calls; budget 15-30s and a few cents per clip.
         </p>
       </div>
 
@@ -102,10 +102,14 @@ export default function AdminClips() {
 
       {clips?.map((c) => {
         const result = results[c.id];
-        const tracerUrl = result?.tracer_url ?? c.tracer_url;
-        const info = result?.tracer_info;
-        const debugUrl = result?.tracer_debug_url;
+        const aiUrl = result?.ai_tracer_url;
+        const info = result?.ai_info;
+        const aiDebugUrl = result?.ai_debug_url;
         const isComposite = (c.source_url || "").includes("_composite");
+        const anchors = info?.ai_info?.anchors || [];
+        const scoutHits = info?.ai_info?.scout_hits || [];
+        const stopReason = info?.ai_info?.stop_reason;
+        const model = info?.ai_info?.model;
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
             <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
@@ -138,16 +142,17 @@ export default function AdminClips() {
               </div>
               <div>
                 <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  Tracer
-                  {info?.residual_px != null && (
+                  AI tracer
+                  {info?.n_points != null && (
                     <span className="muted" style={{ marginLeft: 6 }}>
-                      · {info.residual_px.toFixed(1)}px · {info.n_points} pts
+                      · {info.n_points} pts
+                      {info.frame_range && <> · frames {info.frame_range[0]}–{info.frame_range[1]}</>}
                     </span>
                   )}
                 </div>
-                {tracerUrl ? (
+                {aiUrl ? (
                   <video
-                    src={tracerUrl}
+                    src={aiUrl}
                     controls
                     style={{ width: "100%", borderRadius: 8, background: "#000" }}
                   />
@@ -156,52 +161,94 @@ export default function AdminClips() {
                     aspectRatio: "16/9", display: "grid", placeItems: "center",
                     border: "2px dashed var(--border)", borderRadius: 8,
                   }}>
-                    No tracer yet
+                    {running[c.id] ? "Running Claude…" : "No AI trace yet"}
                   </div>
                 )}
               </div>
             </div>
 
-            {debugUrl && (
+            {(model || stopReason) && (
+              <div className="small muted" style={{ marginTop: 8 }}>
+                {model && <>Model: <code>{model}</code> · </>}
+                {stopReason && <>Stop reason: <code>{stopReason}</code></>}
+                {scoutHits.length > 0 && <> · Scout in-flight frames: <code>[{scoutHits.join(", ")}]</code></>}
+              </div>
+            )}
+
+            {anchors.length > 0 && (
+              <details style={{ marginTop: 8 }}>
+                <summary className="small muted" style={{ cursor: "pointer" }}>
+                  Claude's per-frame classifications ({anchors.length})
+                </summary>
+                <div style={{ marginTop: 8, fontSize: 12 }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", borderBottom: "1px solid var(--border)" }}>
+                        <th style={{ padding: "4px 8px" }}>Frame</th>
+                        <th style={{ padding: "4px 8px" }}>State</th>
+                        <th style={{ padding: "4px 8px" }}>Confidence</th>
+                        <th style={{ padding: "4px 8px" }}>Coords</th>
+                        <th style={{ padding: "4px 8px" }}>Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {anchors.map((a, i) => (
+                        <tr key={`${a.frame}-${i}`} style={{ borderBottom: "1px solid var(--border)" }}>
+                          <td style={{ padding: "4px 8px" }}><code>{a.frame}</code></td>
+                          <td style={{ padding: "4px 8px" }}>
+                            <span className={`pill small ${stateClass(a.state)}`}>{a.state || "?"}</span>
+                          </td>
+                          <td style={{ padding: "4px 8px" }}>{a.confidence}</td>
+                          <td style={{ padding: "4px 8px" }}>
+                            {a.x != null && a.y != null ? `(${a.x}, ${a.y})` : "—"}
+                          </td>
+                          <td style={{ padding: "4px 8px" }} className="muted">{a.notes}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            )}
+
+            {aiDebugUrl && (
               <div style={{ marginTop: 10 }}>
                 <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  Detector debug image
+                  AI anchor montage
                 </div>
                 <img
-                  src={debugUrl}
-                  alt="ball candidates debug"
-                  style={{ width: "100%", maxWidth: 800, borderRadius: 8, border: "1px solid var(--border)" }}
+                  src={aiDebugUrl}
+                  alt="Claude anchor frames"
+                  style={{ width: "100%", maxWidth: 1200, borderRadius: 8, border: "1px solid var(--border)" }}
                 />
               </div>
             )}
 
             {result?.error && (
               <p className="small err-text" style={{ marginTop: 8 }}>
-                Retry failed: <code>{result.error}</code>
+                AI trace failed: <code>{result.error}</code>
               </p>
             )}
 
-            {info && !info.ok && !result?.error && (
+            {info && info.ok === false && !result?.error && (
               <p className="small muted" style={{ marginTop: 8 }}>
-                Tracer didn't find a clean trajectory
-                {info.error ? <> — <code>{info.error}</code></> : null}
-                {info.n_candidates != null && <> · {info.n_candidates} raw candidates</>}
-                .
+                AI tracer couldn't find a flight
+                {info.error ? <> — <code>{info.error}</code></> : null}.
               </p>
             )}
 
             <div className="row" style={{ marginTop: 12 }}>
               <button
-                onClick={() => retryOne(c.id)}
-                disabled={!!retrying[c.id] || isComposite}
-                title={isComposite ? "Composite clips need raw halves — re-upload" : "Re-run the tracer with current thresholds"}
+                onClick={() => aiTraceOne(c.id)}
+                disabled={!!running[c.id] || isComposite}
+                title={isComposite ? "Composite clips need raw halves" : "Run AI-only tracer (no classical CV fallback)"}
               >
                 <Icon name="play" size={14} />{" "}
-                {retrying[c.id] ? "Running tracer…" : "Retry tracer"}
+                {running[c.id] ? "Running Claude…" : "Run AI tracer"}
               </button>
               {isComposite && (
                 <span className="small muted" style={{ alignSelf: "center" }}>
-                  Composite — re-upload to re-tracer
+                  Composite — AI tracer doesn't support stitched halves
                 </span>
               )}
             </div>
@@ -210,4 +257,13 @@ export default function AdminClips() {
       })}
     </div>
   );
+}
+
+function stateClass(state) {
+  switch (state) {
+    case "in_flight": return "ok";
+    case "at_rest":   return "";
+    case "gone":      return "warn";
+    default:          return "";
+  }
 }

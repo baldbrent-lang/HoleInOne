@@ -553,3 +553,239 @@ def _fit_and_densify(
         y = max(0.0, min(float(frame_h - 1), y))
         out.append(_Det(frame=f, x=x, y=y, radius=5.0))
     return out
+
+
+# --- Rendering --------------------------------------------------------------
+# Visual style mirrors backend/app/services/tracer.py so the AI-rendered
+# output sits next to the classical one without looking out of place.
+
+TRACER_COLOR = (0, 140, 255)        # bright orange (BGR)
+TRACER_HALO_COLOR = (40, 90, 200)
+TRACER_THICKNESS = 5
+DASH_LENGTH = 14
+GAP_LENGTH = 10
+ANCHOR_RING_COLOR = (0, 230, 255)   # cyan rings on Claude's verified anchor frames
+
+
+def _draw_dashed(img, points: list[tuple[int, int]]) -> None:
+    """Dashed-line overlay with halo. Lifted from tracer.py so the AI
+    pipeline doesn't have to import the classical module."""
+    if len(points) < 2:
+        return
+    pts = np.array(points, dtype=np.int32)
+    cv2.polylines(img, [pts], False, TRACER_HALO_COLOR, TRACER_THICKNESS + 4, cv2.LINE_AA)
+    accumulated = 0.0
+    drawing = True
+    for i in range(1, len(points)):
+        p0 = np.array(points[i - 1], dtype=np.float32)
+        p1 = np.array(points[i], dtype=np.float32)
+        seg_len = float(np.linalg.norm(p1 - p0))
+        if seg_len == 0:
+            continue
+        direction = (p1 - p0) / seg_len
+        traveled = 0.0
+        cur = p0.copy()
+        while traveled < seg_len:
+            target_seg = DASH_LENGTH if drawing else GAP_LENGTH
+            remaining = target_seg - accumulated
+            step = min(remaining, seg_len - traveled)
+            nxt = cur + direction * step
+            if drawing:
+                cv2.line(
+                    img, (int(cur[0]), int(cur[1])), (int(nxt[0]), int(nxt[1])),
+                    TRACER_COLOR, TRACER_THICKNESS, cv2.LINE_AA,
+                )
+            cur = nxt
+            traveled += step
+            accumulated += step
+            if accumulated >= target_seg:
+                drawing = not drawing
+                accumulated = 0.0
+
+
+def render_ai_tracer(
+    input_path: Path, output_path: Path, debug_path: Path | None = None,
+) -> dict:
+    """AI-only ball tracer render — NO classical CV fallback.
+
+    Flow: ask Claude to classify a scout pass of frames + dense pass
+    around the inferred flight window, fit a parabola, render the dashed
+    overlay over the source MP4. On any failure (missing API key, no
+    in_flight anchors found, fit failure) returns ok=False with a clear
+    error string; the caller treats that as "AI couldn't find the ball
+    in this clip" rather than falling back to anything else.
+
+    Returns dict shape compatible with services.tracer.render_tracer:
+        {ok, error, n_points, frame_range, fps, ai_info}
+    Plus `ai_info` with scout/dense diagnostics for debug display.
+    """
+    if not HAS_CV:
+        return {"ok": False, "error": "opencv not installed", "n_points": 0, "ai_info": {}}
+    if not HAS_ANTHROPIC:
+        return {
+            "ok": False,
+            "error": "anthropic SDK not installed (add `anthropic` to requirements.txt)",
+            "n_points": 0,
+            "ai_info": {},
+        }
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return {
+            "ok": False,
+            "error": "ANTHROPIC_API_KEY not set in environment",
+            "n_points": 0,
+            "ai_info": {},
+        }
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return {"ok": False, "error": "could not open video", "n_points": 0, "ai_info": {}}
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
+    try:
+        track, ai_info = track_ball_with_ai(input_path, fps, width, height)
+    except Exception as exc:  # pragma: no cover
+        log.warning("ai_tracer: render crashed during track_ball_with_ai: %s", exc)
+        return {
+            "ok": False,
+            "error": f"AI tracker exception: {exc}",
+            "n_points": 0,
+            "ai_info": {},
+        }
+
+    if debug_path is not None:
+        try:
+            _write_ai_debug_image(input_path, debug_path, ai_info, width, height)
+        except Exception as exc:  # pragma: no cover
+            log.warning("ai_tracer: debug-image write failed: %s", exc)
+
+    if not track:
+        return {
+            "ok": False,
+            "error": f"AI tracker found no ball flight: {ai_info.get('stop_reason')}",
+            "n_points": 0,
+            "ai_info": ai_info,
+        }
+
+    # Render the dashed overlay over the source video.
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    if not writer.isOpened():
+        return {
+            "ok": False,
+            "error": "VideoWriter failed to open output path",
+            "n_points": len(track),
+            "ai_info": ai_info,
+        }
+    cap2 = cv2.VideoCapture(str(input_path))
+    if not cap2.isOpened():
+        writer.release()
+        return {
+            "ok": False,
+            "error": "could not re-open source video for rendering",
+            "n_points": len(track),
+            "ai_info": ai_info,
+        }
+
+    track_by_frame: dict[int, tuple[int, int]] = {
+        int(d.frame): (int(d.x), int(d.y)) for d in track
+    }
+    track_frames = sorted(track_by_frame)
+    anchor_frames = {
+        a["frame"] for a in ai_info.get("anchors", [])
+        if a.get("state") == "in_flight"
+        and a.get("confidence") in ACCEPTED_CONFIDENCE
+    }
+
+    i = 0
+    while True:
+        ok, frame = cap2.read()
+        if not ok:
+            break
+        seen = [track_by_frame[f] for f in track_frames if f <= i]
+        _draw_dashed(frame, seen)
+        # Highlight Claude's verified anchor frames so it's obvious which
+        # points were AI-identified vs interpolated by the parabola fit.
+        if i in anchor_frames and i in track_by_frame:
+            cv2.circle(frame, track_by_frame[i], 9, ANCHOR_RING_COLOR, 2, cv2.LINE_AA)
+        writer.write(frame)
+        i += 1
+    cap2.release()
+    writer.release()
+
+    return {
+        "ok": True,
+        "n_points": len(track),
+        "frame_range": [int(track[0].frame), int(track[-1].frame)],
+        "fps": float(fps),
+        "ai_info": ai_info,
+        "error": None,
+    }
+
+
+def _write_ai_debug_image(
+    input_path: Path, debug_path: Path, ai_info: dict, width: int, height: int,
+) -> None:
+    """Save a montage of every anchor frame with Claude's classification
+    overlaid. Lets us see at a glance which frames were at_rest /
+    in_flight / gone and where Claude placed the ball."""
+    anchors = ai_info.get("anchors") or []
+    if not anchors:
+        return
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return
+    try:
+        tiles = []
+        anchors_sorted = sorted(anchors, key=lambda a: a["frame"])
+        for a in anchors_sorted:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(a["frame"]))
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            # Downscale to a tile so the montage fits.
+            tile_w = 480
+            scale = tile_w / float(frame.shape[1])
+            tile = cv2.resize(
+                frame, (tile_w, int(round(frame.shape[0] * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+            x, y = a.get("x"), a.get("y")
+            # Anchor coords are in the (resized for API) image space;
+            # the API saw images at MAX_IMAGE_WIDTH wide. Scale into the
+            # debug tile coord space for the marker.
+            if x is not None and y is not None:
+                api_w = min(width, MAX_IMAGE_WIDTH)
+                api_scale = api_w / float(width)
+                api_h = int(round(height * api_scale))
+                tile_x = int(round(x / float(api_w) * tile_w))
+                tile_y = int(round(y / float(api_h) * tile.shape[0]))
+                color = {
+                    "in_flight": (0, 230, 255),
+                    "at_rest":   (0, 200, 0),
+                    "gone":      (60, 60, 200),
+                    "unknown":   (180, 180, 180),
+                }.get(a.get("state", ""), (255, 255, 255))
+                cv2.circle(tile, (tile_x, tile_y), 10, color, 2, cv2.LINE_AA)
+            label = f"f{a['frame']} {a.get('state', '?')} ({a.get('confidence', '?')})"
+            cv2.rectangle(tile, (0, 0), (tile.shape[1], 24), (0, 0, 0), -1)
+            cv2.putText(
+                tile, label, (6, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (255, 255, 255), 1, cv2.LINE_AA,
+            )
+            tiles.append(tile)
+        if not tiles:
+            return
+        cols = 4
+        rows = (len(tiles) + cols - 1) // cols
+        th = tiles[0].shape[0]
+        tw = tiles[0].shape[1]
+        montage = np.zeros((th * rows, tw * cols, 3), dtype=np.uint8)
+        for idx, tile in enumerate(tiles):
+            r, c = divmod(idx, cols)
+            montage[r * th:(r + 1) * th, c * tw:(c + 1) * tw] = tile
+        cv2.imwrite(str(debug_path), montage, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    finally:
+        cap.release()
