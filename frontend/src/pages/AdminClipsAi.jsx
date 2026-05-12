@@ -232,11 +232,11 @@ export default function AdminClipsAi() {
                     </span>
                     {(hand.hands_x != null || hand.clubhead_x != null) && (
                       <div className="tiny muted" style={{ marginTop: 4 }}>
-                        hands_x=<code>{hand.hands_x ?? "—"}</code>{" · "}
-                        clubhead_x=<code>{hand.clubhead_x ?? "—"}</code>{" · "}
+                        hands=<code>({hand.hands_x ?? "—"}, {hand.hands_y ?? "—"})</code>{" · "}
+                        clubhead=<code>({hand.clubhead_x ?? "—"}, {hand.clubhead_y ?? "—"})</code>{" · "}
                         shaft=<code>{hand.shaft_direction ?? "—"}</code>
                         {hand.image_width != null && (
-                          <> · image width <code>{hand.image_width}</code>px</>
+                          <> · image <code>{hand.image_width}×{hand.image_height ?? "—"}</code>px</>
                         )}
                       </div>
                     )}

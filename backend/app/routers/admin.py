@@ -39,7 +39,11 @@ from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
 from ..services.tracer import have_tracer, render_tracer
-from ..services.ai_tracer import find_address_frame, detect_handedness_at_address
+from ..services.ai_tracer import (
+    find_address_frame,
+    detect_handedness_at_address,
+    annotate_address_with_shaft,
+)
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_video_info
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -577,13 +581,23 @@ def ai_trace(clip_id: int, db: Session = Depends(get_db)):
         image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
 
     # Step 3: once we have the address frame, ask Claude what handedness
-    # the golfer is. Camera is assumed to be behind the golfer so the
-    # body-side ↔ image-side mapping is the identity (no mirror flip).
+    # the golfer is. Claude reports the (x, y) of hands + clubhead so we
+    # can overlay the shaft on the displayed address frame and visually
+    # verify what Claude saw.
     handedness_info: dict | None = None
     if address_info.get("ok") and address_info.get("address_frame") is not None:
-        handedness_info = detect_handedness_at_address(
-            fpath, int(address_info["address_frame"]),
-        )
+        addr_idx = int(address_info["address_frame"])
+        handedness_info = detect_handedness_at_address(fpath, addr_idx)
+        if handedness_info.get("ok"):
+            wrote = annotate_address_with_shaft(
+                fpath, addr_idx, handedness_info, image_path,
+            )
+            if wrote and image_path.exists():
+                # Refresh the cache-buster so the browser picks up the
+                # annotated image instead of the clean one it may have
+                # already cached.
+                mtime = int(image_path.stat().st_mtime)
+                image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
 
     db.add(AuditLog(
         actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",

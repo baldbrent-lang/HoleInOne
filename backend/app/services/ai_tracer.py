@@ -71,10 +71,11 @@ HANDEDNESS_FROM_ADDRESS_PROMPT = (
     "LEFT-handed.\n\n"
     "Reason in this exact order — do NOT skip steps:\n"
     "Step 1. Locate the golfer's HANDS gripping the club. Note their "
-    "approximate horizontal pixel x-coordinate in the image. (The "
-    "image width is given in the user message.)\n"
+    "approximate (x, y) pixel coordinates in the image. (Image "
+    "dimensions are given in the user message; x=0 is left, y=0 "
+    "is top.)\n"
     "Step 2. Locate the CLUBHEAD resting on the ground at the ball. "
-    "Note its approximate horizontal pixel x-coordinate.\n"
+    "Note its approximate (x, y) pixel coordinates.\n"
     "Step 3. Compare: clubhead_x vs hands_x.\n"
     "  - If clubhead_x < hands_x (clubhead is to the LEFT of the "
     "hands in the image), the shaft drops down-and-LEFT, and the "
@@ -94,7 +95,9 @@ HANDEDNESS_FROM_ADDRESS_PROMPT = (
     "Reply with ONE JSON object and nothing else:\n"
     "{\n"
     '  "hands_x": <int approximate pixel x of the hands>,\n'
+    '  "hands_y": <int approximate pixel y of the hands>,\n'
     '  "clubhead_x": <int approximate pixel x of the clubhead at ground level>,\n'
+    '  "clubhead_y": <int approximate pixel y of the clubhead at ground level>,\n'
     '  "shaft_direction": "down_left" | "down_right" | "vertical",\n'
     '  "handedness": "right" | "left" | "unknown",\n'
     '  "confidence": "high" | "medium" | "low",\n'
@@ -223,6 +226,76 @@ def _grab_frames_jpegs(
     return out
 
 
+def annotate_address_with_shaft(
+    input_path: Path, address_frame_idx: int,
+    handedness_info: dict, output_image_path: Path,
+) -> bool:
+    """Draw the shaft line + landmark dots Claude identified onto the
+    native-resolution address frame and write it to output_image_path.
+    Coordinates from `handedness_info` are in the SENT image space
+    (typically HANDEDNESS_FRAME_W wide) and are scaled to native here.
+
+    Returns True if a file was written, False otherwise (missing
+    coordinates, frame extraction failure, encode failure).
+    """
+    if not HAS_CV:
+        return False
+    hx, hy = handedness_info.get("hands_x"), handedness_info.get("hands_y")
+    cx, cy = handedness_info.get("clubhead_x"), handedness_info.get("clubhead_y")
+    sent_w = handedness_info.get("image_width") or 0
+    sent_h = handedness_info.get("image_height") or 0
+    if None in (hx, hy, cx, cy) or sent_w <= 0 or sent_h <= 0:
+        return False
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return False
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(address_frame_idx))
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        return False
+
+    nh, nw = frame.shape[:2]
+    sx = nw / float(sent_w)
+    sy = nh / float(sent_h)
+    p_hands = (int(round(hx * sx)), int(round(hy * sy)))
+    p_club = (int(round(cx * sx)), int(round(cy * sy)))
+
+    # Halo behind the shaft for legibility on busy backgrounds.
+    cv2.line(frame, p_hands, p_club, (0, 0, 0), 8, cv2.LINE_AA)
+    cv2.line(frame, p_hands, p_club, (0, 230, 255), 4, cv2.LINE_AA)
+    # Landmark dots.
+    cv2.circle(frame, p_hands, 12, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.circle(frame, p_hands, 9, (0, 230, 255), -1, cv2.LINE_AA)
+    cv2.circle(frame, p_club, 12, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.circle(frame, p_club, 9, (255, 80, 80), -1, cv2.LINE_AA)
+    # Short text labels.
+    cv2.putText(
+        frame, "hands", (p_hands[0] + 14, p_hands[1] - 6),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame, "hands", (p_hands[0] + 14, p_hands[1] - 6),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 230, 255), 1, cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame, "clubhead", (p_club[0] + 14, p_club[1] + 18),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame, "clubhead", (p_club[0] + 14, p_club[1] + 18),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 80, 80), 1, cv2.LINE_AA,
+    )
+    ok = cv2.imwrite(
+        str(output_image_path), frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), 90],
+    )
+    return bool(ok)
+
+
 def detect_handedness_at_address(
     input_path: Path, address_frame_idx: int,
     frame_w: int = HANDEDNESS_FRAME_W,
@@ -252,9 +325,12 @@ def detect_handedness_at_address(
         "confidence": None,
         "notes": None,
         "hands_x": None,
+        "hands_y": None,
         "clubhead_x": None,
+        "clubhead_y": None,
         "shaft_direction": None,
         "image_width": None,
+        "image_height": None,
         "model": MODEL,
     }
     if not HAS_CV:
@@ -290,6 +366,7 @@ def detect_handedness_at_address(
         )
     sent_h, sent_w = raw.shape[:2]
     info["image_width"] = sent_w
+    info["image_height"] = sent_h
     ok, buf = cv2.imencode(".jpg", raw, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
     if not ok:
         info["error"] = "could not jpeg-encode address frame"
@@ -350,21 +427,19 @@ def detect_handedness_at_address(
     info["handedness"] = handedness
     info["confidence"] = str(parsed.get("confidence") or "").lower() or None
     info["notes"] = str(parsed.get("notes") or "")[:300] or None
-    try:
-        info["hands_x"] = int(parsed["hands_x"])
-    except (KeyError, TypeError, ValueError):
-        info["hands_x"] = None
-    try:
-        info["clubhead_x"] = int(parsed["clubhead_x"])
-    except (KeyError, TypeError, ValueError):
-        info["clubhead_x"] = None
+    for key in ("hands_x", "hands_y", "clubhead_x", "clubhead_y"):
+        try:
+            info[key] = int(parsed[key])
+        except (KeyError, TypeError, ValueError):
+            info[key] = None
     sd = str(parsed.get("shaft_direction") or "").lower()
     info["shaft_direction"] = sd if sd in {"down_left", "down_right", "vertical"} else None
     log.info(
-        "ai_tracer: handedness at address frame %d — %s (%s) hands_x=%s clubhead_x=%s shaft=%s — %s",
+        "ai_tracer: handedness at address frame %d — %s (%s) "
+        "hands=(%s,%s) clubhead=(%s,%s) shaft=%s — %s",
         address_frame_idx, info["handedness"], info["confidence"],
-        info["hands_x"], info["clubhead_x"], info["shaft_direction"],
-        info["notes"],
+        info["hands_x"], info["hands_y"], info["clubhead_x"], info["clubhead_y"],
+        info["shaft_direction"], info["notes"],
     )
     return info
 
