@@ -233,6 +233,11 @@ CLUB_HOUGH_MAX_GAP = 8
 CLUB_X_MID_LO_FRACTION = 0.25  # lower endpoint must land in middle half
 CLUB_X_MID_HI_FRACTION = 0.75
 CLUB_Y_REACH_FRACTION = 0.40   # line must reach into lower 60% of frame
+CLUB_UPPER_Y_MAX_FRACTION = 0.55  # upper endpoint must be in upper 55%
+# Reject anything close to horizontal — the grass edge / horizon / bench
+# tops will otherwise dominate longest-line voting at slope ~0. At
+# address from behind, a real shaft is at least 45° off horizontal.
+CLUB_MIN_SLOPE_MAGNITUDE = 1.0
 CLUB_SLOPE_SIGN_THRESHOLD = 0.3
 CLUB_MIN_VOTES = 3
 
@@ -645,6 +650,7 @@ def _detect_club_in_frame(det_frame):
     x_lo = w * CLUB_X_MID_LO_FRACTION
     x_hi = w * CLUB_X_MID_HI_FRACTION
     y_reach = h * CLUB_Y_REACH_FRACTION
+    y_upper_max = h * CLUB_UPPER_Y_MAX_FRACTION
     best_len = 0.0
     best_line = None
     best_slope = None
@@ -657,15 +663,20 @@ def _detect_club_in_frame(det_frame):
             continue  # lower end out of the middle band — bench/tree/etc.
         if y2 < y_reach:
             continue  # line doesn't reach into the lower portion
+        if y1 > y_upper_max:
+            continue  # upper end still in lower half — flat ground edges
         dx = x2 - x1
         dy = y2 - y1
         if abs(dx) < 4:
             continue  # too vertical to tell which way it leans
+        slope = float(dy) / float(dx)
+        if abs(slope) < CLUB_MIN_SLOPE_MAGNITUDE:
+            continue  # too horizontal — grass / horizon / bench top
         length = float((dx * dx + dy * dy) ** 0.5)
         if length > best_len:
             best_len = length
             best_line = (int(x1), int(y1), int(x2), int(y2))
-            best_slope = float(dy) / float(dx)
+            best_slope = slope
     return best_line, best_slope
 
 
