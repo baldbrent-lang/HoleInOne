@@ -1764,55 +1764,68 @@ def _extend_track(seed_track, all_detections, total_frames, frame_w=None, frame_
 
 def _smooth_track_for_render(track, ball_pos_native=None):
     """Return a list of integer-frame (frame, x, y) points sampled from
-    the motion fit of `track`. Used in place of the raw detection points
-    when rendering the dashed tracer line, so the line follows the
-    underlying parabola rather than zigzagging between noisy detections.
+    the motion fit of `track`, used in place of raw detection points
+    when rendering the dashed tracer line.
 
-    When `ball_pos_native` is provided, it's added as an anchor at
-    track[0].frame - 1 so the fitted parabola is constrained to pass
-    through the ball's at-rest position. The rendered range extends to
-    cover that anchor frame, so the dashed line draws from the ball
-    position through every smoothed point of the flight.
+    Fit is on the picked track only. When `ball_pos_native` is provided,
+    we extrapolate the fitted parabola backward until y reaches the
+    ball's at-rest y, and render from that frame instead of from
+    track[0]. This way the natural parabolic motion handles the smooth
+    transition from ball-at-rest to picked-track — no separate bridge
+    segment, no kink.
 
-    The rendered range is also truncated at the apex (vertex of the
-    y(frame) parabola) so the tracer doesn't loop back down for the
-    descent — real golf tracers only show impact → apex.
+    The very first rendered point is pinned to the exact ball coords
+    so the line literally starts at the cyan ring (the parabola's
+    extrapolated x at the same y is usually 5-15px off from ball_x,
+    not enough to cause a visible kink at the pin).
+
+    Truncates at apex (vertex of y(frame) parabola) so descent isn't
+    rendered.
     """
     if len(track) < 3:
         return [(int(d.frame), int(d.x), int(d.y)) for d in track]
-    points = list(track)
-    earliest_track_frame = min(int(d.frame) for d in track)
-    if ball_pos_native is not None:
-        ball_anchor = _Det(
-            earliest_track_frame - 1,
-            float(ball_pos_native[0]),
-            float(ball_pos_native[1]),
-            0.0,
-        )
-        points.insert(0, ball_anchor)
-    y_coef, x_coef, _rms = _fit_motion(points)
+    y_coef, x_coef, _rms = _fit_motion(track)
     if y_coef is None:
-        return [(int(p.frame), int(p.x), int(p.y)) for p in track]
-    f_min = min(int(p.frame) for p in points)
-    f_max = max(int(p.frame) for p in points)
-    # Apex truncation: if y(frame) opens upward in math (a > 0, which
-    # in image-y-down coords means the ball goes UP then comes back
-    # DOWN), the vertex frame is the apex. Cut the rendered range
-    # there — no descent rendered. If the apex is outside the data
-    # range, render everything we have.
-    a, b, _c = float(y_coef[0]), float(y_coef[1]), float(y_coef[2])
+        return [(int(d.frame), int(d.x), int(d.y)) for d in track]
+    f_min = min(int(d.frame) for d in track)
+    f_max = max(int(d.frame) for d in track)
+    a, b, c = float(y_coef[0]), float(y_coef[1]), float(y_coef[2])
+
+    # Extrapolate the fitted parabola backward to find the frame at
+    # which y equals the ball-at-rest y. That's where the line should
+    # start: the natural continuation of the parabola hits the ball's
+    # actual position, no need for an artificial bridge.
+    if ball_pos_native is not None and a > 1e-9:
+        ball_y = float(ball_pos_native[1])
+        # Solve a*f² + b*f + (c - ball_y) = 0 for f. The earlier (smaller)
+        # root is where the ball's flight started; the later root is the
+        # symmetric point on the descent which we don't care about.
+        disc = b * b - 4 * a * (c - ball_y)
+        if disc >= 0:
+            sqrtd = disc ** 0.5
+            f_root1 = (-b - sqrtd) / (2.0 * a)
+            f_root2 = (-b + sqrtd) / (2.0 * a)
+            f_at_ball_y = min(f_root1, f_root2)
+            # Cap how far backward we'll extrapolate. If the parabola
+            # would say the ball was at rest 50 frames ago, we don't
+            # want a 50-frame straight line — just clamp to a sane
+            # bridge length.
+            extrapolation_cap_frames = 8
+            f_min = max(int(round(f_at_ball_y)), f_min - extrapolation_cap_frames)
+
+    # Apex truncation (no descent rendered).
     if a > 1e-9:
         vertex_frame = -b / (2.0 * a)
         if f_min < vertex_frame < f_max:
             f_max = int(round(vertex_frame))
-    anchor_frame = earliest_track_frame - 1 if ball_pos_native is not None else None
+
     out = []
     for f in range(f_min, f_max + 1):
-        # Pin the first frame to the EXACT ball-at-rest position so
-        # the tracer line literally starts at the cyan ball ring,
-        # not a few px off from it (the least-squares fit doesn't
-        # pass exactly through any of its input points).
-        if anchor_frame is not None and f == anchor_frame:
+        if f == f_min and ball_pos_native is not None:
+            # Pin the very first point to the exact ball coords. The
+            # parabola's predicted x here is usually within a few px
+            # of ball_x; pinning eliminates that small offset so the
+            # tracer literally starts at the cyan ball ring.
             out.append((f, int(ball_pos_native[0]), int(ball_pos_native[1])))
         else:
             out.append((f, int(np.polyval(x_coef, f)), int(np.polyval(y_coef, f))))
