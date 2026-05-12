@@ -209,6 +209,33 @@ BALL_ADDR_POSITION_TOLERANCE_PX = 12
 BALL_ADDR_Y_TOP_FRACTION = 0.45  # only search below this fraction of the frame
 BALL_ADDR_SEARCH_FRAMES = 30     # search the first N frames (warmup or not)
 
+# Club-shaft handedness detection. At address the club shaft is a long
+# diagonal line extending from the golfer's hands (upper-middle of body)
+# down to the clubhead at his feet. Its slope reveals handedness more
+# reliably than the ball's position — a tee-cam clip may have other
+# practice balls scattered in the grass that confuse ball-address
+# detection, but only the actual club shaft will form a long consistent
+# diagonal in the address phase.
+#
+# Slope sign convention (image y grows downward):
+#   slope > 0  → clubhead to RIGHT of hands → LEFTY
+#   slope < 0  → clubhead to LEFT of hands → RIGHTY
+#
+# For tee-cam from behind, target lies on the side of the body the
+# clubhead points to, so "behind the golfer" = the OPPOSITE side, which
+# is where we want to reject post-mask candidates.
+CLUB_DETECT_SEARCH_FRAMES = 30
+CLUB_MIN_LINE_LEN_PX = 40
+CLUB_CANNY_LOW = 50
+CLUB_CANNY_HIGH = 150
+CLUB_HOUGH_THRESHOLD = 40
+CLUB_HOUGH_MAX_GAP = 8
+CLUB_X_MID_LO_FRACTION = 0.25  # lower endpoint must land in middle half
+CLUB_X_MID_HI_FRACTION = 0.75
+CLUB_Y_REACH_FRACTION = 0.40   # line must reach into lower 60% of frame
+CLUB_SLOPE_SIGN_THRESHOLD = 0.3
+CLUB_MIN_VOTES = 3
+
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
 DASH_LENGTH = 14
@@ -306,6 +333,13 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # Stationary-ball-blob votes accumulated during warmup, used to fix
     # the ball's address position before the swing starts.
     ball_addr_votes: list[tuple[float, float]] = []
+    # Club-shaft slope votes for handedness inference. Each vote is a
+    # signed slope (dy/dx with image-y down); sign indicates which side
+    # of the body the clubhead is on. Plus a single representative
+    # line (longest seen) used to draw on the debug image.
+    club_slope_votes: list[float] = []
+    club_best_line = None
+    club_best_line_len = 0.0
 
     aborted_early = False
     idx = 0
@@ -351,6 +385,18 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         # stays motionless for ~1s while the golfer settles.
         if idx < BALL_ADDR_SEARCH_FRAMES:
             ball_addr_votes.extend(_scan_for_ball_addr_blobs(det_frame))
+        # Club-shaft slope vote during the same address window. Used
+        # to infer handedness for the side filter regardless of whether
+        # ball-address detection succeeds.
+        if idx < CLUB_DETECT_SEARCH_FRAMES:
+            line, slope = _detect_club_in_frame(det_frame)
+            if slope is not None and line is not None:
+                club_slope_votes.append(slope)
+                lx1, ly1, lx2, ly2 = line
+                ln = float(((lx2 - lx1) ** 2 + (ly2 - ly1) ** 2) ** 0.5)
+                if ln > club_best_line_len:
+                    club_best_line_len = ln
+                    club_best_line = line
         if idx < WARMUP_FRAMES:
             idx += 1
             continue
@@ -399,19 +445,34 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         100.0 * hot_pixels / max(1, det_w * det_h),
     )
 
-    # Ball address (detection-coord) + body x-center → decide which side
-    # of the body is "behind" the ball. Detections on that side will be
-    # rejected alongside the hot-mask filter below.
+    # Ball address (detection-coord) + body x-center → kept for display
+    # and as a fallback signal. The primary handedness signal now comes
+    # from the club shaft's slope, which is robust to stray practice
+    # balls in the grass.
     ball_addr_det = _pick_ball_addr(ball_addr_votes)
     body_x_det = _hot_mask_x_center(hot_mask)
+    handedness = _handedness_from_slopes(club_slope_votes)
+
     behind_side: str | None = None
-    if ball_addr_det is not None and body_x_det is not None:
+    if handedness == "lefty":
+        # Clubhead points right → target on right → ball flies right →
+        # left half of frame is behind.
+        behind_side = "left"
+    elif handedness == "righty":
+        behind_side = "right"
+    elif ball_addr_det is not None and body_x_det is not None:
+        # Fallback: trust the ball-address position only if we couldn't
+        # resolve handedness from the club.
         if ball_addr_det[0] < body_x_det - 1:
             behind_side = "right"
         elif ball_addr_det[0] > body_x_det + 1:
             behind_side = "left"
+    n_pos = sum(1 for s in club_slope_votes if s > CLUB_SLOPE_SIGN_THRESHOLD)
+    n_neg = sum(1 for s in club_slope_votes if s < -CLUB_SLOPE_SIGN_THRESHOLD)
     log.info(
-        "tracer: ball_addr=%s  body_x=%s  behind_side=%s",
+        "tracer: club slope votes %d (pos=%d neg=%d) → handedness=%s  "
+        "ball_addr=%s  body_x=%s  behind_side=%s",
+        len(club_slope_votes), n_pos, n_neg, handedness or "unknown",
         f"({ball_addr_det[0]:.0f},{ball_addr_det[1]:.0f})" if ball_addr_det else "None",
         f"{body_x_det:.0f}" if body_x_det is not None else "None",
         behind_side or "none",
@@ -489,6 +550,7 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             native_size=(width, height),
             ball_addr_det=ball_addr_det, body_x_det=body_x_det,
             behind_side=behind_side,
+            club_line_det=club_best_line, handedness=handedness,
         )
 
     # Abort only if every filter failed to rescue a usable seed set —
@@ -558,6 +620,67 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         "fps": float(fps),
         "error": None,
     }
+
+
+def _detect_club_in_frame(det_frame):
+    """Find the longest plausible club-shaft line in a single frame.
+    Returns ((x_top, y_top, x_bot, y_bot), slope) or (None, None).
+
+    Filters Hough-detected line segments by length, position (lower
+    endpoint in middle horizontal half, line reaches into lower 60% of
+    frame), and rejects near-vertical lines whose slope sign is too
+    ambiguous to indicate handedness.
+    """
+    h, w = det_frame.shape[:2]
+    gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, CLUB_CANNY_LOW, CLUB_CANNY_HIGH)
+    lines = cv2.HoughLinesP(
+        edges, 1, np.pi / 180,
+        threshold=CLUB_HOUGH_THRESHOLD,
+        minLineLength=CLUB_MIN_LINE_LEN_PX,
+        maxLineGap=CLUB_HOUGH_MAX_GAP,
+    )
+    if lines is None:
+        return None, None
+    x_lo = w * CLUB_X_MID_LO_FRACTION
+    x_hi = w * CLUB_X_MID_HI_FRACTION
+    y_reach = h * CLUB_Y_REACH_FRACTION
+    best_len = 0.0
+    best_line = None
+    best_slope = None
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        # Put upper endpoint first (smaller y).
+        if y1 > y2:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        if not (x_lo <= x2 <= x_hi):
+            continue  # lower end out of the middle band — bench/tree/etc.
+        if y2 < y_reach:
+            continue  # line doesn't reach into the lower portion
+        dx = x2 - x1
+        dy = y2 - y1
+        if abs(dx) < 4:
+            continue  # too vertical to tell which way it leans
+        length = float((dx * dx + dy * dy) ** 0.5)
+        if length > best_len:
+            best_len = length
+            best_line = (int(x1), int(y1), int(x2), int(y2))
+            best_slope = float(dy) / float(dx)
+    return best_line, best_slope
+
+
+def _handedness_from_slopes(slopes):
+    """Vote on handedness from per-frame club slopes. Returns 'lefty',
+    'righty', or None if the vote isn't decisive."""
+    if not slopes:
+        return None
+    pos = sum(1 for s in slopes if s > CLUB_SLOPE_SIGN_THRESHOLD)
+    neg = sum(1 for s in slopes if s < -CLUB_SLOPE_SIGN_THRESHOLD)
+    if pos >= CLUB_MIN_VOTES and pos >= 2 * max(neg, 1):
+        return "lefty"
+    if neg >= CLUB_MIN_VOTES and neg >= 2 * max(pos, 1):
+        return "righty"
+    return None
 
 
 def _scan_for_ball_addr_blobs(det_frame):
@@ -692,7 +815,8 @@ def _sample_filmstrip(input_path: Path, n_frames: int) -> list:
 def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                  all_detections, seed_detections, filmstrip, total_frames, fps,
                  n_raw=None, hot_mask=None, det_scale=1.0, native_size=None,
-                 ball_addr_det=None, body_x_det=None, behind_side=None):
+                 ball_addr_det=None, body_x_det=None, behind_side=None,
+                 club_line_det=None, handedness=None):
     """Diagnostic JPG composed of two parts stacked vertically.
 
     Top half = the busiest frame (most candidates seen) with:
@@ -753,6 +877,20 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
             by_native = int(ball_addr_det[1] / det_scale)
             cv2.circle(base, (bx_native, by_native), 12, (255, 220, 0), 2, cv2.LINE_AA)
             cv2.circle(base, (bx_native, by_native), 3, (255, 220, 0), -1, cv2.LINE_AA)
+        if club_line_det is not None and det_scale > 0:
+            cx1, cy1, cx2, cy2 = club_line_det
+            cv2.line(
+                base,
+                (int(cx1 / det_scale), int(cy1 / det_scale)),
+                (int(cx2 / det_scale), int(cy2 / det_scale)),
+                (0, 200, 255), 3, cv2.LINE_AA,
+            )
+            tag = f"club: {handedness}" if handedness else "club"
+            cv2.putText(
+                base, tag,
+                (int(cx2 / det_scale) + 10, int(cy2 / det_scale) - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2, cv2.LINE_AA,
+            )
         for d in all_detections:
             cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
         # Surviving upward-streak seeds: bigger, brighter, opaque green.
