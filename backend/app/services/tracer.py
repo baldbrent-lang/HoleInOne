@@ -173,12 +173,15 @@ MAX_CANDIDATES_PER_FRAME = 40
 # forms across it). Once we have a confident seed track of the rising
 # arc, we fit y(frame) as a quadratic + x(frame) as linear, sweep ALL
 # post-hot-mask detections, and pull in anything within `eps` of the
-# predicted position. This recovers the apex + early descent the streak
-# filter cut off. eps = max(min_px, mult * seed_rms_px) so it scales
-# with how clean the seed fit is.
+# predicted position. Eps grows with distance from the seed range
+# because extrapolation is less certain the further out we go — and
+# we refit after every accepted point so the curvature improves as the
+# apex comes into view.
 EXTEND_EPS_MIN_PX = 15.0
 EXTEND_EPS_MULT = 3.0
-EXTEND_BACKWARD_FRAMES = 3
+EXTEND_EPS_GROWTH_PER_FRAME = 0.10
+EXTEND_BACKWARD_FRAMES = 10
+EXTEND_MAX_CONSECUTIVE_MISS = 10
 
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
@@ -460,17 +463,19 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
     cap2 = cv2.VideoCapture(str(input_path))
-    track_by_frame = {d.frame: (int(d.x), int(d.y)) for d in track}
-    track_frames = sorted(track_by_frame)
+    smoothed = _smooth_track_for_render(track)
+    smooth_by_frame = {f: (x, y) for (f, x, y) in smoothed}
+    smooth_frames = sorted(smooth_by_frame)
+    detection_frames = {int(d.frame) for d in track}
     i = 0
     while True:
         ok, frame = cap2.read()
         if not ok:
             break
-        seen = [track_by_frame[f] for f in track_frames if f <= i]
+        seen = [smooth_by_frame[f] for f in smooth_frames if f <= i]
         _draw_dashed(frame, seen)
-        if i in track_by_frame:
-            cv2.circle(frame, track_by_frame[i], 7, BALL_HIGHLIGHT_COLOR, 2, cv2.LINE_AA)
+        if i in detection_frames and i in smooth_by_frame:
+            cv2.circle(frame, smooth_by_frame[i], 7, BALL_HIGHLIGHT_COLOR, 2, cv2.LINE_AA)
         writer.write(frame)
         i += 1
     cap2.release()
@@ -762,39 +767,47 @@ def _residual(track):
     return float(np.sqrt(np.mean((ys - pred) ** 2)))
 
 
-def _extend_track(seed_track, all_detections, total_frames):
-    """Extend a confident seed track (rising arc) with apex + descent
-    detections from `all_detections`.
-
-    Fits the seed track as a frame-parameterized motion model:
-      y(frame) ≈ a*frame² + b*frame + c  (gravity)
-      x(frame) ≈ m*frame + n             (mostly straight horizontal)
-    then for every frame in [first_seed - margin, total_frames] picks
-    the closest post-hot-mask detection within `eps_px` of the predicted
-    point. Frames the seed already covers are kept as-is.
-
-    Uses frame parameterization (rather than y=f(x) like _residual) so
-    near-vertical trajectories — common from tee-cam views — can still
-    be modeled past their apex, where y becomes non-monotonic in x.
+def _fit_motion(track):
+    """Fit a frame-parameterized motion model to a track. Returns
+    (y_coef, x_coef, rms) or (None, None, None) if the frame range is
+    too narrow to fit. y is quadratic in frame (gravity), x is linear
+    (the ball mostly travels in a straight horizontal line in image
+    coords — sliced/drawn balls violate this, but for v0 it's fine).
     """
-    if len(seed_track) < 5:
-        return list(seed_track)
-    frames = np.array([d.frame for d in seed_track], dtype=np.float64)
-    xs = np.array([d.x for d in seed_track], dtype=np.float64)
-    ys = np.array([d.y for d in seed_track], dtype=np.float64)
+    if len(track) < 3:
+        return None, None, None
+    frames = np.array([d.frame for d in track], dtype=np.float64)
+    xs = np.array([d.x for d in track], dtype=np.float64)
+    ys = np.array([d.y for d in track], dtype=np.float64)
     if float(frames.max() - frames.min()) < 4:
-        return list(seed_track)
+        return None, None, None
     y_coef = np.polyfit(frames, ys, 2)
     x_coef = np.polyfit(frames, xs, 1)
     xs_pred = np.polyval(x_coef, frames)
     ys_pred = np.polyval(y_coef, frames)
-    seed_rms = float(np.sqrt(np.mean((xs - xs_pred) ** 2 + (ys - ys_pred) ** 2)))
-    eps = max(EXTEND_EPS_MIN_PX, EXTEND_EPS_MULT * seed_rms)
+    rms = float(np.sqrt(np.mean((xs - xs_pred) ** 2 + (ys - ys_pred) ** 2)))
+    return y_coef, x_coef, rms
 
-    first_f = int(frames.min())
-    last_f = int(frames.max())
-    window_start = max(0, first_f - EXTEND_BACKWARD_FRAMES)
-    window_end = total_frames
+
+def _extend_track(seed_track, all_detections, total_frames):
+    """Extend a confident seed track (rising arc) with apex + descent
+    detections from `all_detections`, using *incremental refitting*.
+
+    For each frame past the seed range (and a few frames before), predict
+    (px, py) from the current motion fit, find the closest in-frame
+    detection, accept it if within an eps that grows with extrapolation
+    distance, and refit. The refit step is the key — a fit on rising-only
+    seeds has uncertain curvature, but every apex-region point we add
+    sharpens the parabola and improves subsequent predictions.
+    """
+    if len(seed_track) < 5:
+        return list(seed_track)
+    y_coef, x_coef, rms = _fit_motion(seed_track)
+    if y_coef is None:
+        return list(seed_track)
+
+    seed_first = min(d.frame for d in seed_track)
+    seed_last = max(d.frame for d in seed_track)
 
     seed_frames = {int(d.frame) for d in seed_track}
     by_frame: dict[int, list[_Det]] = {}
@@ -802,36 +815,73 @@ def _extend_track(seed_track, all_detections, total_frames):
         f = int(d.frame)
         if f in seed_frames:
             continue
-        if not (window_start <= f <= window_end):
-            continue
         by_frame.setdefault(f, []).append(d)
 
-    extra: list[_Det] = []
-    last_kept_f = last_f
-    for f in sorted(by_frame):
-        # Once we accept a point, predicting further out from there
-        # should still match the parabola — but if we miss too many
-        # frames in a row, stop extending forward (the ball has likely
-        # left the frame or trail has gone too cold).
-        if f > last_kept_f + MAX_FRAME_GAP * 2 and f > last_f:
-            break
-        py = float(np.polyval(y_coef, f))
-        px = float(np.polyval(x_coef, f))
-        best = None
-        best_err = float("inf")
-        for d in by_frame[f]:
-            err = float(np.hypot(d.x - px, d.y - py))
-            if err < best_err:
-                best_err = err
-                best = d
-        if best is not None and best_err <= eps:
-            extra.append(best)
-            last_kept_f = f
+    track = list(seed_track)
 
-    if not extra:
-        return list(seed_track)
-    out = list(seed_track) + extra
-    out.sort(key=lambda d: d.frame)
+    def _try_extend(frame_iter, anchor_frame):
+        """Walk frame_iter, predicting from the current fit, adding any
+        detection within an eps that grows with |frame - anchor_frame|.
+        Stops after EXTEND_MAX_CONSECUTIVE_MISS frames with no acceptance."""
+        nonlocal y_coef, x_coef, rms
+        consecutive_miss = 0
+        for f in frame_iter:
+            distance = abs(f - anchor_frame)
+            local_eps = max(EXTEND_EPS_MIN_PX, EXTEND_EPS_MULT * rms) * (
+                1.0 + EXTEND_EPS_GROWTH_PER_FRAME * distance
+            )
+            cands = by_frame.get(f, [])
+            if not cands:
+                consecutive_miss += 1
+                if consecutive_miss > EXTEND_MAX_CONSECUTIVE_MISS:
+                    break
+                continue
+            py = float(np.polyval(y_coef, f))
+            px = float(np.polyval(x_coef, f))
+            best = None
+            best_err = float("inf")
+            for d in cands:
+                err = float(np.hypot(d.x - px, d.y - py))
+                if err < best_err:
+                    best_err = err
+                    best = d
+            if best is not None and best_err <= local_eps:
+                track.append(best)
+                consecutive_miss = 0
+                new_y, new_x, new_rms = _fit_motion(track)
+                if new_y is not None:
+                    y_coef, x_coef, rms = new_y, new_x, new_rms
+            else:
+                consecutive_miss += 1
+                if consecutive_miss > EXTEND_MAX_CONSECUTIVE_MISS:
+                    break
+
+    _try_extend(range(seed_last + 1, total_frames + 1), seed_last)
+    _try_extend(
+        range(seed_first - 1, max(-1, seed_first - 1 - EXTEND_BACKWARD_FRAMES), -1),
+        seed_first,
+    )
+
+    track.sort(key=lambda d: d.frame)
+    return track
+
+
+def _smooth_track_for_render(track):
+    """Return a list of integer-frame (frame, x, y) points sampled from
+    the motion fit of `track`. Used in place of the raw detection points
+    when rendering the dashed tracer line, so the line follows the
+    underlying parabola rather than zigzagging between noisy detections.
+    """
+    if len(track) < 3:
+        return [(int(d.frame), int(d.x), int(d.y)) for d in track]
+    y_coef, x_coef, _rms = _fit_motion(track)
+    if y_coef is None:
+        return [(int(d.frame), int(d.x), int(d.y)) for d in track]
+    f_min = min(int(d.frame) for d in track)
+    f_max = max(int(d.frame) for d in track)
+    out = []
+    for f in range(f_min, f_max + 1):
+        out.append((f, int(np.polyval(x_coef, f)), int(np.polyval(y_coef, f))))
     return out
 
 
