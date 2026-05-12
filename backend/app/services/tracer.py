@@ -183,6 +183,18 @@ EXTEND_EPS_GROWTH_PER_FRAME = 0.10
 EXTEND_BACKWARD_FRAMES = 10
 EXTEND_MAX_CONSECUTIVE_MISS = 10
 
+# Ball-address detection. During the warmup frames the ball is stationary
+# at address. Find it by looking for a small bright blob in the lower
+# half of the frame that appears in multiple consecutive warmup frames
+# at the same position. Once we know which side of the body's x-center
+# the ball sits on, we can reject post-mask candidates on the opposite
+# side — those are body silhouette fragments or background noise that
+# the ball physically can't be near.
+BALL_ADDR_BRIGHT_THRESH = 220
+BALL_ADDR_MIN_OCCURRENCES = 5
+BALL_ADDR_POSITION_TOLERANCE_PX = 8
+BALL_ADDR_Y_TOP_FRACTION = 0.45  # only search below this fraction of the frame
+
 TRACER_COLOR = (240, 240, 240)
 TRACER_THICKNESS = 3
 DASH_LENGTH = 14
@@ -277,6 +289,9 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     # can apply the hot-mask filter in ref-coords (where the heatmap
     # lives) and only then unwarp survivors back to current-frame coords.
     frame_M_inv: dict[int, "np.ndarray | None"] = {}
+    # Stationary-ball-blob votes accumulated during warmup, used to fix
+    # the ball's address position before the swing starts.
+    ball_addr_votes: list[tuple[float, float]] = []
 
     aborted_early = False
     idx = 0
@@ -318,6 +333,9 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
 
         fg_mask = bg.apply(bg_input)
         if idx < WARMUP_FRAMES:
+            # Use warmup frames (when the ball is still at address) to
+            # vote on its stationary position. Cheap — no MOG2 dependency.
+            ball_addr_votes.extend(_scan_for_ball_addr_blobs(det_frame))
             idx += 1
             continue
         # Heatmap only accumulates when fg_mask lives in a consistent
@@ -365,13 +383,33 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         100.0 * hot_pixels / max(1, det_w * det_h),
     )
 
-    # One-shot pass: filter by hot mask in ref coords, unwarp the
-    # survivor back to current-frame coords, scale to native. Frames
-    # where motion-comp failed keep their cand (no reliable hot-mask
-    # filtering possible) and skip the unwarp.
+    # Ball address (detection-coord) + body x-center → decide which side
+    # of the body is "behind" the ball. Detections on that side will be
+    # rejected alongside the hot-mask filter below.
+    ball_addr_det = _pick_ball_addr(ball_addr_votes)
+    body_x_det = _hot_mask_x_center(hot_mask)
+    behind_side: str | None = None
+    if ball_addr_det is not None and body_x_det is not None:
+        if ball_addr_det[0] < body_x_det - 1:
+            behind_side = "right"
+        elif ball_addr_det[0] > body_x_det + 1:
+            behind_side = "left"
+    log.info(
+        "tracer: ball_addr=%s  body_x=%s  behind_side=%s",
+        f"({ball_addr_det[0]:.0f},{ball_addr_det[1]:.0f})" if ball_addr_det else "None",
+        f"{body_x_det:.0f}" if body_x_det is not None else "None",
+        behind_side or "none",
+    )
+
+    # One-shot pass: filter by hot mask in ref coords, optionally reject
+    # the half of the frame behind the golfer, then unwarp the survivor
+    # back to current-frame coords and scale to native. Frames where
+    # motion-comp failed keep their cand (no reliable hot-mask filtering
+    # possible) and skip the unwarp.
     inv = 1.0 / det_scale if det_scale != 0 else 1.0
     detections: list[_Det] = []
     hot_rejected = 0
+    side_rejected = 0
     for f, cx, cy, r in raw_cands_det:
         M_inv = frame_M_inv.get(f) if USE_MOTION_COMPENSATION else None
         if M_inv is not None or not USE_MOTION_COMPENSATION:
@@ -379,6 +417,15 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             if 0 <= iy < det_h and 0 <= ix < det_w and hot_mask[iy, ix]:
                 hot_rejected += 1
                 continue
+        # Side filter: cand position is in ref-coord det res (same as
+        # body_x_det), so we can compare directly. Centered shots
+        # (behind_side is None) skip this gate.
+        if behind_side == "left" and body_x_det is not None and cx < body_x_det:
+            side_rejected += 1
+            continue
+        if behind_side == "right" and body_x_det is not None and cx > body_x_det:
+            side_rejected += 1
+            continue
         if M_inv is not None:
             cx_cur = float(M_inv[0, 0] * cx + M_inv[0, 1] * cy + M_inv[0, 2])
             cy_cur = float(M_inv[1, 0] * cx + M_inv[1, 1] * cy + M_inv[1, 2])
@@ -386,8 +433,8 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             cx_cur, cy_cur = cx, cy
         detections.append(_Det(f, cx_cur * inv, cy_cur * inv, r * inv))
     log.info(
-        "tracer: hot-mask kept %d / %d raw candidates (%d rejected)",
-        len(detections), len(raw_cands_det), hot_rejected,
+        "tracer: hot-mask rejected %d, side-filter rejected %d, kept %d / %d raw",
+        hot_rejected, side_rejected, len(detections), len(raw_cands_det),
     )
 
     # Stage B: prune candidates that aren't part of any short upward
@@ -424,6 +471,8 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             total_frames_scanned, fps,
             n_raw=len(raw_cands_det), hot_mask=hot_mask, det_scale=det_scale,
             native_size=(width, height),
+            ball_addr_det=ball_addr_det, body_x_det=body_x_det,
+            behind_side=behind_side,
         )
 
     # Abort only if every filter failed to rescue a usable seed set —
@@ -490,6 +539,65 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
         "fps": float(fps),
         "error": None,
     }
+
+
+def _scan_for_ball_addr_blobs(det_frame):
+    """Find small bright blobs in the lower portion of a single det-res
+    frame. Returns a list of (cx, cy) positions in detection coords.
+    Used during warmup to vote on the ball's address position."""
+    gray = cv2.cvtColor(det_frame, cv2.COLOR_BGR2GRAY)
+    _ret, bright = cv2.threshold(gray, BALL_ADDR_BRIGHT_THRESH, 255, cv2.THRESH_BINARY)
+    contours, _h = cv2.findContours(bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h = det_frame.shape[0]
+    y_floor = h * BALL_ADDR_Y_TOP_FRACTION
+    blobs = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if not (MIN_BALL_AREA <= area <= MAX_BALL_AREA):
+            continue
+        (cx, cy), radius = cv2.minEnclosingCircle(c)
+        if not (MIN_BALL_RADIUS <= radius <= MAX_BALL_RADIUS):
+            continue
+        if cy < y_floor:
+            continue
+        blobs.append((float(cx), float(cy)))
+    return blobs
+
+
+def _pick_ball_addr(all_blobs):
+    """Pick the (cx, cy) position that appears in the most warmup
+    samples within a small position tolerance. Returns None if no
+    position recurs enough times to look like a stationary ball."""
+    if not all_blobs:
+        return None
+    best = None
+    best_count = 0
+    tol = BALL_ADDR_POSITION_TOLERANCE_PX
+    for (cx, cy) in all_blobs:
+        count = 0
+        for (cx2, cy2) in all_blobs:
+            if abs(cx2 - cx) <= tol and abs(cy2 - cy) <= tol:
+                count += 1
+        if count > best_count:
+            best_count = count
+            best = (cx, cy)
+    if best_count >= BALL_ADDR_MIN_OCCURRENCES:
+        return best
+    return None
+
+
+def _hot_mask_x_center(hot_mask):
+    """X-center of the largest connected component of the hot mask —
+    typically the golfer's body envelope. Returns None if the mask is
+    empty or too sparse to extract a body bbox."""
+    contours, _h = cv2.findContours(hot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < 200:
+        return None
+    x, _y, w, _h2 = cv2.boundingRect(largest)
+    return float(x + w / 2.0)
 
 
 def _build_hot_mask(heatmap, counted_frames: int):
@@ -564,12 +672,16 @@ def _sample_filmstrip(input_path: Path, n_frames: int) -> list:
 
 def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                  all_detections, seed_detections, filmstrip, total_frames, fps,
-                 n_raw=None, hot_mask=None, det_scale=1.0, native_size=None):
+                 n_raw=None, hot_mask=None, det_scale=1.0, native_size=None,
+                 ball_addr_det=None, body_x_det=None, behind_side=None):
     """Diagnostic JPG composed of two parts stacked vertically.
 
     Top half = the busiest frame (most candidates seen) with:
       - a red translucent overlay of the hot mask (the regions excluded
         by the motion-density filter — body, club corridor, leaves)
+      - a cyan vertical line at the body's x-center, with a tint over
+        the half that got rejected by the side filter
+      - a cyan ring at the ball's detected address position
       - tiny yellow dots for every POST-hot-mask detection across the
         clip
       - bright green dots for the candidates that survived the
@@ -597,6 +709,31 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
             tint[..., 2] = 200  # red in BGR
             mask3 = scaled.astype(bool)
             base[mask3] = (0.55 * base[mask3] + 0.45 * tint[mask3]).astype(np.uint8)
+        # Body x-center axis + side-filter shading. body_x_det is in
+        # detection-coord px, so scale up to native frame width for the
+        # overlay.
+        if body_x_det is not None and det_scale > 0:
+            body_x_native = int(body_x_det / det_scale)
+            cv2.line(base, (body_x_native, 0), (body_x_native, base.shape[0]),
+                     (255, 220, 0), 2, cv2.LINE_AA)
+            if behind_side in ("left", "right"):
+                shade = np.zeros_like(base)
+                shade[..., 0] = 80  # blue tint on the rejected half
+                if behind_side == "left":
+                    shade[:, :body_x_native] = (60, 60, 60)
+                    base[:, :body_x_native] = (
+                        0.65 * base[:, :body_x_native] + 0.35 * shade[:, :body_x_native]
+                    ).astype(np.uint8)
+                else:
+                    shade[:, body_x_native:] = (60, 60, 60)
+                    base[:, body_x_native:] = (
+                        0.65 * base[:, body_x_native:] + 0.35 * shade[:, body_x_native:]
+                    ).astype(np.uint8)
+        if ball_addr_det is not None and det_scale > 0:
+            bx_native = int(ball_addr_det[0] / det_scale)
+            by_native = int(ball_addr_det[1] / det_scale)
+            cv2.circle(base, (bx_native, by_native), 12, (255, 220, 0), 2, cv2.LINE_AA)
+            cv2.circle(base, (bx_native, by_native), 3, (255, 220, 0), -1, cv2.LINE_AA)
         for d in all_detections:
             cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
         # Surviving upward-streak seeds: bigger, brighter, opaque green.
