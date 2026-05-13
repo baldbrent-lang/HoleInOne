@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..database import get_db
+from ..database import SessionLocal, get_db
 from ..deps import require_admin
 from ..models import (
     AuditLog,
@@ -752,6 +753,105 @@ def ai_trace(
     }
 
 
+def _utcnow_naive() -> datetime:
+    """Naive UTC datetime, matching how the model stores timestamps."""
+    return datetime.utcnow()
+
+
+def _run_long_upload_job(
+    upload_id: int,
+    seg_list: list[dict],
+    auto_detect_swings: bool,
+    starting_hole: int,
+    ai_tracer_model: str | None,
+) -> None:
+    """Background worker for the long-upload cut / splice / AI-tracer
+    pipeline.
+
+    Owns its own DB session so the calling HTTP request can return
+    immediately. Flips the LongVideoUpload row's processing_status
+    through processing → completed (or failed, with last_error set).
+    Any caller-supplied segments take precedence; if seg_list is empty
+    and auto_detect_swings is true, peaks are detected from the tee
+    audio inside this worker.
+    """
+    db = SessionLocal()
+    try:
+        row = db.get(LongVideoUpload, upload_id)
+        if not row:
+            log.warning("long-upload worker: row %s vanished before start", upload_id)
+            return
+        row.processing_status = "processing"
+        row.processing_started_at = _utcnow_naive()
+        row.last_error = None
+        db.commit()
+
+        try:
+            src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+            if not src_path or not src_path.exists():
+                raise RuntimeError(
+                    f"tee source file missing on disk: {row.tee_filename}"
+                )
+            green_src_path: Path | None = None
+            if row.green_filename:
+                candidate = CLIPS_DIR / row.green_filename
+                if not candidate.exists():
+                    raise RuntimeError(
+                        f"green source file missing on disk: {row.green_filename}"
+                    )
+                green_src_path = candidate
+
+            segs = list(seg_list or [])
+            if not segs and auto_detect_swings:
+                tee_fps = probe_fps(src_path) or 30.0
+                detected = detect_swings_from_audio(src_path, fps=tee_fps)
+                for i, d in enumerate(detected):
+                    segs.append({
+                        "hole_number": starting_hole + i,
+                        "start_sec": d["start_sec"],
+                        "end_sec": d["end_sec"],
+                    })
+                if not segs:
+                    raise RuntimeError(
+                        "no swing impacts detected in the tee video's audio"
+                    )
+
+            results = _process_long_upload_segments(
+                db,
+                course_id=row.course_id,
+                camera_type=row.camera_type,
+                base_dt=row.base_captured_at,
+                src_path=src_path,
+                green_src_path=green_src_path,
+                seg_list=segs,
+                dual_camera=green_src_path is not None,
+                ai_tracer_model=ai_tracer_model,
+            )
+
+            # Re-fetch in case the session was rolled back during segment work.
+            row = db.get(LongVideoUpload, upload_id)
+            if row is None:
+                log.warning("long-upload worker: row %s deleted mid-run", upload_id)
+                return
+            row.last_n_segments = len(segs)
+            row.last_n_succeeded = sum(1 for r in results if r.get("ok"))
+            row.processing_status = "completed"
+            row.processing_completed_at = _utcnow_naive()
+            row.last_error = None
+            db.commit()
+        except Exception as exc:
+            log.exception("long-upload worker %s failed: %s", upload_id, exc)
+            db.rollback()
+            row = db.get(LongVideoUpload, upload_id)
+            if row is not None:
+                row.processing_status = "failed"
+                row.processing_completed_at = _utcnow_naive()
+                row.last_error = str(exc)[:2000]
+                db.commit()
+    finally:
+        db.close()
+
+
 def _process_long_upload_segments(
     db: Session,
     course_id: int,
@@ -1120,87 +1220,44 @@ async def upload_long_video(
         green_src_path = CLIPS_DIR / green_src_name
         green_src_path.write_bytes(green_data)
 
-    # Auto-segment by audio when the operator didn't mark any swings
-    # manually. The detector scans the tee video for sharp impact
-    # transients and returns one (start, end) window per detected
-    # swing. Hole numbers are auto-assigned sequentially starting at
-    # `starting_hole`; the operator can re-edit clips after upload
-    # from /admin/clips if a specific hole assignment is needed.
-    auto_detect_info: dict | None = None
-    if not seg_list and auto_detect_swings:
-        tee_fps = probe_fps(src_path) or 30.0
-        detected = detect_swings_from_audio(src_path, fps=tee_fps)
-        auto_detect_info = {
-            "n_detected": len(detected),
-            "tee_fps": tee_fps,
-            "peaks": [
-                {
-                    "peak_time_sec": round(d["peak_time_sec"], 3),
-                    "ratio": (round(d["ratio"], 1) if d.get("ratio") is not None else None),
-                    "confidence": d.get("confidence"),
-                }
-                for d in detected
-            ],
-        }
-        for i, d in enumerate(detected):
-            seg_list.append({
-                "hole_number": starting_hole + i,
-                "start_sec": d["start_sec"],
-                "end_sec": d["end_sec"],
-            })
-        if not seg_list:
-            src_path.unlink(missing_ok=True)
-            if green_src_path is not None:
-                green_src_path.unlink(missing_ok=True)
-            raise HTTPException(
-                400,
-                "no swing impacts detected in the tee video's audio — "
-                "either the clip has no audio track, the audio is too "
-                "quiet, or the peak/median ratio fell below threshold. "
-                "Try marking segments manually.",
-            )
-
-    results = _process_long_upload_segments(
-        db,
+    # Persist the long source(s) + queue the cut / splice / AI-tracer
+    # pipeline as a background job. The HTTP request returns immediately
+    # so the operator isn't blocked on the (multi-minute) processing
+    # phase — the frontend polls /long-uploads to track progress.
+    upload_row = LongVideoUpload(
         course_id=course_id,
         camera_type=camera_type,
-        base_dt=base_dt,
-        src_path=src_path,
-        green_src_path=green_src_path,
-        seg_list=seg_list,
-        dual_camera=dual_camera,
-        ai_tracer_model=ai_tracer_model,
+        base_captured_at=base_dt,
+        tee_filename=src_path.name,
+        green_filename=(green_src_path.name if green_src_path is not None else None),
+        tee_original_filename=(video.filename or None),
+        green_original_filename=(video_green.filename if video_green is not None else None),
+        processing_status="pending",
     )
+    db.add(upload_row)
+    db.commit()
+    db.refresh(upload_row)
 
-    # Persist the long source(s) so the operator can re-edit / reprocess
-    # the same upload from /admin/long-upload without having to re-upload
-    # the file(s). The cleanup-on-exit step was removed deliberately —
-    # files now live in CLIPS_DIR alongside per-swing outputs and are
-    # tracked via the LongVideoUpload row below.
-    try:
-        n_seg = len(seg_list) if isinstance(seg_list, list) else 0
-        n_ok = sum(1 for r in results if r.get("ok"))
-        upload_row = LongVideoUpload(
-            course_id=course_id,
-            camera_type=camera_type,
-            base_captured_at=base_dt,
-            tee_filename=src_path.name,
-            green_filename=(green_src_path.name if green_src_path is not None else None),
-            tee_original_filename=(video.filename or None),
-            green_original_filename=(video_green.filename if video_green is not None else None),
-            last_n_segments=n_seg,
-            last_n_succeeded=n_ok,
-        )
-        db.add(upload_row)
-        db.commit()
-    except Exception as exc:
-        log.warning("long-upload: failed to persist LongVideoUpload row: %s", exc)
-        db.rollback()
+    upload_id = upload_row.id
+    threading.Thread(
+        target=_run_long_upload_job,
+        kwargs={
+            "upload_id": upload_id,
+            "seg_list": list(seg_list),
+            "auto_detect_swings": bool(auto_detect_swings),
+            "starting_hole": int(starting_hole or 1),
+            "ai_tracer_model": ai_tracer_model,
+        },
+        daemon=True,
+        name=f"long-upload-{upload_id}",
+    ).start()
 
     return {
-        "results": results,
+        "upload_id": upload_id,
+        "processing_status": "pending",
         "dual_camera": dual_camera,
-        "auto_detect": auto_detect_info,
+        "queued_segments": len(seg_list) if seg_list else None,
+        "auto_detect_swings": bool(auto_detect_swings and not seg_list),
     }
 
 
@@ -1254,6 +1311,16 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "dual_camera": r.green_filename is not None,
             "last_n_segments": r.last_n_segments,
             "last_n_succeeded": r.last_n_succeeded,
+            "processing_status": r.processing_status,
+            "processing_started_at": (
+                r.processing_started_at.isoformat()
+                if r.processing_started_at else None
+            ),
+            "processing_completed_at": (
+                r.processing_completed_at.isoformat()
+                if r.processing_completed_at else None
+            ),
+            "last_error": r.last_error,
         })
     return out
 
@@ -1268,9 +1335,10 @@ def reprocess_long_upload(
     db: Session = Depends(get_db),
 ):
     """Re-cut / re-process a previously-uploaded long video without
-    re-uploading. Uses the same per-segment pipeline as the initial
-    POST /clips/long-upload, but reads the source file(s) from disk
-    via the stored LongVideoUpload row."""
+    re-uploading. Queues the same per-segment pipeline used by the
+    initial POST /clips/long-upload as a background job; returns
+    immediately with the upload_id and pending status so the frontend
+    can poll /long-uploads."""
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
@@ -1280,7 +1348,6 @@ def reprocess_long_upload(
             404,
             f"tee source file missing on disk: {row.tee_filename}",
         )
-    green_src_path: Path | None = None
     if row.green_filename:
         candidate = CLIPS_DIR / row.green_filename
         if not candidate.exists():
@@ -1288,7 +1355,6 @@ def reprocess_long_upload(
                 404,
                 f"green source file missing on disk: {row.green_filename}",
             )
-        green_src_path = candidate
 
     try:
         seg_list = json.loads(segments or "[]")
@@ -1302,62 +1368,34 @@ def reprocess_long_upload(
             "no segments supplied — pass auto_detect_swings=true or "
             "provide segments manually",
         )
+    if row.processing_status == "processing":
+        raise HTTPException(409, "this upload is already being processed")
 
-    auto_detect_info: dict | None = None
-    if not seg_list and auto_detect_swings:
-        tee_fps = probe_fps(src_path) or 30.0
-        detected = detect_swings_from_audio(src_path, fps=tee_fps)
-        auto_detect_info = {
-            "n_detected": len(detected),
-            "tee_fps": tee_fps,
-            "peaks": [
-                {
-                    "peak_time_sec": round(d["peak_time_sec"], 3),
-                    "ratio": (round(d["ratio"], 1) if d.get("ratio") is not None else None),
-                    "confidence": d.get("confidence"),
-                }
-                for d in detected
-            ],
-        }
-        for i, d in enumerate(detected):
-            seg_list.append({
-                "hole_number": starting_hole + i,
-                "start_sec": d["start_sec"],
-                "end_sec": d["end_sec"],
-            })
-        if not seg_list:
-            raise HTTPException(
-                400,
-                "no swing impacts detected in the tee video's audio — "
-                "try marking segments manually",
-            )
+    row.processing_status = "pending"
+    row.processing_started_at = None
+    row.processing_completed_at = None
+    row.last_error = None
+    db.commit()
 
-    dual_camera = green_src_path is not None
-    results = _process_long_upload_segments(
-        db,
-        course_id=row.course_id,
-        camera_type=row.camera_type,
-        base_dt=row.base_captured_at,
-        src_path=src_path,
-        green_src_path=green_src_path,
-        seg_list=seg_list,
-        dual_camera=dual_camera,
-        ai_tracer_model=ai_tracer_model,
-    )
-
-    # Update the stored row's last-attempt stats.
-    try:
-        row.last_n_segments = len(seg_list)
-        row.last_n_succeeded = sum(1 for r in results if r.get("ok"))
-        db.commit()
-    except Exception as exc:
-        log.warning("long-upload: failed to update LongVideoUpload row %s: %s", row.id, exc)
-        db.rollback()
+    threading.Thread(
+        target=_run_long_upload_job,
+        kwargs={
+            "upload_id": row.id,
+            "seg_list": list(seg_list),
+            "auto_detect_swings": bool(auto_detect_swings),
+            "starting_hole": int(starting_hole or 1),
+            "ai_tracer_model": ai_tracer_model,
+        },
+        daemon=True,
+        name=f"long-upload-reprocess-{row.id}",
+    ).start()
 
     return {
-        "results": results,
-        "dual_camera": dual_camera,
-        "auto_detect": auto_detect_info,
+        "upload_id": row.id,
+        "processing_status": "pending",
+        "dual_camera": row.green_filename is not None,
+        "queued_segments": len(seg_list) if seg_list else None,
+        "auto_detect_swings": bool(auto_detect_swings and not seg_list),
     }
 
 

@@ -42,12 +42,17 @@ export default function AdminLongUpload() {
   const [segments, setSegments] = useState([{ ...EMPTY_SEG }]);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [results, setResults] = useState(null);
-  const [autoDetectInfo, setAutoDetectInfo] = useState(null);
+  const [queuedUploadId, setQueuedUploadId] = useState(null);
   const [error, setError] = useState(null);
   const [priorUploads, setPriorUploads] = useState(null);
   const [reprocessing, setReprocessing] = useState({}); // {id: true}
   const videoRef = useRef(null);
+
+  const anyProcessing =
+    Array.isArray(priorUploads) &&
+    priorUploads.some(
+      (u) => u.processing_status === "pending" || u.processing_status === "processing",
+    );
 
   useEffect(() => {
     if (!adminPassword) return;
@@ -55,6 +60,16 @@ export default function AdminLongUpload() {
     refreshPriorUploads();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminPassword]);
+
+  // Poll the long-uploads listing while any row is pending/processing so the
+  // UI flips to "completed" without a manual refresh. Polling stops once
+  // everything has settled.
+  useEffect(() => {
+    if (!adminPassword || !anyProcessing) return;
+    const id = setInterval(refreshPriorUploads, 4000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adminPassword, anyProcessing]);
 
   async function refreshPriorUploads() {
     try {
@@ -69,17 +84,14 @@ export default function AdminLongUpload() {
   async function reprocessPrior(uploadId) {
     setReprocessing((r) => ({ ...r, [uploadId]: true }));
     setError(null);
-    setResults(null);
-    setAutoDetectInfo(null);
     const fd = new FormData();
     fd.append("segments", "[]");
     fd.append("auto_detect_swings", "true");
     fd.append("starting_hole", String(parseInt(startingHole, 10) || 1));
     fd.append("ai_tracer_model", aiTracerModel);
     try {
-      const data = await api.reprocessLongUpload(adminPassword, uploadId, fd);
-      setResults(data.results || []);
-      setAutoDetectInfo(data.auto_detect || null);
+      await api.reprocessLongUpload(adminPassword, uploadId, fd);
+      setQueuedUploadId(uploadId);
       refreshPriorUploads();
     } catch (e) {
       setError(e.message);
@@ -128,8 +140,7 @@ export default function AdminLongUpload() {
   async function submit(e) {
     e.preventDefault();
     setError(null);
-    setResults(null);
-    setAutoDetectInfo(null);
+    setQueuedUploadId(null);
 
     if (!file) { setError("Pick a video file."); return; }
     let cleaned = [];
@@ -176,8 +187,7 @@ export default function AdminLongUpload() {
 
     try {
       const data = await api.longUploadClips(adminPassword, fd, setProgress);
-      setResults(data.results || []);
-      setAutoDetectInfo(data.auto_detect || null);
+      setQueuedUploadId(data?.upload_id ?? null);
       refreshPriorUploads();
     } catch (e) {
       setError(e.message);
@@ -211,6 +221,18 @@ export default function AdminLongUpload() {
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>
 
+      {queuedUploadId != null && (
+        <div className="card" style={{ borderLeft: "4px solid var(--primary)" }}>
+          <b>Upload #{queuedUploadId} queued.</b>{" "}
+          <span className="small muted">
+            Cutting, AI-tracer, and splicing run in the background — usually
+            5–10 minutes. You can close this page; finished clips appear on{" "}
+            <Link to="/admin/broadcast-clips">Broadcast</Link> when ready, and
+            this list updates automatically.
+          </span>
+        </div>
+      )}
+
       {priorUploads && priorUploads.length > 0 && (
         <div className="card">
           <h3 style={{ marginBottom: 6 }}>Previous long uploads</h3>
@@ -222,11 +244,20 @@ export default function AdminLongUpload() {
           <div className="stack" style={{ gap: 8 }}>
             {priorUploads.map((u) => {
               const missing = u.tee_missing || u.green_missing;
+              const status = u.processing_status || "completed";
+              const busy = status === "pending" || status === "processing";
+              const statusPill = (
+                status === "processing" ? <span className="pill warn small">processing…</span> :
+                status === "pending"    ? <span className="pill warn small">queued</span> :
+                status === "failed"     ? <span className="pill err small">failed</span> :
+                                          <span className="pill ok small">done</span>
+              );
               return (
                 <div key={u.id} className="card tight" style={{ margin: 0, padding: 10 }}>
                   <div className="inline" style={{ justifyContent: "space-between", width: "100%" }}>
                     <div className="small">
                       <b>#{u.id}</b>{" "}
+                      <span style={{ marginLeft: 4 }}>{statusPill}</span>{" "}
                       <span className="muted">
                         · {u.course_name || `course #${u.course_id}`}{" "}
                         · {u.base_captured_at ? new Date(u.base_captured_at).toLocaleString() : "—"}
@@ -248,23 +279,41 @@ export default function AdminLongUpload() {
                           <> · last run: {u.last_n_succeeded ?? "?"}/{u.last_n_segments} succeeded</>
                         )}
                       </div>
+                      {status === "failed" && u.last_error && (
+                        <div className="tiny err-text" style={{ marginTop: 2 }}>
+                          error: <code>{u.last_error}</code>
+                        </div>
+                      )}
+                      {busy && (
+                        <div className="tiny muted" style={{ marginTop: 2 }}>
+                          {status === "pending"
+                            ? "Queued — will start shortly."
+                            : "Running cut + AI tracer + splice on the server. This page polls for completion."}
+                        </div>
+                      )}
                     </div>
                     <div className="inline" style={{ gap: 6 }}>
                       <button
                         type="button"
                         className="small"
                         onClick={() => reprocessPrior(u.id)}
-                        disabled={!!reprocessing[u.id] || missing}
-                        title={missing ? "Source file missing on disk" : "Re-cut + re-process this upload with current settings"}
+                        disabled={!!reprocessing[u.id] || missing || busy}
+                        title={
+                          busy
+                            ? "Already running"
+                            : missing
+                            ? "Source file missing on disk"
+                            : "Re-cut + re-process this upload with current settings"
+                        }
                       >
-                        {reprocessing[u.id] ? "Reprocessing…" : "Reprocess"}
+                        {reprocessing[u.id] ? "Queuing…" : busy ? "Running…" : "Reprocess"}
                       </button>
                       <button
                         type="button"
                         className="ghost small err-text"
                         onClick={() => deletePrior(u.id)}
-                        disabled={!!reprocessing[u.id]}
-                        title="Delete this stored upload + its source files"
+                        disabled={!!reprocessing[u.id] || busy}
+                        title={busy ? "Wait for processing to finish" : "Delete this stored upload + its source files"}
                       >
                         Delete
                       </button>
@@ -538,7 +587,11 @@ export default function AdminLongUpload() {
               <div style={{ height: 8, background: "var(--surface-alt)", borderRadius: 4, overflow: "hidden" }}>
                 <div style={{ width: `${progress}%`, height: "100%", background: "var(--primary)" }} />
               </div>
-              <div className="small muted" style={{ marginTop: 4 }}>{progress}% uploaded — ffmpeg cutting starts as soon as upload finishes</div>
+              <div className="small muted" style={{ marginTop: 4 }}>
+                {progress < 100
+                  ? `${progress}% uploaded — once the upload finishes, AI cutting + splicing runs in the background.`
+                  : "Upload complete — queuing background job…"}
+              </div>
             </div>
           )}
 
@@ -547,81 +600,14 @@ export default function AdminLongUpload() {
               ? `Uploading… ${progress}%`
               : (autoDetectSwings
                 ? (fileGreen
-                  ? "Auto-detect swings + run AI tracer + composite (dual-cam)"
-                  : "Auto-detect swings + run matcher")
+                  ? "Upload + queue auto-detect + AI tracer + composite"
+                  : "Upload + queue auto-detect + matcher")
                 : (fileGreen
-                  ? `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run AI tracer + composite (dual-cam)`
-                  : `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run matcher`))}
+                  ? `Upload + queue ${segments.length} swing${segments.length === 1 ? "" : "s"} + AI tracer + composite`
+                  : `Upload + queue ${segments.length} swing${segments.length === 1 ? "" : "s"} + matcher`))}
           </button>
         </form>
       </div>
-
-      {results && (
-        <div className="card">
-          <h3 style={{ marginBottom: 10 }}>Results ({results.filter((r) => r.ok).length}/{results.length} succeeded)</h3>
-          {autoDetectInfo && (
-            <p className="small muted" style={{ marginBottom: 12 }}>
-              Auto-detected <b>{autoDetectInfo.n_detected}</b> swing
-              {autoDetectInfo.n_detected === 1 ? "" : "s"} from tee-video audio
-              {Array.isArray(autoDetectInfo.peaks) && autoDetectInfo.peaks.length > 0 && (
-                <> at: {autoDetectInfo.peaks.map((p, i) => (
-                  <code key={i} style={{ marginRight: 6 }}>
-                    {p.peak_time_sec}s{p.ratio != null ? ` (×${p.ratio})` : ""}
-                  </code>
-                ))}</>
-              )}
-            </p>
-          )}
-          <div className="stack">
-            {results.map((r, i) => (
-              <div key={i} className="card tight" style={{ margin: 0 }}>
-                <div className="inline" style={{ justifyContent: "space-between", width: "100%" }}>
-                  <div>
-                    <b>Swing {(r.index ?? i) + 1}{r.hole_number ? ` · Hole ${r.hole_number}` : ""}</b>
-                    {r.dual_camera && (
-                      <span className="pill small" style={{ marginLeft: 6 }}>dual-cam</span>
-                    )}
-                  </div>
-                  {r.ok ? (
-                    <span className={`pill ${r.status === "assigned" ? "ok" : "warn"}`}>{r.status}</span>
-                  ) : (
-                    <span className="pill err">failed</span>
-                  )}
-                </div>
-                {r.ok ? (
-                  <>
-                    <div className="small muted" style={{ marginTop: 4 }}>
-                      {r.participant_name ? `Matched to ${r.participant_name}` : "No match — appears in manual review queue."}
-                    </div>
-                    {r.composite && (
-                      <div className="tiny muted" style={{ marginTop: 2 }}>
-                        Composite: tee→green cut at <code>{r.composite.switch_sec}s</code>, end <code>{r.composite.end_sec}s</code>
-                        {r.composite.method && <> · impact via <code>{r.composite.method}</code></>}
-                      </div>
-                    )}
-                    {r.ai_tracer_error && (
-                      <div className="tiny err-text" style={{ marginTop: 2 }}>
-                        AI tracer issue: <code>{r.ai_tracer_error}</code> (fell back to raw cut)
-                      </div>
-                    )}
-                    {r.source_url && (
-                      <video
-                        src={r.source_url}
-                        controls
-                        playsInline
-                        preload="metadata"
-                        style={{ width: "100%", maxWidth: 480, marginTop: 8, borderRadius: 8, background: "#000" }}
-                      />
-                    )}
-                  </>
-                ) : (
-                  <div className="err-text small" style={{ marginTop: 4 }}>{r.error}</div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

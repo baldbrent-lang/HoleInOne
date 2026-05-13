@@ -84,6 +84,31 @@ def _migrate() -> None:
         if "operator_password_hash" not in course_cols:
             statements.append("ALTER TABLE courses ADD COLUMN operator_password_hash VARCHAR(200)")
 
+    # LongVideoUpload additions — background-job UX fields.
+    if "long_video_uploads" in inspector.get_table_names():
+        lvu_cols = {c["name"] for c in inspector.get_columns("long_video_uploads")}
+        if "processing_status" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN processing_status VARCHAR(20) DEFAULT 'completed'"
+            )
+            # Existing rows predate the background-job flow — backfill as
+            # completed so the UI doesn't flag them as stuck.
+            statements.append(
+                "UPDATE long_video_uploads SET processing_status = 'completed' WHERE processing_status IS NULL"
+            )
+        if "processing_started_at" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN processing_started_at TIMESTAMP"
+            )
+        if "processing_completed_at" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN processing_completed_at TIMESTAMP"
+            )
+        if "last_error" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN last_error TEXT"
+            )
+
     # VideoClip additions
     if "video_clips" in inspector.get_table_names():
         clip_cols = {c["name"] for c in inspector.get_columns("video_clips")}
