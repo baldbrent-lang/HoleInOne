@@ -2548,7 +2548,14 @@ AUDIO_ENVELOPE_WINDOW_MS = 10
 # Minimum peak-to-median ratio for us to trust the audio peak as a
 # real impact. Below this we treat the audio as too noisy to
 # identify a clear "thwack" and fall back to the AI vision path.
-AUDIO_MIN_PEAK_OVER_MEDIAN = 4.0
+AUDIO_MIN_PEAK_OVER_MEDIAN = 30.0
+# Visual impact lands a few frames before the audio envelope peak: sound
+# from the strike has to travel ~5–15 m of air to the mic (≈30 ms /
+# ~1 frame at 30 fps), and the smoothed envelope's max sits a few ms
+# after the leading edge of the transient. Two frames back is a good
+# default for typical phone-mic distances; tune up if the mic was very
+# far from the tee, down if it was on the player.
+AUDIO_IMPACT_PRE_PEAK_FRAMES = 2
 
 
 def find_impact_via_audio(input_path: Path, fps: float) -> dict:
@@ -2670,21 +2677,28 @@ def find_impact_via_audio(input_path: Path, fps: float) -> dict:
 
     peak_time = peak_idx / float(AUDIO_SAMPLE_RATE)
     info["peak_time_sec"] = float(peak_time)
-    info["impact_frame"] = int(round(peak_time * fps))
-    # Confidence buckets — these are heuristic but visible in the UI
-    # so the operator can sanity-check the audio call.
-    if ratio >= 15:
+    audio_peak_frame = int(round(peak_time * fps))
+    # Visual impact lands a few frames before the audio envelope peak
+    # (see AUDIO_IMPACT_PRE_PEAK_FRAMES comment). Clamp to 0 so we don't
+    # go negative on short clips with impact near the very start.
+    adjusted_frame = max(0, audio_peak_frame - AUDIO_IMPACT_PRE_PEAK_FRAMES)
+    info["audio_peak_frame"] = audio_peak_frame
+    info["pre_peak_offset_frames"] = int(AUDIO_IMPACT_PRE_PEAK_FRAMES)
+    info["impact_frame"] = adjusted_frame
+    # Confidence buckets — gated at >=30 by AUDIO_MIN_PEAK_OVER_MEDIAN
+    # above, so "low" is unreachable here. Kept for downstream code
+    # that branches on the label.
+    if ratio >= 60:
         info["confidence"] = "high"
-    elif ratio >= 8:
-        info["confidence"] = "medium"
     else:
-        info["confidence"] = "low"
+        info["confidence"] = "medium"
 
     info["ok"] = True
     log.info(
-        "ai_tracer: audio impact — frame=%d t=%.3fs peak=%.3f median=%.3f "
-        "ratio=%.1f confidence=%s",
-        info["impact_frame"], peak_time, peak_value, median, ratio,
+        "ai_tracer: audio impact — frame=%d (audio_peak=%d - %d) t=%.3fs "
+        "peak=%.3f median=%.3f ratio=%.1f confidence=%s",
+        info["impact_frame"], audio_peak_frame, AUDIO_IMPACT_PRE_PEAK_FRAMES,
+        peak_time, peak_value, median, ratio,
         info["confidence"],
     )
     return info
@@ -3369,19 +3383,21 @@ def run_full_ai_tracer_pipeline(
         audio_frame = audio_impact_info.get("impact_frame")
         if audio_frame is not None and audio_frame >= addr_idx:
             ratio_str = (
-                f" (peak/median = {audio_impact_info['ratio']:.1f})"
+                f" (×{audio_impact_info['ratio']:.1f})"
                 if audio_impact_info.get("ratio") is not None else ""
             )
             peak_str = (
                 f" at {audio_impact_info['peak_time_sec']:.3f}s"
                 if audio_impact_info.get("peak_time_sec") is not None else ""
             )
+            offset = audio_impact_info.get("pre_peak_offset_frames") or 0
+            offset_str = f" − {offset}f" if offset else ""
             impact_info = {
                 "ok": True,
                 "error": None,
                 "impact_frame": int(audio_frame),
                 "confidence": audio_impact_info.get("confidence"),
-                "notes": f"audio peak{peak_str}{ratio_str}",
+                "notes": f"audio peak{peak_str}{ratio_str}{offset_str}",
                 "method": "audio",
                 "model": None,
                 "frames_sent": [],
