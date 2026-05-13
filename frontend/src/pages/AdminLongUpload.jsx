@@ -378,40 +378,44 @@ export default function AdminLongUpload() {
                   {showSource[u.id] && !missing && (u.tee_url || u.green_url) && (
                     <div className="card tight" style={{ margin: "10px 0 0", background: "var(--surface-alt)" }}>
                       <div className="small" style={{ marginBottom: 6 }}>
-                        <b>Source video{u.dual_camera ? "s" : ""}</b>
+                        <b>Source preview{u.dual_camera ? "s" : ""}</b>{" "}
+                        <span className="tiny muted">
+                          · first-frame thumbnails so you can verify the tee/green labels match the footage
+                        </span>
                       </div>
                       <div
                         style={{
                           display: "grid",
-                          gridTemplateColumns: u.dual_camera ? "1fr 1fr" : "1fr",
-                          gap: 8,
+                          gridTemplateColumns: "repeat(auto-fill, minmax(220px, max-content))",
+                          gap: 10,
+                          alignItems: "start",
                         }}
                       >
                         {u.tee_url && (
-                          <div style={{ minWidth: 0 }}>
+                          <div style={{ width: 240 }}>
                             <div className="tiny muted" style={{ marginBottom: 2 }}>
-                              tee · <code>{u.tee_original_filename || u.tee_filename}</code>
+                              <b>tee</b> · <code>{u.tee_original_filename || u.tee_filename}</code>
                             </div>
                             <video
                               src={u.tee_url}
-                              controls
-                              playsInline
                               preload="metadata"
-                              style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                              muted
+                              playsInline
+                              style={{ width: 240, height: 135, borderRadius: 6, background: "#000", objectFit: "cover" }}
                             />
                           </div>
                         )}
                         {u.dual_camera && u.green_url && (
-                          <div style={{ minWidth: 0 }}>
+                          <div style={{ width: 240 }}>
                             <div className="tiny muted" style={{ marginBottom: 2 }}>
-                              green · <code>{u.green_original_filename || u.green_filename}</code>
+                              <b>green</b> · <code>{u.green_original_filename || u.green_filename}</code>
                             </div>
                             <video
                               src={u.green_url}
-                              controls
-                              playsInline
                               preload="metadata"
-                              style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                              muted
+                              playsInline
+                              style={{ width: 240, height: 135, borderRadius: 6, background: "#000", objectFit: "cover" }}
                             />
                           </div>
                         )}
