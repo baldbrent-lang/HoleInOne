@@ -57,6 +57,7 @@ from ..services.ai_tracer import (
     detect_swings_combined,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
+from ..services.intro_overlay import apply_intro_overlay_inplace
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -1037,6 +1038,49 @@ def _process_long_upload_segments(
             row.last_n_succeeded = done_so_far
             db.commit()
 
+    # Cache the course once per call — _intro_overlay_for_clip needs
+    # course.name / par3_holes / hole_yardages for every segment.
+    _course_for_intro: Course | None = db.get(Course, course_id)
+
+    def _intro_overlay_for_clip(clip: VideoClip, participant: Participant | None) -> None:
+        """Best-effort: re-encode the clip's deliverable file in-place
+        with the slide-in/out intro panels overlaid on the first ~3.5s.
+        Any failure (PIL missing, ffmpeg fails, file gone) logs and
+        moves on — the underlying clip ships either way."""
+        if not clip.source_url:
+            return
+        fname = clip.source_url.rstrip("/").rsplit("/", 1)[-1]
+        if not fname:
+            return
+        fpath = CLIPS_DIR / fname
+        if not fpath.exists():
+            return
+        course = _course_for_intro
+        yardage = None
+        par = None
+        course_name = ""
+        if course is not None:
+            course_name = course.name or ""
+            if course.hole_yardages:
+                raw_y = course.hole_yardages.get(str(int(clip.hole_number)))
+                try:
+                    yardage = int(raw_y) if raw_y is not None else None
+                except (TypeError, ValueError):
+                    yardage = None
+            par_3_list = [int(h) for h in (course.par3_holes or [])]
+            par = 3 if int(clip.hole_number) in par_3_list else 4
+        try:
+            apply_intro_overlay_inplace(
+                fpath,
+                player_name=(participant.name if participant else None),
+                course_name=course_name,
+                hole_number=int(clip.hole_number),
+                par=par,
+                yardage=yardage,
+            )
+        except Exception as exc:  # pragma: no cover
+            log.warning("intro overlay failed for clip %s: %s", clip.id, exc)
+
     n_done = 0
     results: list[dict] = []
     for idx, seg in enumerate(seg_list):
@@ -1160,6 +1204,7 @@ def _process_long_upload_segments(
             participant = match_clip(db, clip)
             if participant and clip.ball_in_cup:
                 notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+            _intro_overlay_for_clip(clip, participant)
             db.commit()
 
             results.append({
@@ -1214,6 +1259,7 @@ def _process_long_upload_segments(
         participant = match_clip(db, clip)
         if participant and clip.ball_in_cup:
             notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+        _intro_overlay_for_clip(clip, participant)
         db.commit()
 
         results.append({
