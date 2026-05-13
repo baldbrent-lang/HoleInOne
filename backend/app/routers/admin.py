@@ -4,6 +4,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1489,22 +1490,37 @@ def test_cut_long_upload(
             pass
 
     cuts: list[dict] = []
+    t_loop_start = time.monotonic()
+    n_windows_total = len(windows)
     for idx, w in enumerate(windows):
         start_sec = float(w["start_sec"])
         end_sec = float(w["end_sec"])
         tok = secrets.token_hex(4)
         tee_name = f"testcut-{upload_id}-{idx:02d}-tee-{tok}.mp4"
         tee_out = testcuts_dir / tee_name
-        tee_ok = cut_segment(src_path, tee_out, start_sec, end_sec)
+        t_cut_start = time.monotonic()
+        # Fast seek + stream copy: ~50x faster than the production
+        # frame-accurate path. Snaps to nearest keyframe (~0-2s drift)
+        # which is fine when the operator is just verifying that the
+        # detector landed on real swings.
+        tee_ok = cut_segment(src_path, tee_out, start_sec, end_sec, fast=True)
 
         green_url: str | None = None
         green_ok: bool | None = None
         if green_path is not None:
             green_name = f"testcut-{upload_id}-{idx:02d}-green-{tok}.mp4"
             green_out = testcuts_dir / green_name
-            green_ok = cut_segment(green_path, green_out, start_sec, end_sec)
+            green_ok = cut_segment(green_path, green_out, start_sec, end_sec, fast=True)
             if green_ok:
                 green_url = f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{green_name}"
+
+        log.info(
+            "long-upload test-cut: upload=%s cut %d/%d [%.1f-%.1fs] tee=%s green=%s in %.1fs",
+            upload_id, idx + 1, n_windows_total, start_sec, end_sec,
+            "ok" if tee_ok else "fail",
+            "ok" if green_ok else ("fail" if green_ok is False else "—"),
+            time.monotonic() - t_cut_start,
+        )
 
         cuts.append({
             "index": idx,
@@ -1525,8 +1541,9 @@ def test_cut_long_upload(
         })
 
     log.info(
-        "long-upload test-cut: upload=%s detector=%s windows=%d cuts_ok=%d",
+        "long-upload test-cut: upload=%s detector=%s windows=%d cuts_ok=%d total=%.1fs",
         upload_id, detector, len(windows), sum(1 for c in cuts if c["ok"]),
+        time.monotonic() - t_loop_start,
     )
     return {
         "upload_id": upload_id,
