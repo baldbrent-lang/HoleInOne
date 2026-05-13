@@ -105,6 +105,16 @@ export default function AdminLongUpload() {
     fd.append("auto_detect_swings", "true");
     fd.append("starting_hole", String(parseInt(startingHole, 10) || 1));
     fd.append("ai_tracer_model", aiTracerModel);
+    // Pass the operator's tuned detector thresholds — same numbers
+    // they used to verify clip boundaries in the Test cut UI. Falls
+    // back to the production combined-mode defaults if the inputs
+    // are blank.
+    const aRatio = parseFloat(audioMinRatio[uploadId]);
+    const mRatio = parseFloat(motionRatio[uploadId]);
+    const win = parseFloat(pairWindow[uploadId]);
+    fd.append("audio_min_peak_ratio", String(Number.isFinite(aRatio) && aRatio > 0 ? aRatio : 5));
+    fd.append("motion_ratio", String(Number.isFinite(mRatio) && mRatio > 0 ? mRatio : 2));
+    fd.append("combined_pair_window_sec", String(Number.isFinite(win) && win > 0 ? win : 3));
     try {
       await api.reprocessLongUpload(adminPassword, uploadId, fd);
       setQueuedUploadId(uploadId);
@@ -493,7 +503,7 @@ export default function AdminLongUpload() {
                             ? "Already running"
                             : missing
                             ? "Source file missing on disk"
-                            : "Re-cut + re-process this upload with current settings"
+                            : `Re-cut + re-process with combined detector at audio=${audioMinRatio[u.id] ?? 5}, motion=${motionRatio[u.id] ?? 2}, pair-window=${pairWindow[u.id] ?? 3}s. Tune via Test cut first.`
                         }
                       >
                         {reprocessing[u.id] ? "Queuing…" : busy ? "Running…" : "Reprocess"}

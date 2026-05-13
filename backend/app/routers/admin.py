@@ -767,6 +767,9 @@ def _run_long_upload_job(
     auto_detect_swings: bool,
     starting_hole: int,
     ai_tracer_model: str | None,
+    audio_min_peak_ratio: float = 5.0,
+    motion_ratio: float = 2.0,
+    combined_pair_window_sec: float = 3.0,
 ) -> None:
     """Background worker for the long-upload cut / splice / AI-tracer
     pipeline.
@@ -812,7 +815,13 @@ def _run_long_upload_job(
                 # Combined audio + motion detector: an audio impact only
                 # counts when a motion burst peaks within ±3 s. Filters
                 # the false positives each detector produces alone.
-                detected = detect_swings_combined(src_path, fps=tee_fps)
+                detected = detect_swings_combined(
+                    src_path,
+                    fps=tee_fps,
+                    audio_min_peak_ratio=float(audio_min_peak_ratio),
+                    motion_ratio=float(motion_ratio),
+                    pair_window_sec=float(combined_pair_window_sec),
+                )
                 for i, d in enumerate(detected):
                     segs.append({
                         "hole_number": starting_hole + i,
@@ -1175,6 +1184,9 @@ async def upload_long_video(
     video: UploadFile = File(...),
     video_green: UploadFile | None = File(None),
     ai_tracer_model: str | None = Form(None),
+    audio_min_peak_ratio: float = Form(5.0),
+    motion_ratio: float = Form(2.0),
+    combined_pair_window_sec: float = Form(3.0),
     db: Session = Depends(get_db),
 ):
     """Cut a long video into multiple per-swing clips and run each through
@@ -1288,6 +1300,9 @@ async def upload_long_video(
             "auto_detect_swings": bool(auto_detect_swings),
             "starting_hole": int(starting_hole or 1),
             "ai_tracer_model": ai_tracer_model,
+            "audio_min_peak_ratio": float(audio_min_peak_ratio),
+            "motion_ratio": float(motion_ratio),
+            "combined_pair_window_sec": float(combined_pair_window_sec),
         },
         daemon=True,
         name=f"long-upload-{upload_id}",
@@ -1381,6 +1396,9 @@ def reprocess_long_upload(
     auto_detect_swings: bool = Form(True),
     starting_hole: int = Form(1),
     ai_tracer_model: str | None = Form(None),
+    audio_min_peak_ratio: float = Form(5.0),
+    motion_ratio: float = Form(2.0),
+    combined_pair_window_sec: float = Form(3.0),
     db: Session = Depends(get_db),
 ):
     """Re-cut / re-process a previously-uploaded long video without
@@ -1434,6 +1452,9 @@ def reprocess_long_upload(
             "auto_detect_swings": bool(auto_detect_swings),
             "starting_hole": int(starting_hole or 1),
             "ai_tracer_model": ai_tracer_model,
+            "audio_min_peak_ratio": float(audio_min_peak_ratio),
+            "motion_ratio": float(motion_ratio),
+            "combined_pair_window_sec": float(combined_pair_window_sec),
         },
         daemon=True,
         name=f"long-upload-reprocess-{row.id}",
