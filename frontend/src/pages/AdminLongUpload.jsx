@@ -50,6 +50,7 @@ export default function AdminLongUpload() {
   const [testCutResults, setTestCutResults] = useState({}); // {id: {detector, cuts, ...}}
   const [testCutDetector, setTestCutDetector] = useState({}); // {id: "motion"|"audio"}
   const [audioMinRatio, setAudioMinRatio] = useState({}); // {id: number}
+  const [detectOnly, setDetectOnly] = useState({}); // {id: true} -> skip cutting
   const [showSource, setShowSource] = useState({}); // {id: true}
   const videoRef = useRef(null);
 
@@ -112,6 +113,7 @@ export default function AdminLongUpload() {
       const ratio = parseFloat(audioMinRatio[uploadId]);
       if (Number.isFinite(ratio) && ratio > 0) opts.audioMinPeakRatio = ratio;
     }
+    if (detectOnly[uploadId]) opts.cutClips = false;
     setTestCutting((t) => ({ ...t, [uploadId]: true }));
     setError(null);
     try {
@@ -345,6 +347,22 @@ export default function AdminLongUpload() {
                           title="Minimum peak/median ratio. Higher = stricter (only the loudest thwacks). Default 10."
                         />
                       )}
+                      <label
+                        className="tiny"
+                        style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                        title="Skip ffmpeg cutting and just list the detected swing times. Fast — useful while tuning the detector."
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!detectOnly[u.id]}
+                          onChange={(e) =>
+                            setDetectOnly((d) => ({ ...d, [u.id]: e.target.checked }))
+                          }
+                          disabled={!!testCutting[u.id] || missing || busy}
+                          style={{ margin: 0 }}
+                        />
+                        detect only
+                      </label>
                       <button
                         type="button"
                         className="secondary small"
@@ -527,61 +545,101 @@ export default function AdminLongUpload() {
                           duration filter rejected everything.
                         </div>
                       )}
-                      <div
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: testCutResults[u.id].dual_camera
-                            ? "repeat(auto-fill, minmax(360px, 1fr))"
-                            : "repeat(auto-fill, minmax(220px, 1fr))",
-                          gap: 8,
-                        }}
-                      >
-                        {testCutResults[u.id].cuts.map((c) => (
-                          <div key={c.index} style={{ minWidth: 0 }}>
-                            <div className="tiny muted" style={{ marginBottom: 2 }}>
-                              #{c.index + 1} · {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
-                              {" "}({c.duration_sec}s)
-                              {c.peak_time_sec != null && (
-                                <> · peak {c.peak_time_sec.toFixed(2)}s</>
-                              )}
-                              {c.ratio != null && <> · ×{c.ratio.toFixed(1)}</>}
-                              {c.confidence && <> · {c.confidence}</>}
-                            </div>
-                            <div
-                              style={{
-                                display: "grid",
-                                gridTemplateColumns: testCutResults[u.id].dual_camera ? "1fr 1fr" : "1fr",
-                                gap: 4,
-                              }}
-                            >
-                              {c.ok && c.url ? (
-                                <video
-                                  src={c.url}
-                                  controls
-                                  playsInline
-                                  preload="metadata"
-                                  style={{ width: "100%", borderRadius: 6, background: "#000" }}
-                                />
-                              ) : (
-                                <div className="tiny err-text">tee cut failed</div>
-                              )}
-                              {testCutResults[u.id].dual_camera && (
-                                c.green_url ? (
+                      {testCutResults[u.id].cuts_skipped ? (
+                        <div className="tiny" style={{ fontFamily: "monospace", lineHeight: 1.6 }}>
+                          <div className="muted" style={{ marginBottom: 4 }}>
+                            <b>{testCutResults[u.id].cuts.length}</b> swing
+                            {testCutResults[u.id].cuts.length === 1 ? "" : "s"} detected
+                            · cutting skipped
+                          </div>
+                          <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ textAlign: "left" }}>
+                                <th style={{ padding: "2px 10px 2px 0" }}>#</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>peak</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>×ratio</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>window</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>conf</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {testCutResults[u.id].cuts.map((c) => (
+                                <tr key={c.index}>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>{c.index + 1}</td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.peak_time_sec != null ? `${c.peak_time_sec.toFixed(2)}s` : "—"}
+                                  </td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.ratio != null ? `×${c.ratio.toFixed(1)}` : "—"}
+                                  </td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
+                                  </td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.confidence || "—"}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: testCutResults[u.id].dual_camera
+                              ? "repeat(auto-fill, minmax(360px, 1fr))"
+                              : "repeat(auto-fill, minmax(220px, 1fr))",
+                            gap: 8,
+                          }}
+                        >
+                          {testCutResults[u.id].cuts.map((c) => (
+                            <div key={c.index} style={{ minWidth: 0 }}>
+                              <div className="tiny muted" style={{ marginBottom: 2 }}>
+                                #{c.index + 1} · {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
+                                {" "}({c.duration_sec}s)
+                                {c.peak_time_sec != null && (
+                                  <> · peak {c.peak_time_sec.toFixed(2)}s</>
+                                )}
+                                {c.ratio != null && <> · ×{c.ratio.toFixed(1)}</>}
+                                {c.confidence && <> · {c.confidence}</>}
+                              </div>
+                              <div
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: testCutResults[u.id].dual_camera ? "1fr 1fr" : "1fr",
+                                  gap: 4,
+                                }}
+                              >
+                                {c.ok && c.url ? (
                                   <video
-                                    src={c.green_url}
+                                    src={c.url}
                                     controls
                                     playsInline
                                     preload="metadata"
                                     style={{ width: "100%", borderRadius: 6, background: "#000" }}
                                   />
-                                ) : c.green_ok === false ? (
-                                  <div className="tiny err-text">green cut failed</div>
-                                ) : null
-                              )}
+                                ) : (
+                                  <div className="tiny err-text">tee cut failed</div>
+                                )}
+                                {testCutResults[u.id].dual_camera && (
+                                  c.green_url ? (
+                                    <video
+                                      src={c.green_url}
+                                      controls
+                                      playsInline
+                                      preload="metadata"
+                                      style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                                    />
+                                  ) : c.green_ok === false ? (
+                                    <div className="tiny err-text">green cut failed</div>
+                                  ) : null
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        ))}
-                      </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

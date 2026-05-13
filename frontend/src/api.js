@@ -230,6 +230,9 @@ export const api = {
       if (opts.audioMinPeakRatio != null) {
         fd.append("audio_min_peak_ratio", String(opts.audioMinPeakRatio));
       }
+      if (opts.cutClips === false) {
+        fd.append("cut_clips", "false");
+      }
       xhr.send(fd);
     }),
   retryTracer: (key, clipId) =>

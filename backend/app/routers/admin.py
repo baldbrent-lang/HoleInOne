@@ -1434,6 +1434,7 @@ def test_cut_long_upload(
     upload_id: int,
     detector: str = Form("motion"),
     audio_min_peak_ratio: float = Form(10.0),
+    cut_clips: bool = Form(True),
     db: Session = Depends(get_db),
 ):
     """Dry-run the swing-cutting half of the long-upload pipeline.
@@ -1495,6 +1496,33 @@ def test_cut_long_upload(
     for idx, w in enumerate(windows):
         start_sec = float(w["start_sec"])
         end_sec = float(w["end_sec"])
+        peak_time_sec = (
+            float(w.get("peak_time_sec"))
+            if w.get("peak_time_sec") is not None else None
+        )
+        cut_entry: dict = {
+            "index": idx,
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "duration_sec": round(end_sec - start_sec, 2),
+            "peak_time_sec": peak_time_sec,
+            "ratio": w.get("ratio"),
+            "confidence": w.get("confidence"),
+            "burst_duration_sec": w.get("burst_duration_sec"),
+        }
+        if not cut_clips:
+            # Detection-only mode: no ffmpeg, no files. Operator just
+            # wants to see the peak times to debug the detector.
+            cut_entry.update({
+                "ok": None,
+                "url": None,
+                "green_url": None,
+                "green_ok": None,
+                "skipped": True,
+            })
+            cuts.append(cut_entry)
+            continue
+
         tok = secrets.token_hex(4)
         tee_name = f"testcut-{upload_id}-{idx:02d}-tee-{tok}.mp4"
         tee_out = testcuts_dir / tee_name
@@ -1522,16 +1550,8 @@ def test_cut_long_upload(
             time.monotonic() - t_cut_start,
         )
 
-        cuts.append({
-            "index": idx,
+        cut_entry.update({
             "ok": bool(tee_ok),
-            "start_sec": start_sec,
-            "end_sec": end_sec,
-            "duration_sec": round(end_sec - start_sec, 2),
-            "peak_time_sec": float(w.get("peak_time_sec")) if w.get("peak_time_sec") is not None else None,
-            "ratio": w.get("ratio"),
-            "confidence": w.get("confidence"),
-            "burst_duration_sec": w.get("burst_duration_sec"),
             "url": (
                 f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{tee_name}"
                 if tee_ok else None
@@ -1539,10 +1559,12 @@ def test_cut_long_upload(
             "green_url": green_url,
             "green_ok": green_ok,
         })
+        cuts.append(cut_entry)
 
     log.info(
-        "long-upload test-cut: upload=%s detector=%s windows=%d cuts_ok=%d total=%.1fs",
-        upload_id, detector, len(windows), sum(1 for c in cuts if c["ok"]),
+        "long-upload test-cut: upload=%s detector=%s windows=%d cut_clips=%s cuts_ok=%d total=%.1fs",
+        upload_id, detector, len(windows), cut_clips,
+        sum(1 for c in cuts if c.get("ok")),
         time.monotonic() - t_loop_start,
     )
     return {
@@ -1551,6 +1573,7 @@ def test_cut_long_upload(
         "tee_fps": tee_fps,
         "n_windows": len(windows),
         "dual_camera": green_path is not None,
+        "cuts_skipped": not cut_clips,
         "debug": debug or None,
         "cuts": cuts,
     }
