@@ -1443,6 +1443,7 @@ def test_cut_long_upload(
     detector: str = Form("motion"),
     audio_min_peak_ratio: float = Form(10.0),
     motion_ratio: float = Form(4.0),
+    combined_pair_window_sec: float = Form(3.0),
     cut_clips: bool = Form(True),
     db: Session = Depends(get_db),
 ):
@@ -1485,6 +1486,68 @@ def test_cut_long_upload(
             min_peak_ratio=float(audio_min_peak_ratio),
             debug=debug,
         )
+    elif detector == "combined":
+        # AND the two detectors: a candidate swing only if an audio
+        # impact and a motion burst peak within combined_pair_window_sec
+        # of each other. Output windows use the audio peak as the
+        # anchor (precise impact moment).
+        audio_debug: dict = {}
+        motion_debug: dict = {}
+        audio_windows = detect_swings_from_audio(
+            src_path,
+            fps=tee_fps,
+            min_peak_ratio=float(audio_min_peak_ratio),
+            debug=audio_debug,
+        )
+        motion_windows = detect_swings_from_motion(
+            src_path,
+            fps=tee_fps,
+            motion_ratio=float(motion_ratio),
+            debug=motion_debug,
+        )
+        pair_window = float(combined_pair_window_sec)
+        windows = []
+        pairs = []
+        for aw in audio_windows:
+            a_t = aw.get("peak_time_sec")
+            if a_t is None:
+                continue
+            closest_m = None
+            closest_dt = None
+            for mw in motion_windows:
+                m_t = mw.get("peak_time_sec")
+                if m_t is None:
+                    continue
+                dt = abs(float(a_t) - float(m_t))
+                if dt <= pair_window and (closest_dt is None or dt < closest_dt):
+                    closest_dt = dt
+                    closest_m = mw
+            if closest_m is not None:
+                windows.append(aw)
+                pairs.append({
+                    "audio_peak_sec": round(float(a_t), 2),
+                    "motion_peak_sec": round(float(closest_m.get("peak_time_sec")), 2),
+                    "dt_sec": round(float(closest_dt), 2),
+                    "audio_ratio": (
+                        round(float(aw.get("ratio")), 1)
+                        if aw.get("ratio") is not None else None
+                    ),
+                    "motion_ratio": (
+                        round(float(closest_m.get("ratio")), 1)
+                        if closest_m.get("ratio") is not None else None
+                    ),
+                })
+        debug = {
+            "audio": audio_debug,
+            "motion": motion_debug,
+            "combined": {
+                "pair_window_sec": pair_window,
+                "n_audio_windows": len(audio_windows),
+                "n_motion_windows": len(motion_windows),
+                "n_paired": len(pairs),
+                "pairs": pairs,
+            },
+        }
     else:
         detector = "motion"
         windows = detect_swings_from_motion(

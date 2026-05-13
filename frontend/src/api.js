@@ -233,6 +233,9 @@ export const api = {
       if (opts.motionRatio != null) {
         fd.append("motion_ratio", String(opts.motionRatio));
       }
+      if (opts.combinedPairWindowSec != null) {
+        fd.append("combined_pair_window_sec", String(opts.combinedPairWindowSec));
+      }
       if (opts.cutClips === false) {
         fd.append("cut_clips", "false");
       }

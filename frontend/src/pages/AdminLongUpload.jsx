@@ -59,6 +59,7 @@ export default function AdminLongUpload() {
   const [testCutDetector, setTestCutDetector] = useState({}); // {id: "motion"|"audio"}
   const [audioMinRatio, setAudioMinRatio] = useState({}); // {id: number}
   const [motionRatio, setMotionRatio] = useState({}); // {id: number}
+  const [pairWindow, setPairWindow] = useState({}); // {id: number} -> combined-mode pair window
   const [detectOnly, setDetectOnly] = useState({}); // {id: true} -> skip cutting
   const [showSource, setShowSource] = useState({}); // {id: true}
   const videoRef = useRef(null);
@@ -121,6 +122,13 @@ export default function AdminLongUpload() {
     if (detector === "audio") {
       const ratio = parseFloat(audioMinRatio[uploadId]);
       if (Number.isFinite(ratio) && ratio > 0) opts.audioMinPeakRatio = ratio;
+    } else if (detector === "combined") {
+      const aRatio = parseFloat(audioMinRatio[uploadId] ?? 5);
+      const mRatio = parseFloat(motionRatio[uploadId] ?? 2);
+      const win = parseFloat(pairWindow[uploadId] ?? 3);
+      if (Number.isFinite(aRatio) && aRatio > 0) opts.audioMinPeakRatio = aRatio;
+      if (Number.isFinite(mRatio) && mRatio > 0) opts.motionRatio = mRatio;
+      if (Number.isFinite(win) && win > 0) opts.combinedPairWindowSec = win;
     } else {
       const ratio = parseFloat(motionRatio[uploadId]);
       if (Number.isFinite(ratio) && ratio > 0) opts.motionRatio = ratio;
@@ -341,12 +349,13 @@ export default function AdminLongUpload() {
                         disabled={!!testCutting[u.id] || missing || busy}
                         className="small"
                         style={{ fontSize: 12, padding: "2px 6px" }}
-                        title="Swing detector used for the test cut"
+                        title="Swing detector used for the test cut. 'combined' AND's audio + motion: a swing only counts when an audio peak and a motion peak land within the pair window."
                       >
                         <option value="motion">motion</option>
                         <option value="audio">audio</option>
+                        <option value="combined">combined</option>
                       </select>
-                      {(testCutDetector[u.id] || "motion") === "audio" ? (
+                      {(testCutDetector[u.id] || "motion") === "audio" && (
                         <input
                           type="number"
                           min="1"
@@ -360,7 +369,8 @@ export default function AdminLongUpload() {
                           style={{ width: 60, fontSize: 12, padding: "2px 6px" }}
                           title="Minimum peak/median ratio. Higher = stricter (only the loudest thwacks). Default 10."
                         />
-                      ) : (
+                      )}
+                      {(testCutDetector[u.id] || "motion") === "motion" && (
                         <input
                           type="number"
                           min="1"
@@ -374,6 +384,56 @@ export default function AdminLongUpload() {
                           style={{ width: 60, fontSize: 12, padding: "2px 6px" }}
                           title="Motion threshold = median frame-diff × this ratio. Higher = stricter. Default 4."
                         />
+                      )}
+                      {(testCutDetector[u.id] || "motion") === "combined" && (
+                        <span
+                          className="tiny"
+                          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                        >
+                          a:
+                          <input
+                            type="number"
+                            min="1"
+                            step="0.5"
+                            value={audioMinRatio[u.id] ?? 5}
+                            onChange={(e) =>
+                              setAudioMinRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                            }
+                            disabled={!!testCutting[u.id] || missing || busy}
+                            className="small"
+                            style={{ width: 50, fontSize: 12, padding: "2px 6px" }}
+                            title="Audio peak/median ratio for combined mode. Default 5."
+                          />
+                          m:
+                          <input
+                            type="number"
+                            min="1"
+                            step="0.5"
+                            value={motionRatio[u.id] ?? 2}
+                            onChange={(e) =>
+                              setMotionRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                            }
+                            disabled={!!testCutting[u.id] || missing || busy}
+                            className="small"
+                            style={{ width: 50, fontSize: 12, padding: "2px 6px" }}
+                            title="Motion threshold ratio for combined mode. Default 2."
+                          />
+                          ±
+                          <input
+                            type="number"
+                            min="0.5"
+                            step="0.5"
+                            value={pairWindow[u.id] ?? 3}
+                            onChange={(e) =>
+                              setPairWindow((r) => ({ ...r, [u.id]: e.target.value }))
+                            }
+                            disabled={!!testCutting[u.id] || missing || busy}
+                            className="small"
+                            style={{ width: 50, fontSize: 12, padding: "2px 6px" }}
+                            title="Max seconds between an audio peak and a motion peak to count them as the same swing. Default 3."
+                          />
+                          s
+                        </span>
                       )}
                       <label
                         className="tiny"
@@ -508,6 +568,47 @@ export default function AdminLongUpload() {
                         <div className="tiny muted" style={{ marginBottom: 8, fontFamily: "monospace", lineHeight: 1.4 }}>
                           {testCutResults[u.id].debug.reason ? (
                             <div className="err-text">reason: {testCutResults[u.id].debug.reason}</div>
+                          ) : testCutResults[u.id].detector === "combined" ? (
+                            <>
+                              {(() => {
+                                const c = testCutResults[u.id].debug.combined || {};
+                                const a = testCutResults[u.id].debug.audio || {};
+                                const m = testCutResults[u.id].debug.motion || {};
+                                return (
+                                  <>
+                                    combined: audio_peaks={c.n_audio_windows ?? "?"}
+                                    {" "}· motion_peaks={c.n_motion_windows ?? "?"}
+                                    {" "}· paired={c.n_paired ?? "?"}
+                                    {" "}· window=±{c.pair_window_sec}s
+                                    <br />
+                                    audio: median={a.median_envelope?.toFixed?.(4) ?? "?"}
+                                    {" "}· threshold={a.threshold?.toFixed?.(4) ?? "?"}
+                                    {" "}(×{a.min_peak_ratio_used})
+                                    {" "}· raw_peaks={a.n_raw_peaks ?? "?"}
+                                    <br />
+                                    motion: median={m.median_motion?.toFixed?.(4) ?? "?"}
+                                    {" "}· threshold={m.threshold?.toFixed?.(4) ?? "?"}
+                                    {" "}(×{m.motion_ratio_used})
+                                    {" "}· raw_bursts={m.n_raw_bursts ?? "?"}
+                                    {" "}· duration_ok={m.n_duration_ok ?? "?"}
+                                    {Array.isArray(c.pairs) && c.pairs.length > 0 && (
+                                      <>
+                                        <br />
+                                        pairs (audio_sec, motion_sec, Δt, ×audio, ×motion):
+                                        <br />
+                                        {c.pairs.map((p, i) => (
+                                          <span key={i} style={{ marginRight: 10 }}>
+                                            [{p.audio_peak_sec}s ↔ {p.motion_peak_sec}s]
+                                            {" "}Δ{p.dt_sec}s
+                                            {" "}×{p.audio_ratio}/{p.motion_ratio}
+                                          </span>
+                                        ))}
+                                      </>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                            </>
                           ) : testCutResults[u.id].detector === "audio" ? (
                             <>
                               audio: median={testCutResults[u.id].debug.median_envelope?.toFixed(4)}{" "}
