@@ -2688,3 +2688,236 @@ def find_impact_via_audio(input_path: Path, fps: float) -> dict:
         info["confidence"],
     )
     return info
+
+
+def run_full_ai_tracer_pipeline(
+    input_path: Path,
+    output_dir: Path,
+    output_prefix: str,
+    model: str | None = None,
+) -> dict:
+    """Run the complete AI tracer pipeline (address → handedness →
+    impact → refine → ball-track → tracer render) on a single clip.
+
+    Writes intermediate JPEGs and the final tracer MP4 into
+    `output_dir`, prefixed with `output_prefix`. Returns a dict with
+    every stage's raw output plus paths to the files it wrote and a
+    computed `cutover_time_sec` (when the rendered tracer ends in
+    clip-time, plus a 1s buffer) for downstream dual-camera composite
+    use.
+
+    Never raises. The router that calls this is responsible for
+    transcoding the tracer MP4 to H.264 for browser playback if it
+    plans to display it directly, and for constructing public URLs.
+    """
+    result: dict = {
+        "ok": False,
+        "error": None,
+        "address": None,
+        "address_image_path": None,
+        "handedness": None,
+        "impact": None,
+        "impact_refined": None,
+        "impact_image_path": None,
+        "ball_track": None,
+        "ball_track_frames": [],
+        "tracer_video_info": None,
+        "tracer_video_path": None,
+        "cutover_time_sec": None,
+        "fps": None,
+        "ball_rest_xy_native": None,
+        "ball_xy_sent": None,
+        "ball_sent_dims": None,
+    }
+
+    if not HAS_CV:
+        result["error"] = "opencv not installed"
+        return result
+    if not HAS_ANTHROPIC:
+        result["error"] = "anthropic SDK not installed"
+        return result
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        result["error"] = "ANTHROPIC_API_KEY not set in environment"
+        return result
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Step 1: address frame ---
+    address_image_path = output_dir / f"{output_prefix}_address.jpg"
+    address_info = find_address_frame(
+        input_path, output_image_path=address_image_path, model=model,
+    )
+    result["address"] = address_info
+    if address_image_path.exists():
+        result["address_image_path"] = address_image_path
+    if not address_info.get("ok") or address_info.get("address_frame") is None:
+        result["error"] = f"address: {address_info.get('error', 'no address frame')}"
+        return result
+    addr_idx = int(address_info["address_frame"])
+
+    # --- Step 2: handedness + landmarks ---
+    handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
+    result["handedness"] = handedness_info
+    if handedness_info.get("ok"):
+        annotate_address_with_shaft(
+            input_path, addr_idx, handedness_info, address_image_path,
+        )
+
+    # Extract ball-rest position in handedness sent-image coords for
+    # downstream impact / track passes.
+    ball_xy_sent = None
+    ball_sent_dims = None
+    if handedness_info.get("ok"):
+        bx = handedness_info.get("ball_x")
+        by = handedness_info.get("ball_y")
+        sw = handedness_info.get("image_width")
+        sh = handedness_info.get("image_height")
+        if bx is not None and by is not None and sw and sh:
+            ball_xy_sent = (float(bx), float(by))
+            ball_sent_dims = (int(sw), int(sh))
+    result["ball_xy_sent"] = ball_xy_sent
+    result["ball_sent_dims"] = ball_sent_dims
+
+    # --- Step 3a: audio impact (preferred) ---
+    # Avoid a circular import by reaching into the video service only
+    # when we need the fps probe.
+    from .video import probe_fps as _probe_fps
+    fps_val = _probe_fps(input_path) or 30.0
+    result["fps"] = fps_val
+    audio_impact_info = find_impact_via_audio(input_path, fps_val)
+    impact_info: dict | None = None
+    if audio_impact_info.get("ok"):
+        audio_frame = audio_impact_info.get("impact_frame")
+        if audio_frame is not None and audio_frame >= addr_idx:
+            ratio_str = (
+                f" (peak/median = {audio_impact_info['ratio']:.1f})"
+                if audio_impact_info.get("ratio") is not None else ""
+            )
+            peak_str = (
+                f" at {audio_impact_info['peak_time_sec']:.3f}s"
+                if audio_impact_info.get("peak_time_sec") is not None else ""
+            )
+            impact_info = {
+                "ok": True,
+                "error": None,
+                "impact_frame": int(audio_frame),
+                "confidence": audio_impact_info.get("confidence"),
+                "notes": f"audio peak{peak_str}{ratio_str}",
+                "method": "audio",
+                "model": None,
+                "frames_sent": [],
+                "audio": audio_impact_info,
+            }
+        else:
+            audio_impact_info["error"] = (
+                f"audio peak at frame {audio_frame} precedes address "
+                f"frame {addr_idx}"
+            )
+            audio_impact_info["ok"] = False
+
+    # --- Step 3b: AI vision impact (fallback) ---
+    if impact_info is None:
+        impact_info = find_impact_frame_after_address(
+            input_path, addr_idx,
+            ball_xy_sent=ball_xy_sent,
+            ball_sent_dims=ball_sent_dims,
+            output_image_path=None,
+            model=model,
+        )
+        impact_info["method"] = "ai_vision"
+        impact_info["audio"] = audio_impact_info
+    result["impact"] = impact_info
+    if not impact_info.get("ok") or impact_info.get("impact_frame") is None:
+        result["error"] = f"impact: {impact_info.get('error', 'no impact')}"
+        return result
+
+    # --- Step 4: refined impact + shaft on impact frame ---
+    impact_image_path = output_dir / f"{output_prefix}_impact.jpg"
+    refined_impact_info = refine_impact_frame(
+        input_path, int(impact_info["impact_frame"]),
+        ball_xy_sent=ball_xy_sent,
+        ball_sent_dims=ball_sent_dims,
+        output_image_path=impact_image_path,
+        model=model,
+    )
+    result["impact_refined"] = refined_impact_info
+    if impact_image_path.exists():
+        result["impact_image_path"] = impact_image_path
+    if not refined_impact_info.get("ok") or refined_impact_info.get("impact_frame") is None:
+        result["error"] = (
+            f"refined_impact: {refined_impact_info.get('error', 'no refined impact')}"
+        )
+        return result
+
+    # --- Step 5: per-frame ball tracking ---
+    track_prefix = f"{output_prefix}_track"
+    ball_track_info = track_ball_after_impact(
+        input_path,
+        int(refined_impact_info["impact_frame"]),
+        output_dir=output_dir,
+        output_prefix=track_prefix,
+        ball_xy_sent=ball_xy_sent,
+        ball_sent_dims=ball_sent_dims,
+        model=model,
+    )
+    result["ball_track"] = ball_track_info
+    for rec in (ball_track_info.get("frames") or []):
+        result["ball_track_frames"].append({
+            "frame": rec.get("frame"),
+            "found": rec.get("found"),
+            "x": rec.get("x"),
+            "y": rec.get("y"),
+            "confidence": rec.get("confidence"),
+            "notes": rec.get("notes"),
+            "retry": rec.get("retry", False),
+            "image_filename": rec.get("image_filename"),
+        })
+
+    # --- Step 6: render tracer overlay video ---
+    ball_rest_xy_native: tuple[float, float] | None = None
+    if ball_xy_sent and ball_sent_dims:
+        cap = cv2.VideoCapture(str(input_path))
+        try:
+            if cap.isOpened():
+                nw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                nh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if nw > 0 and nh > 0:
+                    ball_rest_xy_native = (
+                        ball_xy_sent[0] * nw / ball_sent_dims[0],
+                        ball_xy_sent[1] * nh / ball_sent_dims[1],
+                    )
+        finally:
+            cap.release()
+    result["ball_rest_xy_native"] = ball_rest_xy_native
+
+    tracer_path = output_dir / f"{output_prefix}_ai_tracer.mp4"
+    tracer_info = render_tracer_video(
+        input_path, tracer_path,
+        ball_rest_xy_native=ball_rest_xy_native,
+        impact_frame_idx=int(refined_impact_info["impact_frame"]),
+        track_frames=ball_track_info.get("frames") or [],
+    )
+    result["tracer_video_info"] = tracer_info
+    if tracer_info.get("ok"):
+        result["tracer_video_path"] = tracer_path
+        # Cutover time for dual-camera composite: when the rendered
+        # smoothed line ends (last sampled frame in source-clip
+        # frame-index space), plus a 1-second pause so the viewer
+        # registers the tracer apex before the cut to the green
+        # camera. frame_range is in clip-relative frame indices so
+        # we just divide by fps.
+        rng = tracer_info.get("frame_range")
+        if rng and fps_val > 0:
+            result["cutover_time_sec"] = float(rng[1]) / fps_val + 1.0
+
+    result["ok"] = True
+    log.info(
+        "ai_tracer: pipeline complete for %s — addr=%s impact=%s "
+        "tracked=%d/%d cutover=%.2fs",
+        input_path.name, addr_idx,
+        refined_impact_info.get("impact_frame"),
+        (ball_track_info or {}).get("n_frames_found", 0),
+        (ball_track_info or {}).get("n_frames_processed", 0),
+        result["cutover_time_sec"] or 0.0,
+    )
+    return result

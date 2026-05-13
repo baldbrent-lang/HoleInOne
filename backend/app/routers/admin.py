@@ -48,6 +48,7 @@ from ..services.ai_tracer import (
     refine_impact_frame,
     track_ball_after_impact,
     render_tracer_video,
+    run_full_ai_tracer_pipeline,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
 
@@ -593,271 +594,101 @@ def ai_trace(
     fpath = CLIPS_DIR / fname
     if not fpath.exists():
         raise HTTPException(404, f"source file missing on disk: {fname}")
-
-    image_name = f"{fpath.stem}_address.jpg"
-    image_path = CLIPS_DIR / image_name
-    address_info = find_address_frame(
-        fpath, output_image_path=image_path, model=model,
+    pipe = run_full_ai_tracer_pipeline(
+        fpath, output_dir=CLIPS_DIR, output_prefix=fpath.stem, model=model,
     )
 
-    image_url = None
-    if address_info.get("saved_image") and image_path.exists():
-        mtime = int(image_path.stat().st_mtime)
-        image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
+    def _public_url(p):
+        if p is None:
+            return None
+        try:
+            mtime = int(p.stat().st_mtime)
+        except FileNotFoundError:
+            return None
+        return f"{settings.app_base_url}/uploads/clips/{p.name}?v={mtime}"
 
-    # Step 3: once we have the address frame, ask Claude what handedness
-    # the golfer is. Claude reports the (x, y) of hands + ball so we
-    # can overlay the shaft on the displayed address frame and visually
-    # verify what Claude saw.
-    handedness_info: dict | None = None
-    impact_info: dict | None = None
-    refined_impact_info: dict | None = None
-    impact_image_url: str | None = None
-    ball_track_info: dict | None = None
-    ball_track_frames_out: list[dict] = []
-    tracer_video_info: dict | None = None
-    tracer_video_url: str | None = None
-    addr_idx_int: int | None = None
-    if address_info.get("ok") and address_info.get("address_frame") is not None:
-        addr_idx_int = int(address_info["address_frame"])
-        handedness_info = detect_handedness_at_address(
-            fpath, addr_idx_int, model=model,
-        )
-        if handedness_info.get("ok"):
-            wrote = annotate_address_with_shaft(
-                fpath, addr_idx_int, handedness_info, image_path,
+    image_url = _public_url(pipe.get("address_image_path"))
+    impact_image_url = _public_url(pipe.get("impact_image_path"))
+
+    # Transcode the tracer MP4 to H.264 + faststart for browser playback.
+    tracer_video_url = None
+    tracer_path = pipe.get("tracer_video_path")
+    tracer_video_info = pipe.get("tracer_video_info")
+    if tracer_path is not None and tracer_video_info and tracer_video_info.get("ok"):
+        compressed = compress_for_email(tracer_path)
+        if not compressed:
+            log.warning(
+                "ai_tracer: compress_for_email returned False for %s — "
+                "browser playback may fail", tracer_path.name,
             )
-            if wrote and image_path.exists():
-                # Refresh the cache-buster so the browser picks up the
-                # annotated image instead of the clean one it may have
-                # already cached.
-                mtime = int(image_path.stat().st_mtime)
-                image_url = f"{settings.app_base_url}/uploads/clips/{image_name}?v={mtime}"
+        if tracer_path.exists() and tracer_path.stat().st_size > 0:
+            tracer_video_url = _public_url(tracer_path)
+        else:
+            tracer_video_info = {
+                **tracer_video_info,
+                "ok": False,
+                "error": "post-encode produced empty file",
+            }
 
-        # Step 4: find the impact frame. Pass the ball's starting
-        # position from the handedness pass (in its sent-image coords)
-        # so the impact function can draw a blue circle at that spot
-        # on each candidate frame.
-        ball_xy_sent = None
-        ball_sent_dims = None
-        if handedness_info and handedness_info.get("ok"):
-            bx = handedness_info.get("ball_x")
-            by = handedness_info.get("ball_y")
-            sw = handedness_info.get("image_width")
-            sh = handedness_info.get("image_height")
-            if bx is not None and by is not None and sw and sh:
-                ball_xy_sent = (float(bx), float(by))
-                ball_sent_dims = (int(sw), int(sh))
+    # Resolve per-frame tracker image URLs.
+    ball_track_frames_out = []
+    for rec in pipe.get("ball_track_frames", []):
+        filename = rec.get("image_filename")
+        url = None
+        if filename:
+            fp = CLIPS_DIR / filename
+            if fp.exists():
+                mtime = int(fp.stat().st_mtime)
+                url = f"{settings.app_base_url}/uploads/clips/{filename}?v={mtime}"
+        ball_track_frames_out.append({
+            "frame": rec.get("frame"),
+            "found": rec.get("found"),
+            "x": rec.get("x"),
+            "y": rec.get("y"),
+            "confidence": rec.get("confidence"),
+            "notes": rec.get("notes"),
+            "retry": rec.get("retry", False),
+            "image_url": url,
+        })
 
-        impact_image_name = f"{fpath.stem}_impact.jpg"
-        impact_image_path = CLIPS_DIR / impact_image_name
-
-        # Step 4a: rough impact. The "thwack" of club-on-ball is a
-        # razor-sharp audio transient that's typically the loudest
-        # moment in the entire clip. Try detecting it from the audio
-        # first — much cheaper and often more precise than asking
-        # Claude to pick from 12 visual candidates. Fall back to the
-        # AI vision step when audio is unavailable, too noisy, or
-        # lacks a clear peak.
-        audio_clip_fps = probe_fps(fpath) or 30.0
-        audio_impact_info = find_impact_via_audio(fpath, audio_clip_fps)
-        impact_info = None
-        if audio_impact_info.get("ok"):
-            audio_frame = audio_impact_info.get("impact_frame")
-            # Sanity-clamp: the audio peak should land at or after the
-            # address frame. If somehow it landed before address (e.g.
-            # the clip starts mid-flight) we don't trust it.
-            if audio_frame is not None and audio_frame >= addr_idx_int:
-                impact_info = {
-                    "ok": True,
-                    "error": None,
-                    "impact_frame": int(audio_frame),
-                    "confidence": audio_impact_info.get("confidence"),
-                    "notes": (
-                        f"audio peak at {audio_impact_info.get('peak_time_sec'):.3f}s "
-                        f"(peak/median = {audio_impact_info.get('ratio'):.1f})"
-                        if audio_impact_info.get("peak_time_sec") is not None
-                        and audio_impact_info.get("ratio") is not None
-                        else "audio peak"
-                    ),
-                    "method": "audio",
-                    "model": None,
-                    "frames_sent": [],
-                    "audio": audio_impact_info,
-                }
-            else:
-                # Audio peak is before address — implausible. Fall
-                # through to AI vision.
-                audio_impact_info["error"] = (
-                    f"audio peak at frame {audio_frame} precedes address "
-                    f"frame {addr_idx_int}"
-                )
-                audio_impact_info["ok"] = False
-
-        if impact_info is None:
-            impact_info = find_impact_frame_after_address(
-                fpath, addr_idx_int,
-                ball_xy_sent=ball_xy_sent,
-                ball_sent_dims=ball_sent_dims,
-                output_image_path=None,
-                model=model,
-            )
-            impact_info["method"] = "ai_vision"
-            impact_info["audio"] = audio_impact_info
-
-        # Step 4b: refinement — ±5 around the rough pick. Same blue
-        # ball-rest circle on every candidate so Claude can lock onto
-        # the precise frame where the clubhead is back at the ball.
-        # The refinement call also reports hands+clubhead landmarks on
-        # the picked frame so we can overlay the shaft.
-        refined_impact_info = None
-        if impact_info.get("ok") and impact_info.get("impact_frame") is not None:
-            refined_impact_info = refine_impact_frame(
-                fpath, int(impact_info["impact_frame"]),
-                ball_xy_sent=ball_xy_sent,
-                ball_sent_dims=ball_sent_dims,
-                output_image_path=impact_image_path,
-                model=model,
-            )
-            if refined_impact_info.get("saved_image") and impact_image_path.exists():
-                impact_mtime = int(impact_image_path.stat().st_mtime)
-                impact_image_url = (
-                    f"{settings.app_base_url}/uploads/clips/{impact_image_name}?v={impact_mtime}"
-                )
-
-        # Step 5: track the ball forward frame-by-frame from impact
-        # until it leaves the frame. Each frame gets its own Claude
-        # call (parallelized); successful ones are saved at native
-        # resolution with a yellow highlight ring on the ball.
-        if refined_impact_info and refined_impact_info.get("ok"):
-            track_prefix = f"{fpath.stem}_track"
-            ball_track_info = track_ball_after_impact(
-                fpath,
-                int(refined_impact_info["impact_frame"]),
-                output_dir=CLIPS_DIR,
-                output_prefix=track_prefix,
-                ball_xy_sent=ball_xy_sent,
-                ball_sent_dims=ball_sent_dims,
-                model=model,
-            )
-            if ball_track_info.get("ok"):
-                for rec in ball_track_info.get("frames", []):
-                    out_record = {
-                        "frame": rec.get("frame"),
-                        "found": rec.get("found"),
-                        "x": rec.get("x"),
-                        "y": rec.get("y"),
-                        "confidence": rec.get("confidence"),
-                        "notes": rec.get("notes"),
-                        "retry": rec.get("retry", False),
-                        "image_url": None,
-                    }
-                    filename = rec.get("image_filename")
-                    if filename:
-                        file_path = CLIPS_DIR / filename
-                        if file_path.exists():
-                            mtime = int(file_path.stat().st_mtime)
-                            out_record["image_url"] = (
-                                f"{settings.app_base_url}/uploads/clips/{filename}?v={mtime}"
-                            )
-                    ball_track_frames_out.append(out_record)
-
-            # Step 6: render the final tracer overlay. We have the rest
-            # ball position (from handedness), the impact frame, and a
-            # set of confirmed ball positions across the post-impact
-            # frames — enough to lay a dashed line from address through
-            # the visible flight on top of the source video. cv2 writes
-            # mp4v; compress_for_email transcodes to H.264 + faststart
-            # so the browser can play it inline.
-            ball_rest_xy_native: tuple[float, float] | None = None
-            sw = handedness_info.get("image_width") if handedness_info else 0
-            sh = handedness_info.get("image_height") if handedness_info else 0
-            bx = handedness_info.get("ball_x") if handedness_info else None
-            by = handedness_info.get("ball_y") if handedness_info else None
-            if (
-                handedness_info and handedness_info.get("ok")
-                and bx is not None and by is not None
-                and sw and sh
-            ):
-                # Convert from the handedness pass's sent-image coords
-                # to native pixels using a fresh capture for dimensions.
-                import cv2 as _cv  # local import — admin.py avoids cv2 elsewhere
-                _cap = _cv.VideoCapture(str(fpath))
-                try:
-                    if _cap.isOpened():
-                        nw = int(_cap.get(_cv.CAP_PROP_FRAME_WIDTH))
-                        nh = int(_cap.get(_cv.CAP_PROP_FRAME_HEIGHT))
-                        if nw > 0 and nh > 0:
-                            ball_rest_xy_native = (
-                                float(bx) * nw / float(sw),
-                                float(by) * nh / float(sh),
-                            )
-                finally:
-                    _cap.release()
-
-            tracer_name = f"{fpath.stem}_ai_tracer.mp4"
-            tracer_path = CLIPS_DIR / tracer_name
-            tracer_video_info = render_tracer_video(
-                fpath, tracer_path,
-                ball_rest_xy_native=ball_rest_xy_native,
-                impact_frame_idx=int(refined_impact_info["impact_frame"]),
-                track_frames=(ball_track_info or {}).get("frames") or [],
-            )
-            if tracer_video_info.get("ok"):
-                compressed = compress_for_email(tracer_path)
-                if not compressed:
-                    log.warning(
-                        "ai_tracer: compress_for_email returned False for %s — "
-                        "browser playback may fail", tracer_path.name,
-                    )
-                if tracer_path.exists() and tracer_path.stat().st_size > 0:
-                    mtime = int(tracer_path.stat().st_mtime)
-                    tracer_video_url = (
-                        f"{settings.app_base_url}/uploads/clips/{tracer_name}?v={mtime}"
-                    )
-                else:
-                    tracer_video_info = {
-                        **tracer_video_info,
-                        "ok": False,
-                        "error": "post-encode produced empty file",
-                    }
-
-    db.add(AuditLog(
-        actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
-        detail=str({
-            "address": address_info,
-            "handedness": handedness_info,
-            "impact": impact_info,
-            "impact_refined": refined_impact_info,
-            "ball_track": {
-                k: v for k, v in (ball_track_info or {}).items()
-                if k != "frames"
-            },
-            "n_track_frames_with_image": len(ball_track_frames_out),
-            "tracer_video": tracer_video_info,
-        }),
-    ))
-    db.commit()
-
+    ball_track_info = pipe.get("ball_track")
     ball_track_summary = None
     if ball_track_info is not None:
         ball_track_summary = {
             k: v for k, v in ball_track_info.items() if k != "frames"
         }
 
+    db.add(AuditLog(
+        actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
+        detail=str({
+            "address": pipe.get("address"),
+            "handedness": pipe.get("handedness"),
+            "impact": pipe.get("impact"),
+            "impact_refined": pipe.get("impact_refined"),
+            "ball_track": ball_track_summary,
+            "n_track_frames_with_image": sum(
+                1 for r in ball_track_frames_out if r.get("image_url")
+            ),
+            "tracer_video": tracer_video_info,
+            "cutover_time_sec": pipe.get("cutover_time_sec"),
+        }),
+    ))
+    db.commit()
+
     return {
         "clip_id": clip.id,
         "source_url": clip.source_url,
-        "address": address_info,
+        "address": pipe.get("address"),
         "address_image_url": image_url,
-        "handedness": handedness_info,
-        "impact": impact_info,
-        "impact_refined": refined_impact_info,
+        "handedness": pipe.get("handedness"),
+        "impact": pipe.get("impact"),
+        "impact_refined": pipe.get("impact_refined"),
         "impact_image_url": impact_image_url,
         "ball_track": ball_track_summary,
         "ball_track_frames": ball_track_frames_out,
         "tracer_video": tracer_video_info,
         "tracer_video_url": tracer_video_url,
+        "cutover_time_sec": pipe.get("cutover_time_sec"),
     }
 
 
@@ -868,6 +699,8 @@ async def upload_long_video(
     base_captured_at: str = Form(...),
     segments: str = Form(...),
     video: UploadFile = File(...),
+    video_green: UploadFile | None = File(None),
+    ai_tracer_model: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Cut a long video into multiple per-swing clips and run each through
@@ -876,16 +709,30 @@ async def upload_long_video(
     Body (multipart):
       course_id: int
       camera_type: 'tee' | 'wide_green' | 'hole'
-      base_captured_at: ISO 8601 — when the recording started. Each segment's
-                       captured_at = base + start_sec.
+      base_captured_at: ISO 8601 — when the recording started. Each
+                       segment's captured_at = base + start_sec.
       segments: JSON array of {hole_number, start_sec, end_sec, ...stats}
       video: long MP4 file
+      video_green: (optional) second long MP4 file from a green-side
+                   camera. Must be wall-clock-synchronized to `video`
+                   (both started recording at the same moment). When
+                   present, each segment is cut from BOTH videos, the
+                   full AI tracer pipeline runs on the tee cut, and
+                   the deliverable becomes a composite: tee-with-tracer
+                   from t=0 up to 1 s after the tracer ends, then a
+                   hard cut to the green clip for the ball landing.
+      ai_tracer_model: (optional) override the AI tracer model used
+                       on the tee cut in dual-camera mode. Falls back
+                       to TRACER_AI_MODEL env / Opus 4.7 default.
     """
     course = db.get(Course, course_id)
     if not course:
         raise HTTPException(404, "course not found")
     if not (video.content_type or "").startswith("video/"):
         raise HTTPException(400, "must be a video file")
+    dual_camera = video_green is not None
+    if dual_camera and not (video_green.content_type or "").startswith("video/"):
+        raise HTTPException(400, "video_green must be a video file")
 
     try:
         seg_list = json.loads(segments or "[]")
@@ -914,6 +761,22 @@ async def upload_long_video(
     src_path = CLIPS_DIR / src_name
     src_path.write_bytes(data)
 
+    green_src_path: Path | None = None
+    if dual_camera:
+        green_data = await video_green.read()
+        if not green_data:
+            src_path.unlink(missing_ok=True)
+            raise HTTPException(400, "empty green video upload")
+        if len(green_data) > 1024 * 1024 * 1024:
+            src_path.unlink(missing_ok=True)
+            raise HTTPException(413, "green video too large (max 1GB)")
+        g_ext = (video_green.filename or "").rsplit(".", 1)[-1].lower() if "." in (video_green.filename or "") else "mp4"
+        if g_ext not in ("mp4", "mov", "webm", "m4v"):
+            g_ext = "mp4"
+        green_src_name = f"long-{course_id}-green-{secrets.token_hex(6)}.{g_ext}"
+        green_src_path = CLIPS_DIR / green_src_name
+        green_src_path.write_bytes(green_data)
+
     results = []
     try:
         for idx, seg in enumerate(seg_list):
@@ -935,6 +798,125 @@ async def upload_long_video(
                 results.append({"index": idx, "ok": False, "error": "ffmpeg cut failed (or ffmpeg not installed)"})
                 continue
 
+            # --- Dual-camera branch -----------------------------------
+            if dual_camera and green_src_path is not None:
+                green_seg_name = f"{course_id}-h{hole_number}-green-{secrets.token_hex(6)}.mp4"
+                green_seg_path = CLIPS_DIR / green_seg_name
+                green_cut_ok = cut_segment(green_src_path, green_seg_path, start_sec, end_sec)
+                if not green_cut_ok:
+                    seg_path.unlink(missing_ok=True)
+                    results.append({"index": idx, "ok": False, "error": "green ffmpeg cut failed"})
+                    continue
+
+                pipe = run_full_ai_tracer_pipeline(
+                    seg_path,
+                    output_dir=CLIPS_DIR,
+                    output_prefix=seg_path.stem,
+                    model=ai_tracer_model,
+                )
+
+                composite_url = None
+                composite_info: dict | None = None
+                composite_path: Path | None = None
+                cutover = pipe.get("cutover_time_sec")
+                tracer_path = pipe.get("tracer_video_path")
+                if (
+                    pipe.get("ok") and tracer_path is not None
+                    and cutover is not None and cutover > 0
+                    and tracer_path.exists()
+                ):
+                    # Probe both segments for duration so we can clip
+                    # the cutover at sensible bounds.
+                    tee_info = probe_video_info(tracer_path)
+                    green_info = probe_video_info(green_seg_path)
+                    tee_duration = float(tee_info.get("duration") or 0.0)
+                    green_duration = float(green_info.get("duration") or 0.0)
+                    switch_sec = max(0.0, min(cutover, tee_duration or cutover))
+                    end_green_sec = max(switch_sec + 0.1, green_duration or (end_sec - start_sec))
+                    composite_name = f"{seg_path.stem}_composite.mp4"
+                    composite_path = CLIPS_DIR / composite_name
+                    if concat_two_clips(
+                        tracer_path, 0.0, switch_sec,
+                        green_seg_path, switch_sec, end_green_sec,
+                        composite_path,
+                    ):
+                        compress_for_email(composite_path)
+                        if composite_path.exists() and composite_path.stat().st_size > 0:
+                            composite_url = f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                            composite_info = {
+                                "switch_sec": round(switch_sec, 2),
+                                "end_sec": round(end_green_sec, 2),
+                                "fps": pipe.get("fps"),
+                                "tracer_frame_range": (pipe.get("tracer_video_info") or {}).get("frame_range"),
+                                "method": (pipe.get("impact") or {}).get("method"),
+                            }
+
+                # Thumbnail off the tee tracer (or fallback to tee cut).
+                thumb_source = tracer_path if (tracer_path and tracer_path.exists()) else seg_path
+                thumb_path = extract_thumbnail(thumb_source)
+                thumb_url = (
+                    f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
+                    if thumb_path else None
+                )
+
+                # Source URL exposed to the gallery is the composite
+                # (or the AI tracer mp4 if the composite step failed
+                # and we couldn't render the green half). Falls back
+                # to the raw tee cut if everything failed.
+                if composite_url:
+                    public_source = composite_url
+                    public_tracer = composite_url
+                elif tracer_path and tracer_path.exists():
+                    public_source = f"{settings.app_base_url}/uploads/clips/{tracer_path.name}"
+                    public_tracer = public_source
+                else:
+                    compress_for_email(seg_path)
+                    public_source = f"{settings.app_base_url}/uploads/clips/{seg_name}"
+                    public_tracer = None
+
+                captured_dt = base_dt + timedelta(seconds=start_sec)
+                clip = VideoClip(
+                    course_id=course_id,
+                    hole_number=hole_number,
+                    camera_type=camera_type,
+                    captured_at=captured_dt,
+                    source_url=public_source,
+                    thumbnail_url=thumb_url,
+                    tracer_url=public_tracer,
+                    carry_yards=_optional_int(seg.get("carry_yards")),
+                    apex_feet=_optional_int(seg.get("apex_feet")),
+                    ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
+                    distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
+                    ball_in_cup=bool(seg.get("ball_in_cup", False)),
+                    processing_status=ClipProcessingStatus.received.value,
+                )
+                db.add(clip)
+                db.flush()
+                participant = match_clip(db, clip)
+                if participant and clip.ball_in_cup:
+                    notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+                db.commit()
+
+                results.append({
+                    "index": idx,
+                    "ok": True,
+                    "clip_id": clip.id,
+                    "hole_number": hole_number,
+                    "captured_at": captured_dt.isoformat(),
+                    "status": clip.processing_status,
+                    "participant_id": clip.participant_id,
+                    "participant_name": participant.name if participant else None,
+                    "source_url": clip.source_url,
+                    "tracer_url": clip.tracer_url,
+                    "thumbnail_url": clip.thumbnail_url,
+                    "issue_note": clip.issue_note,
+                    "dual_camera": True,
+                    "composite": composite_info,
+                    "ai_tracer_error": pipe.get("error"),
+                })
+                continue
+
+            # --- Single-camera (original) branch ----------------------
             compress_for_email(seg_path)
             thumb_path = extract_thumbnail(seg_path)
             thumb_url = (
@@ -981,10 +963,12 @@ async def upload_long_video(
                 "issue_note": clip.issue_note,
             })
     finally:
-        # Clean up the long source — we don't keep it after cutting.
+        # Clean up the long source(s) — we don't keep them after cutting.
         src_path.unlink(missing_ok=True)
+        if green_src_path is not None:
+            green_src_path.unlink(missing_ok=True)
 
-    return {"results": results}
+    return {"results": results, "dual_camera": dual_camera}
 
 
 def _optional_int(v):

@@ -35,6 +35,8 @@ export default function AdminLongUpload() {
   const [baseCapturedAt, setBaseCapturedAt] = useState(nowLocal());
   const [file, setFile] = useState(null);
   const [videoUrl, setVideoUrl] = useState(null);
+  const [fileGreen, setFileGreen] = useState(null);
+  const [aiTracerModel, setAiTracerModel] = useState("claude-opus-4-7");
   const [segments, setSegments] = useState([{ ...EMPTY_SEG }]);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -110,6 +112,10 @@ export default function AdminLongUpload() {
     fd.append("base_captured_at", new Date(baseCapturedAt).toISOString());
     fd.append("segments", JSON.stringify(cleaned));
     fd.append("video", file, file.name);
+    if (fileGreen) {
+      fd.append("video_green", fileGreen, fileGreen.name);
+      fd.append("ai_tracer_model", aiTracerModel);
+    }
 
     try {
       const data = await api.longUploadClips(adminPassword, fd, setProgress);
@@ -148,11 +154,17 @@ export default function AdminLongUpload() {
       <div className="card">
         <h3 style={{ marginBottom: 6 }}>Long video upload</h3>
         <p className="small muted" style={{ marginBottom: 14 }}>
-          Drop one continuous video (e.g., the whole tee-side feed of a round)
-          and mark the start/end seconds for each swing. We'll cut each segment
-          via ffmpeg, run it through the matcher, and deliver per-clip exactly
-          like the regular upload flow. Captured-at for each clip is set to
-          your base time + the segment's start.
+          Drop one continuous tee-side video and mark the start/end seconds
+          for each swing. We'll cut each segment via ffmpeg, run it through
+          the matcher, and deliver per-clip just like the regular upload
+          flow. Captured-at for each clip is set to your base time + the
+          segment's start.
+          {" "}
+          <b>Optional dual-camera:</b> add a green-side long video that's
+          wall-clock-synced to the tee video and we'll run the full AI
+          tracer on the tee cut, then composite tee-with-tracer until 1 s
+          after the tracer ends, then hard-cut to the green clip for the
+          ball landing.
         </p>
 
         <form onSubmit={submit}>
@@ -182,7 +194,7 @@ export default function AdminLongUpload() {
           </div>
 
           <div className="field">
-            <label>Long video file</label>
+            <label>Long video file (tee side)</label>
             <input
               type="file"
               accept="video/*"
@@ -191,6 +203,41 @@ export default function AdminLongUpload() {
             {file && (
               <div className="small muted" style={{ marginTop: 4 }}>
                 {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB
+              </div>
+            )}
+          </div>
+
+          <div className="field">
+            <label>
+              Green-side long video (optional, dual-camera composite)
+            </label>
+            <input
+              type="file"
+              accept="video/*"
+              onChange={(e) => setFileGreen(e.target.files?.[0] || null)}
+            />
+            <div className="small muted" style={{ marginTop: 4 }}>
+              Must be wall-clock-synced to the tee video (both cameras
+              started recording at the same moment). Same segment
+              start/end times are applied to both files.
+              {fileGreen && (
+                <> · <b>{fileGreen.name}</b> · {(fileGreen.size / 1024 / 1024).toFixed(1)} MB</>
+              )}
+            </div>
+            {fileGreen && (
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 8 }}>
+                <label className="small muted" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  AI tracer model:
+                  <select
+                    value={aiTracerModel}
+                    onChange={(e) => setAiTracerModel(e.target.value)}
+                    disabled={uploading}
+                    style={{ fontSize: 13 }}
+                  >
+                    <option value="claude-opus-4-7">Opus 4.7 (best)</option>
+                    <option value="claude-haiku-4-5">Haiku 4.5 (5× cheaper, faster)</option>
+                  </select>
+                </label>
               </div>
             )}
           </div>
@@ -345,7 +392,12 @@ export default function AdminLongUpload() {
             {results.map((r, i) => (
               <div key={i} className="card tight" style={{ margin: 0 }}>
                 <div className="inline" style={{ justifyContent: "space-between", width: "100%" }}>
-                  <b>Swing {(r.index ?? i) + 1}{r.hole_number ? ` · Hole ${r.hole_number}` : ""}</b>
+                  <div>
+                    <b>Swing {(r.index ?? i) + 1}{r.hole_number ? ` · Hole ${r.hole_number}` : ""}</b>
+                    {r.dual_camera && (
+                      <span className="pill small" style={{ marginLeft: 6 }}>dual-cam</span>
+                    )}
+                  </div>
                   {r.ok ? (
                     <span className={`pill ${r.status === "assigned" ? "ok" : "warn"}`}>{r.status}</span>
                   ) : (
@@ -357,6 +409,17 @@ export default function AdminLongUpload() {
                     <div className="small muted" style={{ marginTop: 4 }}>
                       {r.participant_name ? `Matched to ${r.participant_name}` : "No match — appears in manual review queue."}
                     </div>
+                    {r.composite && (
+                      <div className="tiny muted" style={{ marginTop: 2 }}>
+                        Composite: tee→green cut at <code>{r.composite.switch_sec}s</code>, end <code>{r.composite.end_sec}s</code>
+                        {r.composite.method && <> · impact via <code>{r.composite.method}</code></>}
+                      </div>
+                    )}
+                    {r.ai_tracer_error && (
+                      <div className="tiny err-text" style={{ marginTop: 2 }}>
+                        AI tracer issue: <code>{r.ai_tracer_error}</code> (fell back to raw cut)
+                      </div>
+                    )}
                     {r.source_url && (
                       <video
                         src={r.source_url}
