@@ -62,6 +62,9 @@ export default function AdminLongUpload() {
   const [pairWindow, setPairWindow] = useState({}); // {id: number} -> combined-mode pair window
   const [detectOnly, setDetectOnly] = useState({}); // {id: true} -> skip cutting
   const [showSource, setShowSource] = useState({}); // {id: true}
+  const [segHole, setSegHole] = useState({}); // {"uploadId-cutIndex": holeNumber}
+  const [segProcessing, setSegProcessing] = useState({}); // {"uploadId-cutIndex": true}
+  const [segResult, setSegResult] = useState({}); // {"uploadId-cutIndex": {clip_id, ok, error}}
   const videoRef = useRef(null);
 
   const anyProcessing =
@@ -153,6 +156,31 @@ export default function AdminLongUpload() {
       setError(e.message);
     } finally {
       setTestCutting((t) => ({ ...t, [uploadId]: false }));
+    }
+  }
+
+  async function processSegment(uploadId, cut) {
+    const key = `${uploadId}-${cut.index}`;
+    const holeRaw = segHole[key];
+    const startingHoleN = parseInt(startingHole, 10) || 1;
+    const hole = parseInt(holeRaw, 10);
+    const holeNumber = Number.isFinite(hole) && hole > 0
+      ? hole
+      : startingHoleN + cut.index;
+    setSegProcessing((s) => ({ ...s, [key]: true }));
+    setSegResult((r) => ({ ...r, [key]: null }));
+    try {
+      const result = await api.processLongUploadSegment(adminPassword, uploadId, {
+        holeNumber,
+        startSec: cut.start_sec,
+        endSec: cut.end_sec,
+        aiTracerModel,
+      });
+      setSegResult((r) => ({ ...r, [key]: { ok: true, ...result } }));
+    } catch (e) {
+      setSegResult((r) => ({ ...r, [key]: { ok: false, error: e.message } }));
+    } finally {
+      setSegProcessing((s) => ({ ...s, [key]: false }));
     }
   }
 
@@ -758,51 +786,103 @@ export default function AdminLongUpload() {
                             gap: 8,
                           }}
                         >
-                          {testCutResults[u.id].cuts.map((c) => (
-                            <div key={c.index} style={{ minWidth: 0 }}>
-                              <div className="tiny muted" style={{ marginBottom: 2 }}>
-                                #{c.index + 1} · {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
-                                {" "}({c.duration_sec}s)
-                                {c.peak_time_sec != null && (
-                                  <> · peak {c.peak_time_sec.toFixed(2)}s</>
-                                )}
-                                {c.ratio != null && <> · ×{c.ratio.toFixed(1)}</>}
-                                {c.confidence && <> · {c.confidence}</>}
-                              </div>
-                              <div
-                                style={{
-                                  display: "grid",
-                                  gridTemplateColumns: testCutResults[u.id].dual_camera ? "1fr 1fr" : "1fr",
-                                  gap: 4,
-                                }}
-                              >
-                                {c.ok && c.url ? (
-                                  <video
-                                    src={c.url}
-                                    controls
-                                    playsInline
-                                    preload="metadata"
-                                    style={{ width: "100%", borderRadius: 6, background: "#000" }}
-                                  />
-                                ) : (
-                                  <div className="tiny err-text">tee cut failed</div>
-                                )}
-                                {testCutResults[u.id].dual_camera && (
-                                  c.green_url ? (
+                          {testCutResults[u.id].cuts.map((c) => {
+                            const segKey = `${u.id}-${c.index}`;
+                            const startingHoleN = parseInt(startingHole, 10) || 1;
+                            const segHoleValue = segHole[segKey] ?? (startingHoleN + c.index);
+                            const segState = segResult[segKey];
+                            const isProcessing = !!segProcessing[segKey];
+                            return (
+                              <div key={c.index} style={{ minWidth: 0 }}>
+                                <div className="tiny muted" style={{ marginBottom: 2 }}>
+                                  #{c.index + 1} · {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
+                                  {" "}({c.duration_sec}s)
+                                  {c.peak_time_sec != null && (
+                                    <> · peak {c.peak_time_sec.toFixed(2)}s</>
+                                  )}
+                                  {c.ratio != null && <> · ×{c.ratio.toFixed(1)}</>}
+                                  {c.confidence && <> · {c.confidence}</>}
+                                </div>
+                                <div
+                                  style={{
+                                    display: "grid",
+                                    gridTemplateColumns: testCutResults[u.id].dual_camera ? "1fr 1fr" : "1fr",
+                                    gap: 4,
+                                  }}
+                                >
+                                  {c.ok && c.url ? (
                                     <video
-                                      src={c.green_url}
+                                      src={c.url}
                                       controls
                                       playsInline
                                       preload="metadata"
                                       style={{ width: "100%", borderRadius: 6, background: "#000" }}
                                     />
-                                  ) : c.green_ok === false ? (
-                                    <div className="tiny err-text">green cut failed</div>
-                                  ) : null
-                                )}
+                                  ) : (
+                                    <div className="tiny err-text">tee cut failed</div>
+                                  )}
+                                  {testCutResults[u.id].dual_camera && (
+                                    c.green_url ? (
+                                      <video
+                                        src={c.green_url}
+                                        controls
+                                        playsInline
+                                        preload="metadata"
+                                        style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                                      />
+                                    ) : c.green_ok === false ? (
+                                      <div className="tiny err-text">green cut failed</div>
+                                    ) : null
+                                  )}
+                                </div>
+                                <div
+                                  className="tiny"
+                                  style={{
+                                    marginTop: 4,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                    hole
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      value={segHoleValue}
+                                      onChange={(e) =>
+                                        setSegHole((s) => ({ ...s, [segKey]: e.target.value }))
+                                      }
+                                      disabled={isProcessing}
+                                      className="small"
+                                      style={{ width: 46, fontSize: 12, padding: "2px 6px" }}
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    className="secondary small"
+                                    onClick={() => processSegment(u.id, c)}
+                                    disabled={isProcessing}
+                                    title="Run the full AI tracer + composite pipeline on this clip and add it to Broadcast"
+                                  >
+                                    {isProcessing ? "Processing…" : "Process for broadcast"}
+                                  </button>
+                                  {segState && segState.ok && segState.clip_id && (
+                                    <span className="ok-text" title={`Clip #${segState.clip_id} created`}>
+                                      ✓ clip #{segState.clip_id}
+                                      {segState.participant_name && <> · {segState.participant_name}</>}
+                                    </span>
+                                  )}
+                                  {segState && !segState.ok && (
+                                    <span className="err-text" title={segState.error}>
+                                      ✗ {String(segState.error || "").slice(0, 60)}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>

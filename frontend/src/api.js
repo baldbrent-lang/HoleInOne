@@ -210,6 +210,32 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}`, {
       method: "DELETE", adminPassword: key,
     }),
+  processLongUploadSegment: (key, uploadId, { holeNumber, startSec, endSec, aiTracerModel }) =>
+    // Synchronous endpoint that runs the full per-segment pipeline
+    // (real cut + AI tracer + composite + VideoClip row) on ONE
+    // detected window. Typically 30-90 s; allow up to 5 min before
+    // timing out so the request doesn't fall over on slow encoders.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/long-uploads/${uploadId}/process-segment`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 5 * 60 * 1000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 5 min"));
+      const fd = new FormData();
+      fd.append("hole_number", String(holeNumber));
+      fd.append("start_sec", String(startSec));
+      fd.append("end_sec", String(endSec));
+      if (aiTracerModel) fd.append("ai_tracer_model", aiTracerModel);
+      xhr.send(fd);
+    }),
   testCutLongUpload: (key, uploadId, detector = "motion", opts = {}) =>
     // Form-encoded POST so we get FastAPI's Form(...) parsing without
     // needing the JSON path in request().

@@ -1663,6 +1663,65 @@ def test_cut_long_upload(
     }
 
 
+@router.post("/long-uploads/{upload_id}/process-segment")
+def process_long_upload_segment(
+    upload_id: int,
+    hole_number: int = Form(...),
+    start_sec: float = Form(...),
+    end_sec: float = Form(...),
+    ai_tracer_model: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Run the full per-segment pipeline on ONE detected window so the
+    operator can promote individual test-cut previews to broadcast
+    without re-processing the whole long upload.
+
+    Runs synchronously (typically 30–90 s including AI tracer +
+    composite) and returns the resulting VideoClip metadata.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "long upload has no tee file")
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+
+    green_src_path: Path | None = None
+    if row.green_filename:
+        candidate = CLIPS_DIR / row.green_filename
+        if not candidate.exists():
+            raise HTTPException(
+                404,
+                f"green source file missing on disk: {row.green_filename}",
+            )
+        green_src_path = candidate
+
+    if end_sec <= start_sec:
+        raise HTTPException(400, "end_sec must be > start_sec")
+
+    seg_list = [{
+        "hole_number": int(hole_number),
+        "start_sec": float(start_sec),
+        "end_sec": float(end_sec),
+    }]
+    results = _process_long_upload_segments(
+        db,
+        course_id=row.course_id,
+        camera_type=row.camera_type,
+        base_dt=row.base_captured_at,
+        src_path=src_path,
+        green_src_path=green_src_path,
+        seg_list=seg_list,
+        dual_camera=green_src_path is not None,
+        ai_tracer_model=ai_tracer_model,
+    )
+    if not results:
+        raise HTTPException(500, "segment processing returned no result")
+    return results[0]
+
+
 def _optional_int(v):
     if v in (None, "", "null"):
         return None
