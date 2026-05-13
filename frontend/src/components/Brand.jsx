@@ -13,13 +13,27 @@ export function Brand({ subtitle, hideAccount }) {
     <div className="brand" style={{ justifyContent: "space-between", width: "100%" }}>
       <Link
         to="/"
-        style={{ display: "flex", alignItems: "center", gap: 12, textDecoration: "none", color: "inherit" }}
+        style={{ display: "flex", alignItems: "center", gap: 14, textDecoration: "none", color: "inherit" }}
       >
-        <img
-          src={LOGO_URL}
-          alt="GolfReelz"
-          style={{ height: 44, width: "auto", display: "block" }}
-        />
+        {/* Source PNG has ~20% whitespace top/bottom. Wrap with
+            overflow:hidden so we display the tight logo content
+            cropped to ~60px tall while the underlying img renders at
+            100px — the 20px on each side gets clipped. */}
+        <div
+          aria-hidden="false"
+          style={{
+            height: 60,
+            overflow: "hidden",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <img
+            src={LOGO_URL}
+            alt="GolfReelz"
+            style={{ height: 100, width: "auto", display: "block" }}
+          />
+        </div>
         {subtitle && <div className="tag">{subtitle}</div>}
       </Link>
       {!hideAccount && (
