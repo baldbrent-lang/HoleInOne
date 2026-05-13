@@ -19,6 +19,87 @@ export default function AdminBroadcastClips() {
   const [clips, setClips] = useState(null);
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState({}); // {clip_id: true}
+  const [copied, setCopied] = useState({});     // {clip_id: true} for ~1.5s
+
+  /**
+   * Compose the title / text / URL we hand to every share target.
+   * Native share API gets all three; the social / email / SMS deep
+   * links each pick the fields that make sense for them.
+   */
+  function buildShareInfo(c) {
+    const player = c.participant_name || "GolfReelz player";
+    const course = c.course_name || "the course";
+    const holeStr = c.hole_number ? `Hole ${c.hole_number}` : "this hole";
+    const acePrefix = c.ball_in_cup ? "🎯 HOLE-IN-ONE! " : "";
+    const title = `${player} — ${holeStr} at ${course}`;
+    const text = `${acePrefix}${player} on ${holeStr} at ${course}`;
+    return { title, text, url: c.source_url || "" };
+  }
+
+  function flashCopied(clipId) {
+    setCopied((c) => ({ ...c, [clipId]: true }));
+    setTimeout(
+      () => setCopied((c) => ({ ...c, [clipId]: false })),
+      1600,
+    );
+  }
+
+  async function nativeShare(c) {
+    const info = buildShareInfo(c);
+    if (!info.url) return;
+    if (navigator.share) {
+      try {
+        await navigator.share(info);
+        return;
+      } catch (e) {
+        // User cancelled, or the platform doesn't accept these
+        // fields — fall through to clipboard.
+      }
+    }
+    try {
+      await navigator.clipboard?.writeText(info.url);
+      flashCopied(c.id);
+    } catch (e) {
+      window.prompt("Copy this link:", info.url);
+    }
+  }
+
+  async function copyLink(c) {
+    if (!c.source_url) return;
+    try {
+      await navigator.clipboard?.writeText(c.source_url);
+      flashCopied(c.id);
+    } catch (e) {
+      window.prompt("Copy this link:", c.source_url);
+    }
+  }
+
+  function smsHref(c) {
+    const { text, url } = buildShareInfo(c);
+    // iOS uses `sms:&body=`, Android `sms:?body=`. Most modern OSes
+    // tolerate both; `?body=` is the widely-supported form.
+    return `sms:?body=${encodeURIComponent(`${text}  ${url}`)}`;
+  }
+
+  function emailHref(c) {
+    const { title, text, url } = buildShareInfo(c);
+    return (
+      `mailto:?subject=${encodeURIComponent(title)}` +
+      `&body=${encodeURIComponent(`${text}\n\n${url}`)}`
+    );
+  }
+
+  function twitterHref(c) {
+    const { text, url } = buildShareInfo(c);
+    return (
+      `https://twitter.com/intent/tweet?` +
+      `text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`
+    );
+  }
+
+  function facebookHref(c) {
+    return `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(c.source_url || "")}`;
+  }
 
   async function load() {
     try {
@@ -170,7 +251,79 @@ export default function AdminBroadcastClips() {
               </div>
             )}
 
-            <div className="row" style={{ marginTop: 8, justifyContent: "flex-end" }}>
+            <div
+              className="row"
+              style={{
+                marginTop: 8,
+                gap: 6,
+                flexWrap: "wrap",
+                justifyContent: "flex-end",
+                alignItems: "center",
+              }}
+            >
+              <button
+                type="button"
+                className="small"
+                onClick={() => nativeShare(c)}
+                disabled={!c.source_url}
+                title="Open the OS share sheet (mobile) or copy the link (desktop)"
+              >
+                <Icon name="share" size={14} /> Share
+              </button>
+              <button
+                type="button"
+                className="secondary small"
+                onClick={() => copyLink(c)}
+                disabled={!c.source_url}
+                title="Copy the clip URL to your clipboard"
+              >
+                {copied[c.id] ? "Copied!" : "Copy link"}
+              </button>
+              <a
+                className="btn secondary small"
+                href={c.source_url || "#"}
+                download
+                style={{ width: "auto" }}
+                title="Download the .mp4 file"
+              >
+                <Icon name="download" size={14} /> Download
+              </a>
+              <a
+                className="btn secondary small"
+                href={c.source_url ? smsHref(c) : "#"}
+                style={{ width: "auto" }}
+                title="Open your default Messages app with this clip prefilled"
+              >
+                Text
+              </a>
+              <a
+                className="btn secondary small"
+                href={c.source_url ? emailHref(c) : "#"}
+                style={{ width: "auto" }}
+                title="Open your default email app with this clip prefilled"
+              >
+                Email
+              </a>
+              <a
+                className="btn secondary small"
+                href={c.source_url ? twitterHref(c) : "#"}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ width: "auto" }}
+                title="Post to X / Twitter"
+              >
+                X
+              </a>
+              <a
+                className="btn secondary small"
+                href={c.source_url ? facebookHref(c) : "#"}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ width: "auto" }}
+                title="Post to Facebook"
+              >
+                Facebook
+              </a>
               <button
                 type="button"
                 className="ghost small err-text"
@@ -178,7 +331,7 @@ export default function AdminBroadcastClips() {
                 disabled={!!deleting[c.id]}
                 title="Delete this composite + source files"
               >
-                {deleting[c.id] ? "Deleting…" : "Delete clip"}
+                {deleting[c.id] ? "Deleting…" : "Delete"}
               </button>
             </div>
           </div>
