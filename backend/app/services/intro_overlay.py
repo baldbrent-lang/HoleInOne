@@ -37,12 +37,13 @@ except Exception:  # pragma: no cover
     HAS_PIL = False
 
 
-# Brand palette (close to the in-app green primary)
+# Brand palette
 BRAND_GREEN = (28, 168, 92, 255)
-PANEL_DARK = (16, 22, 30, 235)
+PANEL_TOP_GRAY = (230, 232, 236, 255)   # light gray for the player-name section
+PANEL_BOTTOM_BLUE = (24, 58, 132, 240)  # broadcast-style blue for the course/info
+TEXT_BLACK = (12, 16, 22, 255)
 TEXT_PRIMARY = (255, 255, 255, 255)
-TEXT_MUTED = (200, 208, 218, 255)
-TEXT_ACCENT = (134, 230, 178, 255)
+TEXT_MUTED = (210, 218, 230, 255)
 
 # Animation timing (seconds)
 SLIDE_IN_SEC = 0.4
@@ -84,51 +85,95 @@ def _have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _measure(text: str, font) -> int:
+    """Best-effort horizontal text measurement for PIL fonts. Handles
+    both modern (getlength) and legacy (font default) Pillow APIs."""
+    if not text:
+        return 0
+    if hasattr(font, "getlength"):
+        try:
+            return int(round(font.getlength(text)))
+        except Exception:
+            pass
+    # Fallback when getlength isn't available (very old Pillow / load_default).
+    return int(round(len(text) * (getattr(font, "size", 14) * 0.55)))
+
+
 def render_left_panel(
     player_name: str | None,
     course_name: str,
     hole_number: int | None,
     par: int | None,
     yardage: int | None,
-    width: int = 460,
-    height: int = 90,
 ) -> Image.Image | None:
-    """PIL Image of the left info panel with rounded corners and the
-    semi-transparent dark background. Returns None if PIL is missing."""
+    """Two-section left panel: light-gray top (player name in black)
+    over a blue bottom (course + hole/par/yardage in white). Width is
+    computed dynamically from the rendered text widths so the panel is
+    only as wide as it needs to be."""
     if not HAS_PIL:
         return None
+
+    bold_big = _find_font(FONT_CANDIDATES_BOLD, 30)
+    bold_med = _find_font(FONT_CANDIDATES_BOLD, 18)
+    reg_med = _find_font(FONT_CANDIDATES_REGULAR, 17)
+
+    player_text = (player_name or "Brent Baldwin").upper()
+    course_text = course_name or ""
+    par_value = 3 if par is None else int(par)
+    yards_value = int(yardage) if yardage is not None else 101
+    info_parts = []
+    if hole_number is not None:
+        info_parts.append(f"HOLE {int(hole_number)}")
+    info_parts.append(f"PAR {par_value}")
+    info_parts.append(f"{yards_value} YDS")
+    info_text = "  ·  ".join(info_parts)
+
+    pad_x = 18
+    pad_y_top = 12
+    pad_y_bot = 14
+    line_gap = 6
+
+    w_player = _measure(player_text, bold_big)
+    w_course = _measure(course_text, reg_med)
+    w_info = _measure(info_text, bold_med)
+    content_w = max(w_player, w_course, w_info)
+    width = content_w + 2 * pad_x
+
+    # Section heights — top holds the player name, bottom stacks course
+    # name (if any) above the info row.
+    top_h = (bold_big.size if hasattr(bold_big, "size") else 30) + 2 * pad_y_top
+    info_h = (bold_med.size if hasattr(bold_med, "size") else 18)
+    course_h = (reg_med.size if hasattr(reg_med, "size") else 17) + line_gap if course_text else 0
+    bottom_h = pad_y_bot + course_h + info_h + pad_y_bot
+    height = top_h + bottom_h
+
+    # Build the colored sections first, then clip to a rounded outer
+    # mask. PIL's rounded_rectangle doesn't support per-corner radius,
+    # so an outer mask is cleaner than stitching two rounded shapes.
+    sections = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(sections)
+    sd.rectangle((0, 0, width, top_h), fill=PANEL_TOP_GRAY)
+    sd.rectangle((0, top_h, width, height), fill=PANEL_BOTTOM_BLUE)
+
+    mask = Image.new("L", (width, height), 0)
+    md = ImageDraw.Draw(mask)
+    md.rounded_rectangle((0, 0, width - 1, height - 1), radius=12, fill=255)
+
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    img.paste(sections, (0, 0), mask)
+
     draw = ImageDraw.Draw(img)
-    # Rounded rectangle background
-    draw.rounded_rectangle(
-        (0, 0, width - 1, height - 1), radius=10, fill=PANEL_DARK,
+    # Player name centered vertically in the top section
+    draw.text(
+        (pad_x, pad_y_top), player_text, fill=TEXT_BLACK, font=bold_big,
     )
 
-    bold_big = _find_font(FONT_CANDIDATES_BOLD, 26)
-    bold_med = _find_font(FONT_CANDIDATES_BOLD, 16)
-    reg_med = _find_font(FONT_CANDIDATES_REGULAR, 15)
-
-    pad = 14
-    y = pad
-    name = (player_name or "—").upper()
-    draw.text((pad, y), name, fill=TEXT_PRIMARY, font=bold_big)
-    y += 30
-
-    course_line = course_name or ""
-    if course_line:
-        draw.text((pad, y), course_line, fill=TEXT_MUTED, font=reg_med)
-        y += 19
-
-    # Hole · Par · Yardage row
-    parts: list[str] = []
-    if hole_number:
-        parts.append(f"HOLE {int(hole_number)}")
-    if par:
-        parts.append(f"PAR {int(par)}")
-    if yardage:
-        parts.append(f"{int(yardage)} YDS")
-    if parts:
-        draw.text((pad, y), "  ·  ".join(parts), fill=TEXT_ACCENT, font=bold_med)
+    # Bottom section: course (optional) + info row
+    y = top_h + pad_y_bot
+    if course_text:
+        draw.text((pad_x, y), course_text, fill=TEXT_MUTED, font=reg_med)
+        y += course_h
+    draw.text((pad_x, y), info_text, fill=TEXT_PRIMARY, font=bold_med)
     return img
 
 
@@ -243,7 +288,11 @@ def apply_intro_overlay(
         return False
 
     left_img = render_left_panel(
-        player_name, course_name, hole_number, par, yardage,
+        player_name=player_name,
+        course_name=course_name,
+        hole_number=hole_number,
+        par=par,
+        yardage=yardage,
     )
     right_img = render_right_panel()
     if left_img is None or right_img is None:

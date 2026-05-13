@@ -1056,26 +1056,30 @@ def _process_long_upload_segments(
         if not fpath.exists():
             return
         course = _course_for_intro
-        yardage = None
-        par = None
-        course_name = ""
-        if course is not None:
-            course_name = course.name or ""
-            if course.hole_yardages:
-                raw_y = course.hole_yardages.get(str(int(clip.hole_number)))
-                try:
-                    yardage = int(raw_y) if raw_y is not None else None
-                except (TypeError, ValueError):
-                    yardage = None
-            par_3_list = [int(h) for h in (course.par3_holes or [])]
-            par = 3 if int(clip.hole_number) in par_3_list else 4
+        course_name = course.name if course and course.name else ""
+        # Default yardage when this hole isn't in course.hole_yardages
+        # (e.g. fresh course setup or a newly added hole).
+        yardage = 101
+        if course and course.hole_yardages:
+            raw_y = course.hole_yardages.get(str(int(clip.hole_number)))
+            try:
+                if raw_y is not None:
+                    yardage = int(raw_y)
+            except (TypeError, ValueError):
+                pass
         try:
             apply_intro_overlay_inplace(
                 fpath,
-                player_name=(participant.name if participant else None),
+                # Default to 'Brent Baldwin' when the clip didn't match a
+                # registered participant — keeps the on-screen graphic
+                # populated instead of showing a blank '—'.
+                player_name=(participant.name if participant else "Brent Baldwin"),
                 course_name=course_name,
                 hole_number=int(clip.hole_number),
-                par=par,
+                # GolfReelz is a par-3 challenge product; every hole is
+                # treated as par 3 regardless of the course's par3_holes
+                # list.
+                par=3,
                 yardage=yardage,
             )
         except Exception as exc:  # pragma: no cover
