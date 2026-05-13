@@ -1467,9 +1467,41 @@ def track_ball_after_impact(
         len(frame_indices), frame_indices[0], frame_indices[-1],
     )
 
+    # Compute a "ball flight zone" ROI from the at-rest ball position
+    # passed in by the caller. The ball arcs UP and across the frame
+    # after impact, so anything below the ball's resting y AND outside
+    # a generous horizontal band around the rest x is irrelevant —
+    # cropping it out before sending each frame to Claude removes a
+    # ton of distractor whites (range balls on the ground, shoes,
+    # baskets, other golfers off to the side) and increases the ball's
+    # pixel footprint as a fraction of the image. We don't crop side-
+    # of-flight too aggressively because hooks/slices can drift.
+    ball_xy_native: tuple[float, float] | None = None
+    if (
+        ball_xy_sent is not None and ball_sent_dims is not None
+        and ball_sent_dims[0] > 0 and ball_sent_dims[1] > 0
+    ):
+        # Need the native frame dims; cheapest probe is one extra cap.
+        _cap = cv2.VideoCapture(str(input_path))
+        try:
+            if _cap.isOpened():
+                _nw = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                _nh = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                if _nw > 0 and _nh > 0:
+                    ball_xy_native = (
+                        float(ball_xy_sent[0]) * _nw / float(ball_sent_dims[0]),
+                        float(ball_xy_sent[1]) * _nh / float(ball_sent_dims[1]),
+                    )
+        finally:
+            _cap.release()
+
+    roi: tuple[int, int, int, int] | None = None  # (x0, y0, x1, y1) in native px
+
     # Extract all frames once up front: keep both a resized JPEG (for
     # the API) and the native ndarray (for drawing the highlight when
     # the ball is found, without a second cv2.VideoCapture pass).
+    # Also stash the per-frame native dims so retry / coord-translation
+    # downstream can map sent-coords back to native through the ROI.
     frames_data: dict[int, tuple[bytes, int, int, "np.ndarray"]] = {}
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -1482,17 +1514,54 @@ def track_ball_after_impact(
             if not ok or frame is None:
                 continue
             native_h, native_w = frame.shape[:2]
-            if native_w > send_width:
-                scale = send_width / float(native_w)
+            # Lazily compute the ROI on the first successful frame
+            # (we needed at least one read to know native dims for sure).
+            if roi is None and ball_xy_native is not None:
+                bx = int(round(float(ball_xy_native[0])))
+                by = int(round(float(ball_xy_native[1])))
+                # Horizontal: ±45% of frame width around ball x — wide
+                # enough to cover hooks, slices and high-speed lateral
+                # drift. Vertical: from image top down to ball_y + 60
+                # (small buffer below for the very first impact frame
+                # where the ball might still be at rest, plus margin
+                # for the highlight ring).
+                half_w = int(native_w * 0.45)
+                buffer_below = 60
+                roi = (
+                    max(0, bx - half_w),
+                    0,
+                    min(native_w, bx + half_w),
+                    min(native_h, by + buffer_below),
+                )
+                log.info(
+                    "ai_tracer: ball_track ROI = (%d,%d)→(%d,%d) "
+                    "(%.0f%%×%.0f%% of %dx%d)",
+                    roi[0], roi[1], roi[2], roi[3],
+                    100 * (roi[2] - roi[0]) / native_w,
+                    100 * (roi[3] - roi[1]) / native_h,
+                    native_w, native_h,
+                )
+            # Apply ROI crop. The cropped region is what Claude sees;
+            # we stash the FULL native frame for annotation later, and
+            # the ROI offset (via x0/y0) is recovered from `roi` when
+            # translating coords back.
+            if roi is not None:
+                x0, y0, x1, y1 = roi
+                api_frame = frame[y0:y1, x0:x1]
+            else:
+                api_frame = frame
+            api_h, api_w = api_frame.shape[:2]
+            if api_w > send_width:
+                scale = send_width / float(api_w)
                 resized = cv2.resize(
-                    frame, (send_width, int(round(native_h * scale))),
+                    api_frame, (send_width, int(round(api_h * scale))),
                     interpolation=cv2.INTER_AREA,
                 )
             else:
-                resized = frame
+                resized = api_frame
             ok, buf = cv2.imencode(".jpg", resized, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
             if ok:
-                # Store sent dims (for landmark scaling) + native frame
+                # Store sent dims (for coord translation) + native frame
                 # (for native-res annotation).
                 frames_data[idx] = (
                     bytes(buf),
@@ -1868,10 +1937,25 @@ def track_ball_after_impact(
                         native_x = sent_x
                         native_y = sent_y
                     else:
+                        # Phase 1: Claude saw a sent-w × sent-h image
+                        # that may be a cropped ROI of the native
+                        # frame. Translate sent → ROI → native:
+                        #   roi-space x = sent_x * roi_w / sent_w
+                        #   native x   = roi-space x + roi_x0
+                        # When no ROI was applied, roi_x0/y0 = 0 and
+                        # roi_w/h = native_w/h, which collapses to
+                        # the previous direct sent → native scaling.
                         _jb, sw, sh, native_frame = frames_data[idx]
                         nh, nw = native_frame.shape[:2]
-                        native_x = int(round(sent_x * nw / float(sw)))
-                        native_y = int(round(sent_y * nh / float(sh)))
+                        if roi is not None:
+                            roi_x0, roi_y0, roi_x1, roi_y1 = roi
+                            roi_w = roi_x1 - roi_x0
+                            roi_h = roi_y1 - roi_y0
+                        else:
+                            roi_x0 = roi_y0 = 0
+                            roi_w, roi_h = nw, nh
+                        native_x = int(round(sent_x * roi_w / float(sw) + roi_x0))
+                        native_y = int(round(sent_y * roi_h / float(sh) + roi_y0))
                     record["x"] = native_x
                     record["y"] = native_y
                     record["retry"] = via_retry
