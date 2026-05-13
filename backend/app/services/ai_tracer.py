@@ -2708,15 +2708,11 @@ def render_tracer_video(
                 if rest_xy is not None:
                     cv2.circle(frame, rest_xy, 12, (0, 0, 0), 4, cv2.LINE_AA)
                     cv2.circle(frame, rest_xy, 10, TRACER_REST_RING, 3, cv2.LINE_AA)
-            # Highlight the ball on frames where the tracker has a
-            # fresh position — but skip outliers (where Claude
-            # mis-identified the ball), since drawing a ring at a
-            # rejected position would visually contradict the
-            # smoothed line.
-            if frame_idx in points_by_frame and frame_idx not in rejected_frames:
-                x, y = points_by_frame[frame_idx]
-                cv2.circle(frame, (x, y), 18, (0, 0, 0), 4, cv2.LINE_AA)
-                cv2.circle(frame, (x, y), 16, TRACER_BALL_RING, 3, cv2.LINE_AA)
+            # Per-frame ball ring removed for production output. The
+            # smoothed tracer polyline is enough on its own; the ring
+            # used to "pop" frame-to-frame which read as visual noise.
+            # The resting-ball indicator (drawn above on the first
+            # render frame) and the debug-image overlays are untouched.
             writer.write(frame)
             frame_idx += 1
     finally:
