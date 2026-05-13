@@ -3390,11 +3390,59 @@ def run_full_ai_tracer_pipeline(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Probe fps up front — both the audio-first address shortcut below
+    # and downstream impact / track passes need it.
+    from .video import probe_fps as _probe_fps
+    fps_val = _probe_fps(input_path) or 30.0
+    result["fps"] = fps_val
+
+    # --- Step 0: audio impact (used both to derive the address frame
+    # and to short-circuit AI impact detection downstream) ---
+    audio_impact_info = find_impact_via_audio(input_path, fps_val)
+
     # --- Step 1: address frame ---
+    # When audio impact is confident (ratio >= AUDIO_MIN_PEAK_OVER_MEDIAN
+    # = 25 after high-pass), skip the find_address_frame Claude call.
+    # A golf swing from address to impact is < ~1.5 s; the golfer
+    # holds address for at least a beat. So address ≈ impact − 1.5 s
+    # is a safe heuristic that avoids the $0.05/clip API call.
     address_image_path = output_dir / f"{output_prefix}_address.jpg"
-    address_info = find_address_frame(
-        input_path, output_image_path=address_image_path, model=model,
-    )
+    address_info: dict
+    if audio_impact_info.get("ok") and audio_impact_info.get("impact_frame") is not None:
+        addr_idx = max(0, int(audio_impact_info["impact_frame"]) - int(round(1.5 * fps_val)))
+        if HAS_CV:
+            try:
+                cap = cv2.VideoCapture(str(input_path))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, addr_idx)
+                ok_read, frame = cap.read()
+                cap.release()
+                if ok_read and frame is not None:
+                    cv2.imwrite(str(address_image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            except Exception as exc:  # pragma: no cover
+                log.warning("ai_tracer: audio-derived address frame grab failed: %s", exc)
+        address_info = {
+            "ok": True,
+            "error": None,
+            "address_frame": addr_idx,
+            "confidence": "high",
+            "notes": (
+                f"derived from audio impact frame "
+                f"{audio_impact_info['impact_frame']} − {int(round(1.5 * fps_val))}f "
+                f"(1.5s @ {fps_val:.1f}fps)"
+            ),
+            "model": None,
+            "frames_sent": [],
+            "saved_image": address_image_path.exists(),
+            "method": "audio_derived",
+        }
+        log.info(
+            "ai_tracer: address frame derived from audio impact — addr=%d (impact=%d - %.1fs)",
+            addr_idx, int(audio_impact_info["impact_frame"]), 1.5,
+        )
+    else:
+        address_info = find_address_frame(
+            input_path, output_image_path=address_image_path, model=model,
+        )
     result["address"] = address_info
     if address_image_path.exists():
         result["address_image_path"] = address_image_path
@@ -3426,13 +3474,7 @@ def run_full_ai_tracer_pipeline(
     result["ball_xy_sent"] = ball_xy_sent
     result["ball_sent_dims"] = ball_sent_dims
 
-    # --- Step 3a: audio impact (preferred) ---
-    # Avoid a circular import by reaching into the video service only
-    # when we need the fps probe.
-    from .video import probe_fps as _probe_fps
-    fps_val = _probe_fps(input_path) or 30.0
-    result["fps"] = fps_val
-    audio_impact_info = find_impact_via_audio(input_path, fps_val)
+    # --- Step 3a: audio impact (already computed above; reuse) ---
     impact_info: dict | None = None
     if audio_impact_info.get("ok"):
         audio_frame = audio_impact_info.get("impact_frame")
