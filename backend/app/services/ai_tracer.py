@@ -2934,6 +2934,7 @@ def detect_swings_from_audio(
     min_peak_ratio: float = 6.0,
     highpass_hz: float = 1500.0,
     max_attack_sec: float = 0.030,
+    absolute_threshold_floor: float = 0.001,
     debug: dict | None = None,
 ) -> list[dict]:
     """Find every club-on-ball impact in a long video by scanning its
@@ -3021,7 +3022,14 @@ def detect_swings_from_audio(
     envelope = np.convolve(np.abs(samples), kernel, mode="same")
     median = float(np.median(envelope))
     raw_threshold = median * min_peak_ratio
-    threshold = max(raw_threshold, 0.02)
+    # Safety net for nearly-silent clips: without this, a clip with
+    # almost no audio would have a tiny median and any digital noise
+    # spike would become a huge ratio. The default (0.001) almost
+    # never binds on a real recording but prevents nonsense on empty
+    # ones. 0.02 (the old value) was tuned for un-filtered audio
+    # where median ~ 0.013; with the 1.5 kHz high-pass it drops to
+    # ~0.003 and the floor would dominate the ratio knob.
+    threshold = max(raw_threshold, float(absolute_threshold_floor))
     threshold_floor_hit = threshold > raw_threshold
     min_sep = int(min_separation_sec * AUDIO_SAMPLE_RATE)
     if debug is not None:
@@ -3029,6 +3037,7 @@ def detect_swings_from_audio(
             "duration_sec": round(duration_sec, 2),
             "median_envelope": median,
             "threshold": threshold,
+            "threshold_floor": float(absolute_threshold_floor),
             "threshold_floor_hit": threshold_floor_hit,
         })
 

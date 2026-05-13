@@ -626,7 +626,13 @@ export default function AdminLongUpload() {
                                 <> · highpass @ {testCutResults[u.id].debug.highpass_hz_used} Hz</>
                               )}
                               {testCutResults[u.id].debug.threshold_floor_hit && (
-                                <> · <span className="warn-text">floor 0.02 active</span></>
+                                <> · <span className="warn-text">
+                                  floor {testCutResults[u.id].debug.threshold_floor ?? "0.001"} active —
+                                  raise audio ratio above {(
+                                    (testCutResults[u.id].debug.threshold_floor ?? 0.001)
+                                    / (testCutResults[u.id].debug.median_envelope || 1)
+                                  ).toFixed(1)} to bite
+                                </span></>
                               )}
                               <br />
                               peaks: raw={testCutResults[u.id].debug.n_raw_peaks}
