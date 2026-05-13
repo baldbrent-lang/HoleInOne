@@ -2584,7 +2584,7 @@ AUDIO_ENVELOPE_WINDOW_MS = 10
 # Minimum peak-to-median ratio for us to trust the audio peak as a
 # real impact. Below this we treat the audio as too noisy to
 # identify a clear "thwack" and fall back to the AI vision path.
-AUDIO_MIN_PEAK_OVER_MEDIAN = 30.0
+AUDIO_MIN_PEAK_OVER_MEDIAN = 25.0
 # Visual impact lands a few frames before the audio envelope peak: sound
 # from the strike has to travel ~5–15 m of air to the mic (≈30 ms /
 # ~1 frame at 30 fps), and the smoothed envelope's max sits a few ms
@@ -3482,14 +3482,46 @@ def run_full_ai_tracer_pipeline(
         return result
 
     # --- Step 4: refined impact + shaft on impact frame ---
+    # When step 3 succeeded via audio (ratio >= AUDIO_MIN_PEAK_OVER_MEDIAN
+    # = 25 after high-pass), trust the audio frame directly and skip
+    # both the refine_impact_frame Claude call AND the AI-vision
+    # fallback. Audio gives sub-frame impact timing once the high-pass
+    # filter is in; the refine call's hands / clubhead landmarks
+    # aren't used downstream by ball tracking, so the call was pure
+    # cost. We still produce an impact-frame JPG via cv2 so the
+    # frontend can show what we picked.
     impact_image_path = output_dir / f"{output_prefix}_impact.jpg"
-    refined_impact_info = refine_impact_frame(
-        input_path, int(impact_info["impact_frame"]),
-        ball_xy_sent=ball_xy_sent,
-        ball_sent_dims=ball_sent_dims,
-        output_image_path=impact_image_path,
-        model=model,
-    )
+    if impact_info.get("method") == "audio":
+        if HAS_CV:
+            try:
+                cap = cv2.VideoCapture(str(input_path))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(impact_info["impact_frame"]))
+                ok_read, frame = cap.read()
+                cap.release()
+                if ok_read and frame is not None:
+                    cv2.imwrite(str(impact_image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            except Exception as exc:  # pragma: no cover
+                log.warning("ai_tracer: audio-impact frame grab failed: %s", exc)
+        refined_impact_info = {
+            "ok": True,
+            "error": None,
+            "impact_frame": int(impact_info["impact_frame"]),
+            "hands_x": None, "hands_y": None,
+            "clubhead_x": None, "clubhead_y": None,
+            "confidence": impact_info.get("confidence"),
+            "notes": "skipped refine — audio impact trusted",
+            "method": "audio_trusted",
+            "model": None,
+            "frames_sent": [],
+        }
+    else:
+        refined_impact_info = refine_impact_frame(
+            input_path, int(impact_info["impact_frame"]),
+            ball_xy_sent=ball_xy_sent,
+            ball_sent_dims=ball_sent_dims,
+            output_image_path=impact_image_path,
+            model=model,
+        )
     result["impact_refined"] = refined_impact_info
     if impact_image_path.exists():
         result["impact_image_path"] = impact_image_path
