@@ -3106,6 +3106,102 @@ def detect_swings_from_audio(
     return segments
 
 
+def detect_swings_combined(
+    input_path: Path,
+    fps: float | None = None,
+    audio_min_peak_ratio: float = 5.0,
+    motion_ratio: float = 2.0,
+    pair_window_sec: float = 3.0,
+    before_impact_sec: float = 4.5,
+    after_impact_sec: float = 9.0,
+    debug: dict | None = None,
+) -> list[dict]:
+    """AND-confirm audio impacts with motion bursts.
+
+    Runs the audio and motion detectors with loose-per-detector
+    thresholds, then keeps only audio peaks that have a motion-burst
+    peak within ±pair_window_sec. This filters the false positives
+    each detector produces alone (random loud sounds; random motion
+    bursts) while staying sensitive enough to catch real swings.
+
+    Output windows are anchored on the audio peak (more precise for
+    the impact moment than motion's smoothed burst peak) with
+    before/after_impact_sec padding. Returns segments in the same
+    shape as detect_swings_from_audio.
+    """
+    audio_debug: dict = {}
+    motion_debug: dict = {}
+    audio_windows = detect_swings_from_audio(
+        input_path,
+        fps=fps,
+        min_peak_ratio=audio_min_peak_ratio,
+        before_impact_sec=before_impact_sec,
+        after_impact_sec=after_impact_sec,
+        debug=audio_debug,
+    )
+    motion_windows = detect_swings_from_motion(
+        input_path,
+        fps=fps,
+        motion_ratio=motion_ratio,
+        debug=motion_debug,
+    )
+
+    paired_windows: list[dict] = []
+    pairs: list[dict] = []
+    for aw in audio_windows:
+        a_t = aw.get("peak_time_sec")
+        if a_t is None:
+            continue
+        closest_m = None
+        closest_dt = None
+        for mw in motion_windows:
+            m_t = mw.get("peak_time_sec")
+            if m_t is None:
+                continue
+            dt = abs(float(a_t) - float(m_t))
+            if dt <= pair_window_sec and (closest_dt is None or dt < closest_dt):
+                closest_dt = dt
+                closest_m = mw
+        if closest_m is not None:
+            paired_windows.append(aw)
+            pairs.append({
+                "audio_peak_sec": round(float(a_t), 2),
+                "motion_peak_sec": round(float(closest_m.get("peak_time_sec")), 2),
+                "dt_sec": round(float(closest_dt), 2),
+                "audio_ratio": (
+                    round(float(aw.get("ratio")), 1)
+                    if aw.get("ratio") is not None else None
+                ),
+                "motion_ratio": (
+                    round(float(closest_m.get("ratio")), 1)
+                    if closest_m.get("ratio") is not None else None
+                ),
+            })
+
+    if debug is not None:
+        debug["audio"] = audio_debug
+        debug["motion"] = motion_debug
+        debug["combined"] = {
+            "pair_window_sec": float(pair_window_sec),
+            "before_impact_sec": float(before_impact_sec),
+            "after_impact_sec": float(after_impact_sec),
+            "audio_min_peak_ratio_used": float(audio_min_peak_ratio),
+            "motion_ratio_used": float(motion_ratio),
+            "n_audio_windows": len(audio_windows),
+            "n_motion_windows": len(motion_windows),
+            "n_paired": len(pairs),
+            "pairs": pairs,
+        }
+
+    log.info(
+        "ai_tracer: detect_swings_combined — %d paired (audio=%d motion=%d "
+        "audio_ratio=%.1f motion_ratio=%.1f pair_window=%.1fs)",
+        len(pairs), len(audio_windows), len(motion_windows),
+        audio_min_peak_ratio, motion_ratio, pair_window_sec,
+    )
+    return paired_windows
+
+
 def run_full_ai_tracer_pipeline(
     input_path: Path,
     output_dir: Path,

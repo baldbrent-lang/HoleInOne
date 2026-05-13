@@ -54,6 +54,7 @@ from ..services.ai_tracer import (
     run_full_ai_tracer_pipeline,
     detect_swings_from_audio,
     detect_swings_from_motion,
+    detect_swings_combined,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
 
@@ -806,7 +807,10 @@ def _run_long_upload_job(
             segs = list(seg_list or [])
             if not segs and auto_detect_swings:
                 tee_fps = probe_fps(src_path) or 30.0
-                detected = detect_swings_from_audio(src_path, fps=tee_fps)
+                # Combined audio + motion detector: an audio impact only
+                # counts when a motion burst peaks within ±3 s. Filters
+                # the false positives each detector produces alone.
+                detected = detect_swings_combined(src_path, fps=tee_fps)
                 for i, d in enumerate(detected):
                     segs.append({
                         "hole_number": starting_hole + i,
@@ -815,8 +819,15 @@ def _run_long_upload_job(
                     })
                 if not segs:
                     raise RuntimeError(
-                        "no swing impacts detected in the tee video's audio"
+                        "no swings detected (combined audio+motion found "
+                        "no paired peaks within the 3s window)"
                     )
+
+            # Publish total + reset progress so the polling UI can show
+            # "X/Y processed" while the heavy work runs.
+            row.last_n_segments = len(segs)
+            row.last_n_succeeded = 0
+            db.commit()
 
             results = _process_long_upload_segments(
                 db,
@@ -828,6 +839,7 @@ def _run_long_upload_job(
                 seg_list=segs,
                 dual_camera=green_src_path is not None,
                 ai_tracer_model=ai_tracer_model,
+                progress_upload_id=upload_id,
             )
 
             # Re-fetch in case the session was rolled back during segment work.
@@ -864,13 +876,27 @@ def _process_long_upload_segments(
     seg_list: list[dict],
     dual_camera: bool,
     ai_tracer_model: str | None,
+    progress_upload_id: int | None = None,
 ) -> list[dict]:
     """Cut + process each swing segment from one (or two) source video(s).
 
     Shared between the initial /clips/long-upload endpoint and the
     /clips/long-uploads/{id}/reprocess endpoint so re-editing a stored
     long upload runs the exact same pipeline.
+
+    When `progress_upload_id` is set, the matching LongVideoUpload
+    row's `last_n_succeeded` is bumped after every segment commit so a
+    polling UI sees "X/Y processed" in near-real-time.
     """
+    def _bump_progress(done_so_far: int) -> None:
+        if progress_upload_id is None:
+            return
+        row = db.get(LongVideoUpload, progress_upload_id)
+        if row is not None:
+            row.last_n_succeeded = done_so_far
+            db.commit()
+
+    n_done = 0
     results: list[dict] = []
     for idx, seg in enumerate(seg_list):
         try:
@@ -1000,6 +1026,8 @@ def _process_long_upload_segments(
                 "composite": composite_info,
                 "ai_tracer_error": pipe.get("error"),
             })
+            n_done += 1
+            _bump_progress(n_done)
             continue
 
         # --- Single-camera (original) branch ----------------------
@@ -1048,6 +1076,8 @@ def _process_long_upload_segments(
             "tracer_url": clip.tracer_url,
             "issue_note": clip.issue_note,
         })
+        n_done += 1
+        _bump_progress(n_done)
     return results
 
 
@@ -1487,67 +1517,14 @@ def test_cut_long_upload(
             debug=debug,
         )
     elif detector == "combined":
-        # AND the two detectors: a candidate swing only if an audio
-        # impact and a motion burst peak within combined_pair_window_sec
-        # of each other. Output windows use the audio peak as the
-        # anchor (precise impact moment).
-        audio_debug: dict = {}
-        motion_debug: dict = {}
-        audio_windows = detect_swings_from_audio(
+        windows = detect_swings_combined(
             src_path,
             fps=tee_fps,
-            min_peak_ratio=float(audio_min_peak_ratio),
-            debug=audio_debug,
-        )
-        motion_windows = detect_swings_from_motion(
-            src_path,
-            fps=tee_fps,
+            audio_min_peak_ratio=float(audio_min_peak_ratio),
             motion_ratio=float(motion_ratio),
-            debug=motion_debug,
+            pair_window_sec=float(combined_pair_window_sec),
+            debug=debug,
         )
-        pair_window = float(combined_pair_window_sec)
-        windows = []
-        pairs = []
-        for aw in audio_windows:
-            a_t = aw.get("peak_time_sec")
-            if a_t is None:
-                continue
-            closest_m = None
-            closest_dt = None
-            for mw in motion_windows:
-                m_t = mw.get("peak_time_sec")
-                if m_t is None:
-                    continue
-                dt = abs(float(a_t) - float(m_t))
-                if dt <= pair_window and (closest_dt is None or dt < closest_dt):
-                    closest_dt = dt
-                    closest_m = mw
-            if closest_m is not None:
-                windows.append(aw)
-                pairs.append({
-                    "audio_peak_sec": round(float(a_t), 2),
-                    "motion_peak_sec": round(float(closest_m.get("peak_time_sec")), 2),
-                    "dt_sec": round(float(closest_dt), 2),
-                    "audio_ratio": (
-                        round(float(aw.get("ratio")), 1)
-                        if aw.get("ratio") is not None else None
-                    ),
-                    "motion_ratio": (
-                        round(float(closest_m.get("ratio")), 1)
-                        if closest_m.get("ratio") is not None else None
-                    ),
-                })
-        debug = {
-            "audio": audio_debug,
-            "motion": motion_debug,
-            "combined": {
-                "pair_window_sec": pair_window,
-                "n_audio_windows": len(audio_windows),
-                "n_motion_windows": len(motion_windows),
-                "n_paired": len(pairs),
-                "pairs": pairs,
-            },
-        }
     else:
         detector = "motion"
         windows = detect_swings_from_motion(

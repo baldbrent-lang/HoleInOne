@@ -323,7 +323,7 @@ export default function AdminLongUpload() {
                             {u.green_missing && <> · <span className="err-text">missing on disk</span></>}
                           </>
                         )}
-                        {u.last_n_segments != null && (
+                        {u.last_n_segments != null && status !== "processing" && (
                           <> · last run: {u.last_n_succeeded ?? "?"}/{u.last_n_segments} succeeded</>
                         )}
                       </div>
@@ -334,9 +334,17 @@ export default function AdminLongUpload() {
                       )}
                       {busy && (
                         <div className="tiny muted" style={{ marginTop: 2 }}>
-                          {status === "pending"
-                            ? "Queued — will start shortly."
-                            : "Running cut + AI tracer + splice on the server. This page polls for completion."}
+                          {status === "pending" ? (
+                            "Queued — will start shortly."
+                          ) : u.last_n_segments == null ? (
+                            "Detecting swings (audio + motion)…"
+                          ) : (
+                            <>
+                              <b>{u.last_n_segments}</b> swings identified ·
+                              {" "}processed <b>{u.last_n_succeeded ?? 0}</b> /{" "}
+                              {u.last_n_segments}
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
