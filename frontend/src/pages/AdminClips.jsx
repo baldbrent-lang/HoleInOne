@@ -252,7 +252,7 @@ export default function AdminClips() {
               </button>
               {isComposite && (
                 <span className="small muted" style={{ alignSelf: "center" }}>
-                  Composite — re-upload to re-tracer
+                  Composite — {canRetry ? "tracing raw tee cut" : "no raw tee cut available"}
                 </span>
               )}
             </div>
