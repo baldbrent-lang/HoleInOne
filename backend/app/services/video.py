@@ -67,6 +67,49 @@ def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
+def mux_audio_into_video(video_path: Path, audio_source: Path) -> bool:
+    """Replace video_path's audio with the audio track from audio_source.
+
+    Used after cv2.VideoWriter renders something (which strips audio):
+    we mux the original clip's audio back in so the deliverable plays
+    with sound. Video stream is copied (no re-encode) — only audio is
+    transcoded to AAC. Idempotent — writes to a temp file then atomically
+    renames over video_path. Returns False on any failure (ffmpeg
+    missing, no audio in source, etc.) and leaves video_path untouched.
+    """
+    if not have_ffmpeg():
+        return False
+    if not video_path.exists() or not audio_source.exists():
+        return False
+    tmp = video_path.with_suffix(".audiomux.tmp.mp4")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(video_path),    # input 0 — video we want to keep
+                "-i", str(audio_source),  # input 1 — audio we want to add
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+                "-map", "0:v:0",
+                "-map", "1:a:0?",  # '?' = optional; OK if audio_source has no audio
+                "-shortest",
+                "-movflags", "+faststart",
+                str(tmp),
+            ],
+            check=True,
+            timeout=600,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("mux_audio_into_video failed for %s: %s", video_path, exc)
+        tmp.unlink(missing_ok=True)
+        return False
+    if not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        return False
+    tmp.replace(video_path)
+    return True
+
+
 def concat_two_clips(
     first_path: Path,
     first_start_sec: float,
@@ -84,10 +127,16 @@ def concat_two_clips(
     into a single deliverable clip. Both segments are normalized to the
     same height / fps / pixel format before concat so the join is clean
     even if the source cameras shot at different framerates or
-    resolutions. Audio is dropped.
+    resolutions.
 
-    Returns True on success, False if ffmpeg is missing or the encode
-    failed; output_path is removed on failure.
+    Tries audio-included concat first (both inputs must have an audio
+    stream); on failure (e.g. one input is silent) falls back to a
+    video-only concat. The dual-camera pipeline mixes audio in via
+    mux_audio_into_video upstream, so by the time we get here both
+    inputs should have audio.
+
+    Returns True on success, False if ffmpeg is missing or every encode
+    attempt failed; output_path is removed on failure.
     """
     if not have_ffmpeg():
         log.warning("ffmpeg missing; cannot concat clips")
@@ -95,39 +144,66 @@ def concat_two_clips(
     if first_end_sec <= first_start_sec or second_end_sec <= second_start_sec:
         log.warning("concat: window has non-positive duration")
         return False
-    filter_complex = (
-        f"[0:v]trim=start={first_start_sec:.3f}:end={first_end_sec:.3f},"
-        f"setpts=PTS-STARTPTS,"
-        f"scale=-2:{target_height},fps={target_fps},setsar=1[a];"
-        f"[1:v]trim=start={second_start_sec:.3f}:end={second_end_sec:.3f},"
-        f"setpts=PTS-STARTPTS,"
-        f"scale=-2:{target_height},fps={target_fps},setsar=1[b];"
-        f"[a][b]concat=n=2:v=1:a=0[out]"
-    )
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(first_path),
-                "-i", str(second_path),
-                "-filter_complex", filter_complex,
-                "-map", "[out]",
-                "-c:v", "libx264", "-preset", "veryfast",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                str(output_path),
-            ],
-            check=True,
-            timeout=600,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        log.warning("ffmpeg concat failed: %s", exc)
-        output_path.unlink(missing_ok=True)
-        return False
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        output_path.unlink(missing_ok=True)
-        return False
-    return True
+
+    def _attempt(with_audio: bool) -> bool:
+        if with_audio:
+            filter_complex = (
+                f"[0:v]trim=start={first_start_sec:.3f}:end={first_end_sec:.3f},"
+                f"setpts=PTS-STARTPTS,"
+                f"scale=-2:{target_height},fps={target_fps},setsar=1[v0];"
+                f"[1:v]trim=start={second_start_sec:.3f}:end={second_end_sec:.3f},"
+                f"setpts=PTS-STARTPTS,"
+                f"scale=-2:{target_height},fps={target_fps},setsar=1[v1];"
+                f"[0:a]atrim=start={first_start_sec:.3f}:end={first_end_sec:.3f},"
+                f"asetpts=PTS-STARTPTS,aresample=44100[a0];"
+                f"[1:a]atrim=start={second_start_sec:.3f}:end={second_end_sec:.3f},"
+                f"asetpts=PTS-STARTPTS,aresample=44100[a1];"
+                f"[v0][a0][v1][a1]concat=n=2:v=1:a=1[out_v][out_a]"
+            )
+            map_args = ["-map", "[out_v]", "-map", "[out_a]", "-c:a", "aac", "-b:a", "96k", "-ac", "2"]
+        else:
+            filter_complex = (
+                f"[0:v]trim=start={first_start_sec:.3f}:end={first_end_sec:.3f},"
+                f"setpts=PTS-STARTPTS,"
+                f"scale=-2:{target_height},fps={target_fps},setsar=1[a];"
+                f"[1:v]trim=start={second_start_sec:.3f}:end={second_end_sec:.3f},"
+                f"setpts=PTS-STARTPTS,"
+                f"scale=-2:{target_height},fps={target_fps},setsar=1[b];"
+                f"[a][b]concat=n=2:v=1:a=0[out]"
+            )
+            map_args = ["-map", "[out]"]
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-i", str(first_path),
+                    "-i", str(second_path),
+                    "-filter_complex", filter_complex,
+                    *map_args,
+                    "-c:v", "libx264", "-preset", "veryfast",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    str(output_path),
+                ],
+                check=True,
+                timeout=600,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            log.warning(
+                "ffmpeg concat (%s audio) failed: %s",
+                "with" if with_audio else "without", exc,
+            )
+            output_path.unlink(missing_ok=True)
+            return False
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            output_path.unlink(missing_ok=True)
+            return False
+        return True
+
+    if _attempt(with_audio=True):
+        return True
+    log.info("concat: retrying without audio (one input may be silent)")
+    return _attempt(with_audio=False)
 
 
 def extract_thumbnail(video_path: Path) -> Path | None:

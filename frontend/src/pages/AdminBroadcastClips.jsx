@@ -18,6 +18,7 @@ export default function AdminBroadcastClips() {
     "";
   const [clips, setClips] = useState(null);
   const [error, setError] = useState(null);
+  const [deleting, setDeleting] = useState({}); // {clip_id: true}
 
   async function load() {
     try {
@@ -25,6 +26,21 @@ export default function AdminBroadcastClips() {
       setClips(list);
     } catch (e) {
       setError(e.message);
+    }
+  }
+
+  async function deleteClip(clipId) {
+    if (!window.confirm("Delete this composite clip and its source files? This can't be undone (the underlying long upload, if any, is kept).")) {
+      return;
+    }
+    setDeleting((d) => ({ ...d, [clipId]: true }));
+    try {
+      await api.deleteClip(adminPassword, clipId);
+      setClips((cs) => (cs || []).filter((c) => c.id !== clipId));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setDeleting((d) => ({ ...d, [clipId]: false }));
     }
   }
 
@@ -153,6 +169,18 @@ export default function AdminBroadcastClips() {
                 Source missing
               </div>
             )}
+
+            <div className="row" style={{ marginTop: 8, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="ghost small err-text"
+                onClick={() => deleteClip(c.id)}
+                disabled={!!deleting[c.id]}
+                title="Delete this composite + source files"
+              >
+                {deleting[c.id] ? "Deleting…" : "Delete clip"}
+              </button>
+            </div>
           </div>
         );
       })}

@@ -188,7 +188,13 @@ class LongVideoUpload(Base):
     operator can re-edit / re-process the same source on /admin/long-
     upload without re-uploading. Filenames are stored relative to the
     uploads/clips directory; the actual source files are kept on disk
-    indefinitely until the operator deletes them."""
+    indefinitely until the operator deletes them.
+
+    processing_status drives the background-job UX: the upload endpoint
+    creates the row + saves the source file(s), then immediately
+    returns with status='processing'. A worker thread runs the cut /
+    splice / AI tracer pipeline and flips this to 'completed' (or
+    'failed' with last_error) when done."""
 
     __tablename__ = "long_video_uploads"
 
@@ -202,6 +208,10 @@ class LongVideoUpload(Base):
     green_original_filename: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
     last_n_segments: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     last_n_succeeded: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    processing_status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|processing|completed|failed
+    processing_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    processing_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 

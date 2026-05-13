@@ -182,6 +182,10 @@ export const api = {
     request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
   listBroadcastClips: (key, limit = 100) =>
     request(`/api/admin/broadcast-clips?limit=${limit}`, { adminPassword: key }),
+  deleteClip: (key, clipId) =>
+    request(`/api/admin/clips/${clipId}`, {
+      method: "DELETE", adminPassword: key,
+    }),
   listLongUploads: (key, limit = 100) =>
     request(`/api/admin/long-uploads?limit=${limit}`, { adminPassword: key }),
   reprocessLongUpload: (key, uploadId, formData) =>

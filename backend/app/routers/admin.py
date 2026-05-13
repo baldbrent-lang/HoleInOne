@@ -949,6 +949,80 @@ def _process_long_upload_segments(
     return results
 
 
+@router.delete("/clips/{clip_id}")
+def delete_clip(clip_id: int, db: Session = Depends(get_db)):
+    """Delete a VideoClip row plus the underlying source / tracer /
+    thumbnail / per-clip AI tracer files on disk. Used from the
+    Broadcast review page when an auto-cut composite is bad.
+
+    Per-swing tracer images / impact / address JPGs produced by the
+    AI pipeline for this clip are also unlinked when the filename
+    starts with the same stem. The stored LongVideoUpload row that
+    this clip was derived from (if any) is preserved — reprocessing
+    it would produce a new VideoClip.
+    """
+    clip = db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+
+    freed = 0
+    deleted_files: list[str] = []
+    # Collect every URL we know about for this clip so we can resolve
+    # them to filenames in CLIPS_DIR.
+    candidate_urls = [clip.source_url, clip.tracer_url, clip.thumbnail_url]
+    candidate_names: set[str] = set()
+    for url in candidate_urls:
+        if not url:
+            continue
+        # Strip any cache-buster query string and pull the basename.
+        no_q = url.split("?", 1)[0]
+        name = no_q.rstrip("/").rsplit("/", 1)[-1]
+        if name:
+            candidate_names.add(name)
+    # Also unlink any per-clip AI tracer artifacts whose filenames
+    # share the source stem (e.g. {stem}_address.jpg, {stem}_impact.jpg,
+    # {stem}_track_f00000.jpg, {stem}_ai_tracer.mp4, {stem}_composite.mp4).
+    stems: set[str] = set()
+    for name in list(candidate_names):
+        stem = name.rsplit(".", 1)[0]
+        # Strip known suffixes so we get the original clip stem.
+        for suffix in ("_composite", "_ai_tracer", "_traced"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+        stems.add(stem)
+    if stems:
+        for fp in CLIPS_DIR.iterdir():
+            if not fp.is_file():
+                continue
+            for stem in stems:
+                if fp.name == stem or fp.name.startswith(stem + ".") or fp.name.startswith(stem + "_"):
+                    candidate_names.add(fp.name)
+                    break
+
+    for name in candidate_names:
+        fp = CLIPS_DIR / name
+        try:
+            if fp.exists():
+                freed += fp.stat().st_size
+                fp.unlink()
+                deleted_files.append(name)
+        except Exception as exc:
+            log.warning("clip delete: failed to unlink %s: %s", fp, exc)
+
+    db.add(AuditLog(
+        actor="admin", action="delete_clip", target=f"clip:{clip.id}",
+        detail=f"deleted {len(deleted_files)} files, freed {freed} bytes",
+    ))
+    db.delete(clip)
+    db.commit()
+    return {
+        "deleted": True,
+        "clip_id": clip_id,
+        "freed_bytes": freed,
+        "files_unlinked": deleted_files,
+    }
+
+
 @router.post("/clips/long-upload")
 async def upload_long_video(
     course_id: int = Form(...),

@@ -3028,6 +3028,18 @@ def run_full_ai_tracer_pipeline(
     )
     result["tracer_video_info"] = tracer_info
     if tracer_info.get("ok"):
+        # cv2.VideoWriter strips audio. Mux the original input clip's
+        # audio track back in so the deliverable plays with sound.
+        from .video import mux_audio_into_video as _mux_audio
+        try:
+            audio_ok = _mux_audio(tracer_path, input_path)
+            if not audio_ok:
+                log.info(
+                    "ai_tracer: pipeline — audio mux skipped/failed for %s "
+                    "(source may have no audio)", tracer_path.name,
+                )
+        except Exception as exc:
+            log.warning("ai_tracer: audio mux raised: %s", exc)
         result["tracer_video_path"] = tracer_path
         # Cutover time for dual-camera composite: when the rendered
         # smoothed line ends (last sampled frame in source-clip
