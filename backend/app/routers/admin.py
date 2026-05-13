@@ -44,6 +44,7 @@ from ..services.ai_tracer import (
     detect_handedness_at_address,
     annotate_address_with_shaft,
     find_impact_frame_after_address,
+    find_impact_via_audio,
     refine_impact_frame,
     track_ball_after_impact,
     render_tracer_video,
@@ -650,16 +651,59 @@ def ai_trace(
 
         impact_image_name = f"{fpath.stem}_impact.jpg"
         impact_image_path = CLIPS_DIR / impact_image_name
-        # Step 4a: rough impact — 12 candidates evenly across [+1, +~2s].
-        # We don't save the image here; the refinement step below
-        # overwrites this path with the final pick (shaft overlay too).
-        impact_info = find_impact_frame_after_address(
-            fpath, addr_idx_int,
-            ball_xy_sent=ball_xy_sent,
-            ball_sent_dims=ball_sent_dims,
-            output_image_path=None,
-            model=model,
-        )
+
+        # Step 4a: rough impact. The "thwack" of club-on-ball is a
+        # razor-sharp audio transient that's typically the loudest
+        # moment in the entire clip. Try detecting it from the audio
+        # first — much cheaper and often more precise than asking
+        # Claude to pick from 12 visual candidates. Fall back to the
+        # AI vision step when audio is unavailable, too noisy, or
+        # lacks a clear peak.
+        audio_clip_fps = probe_fps(fpath) or 30.0
+        audio_impact_info = find_impact_via_audio(fpath, audio_clip_fps)
+        impact_info = None
+        if audio_impact_info.get("ok"):
+            audio_frame = audio_impact_info.get("impact_frame")
+            # Sanity-clamp: the audio peak should land at or after the
+            # address frame. If somehow it landed before address (e.g.
+            # the clip starts mid-flight) we don't trust it.
+            if audio_frame is not None and audio_frame >= addr_idx_int:
+                impact_info = {
+                    "ok": True,
+                    "error": None,
+                    "impact_frame": int(audio_frame),
+                    "confidence": audio_impact_info.get("confidence"),
+                    "notes": (
+                        f"audio peak at {audio_impact_info.get('peak_time_sec'):.3f}s "
+                        f"(peak/median = {audio_impact_info.get('ratio'):.1f})"
+                        if audio_impact_info.get("peak_time_sec") is not None
+                        and audio_impact_info.get("ratio") is not None
+                        else "audio peak"
+                    ),
+                    "method": "audio",
+                    "model": None,
+                    "frames_sent": [],
+                    "audio": audio_impact_info,
+                }
+            else:
+                # Audio peak is before address — implausible. Fall
+                # through to AI vision.
+                audio_impact_info["error"] = (
+                    f"audio peak at frame {audio_frame} precedes address "
+                    f"frame {addr_idx_int}"
+                )
+                audio_impact_info["ok"] = False
+
+        if impact_info is None:
+            impact_info = find_impact_frame_after_address(
+                fpath, addr_idx_int,
+                ball_xy_sent=ball_xy_sent,
+                ball_sent_dims=ball_sent_dims,
+                output_image_path=None,
+                model=model,
+            )
+            impact_info["method"] = "ai_vision"
+            impact_info["audio"] = audio_impact_info
 
         # Step 4b: refinement — ±5 around the rough pick. Same blue
         # ball-rest circle on every candidate so Claude can lock onto

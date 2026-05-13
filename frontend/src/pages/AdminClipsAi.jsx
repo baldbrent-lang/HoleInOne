@@ -85,14 +85,16 @@ export default function AdminClipsAi() {
           Camera is assumed to be <b>behind the target line</b>, golfer hitting
           away from camera. Each Run executes six steps:
           (1) find the <b>address frame</b>; (2) on that frame locate hands +
-          ball and infer <b>handedness</b>; (3) rough <b>impact</b> across 12
-          candidates over ~2 s after address; (4) <b>refine</b> the impact
-          frame ±5 and locate the shaft on it; (5) <b>track the ball</b>
-          forward frame-by-frame from impact until it leaves view, with a
-          phase-2 crop+upscale retry on missed frames; (6) render the
-          <b>tracer video</b> — source clip with a progressive dashed
-          orange line from the ball-at-rest position through each tracked
-          ball position.
+          ball and infer <b>handedness</b>; (3) rough <b>impact</b> — first
+          tries detecting the loudest audio transient (the "thwack"), falls
+          back to AI vision picking from 12 candidates if audio is unavailable
+          or unclear; (4) <b>refine</b> the impact frame ±5 and locate the
+          shaft on it; (5) <b>track the ball</b> forward frame-by-frame from
+          impact until it leaves view, with a phase-2 crop+upscale retry on
+          missed frames; (6) render the <b>tracer video</b> — source clip
+          with a smoothed dashed orange line from the ball-at-rest position
+          through each tracked ball position, fading off along its natural
+          arc past the last detection.
         </p>
       </div>
 
@@ -363,7 +365,29 @@ export default function AdminClipsAi() {
                     Refinement candidates: [{impactRefined.frames_sent.join(", ")}]
                   </div>
                 )}
-                {impact?.frames_sent && (
+                {impact?.method === "audio" && (
+                  <div className="tiny muted" style={{ marginTop: 2 }}>
+                    Rough impact via <b>audio peak</b>
+                    {impact?.audio?.peak_time_sec != null && (
+                      <> @ <code>{impact.audio.peak_time_sec.toFixed(3)}s</code></>
+                    )}
+                    {impact?.audio?.ratio != null && (
+                      <> · peak/median = <code>{impact.audio.ratio.toFixed(1)}</code></>
+                    )}
+                    {impact?.confidence && (
+                      <> · confidence <b>{impact.confidence}</b></>
+                    )}
+                  </div>
+                )}
+                {impact?.method === "ai_vision" && impact?.frames_sent && (
+                  <div className="tiny muted" style={{ marginTop: 2 }}>
+                    Rough impact via <b>AI vision</b> · candidates [{impact.frames_sent.join(", ")}] · model {impact.model}
+                    {impact?.audio?.error && (
+                      <> · audio fallback reason: <code>{impact.audio.error}</code></>
+                    )}
+                  </div>
+                )}
+                {impact?.method !== "audio" && impact?.method !== "ai_vision" && impact?.frames_sent && (
                   <div className="tiny muted" style={{ marginTop: 2 }}>
                     Rough candidates: [{impact.frames_sent.join(", ")}] · model {impact.model}
                   </div>

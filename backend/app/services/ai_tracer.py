@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -2264,4 +2266,159 @@ def render_tracer_video(
     info["saved_path"] = str(output_path)
     info["n_outliers_rejected"] = len(rejected_frames)
     info["rejected_frames"] = sorted(rejected_frames)
+    return info
+
+
+# Sample rate used when extracting audio for impact detection. 22050 Hz
+# gives us ~45 µs precision — plenty to resolve a club-on-ball
+# transient (a few ms wide) to the right video frame even at 120 fps.
+AUDIO_SAMPLE_RATE = 22050
+
+# Smoothing window for the RMS envelope, ~10 ms — wide enough to
+# average out one-sample crackle but narrow enough to preserve the
+# sharp leading edge of the impact transient.
+AUDIO_ENVELOPE_WINDOW_MS = 10
+
+# Minimum peak-to-median ratio for us to trust the audio peak as a
+# real impact. Below this we treat the audio as too noisy to
+# identify a clear "thwack" and fall back to the AI vision path.
+AUDIO_MIN_PEAK_OVER_MEDIAN = 4.0
+
+
+def find_impact_via_audio(input_path: Path, fps: float) -> dict:
+    """Locate impact from the audio track.
+
+    A struck golf ball produces a sharp, isolated transient ("thwack")
+    that's typically the loudest moment in the clip by a wide margin.
+    We extract mono PCM via ffmpeg, compute a short-window RMS
+    envelope, find the peak, sanity-check it against the median
+    envelope value (so background noise / music / wind doesn't fool
+    us), and convert the peak's timestamp to a frame index using the
+    supplied `fps`.
+
+    Returns::
+
+        {
+          "ok": bool,
+          "error": str | None,
+          "impact_frame": int | None,
+          "confidence": "high" | "medium" | "low" | None,
+          "method": "audio",
+          "peak_time_sec": float | None,
+          "peak_value": float | None,
+          "median_envelope": float | None,
+          "ratio": float | None,           # peak_value / median_envelope
+          "duration_sec": float | None,
+        }
+
+    Never raises. Returns ok=False with a descriptive `error` whenever
+    we can't run (ffmpeg missing, no audio stream, empty audio, etc.)
+    or can't find a clear peak.
+    """
+    info: dict = {
+        "ok": False,
+        "error": None,
+        "impact_frame": None,
+        "confidence": None,
+        "method": "audio",
+        "peak_time_sec": None,
+        "peak_value": None,
+        "median_envelope": None,
+        "ratio": None,
+        "duration_sec": None,
+    }
+
+    if not HAS_NP:
+        info["error"] = "numpy not installed"
+        return info
+    if shutil.which("ffmpeg") is None:
+        info["error"] = "ffmpeg not on PATH"
+        return info
+    if fps is None or fps <= 0:
+        info["error"] = "invalid fps"
+        return info
+
+    # Extract mono PCM int16 audio at AUDIO_SAMPLE_RATE Hz to stdout.
+    # -vn skips video, -ac 1 forces mono, -f s16le emits raw PCM.
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-i", str(input_path),
+                "-vn", "-ac", "1",
+                "-ar", str(AUDIO_SAMPLE_RATE),
+                "-f", "s16le", "-",
+            ],
+            capture_output=True, timeout=60, check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        info["error"] = f"ffmpeg failed: {exc}"
+        return info
+    if proc.returncode != 0:
+        info["error"] = f"ffmpeg returned {proc.returncode}: {proc.stderr.decode('utf-8', 'ignore')[:200]}"
+        return info
+    raw = proc.stdout
+    if not raw:
+        info["error"] = "no audio data extracted (clip may have no audio track)"
+        return info
+
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if samples.size == 0:
+        info["error"] = "empty audio buffer"
+        return info
+    info["duration_sec"] = float(samples.size) / AUDIO_SAMPLE_RATE
+
+    # RMS-ish envelope: |x| then moving average with a short window.
+    # |x| (rather than x²) keeps the units intuitive (peak-amplitude
+    # ratios) and is good enough for finding the loudest transient.
+    abs_samples = np.abs(samples)
+    win = max(1, int(AUDIO_SAMPLE_RATE * AUDIO_ENVELOPE_WINDOW_MS / 1000.0))
+    if abs_samples.size <= win:
+        info["error"] = "audio too short for envelope"
+        return info
+    kernel = np.ones(win, dtype=np.float32) / float(win)
+    envelope = np.convolve(abs_samples, kernel, mode="same")
+
+    peak_idx = int(np.argmax(envelope))
+    peak_value = float(envelope[peak_idx])
+    median = float(np.median(envelope))
+    info["peak_value"] = peak_value
+    info["median_envelope"] = median
+    if median <= 0:
+        # Mostly-silent audio; no useful baseline. Treat the loudest
+        # sample as impact only if it's well above 0.
+        if peak_value < 0.05:
+            info["error"] = "audio is silent / has no impact transient"
+            return info
+        ratio = float("inf")
+    else:
+        ratio = peak_value / median
+    info["ratio"] = ratio if ratio != float("inf") else None
+    if ratio < AUDIO_MIN_PEAK_OVER_MEDIAN:
+        info["error"] = (
+            f"audio peak/median ratio too low ({ratio:.1f} < "
+            f"{AUDIO_MIN_PEAK_OVER_MEDIAN}); audio likely noisy or "
+            "lacks a clear impact"
+        )
+        return info
+
+    peak_time = peak_idx / float(AUDIO_SAMPLE_RATE)
+    info["peak_time_sec"] = float(peak_time)
+    info["impact_frame"] = int(round(peak_time * fps))
+    # Confidence buckets — these are heuristic but visible in the UI
+    # so the operator can sanity-check the audio call.
+    if ratio >= 15:
+        info["confidence"] = "high"
+    elif ratio >= 8:
+        info["confidence"] = "medium"
+    else:
+        info["confidence"] = "low"
+
+    info["ok"] = True
+    log.info(
+        "ai_tracer: audio impact — frame=%d t=%.3fs peak=%.3f median=%.3f "
+        "ratio=%.1f confidence=%s",
+        info["impact_frame"], peak_time, peak_value, median, ratio,
+        info["confidence"],
+    )
     return info
