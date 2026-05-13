@@ -2244,17 +2244,23 @@ def render_tracer_video(
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
-            # Fade-tail: sub-frame samples of the same parabola spanning
-            # one frame's worth of motion past the last anchor. Each
-            # sub-segment gets progressively lower opacity, so the
-            # tracer visibly "trails off" along its natural direction
-            # instead of stopping with a hard edge.
+            # Fade-tail: extend along the TANGENT of the parabola at
+            # the last kept frame for one frame's worth of motion. We
+            # used to sample the parabola itself past the anchor, but
+            # near or past the apex the curve loops back down — the
+            # tracer would visibly arc downward at the very end, which
+            # the operator complained about. Using the local tangent
+            # instead means the fade carries on in whatever direction
+            # the ball was last moving (rising, level, descending) but
+            # never reverses curvature.
+            base_x = float(np.polyval(x_coef, last_kept_frame))
+            base_y = float(np.polyval(y_coef, last_kept_frame))
+            vx = float(np.polyval(np.polyder(x_coef), last_kept_frame))
+            vy = float(np.polyval(np.polyder(y_coef), last_kept_frame))
             for i in range(1, TRACER_FADE_SEGMENTS + 1):
-                sub_f = last_kept_frame + (
-                    i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
-                )
-                fx = int(round(float(np.polyval(x_coef, sub_f))))
-                fy = int(round(float(np.polyval(y_coef, sub_f))))
+                t = i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
+                fx = int(round(base_x + vx * t))
+                fy = int(round(base_y + vy * t))
                 if not (0 <= fx < width and 0 <= fy < height):
                     break
                 fade_tail_points.append((fx, fy))
