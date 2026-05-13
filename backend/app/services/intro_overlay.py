@@ -40,7 +40,7 @@ except Exception:  # pragma: no cover
 # Brand palette
 BRAND_GREEN = (28, 168, 92, 255)
 PANEL_TOP_GRAY = (230, 232, 236, 255)   # light gray for the player-name section
-PANEL_BOTTOM_BLUE = (24, 58, 132, 240)  # broadcast-style blue for the course/info
+PANEL_BOTTOM_BLUE = (10, 26, 70, 245)   # deep navy for the course/info section
 TEXT_BLACK = (12, 16, 22, 255)
 TEXT_PRIMARY = (255, 255, 255, 255)
 TEXT_MUTED = (210, 218, 230, 255)
@@ -239,9 +239,16 @@ def render_right_panel(
         logo = None
 
     if logo is not None:
-        pad_x = 18
-        pad_y = 14
-        # Scale logo to fit the panel height (minus padding).
+        # Source PNG has ~20% blank space top and bottom. Crop to the
+        # middle 60% vertically so the logo content fills the panel
+        # without visible buffer above and below.
+        crop_top = int(round(logo.height * 0.20))
+        crop_bottom = int(round(logo.height * 0.80))
+        logo = logo.crop((0, crop_top, logo.width, crop_bottom))
+
+        pad_x = 16
+        pad_y = 6
+        # Scale the cropped logo to fit the panel height (minus padding).
         target_h = height - 2 * pad_y
         scale = target_h / float(logo.height)
         logo_w = int(round(logo.width * scale))
