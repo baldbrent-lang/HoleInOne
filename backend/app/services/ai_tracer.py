@@ -1935,10 +1935,15 @@ TRACER_REST_RING = (255, 60, 0)          # blue — ball-at-rest marker
 # misidentifications and the curve refits without them.
 TRAJ_OUTLIER_PX = 80
 TRAJ_OUTLIER_MAX_ITERS = 6
-# How many frames past the last accepted anchor to extend the smoothed
-# line so the tracer carries its natural direction a beat instead of
-# stopping the instant Claude lost the ball.
-TRACER_EXTRAPOLATION_FRAMES = 12
+# How many sub-frame samples the fade-away tail is split into. After
+# the last accepted anchor the tracer doesn't continue extrapolating;
+# instead it shows a brief comet-style tail that spans roughly one
+# frame's worth of ball motion (sampled along the same parabola the
+# main line was drawn through) and fades to zero opacity along its
+# length. Length 1.0 = exactly 1 frame of motion at the local
+# velocity; smaller values make the fade shorter.
+TRACER_FADE_FRAME_LENGTH = 1.0
+TRACER_FADE_SEGMENTS = 10
 
 
 def _robust_quadratic_fit(
@@ -2133,6 +2138,8 @@ def render_tracer_video(
     # the line is a smooth arc instead of a kinked polyline, AND a
     # single bad detection won't yank it at right angles.
     smoothed_points: list[tuple[int, int, int]] = []  # (frame, x, y)
+    fade_tail_points: list[tuple[int, int]] = []  # native pixel coords
+    last_kept_frame_global: int | None = None
     rejected_frames: set[int] = set()
     fit = _robust_quadratic_fit(anchors)
     if fit is not None:
@@ -2142,19 +2149,34 @@ def render_tracer_video(
         if kept:
             first_frame = kept[0][0]
             last_kept_frame = kept[-1][0]
-            # Extend past the last kept anchor for the natural-fade
-            # tail. Clip the moment the parabola walks out of the
-            # image bounds so we don't render off-screen segments.
-            for f in range(first_frame, last_kept_frame + TRACER_EXTRAPOLATION_FRAMES + 1):
+            last_kept_frame_global = last_kept_frame
+            # Main smoothed line ends right at the last accepted
+            # anchor — no confident extrapolation past it.
+            for f in range(first_frame, last_kept_frame + 1):
                 x = int(round(float(np.polyval(x_coef, f))))
                 y = int(round(float(np.polyval(y_coef, f))))
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
+            # Fade-tail: sub-frame samples of the same parabola spanning
+            # one frame's worth of motion past the last anchor. Each
+            # sub-segment gets progressively lower opacity, so the
+            # tracer visibly "trails off" along its natural direction
+            # instead of stopping with a hard edge.
+            for i in range(1, TRACER_FADE_SEGMENTS + 1):
+                sub_f = last_kept_frame + (
+                    i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
+                )
+                fx = int(round(float(np.polyval(x_coef, sub_f))))
+                fy = int(round(float(np.polyval(y_coef, sub_f))))
+                if not (0 <= fx < width and 0 <= fy < height):
+                    break
+                fade_tail_points.append((fx, fy))
         log.info(
             "ai_tracer: tracer fit — %d anchors, %d rejected as outliers, "
-            "%d smoothed render points",
+            "%d smoothed render points, %d fade-tail segments",
             len(anchors), len(rejected_indices), len(smoothed_points),
+            len(fade_tail_points),
         )
     else:
         # Not enough anchors for a stable fit (or numpy missing).
@@ -2196,6 +2218,30 @@ def render_tracer_video(
                 ]
                 if len(visible) >= 2:
                     _draw_dashed_tracer(frame, visible)
+                # Fade-away tail. Renders only once the main line has
+                # reached its end (i.e. we're at or past the last
+                # accepted anchor frame). Each sub-segment is
+                # alpha-blended with linearly decreasing weight so the
+                # line visibly trails off along the parabola tangent.
+                if (
+                    fade_tail_points
+                    and last_kept_frame_global is not None
+                    and frame_idx >= last_kept_frame_global
+                    and visible
+                ):
+                    tail_anchor = visible[-1]
+                    walk = [tail_anchor, *fade_tail_points]
+                    for j in range(len(walk) - 1):
+                        alpha = 1.0 - (j / float(len(walk) - 1))
+                        if alpha <= 0.03:
+                            break
+                        overlay = frame.copy()
+                        cv2.line(
+                            overlay, walk[j], walk[j + 1],
+                            TRACER_LINE_COLOR, TRACER_LINE_THICKNESS,
+                            cv2.LINE_AA,
+                        )
+                        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
                 if rest_xy is not None:
                     cv2.circle(frame, rest_xy, 12, (0, 0, 0), 4, cv2.LINE_AA)
                     cv2.circle(frame, rest_xy, 10, TRACER_REST_RING, 3, cv2.LINE_AA)
