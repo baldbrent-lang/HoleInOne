@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -203,7 +204,7 @@ CLAHE_TILE_SIZE = 8
 #             80-frame span). Cost stays at 40 Claude calls but
 #             the time window doubles to match what the lower-fps
 #             buckets cover in absolute time.
-BALL_TRACK_MAX_FRAMES = 20
+BALL_TRACK_MAX_FRAMES = 12
 BALL_TRACK_MAX_FRAMES_HIGH_FPS = 40
 BALL_TRACK_HIGH_FPS_THRESHOLD = 50.0
 BALL_TRACK_VHIGH_FPS_THRESHOLD = 100.0
@@ -575,6 +576,164 @@ def annotate_address_with_shaft(
         [int(cv2.IMWRITE_JPEG_QUALITY), 90],
     )
     return bool(ok)
+
+
+def find_ball_at_address_cv(
+    input_path: Path,
+    address_frame_idx: int,
+    target_w: int = 1024,
+) -> dict:
+    """Classical-CV ball-at-address detector. Cheap replacement for
+    the handedness Claude call when all we need is the ball-at-rest
+    pixel coords as a ball-tracking seed.
+
+    Samples a handful of frames near address_frame_idx, runs tophat
+    morphology + circularity filtering on each to find small bright
+    blobs, and votes across frames so only a stationary white object
+    (the ball) survives — scattered range balls in the foreground or
+    a white tee marker that happens to look round don't get reinforced
+    across frames the way the actual ball does.
+
+    Returns a dict with the same fields detect_handedness_at_address
+    fills for downstream consumers (ball_x/y, image_width/height) so
+    the rest of the pipeline can treat the two interchangeably.
+    handedness is left as 'unknown' since downstream no longer uses it.
+    """
+    info: dict = {
+        "ok": False,
+        "error": None,
+        "handedness": "unknown",
+        "confidence": None,
+        "notes": None,
+        "hands_x": None,
+        "hands_y": None,
+        "ball_x": None,
+        "ball_y": None,
+        "shaft_direction": None,
+        "image_width": None,
+        "image_height": None,
+        "n_votes": 0,
+        "method": "classical_cv",
+        "model": None,
+    }
+    if not HAS_CV or not HAS_NP:
+        info["error"] = "opencv or numpy not installed"
+        return info
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        info["error"] = "could not open video"
+        return info
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        # Sample five frames centered on the address frame. Address is
+        # held for ~1 s before takeaway, so anything within +-15 frames
+        # at 30 fps should still be the golfer over the ball.
+        offsets = (-15, -8, 0, 8, 15)
+        candidate_indices: list[int] = []
+        for off in offsets:
+            idx = max(0, min(total - 1, int(address_frame_idx) + off))
+            if idx not in candidate_indices:
+                candidate_indices.append(idx)
+
+        per_frame_dets: list[tuple[int, int]] = []
+        sent_w = 0
+        sent_h = 0
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        for idx in candidate_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            h, w = frame.shape[:2]
+            if w > target_w:
+                scale = target_w / float(w)
+                frame = cv2.resize(
+                    frame, (target_w, int(round(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            sent_h, sent_w = frame.shape[:2]
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+            _, mask = cv2.threshold(tophat, 50, 255, cv2.THRESH_BINARY)
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            for c in contours:
+                area = float(cv2.contourArea(c))
+                if area < 3.0 or area > 200.0:
+                    continue
+                peri = float(cv2.arcLength(c, True))
+                if peri <= 0:
+                    continue
+                circ = 4.0 * math.pi * area / (peri * peri)
+                if circ < 0.5:
+                    continue
+                (cx, cy), _r = cv2.minEnclosingCircle(c)
+                # Ball sits on the ground — anything above ~40 % of the
+                # frame is probably sky / golfer's torso, drop it.
+                if cy < sent_h * 0.40:
+                    continue
+                per_frame_dets.append((int(round(cx)), int(round(cy))))
+    finally:
+        cap.release()
+
+    info["image_width"] = sent_w
+    info["image_height"] = sent_h
+    if sent_w == 0:
+        info["error"] = "could not extract any frames"
+        return info
+    if not per_frame_dets:
+        info["error"] = "no ball-shaped blobs detected near address frame"
+        return info
+
+    # Cluster nearby detections — same ball appearing across multiple
+    # frames must land within a few pixels of itself.
+    clusters: list[list[int | float]] = []  # [count, sum_x, sum_y]
+    CLUSTER_RADIUS_PX = 10
+    for x, y in per_frame_dets:
+        merged = False
+        for c in clusters:
+            ax = c[1] / c[0]
+            ay = c[2] / c[0]
+            if abs(x - ax) <= CLUSTER_RADIUS_PX and abs(y - ay) <= CLUSTER_RADIUS_PX:
+                c[0] += 1
+                c[1] += x
+                c[2] += y
+                merged = True
+                break
+        if not merged:
+            clusters.append([1, float(x), float(y)])
+
+    clusters.sort(key=lambda c: -c[0])
+    best = clusters[0]
+    votes = int(best[0])
+    if votes < 2:
+        info["error"] = (
+            f"no ball candidate confirmed across nearby frames "
+            f"(best cluster had {votes} vote, need >= 2)"
+        )
+        return info
+
+    ball_x = int(round(best[1] / votes))
+    ball_y = int(round(best[2] / votes))
+    info["ok"] = True
+    info["ball_x"] = ball_x
+    info["ball_y"] = ball_y
+    info["n_votes"] = votes
+    info["confidence"] = "high" if votes >= 4 else ("medium" if votes >= 3 else "low")
+    info["notes"] = (
+        f"classical-CV tophat vote: ball at ({ball_x}, {ball_y}) in "
+        f"{sent_w}x{sent_h} image, {votes}/{len(candidate_indices)} "
+        f"sampled frames agreed"
+    )
+    log.info(
+        "ai_tracer: find_ball_at_address_cv — addr=%d ball=(%d,%d) votes=%d/%d "
+        "in %dx%d (no Claude call)",
+        address_frame_idx, ball_x, ball_y, votes, len(candidate_indices),
+        sent_w, sent_h,
+    )
+    return info
 
 
 def detect_handedness_at_address(
@@ -3451,10 +3610,25 @@ def run_full_ai_tracer_pipeline(
         return result
     addr_idx = int(address_info["address_frame"])
 
-    # --- Step 2: handedness + landmarks ---
-    handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
+    # --- Step 2: ball-at-address (classical CV first, Claude fallback) ---
+    # We only need the ball pixel coords as a ball-tracking seed;
+    # handedness isn't used downstream. The CV detector votes across
+    # ~5 frames near address so a stationary ball gets reinforced
+    # while scattered range balls / white tee markers don't. Falls
+    # back to the Claude handedness call only when CV returns no
+    # confirmed candidate.
+    handedness_info = find_ball_at_address_cv(input_path, addr_idx)
+    if not handedness_info.get("ok"):
+        log.info(
+            "ai_tracer: CV ball-at-address miss (%s); falling back to Claude",
+            handedness_info.get("error"),
+        )
+        handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
     result["handedness"] = handedness_info
-    if handedness_info.get("ok"):
+    if handedness_info.get("ok") and handedness_info.get("method") != "classical_cv":
+        # Only annotate the address image with shaft when we have the
+        # full Claude output (hands_x/y, shaft direction). CV path
+        # has ball coords only — no shaft to draw.
         annotate_address_with_shaft(
             input_path, addr_idx, handedness_info, address_image_path,
         )
