@@ -49,6 +49,7 @@ from ..services.ai_tracer import (
     track_ball_after_impact,
     render_tracer_video,
     run_full_ai_tracer_pipeline,
+    detect_swings_from_audio,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
 
@@ -697,7 +698,9 @@ async def upload_long_video(
     course_id: int = Form(...),
     camera_type: str = Form("tee"),
     base_captured_at: str = Form(...),
-    segments: str = Form(...),
+    segments: str = Form("[]"),
+    auto_detect_swings: bool = Form(False),
+    starting_hole: int = Form(1),
     video: UploadFile = File(...),
     video_green: UploadFile | None = File(None),
     ai_tracer_model: str | None = Form(None),
@@ -738,8 +741,18 @@ async def upload_long_video(
         seg_list = json.loads(segments or "[]")
     except json.JSONDecodeError:
         raise HTTPException(400, "segments must be a JSON array")
-    if not isinstance(seg_list, list) or not seg_list:
-        raise HTTPException(400, "at least one segment is required")
+    if not isinstance(seg_list, list):
+        raise HTTPException(400, "segments must be a JSON array")
+    # When the operator hasn't marked segments manually, we'll auto-
+    # detect every club-on-ball impact from the tee audio after the
+    # source video lands on disk — see the post-write block below.
+    if not seg_list and not auto_detect_swings:
+        raise HTTPException(
+            400,
+            "no segments supplied — pass auto_detect_swings=true to "
+            "auto-detect swings from audio, or provide at least one "
+            "segment manually",
+        )
 
     try:
         base_dt = datetime.fromisoformat(base_captured_at.replace("Z", "+00:00"))
@@ -776,6 +789,46 @@ async def upload_long_video(
         green_src_name = f"long-{course_id}-green-{secrets.token_hex(6)}.{g_ext}"
         green_src_path = CLIPS_DIR / green_src_name
         green_src_path.write_bytes(green_data)
+
+    # Auto-segment by audio when the operator didn't mark any swings
+    # manually. The detector scans the tee video for sharp impact
+    # transients and returns one (start, end) window per detected
+    # swing. Hole numbers are auto-assigned sequentially starting at
+    # `starting_hole`; the operator can re-edit clips after upload
+    # from /admin/clips if a specific hole assignment is needed.
+    auto_detect_info: dict | None = None
+    if not seg_list and auto_detect_swings:
+        tee_fps = probe_fps(src_path) or 30.0
+        detected = detect_swings_from_audio(src_path, fps=tee_fps)
+        auto_detect_info = {
+            "n_detected": len(detected),
+            "tee_fps": tee_fps,
+            "peaks": [
+                {
+                    "peak_time_sec": round(d["peak_time_sec"], 3),
+                    "ratio": (round(d["ratio"], 1) if d.get("ratio") is not None else None),
+                    "confidence": d.get("confidence"),
+                }
+                for d in detected
+            ],
+        }
+        for i, d in enumerate(detected):
+            seg_list.append({
+                "hole_number": starting_hole + i,
+                "start_sec": d["start_sec"],
+                "end_sec": d["end_sec"],
+            })
+        if not seg_list:
+            src_path.unlink(missing_ok=True)
+            if green_src_path is not None:
+                green_src_path.unlink(missing_ok=True)
+            raise HTTPException(
+                400,
+                "no swing impacts detected in the tee video's audio — "
+                "either the clip has no audio track, the audio is too "
+                "quiet, or the peak/median ratio fell below threshold. "
+                "Try marking segments manually.",
+            )
 
     results = []
     try:
@@ -968,7 +1021,11 @@ async def upload_long_video(
         if green_src_path is not None:
             green_src_path.unlink(missing_ok=True)
 
-    return {"results": results, "dual_camera": dual_camera}
+    return {
+        "results": results,
+        "dual_camera": dual_camera,
+        "auto_detect": auto_detect_info,
+    }
 
 
 def _optional_int(v):

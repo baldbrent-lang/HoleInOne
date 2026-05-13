@@ -37,10 +37,13 @@ export default function AdminLongUpload() {
   const [videoUrl, setVideoUrl] = useState(null);
   const [fileGreen, setFileGreen] = useState(null);
   const [aiTracerModel, setAiTracerModel] = useState("claude-opus-4-7");
+  const [autoDetectSwings, setAutoDetectSwings] = useState(true);
+  const [startingHole, setStartingHole] = useState(1);
   const [segments, setSegments] = useState([{ ...EMPTY_SEG }]);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [results, setResults] = useState(null);
+  const [autoDetectInfo, setAutoDetectInfo] = useState(null);
   const [error, setError] = useState(null);
   const videoRef = useRef(null);
 
@@ -78,28 +81,32 @@ export default function AdminLongUpload() {
     e.preventDefault();
     setError(null);
     setResults(null);
+    setAutoDetectInfo(null);
 
     if (!file) { setError("Pick a video file."); return; }
-    const cleaned = segments
-      .map((s) => ({
-        hole_number: parseInt(s.hole_number, 10),
-        start_sec: parseFloat(s.start_sec),
-        end_sec: parseFloat(s.end_sec),
-        distance_from_pin_feet: s.distance_from_pin_feet ? parseInt(s.distance_from_pin_feet, 10) : null,
-        carry_yards: s.carry_yards ? parseInt(s.carry_yards, 10) : null,
-        ball_speed_mph: s.ball_speed_mph ? parseInt(s.ball_speed_mph, 10) : null,
-        ball_in_cup: !!s.ball_in_cup,
-      }))
-      .filter((s) => Number.isFinite(s.hole_number) && Number.isFinite(s.start_sec) && Number.isFinite(s.end_sec));
+    let cleaned = [];
+    if (!autoDetectSwings) {
+      cleaned = segments
+        .map((s) => ({
+          hole_number: parseInt(s.hole_number, 10),
+          start_sec: parseFloat(s.start_sec),
+          end_sec: parseFloat(s.end_sec),
+          distance_from_pin_feet: s.distance_from_pin_feet ? parseInt(s.distance_from_pin_feet, 10) : null,
+          carry_yards: s.carry_yards ? parseInt(s.carry_yards, 10) : null,
+          ball_speed_mph: s.ball_speed_mph ? parseInt(s.ball_speed_mph, 10) : null,
+          ball_in_cup: !!s.ball_in_cup,
+        }))
+        .filter((s) => Number.isFinite(s.hole_number) && Number.isFinite(s.start_sec) && Number.isFinite(s.end_sec));
 
-    if (cleaned.length === 0) {
-      setError("At least one segment with hole / start / end is required.");
-      return;
-    }
-    for (const s of cleaned) {
-      if (s.end_sec <= s.start_sec) {
-        setError(`Segment for hole ${s.hole_number}: end must be greater than start.`);
+      if (cleaned.length === 0) {
+        setError("At least one segment with hole / start / end is required (or enable Auto-detect).");
         return;
+      }
+      for (const s of cleaned) {
+        if (s.end_sec <= s.start_sec) {
+          setError(`Segment for hole ${s.hole_number}: end must be greater than start.`);
+          return;
+        }
       }
     }
 
@@ -111,6 +118,8 @@ export default function AdminLongUpload() {
     fd.append("camera_type", cameraType);
     fd.append("base_captured_at", new Date(baseCapturedAt).toISOString());
     fd.append("segments", JSON.stringify(cleaned));
+    fd.append("auto_detect_swings", autoDetectSwings ? "true" : "false");
+    fd.append("starting_hole", String(parseInt(startingHole, 10) || 1));
     fd.append("video", file, file.name);
     if (fileGreen) {
       fd.append("video_green", fileGreen, fileGreen.name);
@@ -120,6 +129,7 @@ export default function AdminLongUpload() {
     try {
       const data = await api.longUploadClips(adminPassword, fd, setProgress);
       setResults(data.results || []);
+      setAutoDetectInfo(data.auto_detect || null);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -260,6 +270,42 @@ export default function AdminLongUpload() {
           )}
 
           <div className="card" style={{ background: "var(--surface-alt)", margin: "0 0 16px" }}>
+            <label className="inline" style={{ gap: 8, cursor: "pointer", marginBottom: 4 }}>
+              <input
+                type="checkbox"
+                checked={autoDetectSwings}
+                onChange={(e) => setAutoDetectSwings(e.target.checked)}
+              />
+              <span>
+                <b>Auto-detect swings from audio</b>{" "}
+                <span className="small muted">
+                  (server scans the tee video's audio track for impact transients
+                  and segments each swing automatically — no manual marking)
+                </span>
+              </span>
+            </label>
+            {autoDetectSwings && (
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 8 }}>
+                <label className="small muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  Starting hole #:
+                  <input
+                    type="number"
+                    min="1"
+                    value={startingHole}
+                    onChange={(e) => setStartingHole(e.target.value)}
+                    style={{ width: 70, fontSize: 13 }}
+                  />
+                </label>
+                <span className="tiny muted">
+                  Each detected swing gets a sequential hole number from here.
+                  You can re-assign individual clips from /admin/clips after upload.
+                </span>
+              </div>
+            )}
+          </div>
+
+          {!autoDetectSwings && (
+          <div className="card" style={{ background: "var(--surface-alt)", margin: "0 0 16px" }}>
             <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
               <h4>Segments</h4>
               <button type="button" className="secondary small" onClick={addSeg} style={{ width: "auto" }}>
@@ -368,6 +414,7 @@ export default function AdminLongUpload() {
               </div>
             ))}
           </div>
+          )}
 
           {error && <p className="err-text small">{error}</p>}
           {uploading && progress > 0 && (
@@ -382,10 +429,13 @@ export default function AdminLongUpload() {
           <button disabled={uploading || !file || !courseId}>
             {uploading
               ? `Uploading… ${progress}%`
-              : (fileGreen
-                ? `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run AI tracer + composite (dual-cam)`
-                : `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run matcher`
-              )}
+              : (autoDetectSwings
+                ? (fileGreen
+                  ? "Auto-detect swings + run AI tracer + composite (dual-cam)"
+                  : "Auto-detect swings + run matcher")
+                : (fileGreen
+                  ? `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run AI tracer + composite (dual-cam)`
+                  : `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run matcher`))}
           </button>
         </form>
       </div>
@@ -393,6 +443,19 @@ export default function AdminLongUpload() {
       {results && (
         <div className="card">
           <h3 style={{ marginBottom: 10 }}>Results ({results.filter((r) => r.ok).length}/{results.length} succeeded)</h3>
+          {autoDetectInfo && (
+            <p className="small muted" style={{ marginBottom: 12 }}>
+              Auto-detected <b>{autoDetectInfo.n_detected}</b> swing
+              {autoDetectInfo.n_detected === 1 ? "" : "s"} from tee-video audio
+              {Array.isArray(autoDetectInfo.peaks) && autoDetectInfo.peaks.length > 0 && (
+                <> at: {autoDetectInfo.peaks.map((p, i) => (
+                  <code key={i} style={{ marginRight: 6 }}>
+                    {p.peak_time_sec}s{p.ratio != null ? ` (×${p.ratio})` : ""}
+                  </code>
+                ))}</>
+              )}
+            </p>
+          )}
           <div className="stack">
             {results.map((r, i) => (
               <div key={i} className="card tight" style={{ margin: 0 }}>

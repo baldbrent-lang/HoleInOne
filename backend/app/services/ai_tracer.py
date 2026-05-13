@@ -2690,6 +2690,135 @@ def find_impact_via_audio(input_path: Path, fps: float) -> dict:
     return info
 
 
+def detect_swings_from_audio(
+    input_path: Path,
+    fps: float | None = None,
+    min_separation_sec: float = 4.0,
+    before_impact_sec: float = 3.0,
+    after_impact_sec: float = 5.0,
+    min_peak_ratio: float = 4.0,
+) -> list[dict]:
+    """Find every club-on-ball impact in a long video by scanning its
+    audio for sharp transients, then return one swing window per
+    impact.
+
+    Returns a list of segment dicts shaped like the manual-segments
+    JSON the long-upload endpoint already accepts, but with no
+    hole_number filled in (caller assigns those):
+
+        [
+          {
+            "peak_time_sec": float,
+            "start_sec": float,        # max(0, peak - before_impact_sec)
+            "end_sec": float,          # min(duration, peak + after_impact_sec)
+            "ratio": float,            # peak / median envelope
+            "confidence": "high" | "medium" | "low",
+          },
+          ...
+        ]
+
+    Empty list when no audio, no peaks above threshold, or ffmpeg /
+    numpy unavailable. Never raises.
+    """
+    if not HAS_NP or shutil.which("ffmpeg") is None:
+        log.info("ai_tracer: detect_swings_from_audio — missing numpy / ffmpeg")
+        return []
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-i", str(input_path),
+                "-vn", "-ac", "1",
+                "-ar", str(AUDIO_SAMPLE_RATE),
+                "-f", "s16le", "-",
+            ],
+            capture_output=True, timeout=120, check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        log.warning("ai_tracer: detect_swings ffmpeg failed: %s", exc)
+        return []
+    if proc.returncode != 0 or not proc.stdout:
+        log.info(
+            "ai_tracer: detect_swings — no audio (rc=%d, stderr=%s)",
+            proc.returncode,
+            proc.stderr.decode("utf-8", "ignore")[:120],
+        )
+        return []
+    samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    if samples.size == 0:
+        return []
+    duration_sec = float(samples.size) / AUDIO_SAMPLE_RATE
+    win = max(1, int(AUDIO_SAMPLE_RATE * AUDIO_ENVELOPE_WINDOW_MS / 1000.0))
+    if samples.size <= win:
+        return []
+    kernel = np.ones(win, dtype=np.float32) / float(win)
+    envelope = np.convolve(np.abs(samples), kernel, mode="same")
+    median = float(np.median(envelope))
+    threshold = max(median * min_peak_ratio, 0.02)
+    min_sep = int(min_separation_sec * AUDIO_SAMPLE_RATE)
+
+    # Two-pass peak finder. First pass: every local maximum above
+    # threshold. Second pass: greedy non-max suppression within
+    # min_separation — keep the loudest peak in each cluster.
+    above = envelope > threshold
+    raw_peaks: list[tuple[int, float]] = []
+    n = envelope.size
+    # Local-max in a small ±5-sample neighborhood (cheap & sufficient
+    # given the envelope smoothing already done).
+    for i in range(5, n - 5):
+        if not above[i]:
+            continue
+        v = float(envelope[i])
+        if (
+            v >= envelope[i - 1] and v >= envelope[i + 1]
+            and v >= envelope[i - 3] and v >= envelope[i + 3]
+            and v >= envelope[i - 5] and v >= envelope[i + 5]
+        ):
+            raw_peaks.append((i, v))
+    if not raw_peaks:
+        log.info(
+            "ai_tracer: detect_swings — no peaks above %.4f (median=%.4f)",
+            threshold, median,
+        )
+        return []
+
+    # Sort by amplitude desc, then walk; for each candidate peak, if
+    # we haven't already accepted a peak within ±min_sep samples, take
+    # this one.
+    raw_peaks.sort(key=lambda t: -t[1])
+    accepted_positions: list[int] = []
+    for pos, _v in raw_peaks:
+        if any(abs(pos - acc) < min_sep for acc in accepted_positions):
+            continue
+        accepted_positions.append(pos)
+    accepted_positions.sort()
+
+    segments: list[dict] = []
+    for pos in accepted_positions:
+        peak_t = pos / float(AUDIO_SAMPLE_RATE)
+        peak_value = float(envelope[pos])
+        ratio = (peak_value / median) if median > 0 else float("inf")
+        if ratio >= 15:
+            conf = "high"
+        elif ratio >= 8:
+            conf = "medium"
+        else:
+            conf = "low"
+        segments.append({
+            "peak_time_sec": float(peak_t),
+            "start_sec": max(0.0, peak_t - before_impact_sec),
+            "end_sec": min(duration_sec, peak_t + after_impact_sec),
+            "ratio": float(ratio) if ratio != float("inf") else None,
+            "confidence": conf,
+        })
+    log.info(
+        "ai_tracer: detect_swings — %d swing windows from audio "
+        "(duration=%.1fs median=%.4f threshold=%.4f)",
+        len(segments), duration_sec, median, threshold,
+    )
+    return segments
+
+
 def run_full_ai_tracer_pipeline(
     input_path: Path,
     output_dir: Path,
