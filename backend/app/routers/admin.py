@@ -1286,6 +1286,12 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
         green_exists = bool(green_path and green_path.exists())
         tee_size = tee_path.stat().st_size if tee_exists else None
         green_size = green_path.stat().st_size if green_exists else None
+        tee_duration = (
+            probe_video_info(tee_path).get("duration") if tee_exists else None
+        )
+        green_duration = (
+            probe_video_info(green_path).get("duration") if green_exists else None
+        )
         course = courses.get(r.course_id)
         out.append({
             "id": r.id,
@@ -1301,6 +1307,7 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
                 if tee_exists else None
             ),
             "tee_size_mb": round(tee_size / 1024 / 1024, 1) if tee_size else None,
+            "tee_duration_sec": round(tee_duration, 1) if tee_duration else None,
             "tee_missing": (r.tee_filename is not None and not tee_exists),
             "green_filename": r.green_filename,
             "green_original_filename": r.green_original_filename,
@@ -1309,6 +1316,7 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
                 if green_exists else None
             ),
             "green_size_mb": round(green_size / 1024 / 1024, 1) if green_size else None,
+            "green_duration_sec": round(green_duration, 1) if green_duration else None,
             "green_missing": (r.green_filename is not None and not green_exists),
             "dual_camera": r.green_filename is not None,
             "last_n_segments": r.last_n_segments,
@@ -1434,6 +1442,7 @@ def test_cut_long_upload(
     upload_id: int,
     detector: str = Form("motion"),
     audio_min_peak_ratio: float = Form(10.0),
+    motion_ratio: float = Form(4.0),
     cut_clips: bool = Form(True),
     db: Session = Depends(get_db),
 ):
@@ -1478,7 +1487,12 @@ def test_cut_long_upload(
         )
     else:
         detector = "motion"
-        windows = detect_swings_from_motion(src_path, fps=tee_fps, debug=debug)
+        windows = detect_swings_from_motion(
+            src_path,
+            fps=tee_fps,
+            motion_ratio=float(motion_ratio),
+            debug=debug,
+        )
 
     # Wipe any previous test cuts for this upload so re-running the
     # detector doesn't accumulate stale files.

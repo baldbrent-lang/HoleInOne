@@ -13,6 +13,14 @@ function nowLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function fmtDuration(sec) {
+  if (sec == null || !Number.isFinite(sec)) return null;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 const EMPTY_SEG = {
   hole_number: "",
   start_sec: "",
@@ -50,6 +58,7 @@ export default function AdminLongUpload() {
   const [testCutResults, setTestCutResults] = useState({}); // {id: {detector, cuts, ...}}
   const [testCutDetector, setTestCutDetector] = useState({}); // {id: "motion"|"audio"}
   const [audioMinRatio, setAudioMinRatio] = useState({}); // {id: number}
+  const [motionRatio, setMotionRatio] = useState({}); // {id: number}
   const [detectOnly, setDetectOnly] = useState({}); // {id: true} -> skip cutting
   const [showSource, setShowSource] = useState({}); // {id: true}
   const videoRef = useRef(null);
@@ -112,6 +121,9 @@ export default function AdminLongUpload() {
     if (detector === "audio") {
       const ratio = parseFloat(audioMinRatio[uploadId]);
       if (Number.isFinite(ratio) && ratio > 0) opts.audioMinPeakRatio = ratio;
+    } else {
+      const ratio = parseFloat(motionRatio[uploadId]);
+      if (Number.isFinite(ratio) && ratio > 0) opts.motionRatio = ratio;
     }
     if (detectOnly[uploadId]) opts.cutClips = false;
     setTestCutting((t) => ({ ...t, [uploadId]: true }));
@@ -291,12 +303,14 @@ export default function AdminLongUpload() {
                       </span>
                       <div className="tiny muted" style={{ marginTop: 2 }}>
                         tee: <code>{u.tee_original_filename || u.tee_filename}</code>
+                        {fmtDuration(u.tee_duration_sec) && <> · {fmtDuration(u.tee_duration_sec)}</>}
                         {u.tee_size_mb != null && <> · {u.tee_size_mb} MB</>}
                         {u.tee_missing && <> · <span className="err-text">missing on disk</span></>}
                         {u.dual_camera && (
                           <>
                             <br />
                             green: <code>{u.green_original_filename || u.green_filename}</code>
+                            {fmtDuration(u.green_duration_sec) && <> · {fmtDuration(u.green_duration_sec)}</>}
                             {u.green_size_mb != null && <> · {u.green_size_mb} MB</>}
                             {u.green_missing && <> · <span className="err-text">missing on disk</span></>}
                           </>
@@ -332,7 +346,7 @@ export default function AdminLongUpload() {
                         <option value="motion">motion</option>
                         <option value="audio">audio</option>
                       </select>
-                      {(testCutDetector[u.id] || "motion") === "audio" && (
+                      {(testCutDetector[u.id] || "motion") === "audio" ? (
                         <input
                           type="number"
                           min="1"
@@ -345,6 +359,20 @@ export default function AdminLongUpload() {
                           className="small"
                           style={{ width: 60, fontSize: 12, padding: "2px 6px" }}
                           title="Minimum peak/median ratio. Higher = stricter (only the loudest thwacks). Default 10."
+                        />
+                      ) : (
+                        <input
+                          type="number"
+                          min="1"
+                          step="0.5"
+                          value={motionRatio[u.id] ?? 4}
+                          onChange={(e) =>
+                            setMotionRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                          }
+                          disabled={!!testCutting[u.id] || missing || busy}
+                          className="small"
+                          style={{ width: 60, fontSize: 12, padding: "2px 6px" }}
+                          title="Motion threshold = median frame-diff × this ratio. Higher = stricter. Default 4."
                         />
                       )}
                       <label
