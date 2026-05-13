@@ -380,7 +380,12 @@ export default function AdminLongUpload() {
           )}
 
           <button disabled={uploading || !file || !courseId}>
-            {uploading ? `Uploading… ${progress}%` : `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run matcher`}
+            {uploading
+              ? `Uploading… ${progress}%`
+              : (fileGreen
+                ? `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run AI tracer + composite (dual-cam)`
+                : `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run matcher`
+              )}
           </button>
         </form>
       </div>
