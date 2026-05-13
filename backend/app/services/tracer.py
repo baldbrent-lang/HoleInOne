@@ -50,7 +50,7 @@ except Exception:  # pragma: no cover
 # suppresses random texture wiggle but easily lets the actual ball
 # through (the ball traverses pixels whose σ is tiny because the
 # background there is mostly uniform sky / grass).
-BG_VAR_THRESHOLD = 50
+BG_VAR_THRESHOLD = 30
 
 # Skip the first N frames of candidate extraction so the background
 # model has time to converge. The frames are still fed to the
@@ -72,7 +72,7 @@ MAX_BALL_RADIUS = 18.0
 # Motion blur elongates the ball; allow a forgiving floor.
 # Bumped 0.40 → 0.55 after first MOG2 run showed body-edge fragments
 # (slightly oblong) sneaking through.
-MIN_CIRCULARITY = 0.55
+MIN_CIRCULARITY = 0.40
 
 # Any single foreground blob larger than this is treated as "the body
 # or club arc" — the bounding box (plus a buffer) is excluded from
@@ -175,8 +175,8 @@ USE_UPWARD_STREAK_FILTER = True
 # (kept 96%+ of raw). A real ball moves 10-30px/frame at launch — 6px
 # is still permissive enough for the apex / blurred frames where it
 # slows, but enough to discard wind-wiggle noise.
-MIN_UPWARD_CHAIN_LEN = 5
-MIN_UPWARD_DY_PER_FRAME = 6.0
+MIN_UPWARD_CHAIN_LEN = 4
+MIN_UPWARD_DY_PER_FRAME = 4.0
 UPWARD_SEARCH_FRAMES = 2
 
 # Hard cap on the number of candidates we keep per frame. Even with
