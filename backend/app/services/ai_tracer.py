@@ -2153,17 +2153,30 @@ def _robust_quadratic_fit(
     anchors: list[tuple[int, int, int]],
     threshold_px: float = TRAJ_OUTLIER_PX,
     max_iters: int = TRAJ_OUTLIER_MAX_ITERS,
+    pinned_indices: set[int] | None = None,
+    weights: list[float] | None = None,
 ):
     """Fit y = a·f² + b·f + c and x = m·f + k to `anchors`
     (list of (frame, x, y)), iteratively dropping the anchor with the
     largest residual until every kept residual is ≤ threshold_px or
     fewer than 3 anchors remain.
 
+    `pinned_indices` (e.g. {0} for the rest position) are excluded
+    from outlier rejection — they're ground-truth anchors that the fit
+    should always respect, even if their residual is large. They still
+    contribute to the fit; they just can't be thrown out.
+
+    `weights`, if provided, must be the same length as `anchors`. Used
+    as the `w=` parameter to numpy's polyfit so high-confidence anchors
+    can pull the curve toward themselves. Pinned anchors are typically
+    weighted heavily so the fit passes through (or very near) them.
+
     Returns (x_coef, y_coef, rejected_indices_set) on success, or
     None when fewer than 3 anchors are usable or numpy is missing.
     """
     if not HAS_NP or len(anchors) < 3:
         return None
+    pinned: set[int] = set(pinned_indices) if pinned_indices else set()
     rejected: set[int] = set()
     last_coefs = None
     for _ in range(max_iters):
@@ -2173,21 +2186,42 @@ def _robust_quadratic_fit(
         frames = np.array([anchors[i][0] for i in kept_idxs], dtype=float)
         xs = np.array([anchors[i][1] for i in kept_idxs], dtype=float)
         ys = np.array([anchors[i][2] for i in kept_idxs], dtype=float)
+        if weights is not None:
+            ws = np.array(
+                [weights[i] for i in kept_idxs], dtype=float,
+            )
+            # polyfit chokes on all-zero weights; clamp to tiny positive
+            ws = np.where(ws > 0, ws, 1e-3)
+        else:
+            ws = None
         try:
-            y_coef = np.polyfit(frames, ys, 2)
-            x_coef = np.polyfit(frames, xs, 1)
+            y_coef = np.polyfit(frames, ys, 2, w=ws)
+            x_coef = np.polyfit(frames, xs, 1, w=ws)
         except Exception:
             return None
         last_coefs = (x_coef, y_coef)
         x_pred = np.polyval(x_coef, frames)
         y_pred = np.polyval(y_coef, frames)
         residuals = np.sqrt((xs - x_pred) ** 2 + (ys - y_pred) ** 2)
-        worst_local = int(np.argmax(residuals))
-        worst_residual = float(residuals[worst_local])
+        # Find the worst residual among NON-pinned anchors only — a
+        # pinned anchor (the rest position) is allowed to have a large
+        # residual without being thrown out.
+        worst_local = -1
+        worst_residual = -1.0
+        for j, idx in enumerate(kept_idxs):
+            if idx in pinned:
+                continue
+            r = float(residuals[j])
+            if r > worst_residual:
+                worst_residual = r
+                worst_local = j
+        if worst_local < 0:
+            # All remaining anchors are pinned (or below threshold).
+            return last_coefs[0], last_coefs[1], rejected
         if worst_residual > threshold_px and len(kept_idxs) > 3:
             rejected.add(kept_idxs[worst_local])
             continue
-        return x_coef, y_coef, rejected
+        return last_coefs[0], last_coefs[1], rejected
     # Loop fell out without converging — return the last successful fit
     # if it exists and we still have ≥3 anchors.
     kept_after = [i for i in range(len(anchors)) if i not in rejected]
@@ -2344,7 +2378,22 @@ def render_tracer_video(
     fade_tail_points: list[tuple[int, int]] = []  # native pixel coords
     last_kept_frame_global: int | None = None
     rejected_frames: set[int] = set()
-    fit = _robust_quadratic_fit(anchors)
+    # Pin + heavily-weight the rest position so the parabola fit is
+    # forced to start at the actual at-rest ball pixel — not whatever
+    # the in-flight detections (which can cluster far above the rest)
+    # would extrapolate. Without this the rest gets thrown out as an
+    # outlier and the rendered tracer disconnects from the blue
+    # ball-rest marker.
+    rest_is_anchor_zero = ball_rest_xy_native is not None
+    pinned_set = {0} if rest_is_anchor_zero else None
+    if rest_is_anchor_zero and len(anchors) > 1:
+        # 5x weight on the rest, 1x on every detected ball position.
+        weight_list = [5.0] + [1.0] * (len(anchors) - 1)
+    else:
+        weight_list = None
+    fit = _robust_quadratic_fit(
+        anchors, pinned_indices=pinned_set, weights=weight_list,
+    )
     if fit is not None:
         x_coef, y_coef, rejected_indices = fit
         rejected_frames = {anchors[i][0] for i in rejected_indices}
