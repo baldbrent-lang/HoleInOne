@@ -176,7 +176,13 @@ REFINE_IMPACT_FRAME_W = 768
 # without benefit, so we sit right at the sweet spot. Parallel calls
 # keep wall time manageable across the typical 30-60 frame flight.
 BALL_TRACK_FRAME_W = 1568
+# Default frame budget. Slow-mo clips (≥50 fps) need ~2× as many
+# frames to span the same wall-clock duration of flight, so we
+# auto-bump to BALL_TRACK_MAX_FRAMES_HIGH_FPS when the source fps
+# crosses BALL_TRACK_HIGH_FPS_THRESHOLD. Caller can still override.
 BALL_TRACK_MAX_FRAMES = 20
+BALL_TRACK_MAX_FRAMES_HIGH_FPS = 40
+BALL_TRACK_HIGH_FPS_THRESHOLD = 50.0
 BALL_TRACK_CONCURRENCY = 8
 
 # Phase-2 retry sends a crop. Crop size is in NATIVE pixels (how much
@@ -1371,7 +1377,7 @@ def track_ball_after_impact(
     output_prefix: str,
     ball_xy_sent: tuple[float, float] | None = None,
     ball_sent_dims: tuple[int, int] | None = None,
-    max_frames: int = BALL_TRACK_MAX_FRAMES,
+    max_frames: int | None = None,
     send_width: int = BALL_TRACK_FRAME_W,
     concurrency: int = BALL_TRACK_CONCURRENCY,
     model: str | None = None,
@@ -1449,11 +1455,25 @@ def track_ball_after_impact(
         return info
     try:
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        clip_fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
     finally:
         cap.release()
     if total_frames <= 1:
         info["error"] = "video has no frames"
         return info
+
+    # Resolve frame budget. Slow-mo clips need more frames to span the
+    # same visible flight time; auto-bump unless caller explicitly set
+    # max_frames.
+    if max_frames is None:
+        if clip_fps >= BALL_TRACK_HIGH_FPS_THRESHOLD:
+            max_frames = BALL_TRACK_MAX_FRAMES_HIGH_FPS
+        else:
+            max_frames = BALL_TRACK_MAX_FRAMES
+        log.info(
+            "ai_tracer: ball_track — fps=%.1f → max_frames=%d",
+            clip_fps, max_frames,
+        )
 
     impact_frame_idx = int(impact_frame_idx)
     last_frame = min(total_frames - 1, impact_frame_idx + max_frames - 1)
@@ -1962,9 +1982,16 @@ def track_ball_after_impact(
 
         # Always write a JPEG for this frame so the operator can see
         # what Claude was actually looking at, even when the ball was
-        # not found. Annotated when found, plain otherwise.
+        # not found. Annotated when found, plain otherwise. Also draw
+        # the ROI rectangle so it's obvious which region of the full
+        # frame was actually fed to Claude.
         _jb, sw, sh, native_frame = frames_data[idx]
         annotated = native_frame.copy()
+        if roi is not None:
+            rx0, ry0, rx1, ry1 = roi
+            # Thin lime-green rectangle marking the cropped region.
+            cv2.rectangle(annotated, (rx0, ry0), (rx1, ry1), (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.rectangle(annotated, (rx0, ry0), (rx1, ry1), (40, 220, 80), 2, cv2.LINE_AA)
         if record["found"] and record["x"] is not None and record["y"] is not None:
             ring_color = (0, 230, 255) if not record["retry"] else (255, 200, 0)
             cv2.circle(annotated, (record["x"], record["y"]), 22, (0, 0, 0), 5, cv2.LINE_AA)
@@ -2235,28 +2262,38 @@ def render_tracer_video(
         if kept:
             first_frame = kept[0][0]
             last_kept_frame = kept[-1][0]
-            last_kept_frame_global = last_kept_frame
-            # Main smoothed line ends right at the last accepted
-            # anchor — no confident extrapolation past it.
-            for f in range(first_frame, last_kept_frame + 1):
+            # Truncate the rendered line at the parabola's apex when
+            # apex falls within the kept-anchor range. In image coords
+            # y grows downward, so the ball's HIGHEST visual point is
+            # the parabola's MINIMUM (positive a, vertex at -b/2a).
+            # Past that minimum the smoothed line would curve back
+            # down — bad visual when the ball was clearly still
+            # rising on the last detected frames. Stopping at apex
+            # produces a clean upward arc that ends at its peak.
+            a_y = float(y_coef[0])
+            b_y = float(y_coef[1])
+            render_end = last_kept_frame
+            if a_y > 1e-6:
+                apex_frame_f = -b_y / (2.0 * a_y)
+                if first_frame < apex_frame_f < last_kept_frame:
+                    render_end = int(round(apex_frame_f))
+            last_kept_frame_global = render_end
+            for f in range(first_frame, render_end + 1):
                 x = int(round(float(np.polyval(x_coef, f))))
                 y = int(round(float(np.polyval(y_coef, f))))
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
             # Fade-tail: extend along the TANGENT of the parabola at
-            # the last kept frame for one frame's worth of motion. We
-            # used to sample the parabola itself past the anchor, but
-            # near or past the apex the curve loops back down — the
-            # tracer would visibly arc downward at the very end, which
-            # the operator complained about. Using the local tangent
-            # instead means the fade carries on in whatever direction
-            # the ball was last moving (rising, level, descending) but
-            # never reverses curvature.
-            base_x = float(np.polyval(x_coef, last_kept_frame))
-            base_y = float(np.polyval(y_coef, last_kept_frame))
-            vx = float(np.polyval(np.polyder(x_coef), last_kept_frame))
-            vy = float(np.polyval(np.polyder(y_coef), last_kept_frame))
+            # `render_end` (which equals apex when truncated, otherwise
+            # last_kept_frame) for one frame's worth of motion. The
+            # tangent at apex has vy = 0 so the fade goes horizontally
+            # — never loops down. On non-truncated lines it picks up
+            # the local velocity and continues straight from there.
+            base_x = float(np.polyval(x_coef, render_end))
+            base_y = float(np.polyval(y_coef, render_end))
+            vx = float(np.polyval(np.polyder(x_coef), render_end))
+            vy = float(np.polyval(np.polyder(y_coef), render_end))
             for i in range(1, TRACER_FADE_SEGMENTS + 1):
                 t = i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
                 fx = int(round(base_x + vx * t))
