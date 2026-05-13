@@ -201,22 +201,76 @@ def _flag_icon(img: Image.Image, x: int, y: int, size: int, fill):
     )
 
 
+def _find_brand_logo() -> Path | None:
+    """Locate the GolfReelz brand logo on disk. The canonical location
+    is `frontend/public/golfreelz-logo.png` at the repo root; we also
+    check a backend-local copy in case the frontend tree isn't shipped
+    with the backend deploy."""
+    # services/intro_overlay.py → ../../../ = repo root.
+    here = Path(__file__).resolve()
+    repo_root = here.parents[3]
+    candidates = [
+        repo_root / "frontend" / "public" / "golfreelz-logo.png",
+        here.parent.parent / "assets" / "golfreelz-logo.png",
+    ]
+    for p in candidates:
+        if p.exists() and p.stat().st_size > 0:
+            return p
+    return None
+
+
 def render_right_panel(
-    width: int = 220,
     height: int = 70,
 ) -> Image.Image | None:
-    """PIL Image of the right brand panel."""
+    """PIL Image of the right brand panel. Uses the GolfReelz logo PNG
+    when it exists on disk; falls back to a drawn flag-icon + wordmark
+    otherwise so the overlay still ships during initial deploys."""
     if not HAS_PIL:
         return None
+
+    logo_path = _find_brand_logo()
+    if logo_path is not None:
+        try:
+            logo = Image.open(logo_path).convert("RGBA")
+        except Exception as exc:  # pragma: no cover
+            log.warning("intro_overlay: failed to open logo %s: %s", logo_path, exc)
+            logo = None
+    else:
+        logo = None
+
+    if logo is not None:
+        pad_x = 18
+        pad_y = 14
+        # Scale logo to fit the panel height (minus padding).
+        target_h = height - 2 * pad_y
+        scale = target_h / float(logo.height)
+        logo_w = int(round(logo.width * scale))
+        logo_h = target_h
+        logo_scaled = logo.resize((logo_w, logo_h), Image.LANCZOS)
+        width = logo_w + 2 * pad_x
+        # White-ish rounded background — the logo is dark-on-light by
+        # design, so we need a light fill underneath so it's legible
+        # against sky / grass video.
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        bg = Image.new("RGBA", (width, height), (255, 255, 255, 240))
+        mask = Image.new("L", (width, height), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, width - 1, height - 1), radius=12, fill=255,
+        )
+        img.paste(bg, (0, 0), mask)
+        img.paste(logo_scaled, (pad_x, pad_y), logo_scaled)
+        return img
+
+    # Fallback: drawn flag icon + 'GolfReelz' wordmark, used until the
+    # PNG is dropped into frontend/public/.
+    width = 220
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle(
         (0, 0, width - 1, height - 1), radius=10, fill=BRAND_GREEN,
     )
-    # Icon on the left of the panel
     icon_size = height - 26
     _flag_icon(img, 14, (height - icon_size) // 2, icon_size, TEXT_PRIMARY)
-    # Wordmark
     bold = _find_font(FONT_CANDIDATES_BOLD, 26)
     text_x = 14 + icon_size + 10
     text_y = (height - 32) // 2
