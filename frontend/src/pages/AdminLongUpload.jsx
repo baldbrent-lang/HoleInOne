@@ -622,11 +622,18 @@ export default function AdminLongUpload() {
                               audio: median={testCutResults[u.id].debug.median_envelope?.toFixed(4)}{" "}
                               · threshold={testCutResults[u.id].debug.threshold?.toFixed(4)}{" "}
                               (×{testCutResults[u.id].debug.min_peak_ratio_used})
+                              {testCutResults[u.id].debug.highpass_hz_used > 0 && (
+                                <> · highpass @ {testCutResults[u.id].debug.highpass_hz_used} Hz</>
+                              )}
                               {testCutResults[u.id].debug.threshold_floor_hit && (
                                 <> · <span className="warn-text">floor 0.02 active</span></>
                               )}
                               <br />
                               peaks: raw={testCutResults[u.id].debug.n_raw_peaks}
+                              {testCutResults[u.id].debug.n_after_attack != null && (
+                                <> · attack_ok={testCutResults[u.id].debug.n_after_attack}
+                                {" "}(≤{Math.round((testCutResults[u.id].debug.max_attack_sec_used ?? 0)*1000)}ms)</>
+                              )}
                               {" "}· kept_after_nms={testCutResults[u.id].debug.n_after_nms}
                               {" "}· min_sep={testCutResults[u.id].debug.min_separation_sec}s
                               {" "}over {testCutResults[u.id].debug.duration_sec?.toFixed(1)}s
@@ -634,12 +641,17 @@ export default function AdminLongUpload() {
                                 testCutResults[u.id].debug.top_peaks.length > 0 && (
                                 <>
                                   <br />
-                                  top peaks (sec, ×ratio, kept-by-nms) — raise the
-                                  ratio above the loudest unwanted peak to filter it out:
+                                  top peaks (sec, ×ratio, attack-ms, kept):
+                                  {" "}✗-attack = sustained sound (voice/rumble);
+                                  {" "}✗-nms = suppressed by another peak nearby.
                                   <br />
                                   {testCutResults[u.id].debug.top_peaks.map((p, i) => (
                                     <span key={i} style={{ marginRight: 10 }}>
-                                      {p.peak_sec}s ×{p.ratio} {p.kept ? "✓" : "✗"}
+                                      {p.peak_sec}s ×{p.ratio}
+                                      {p.attack_ms != null && (
+                                        <> {p.attack_ms}ms{p.passes_attack ? "" : "✗atk"}</>
+                                      )}
+                                      {" "}{p.kept ? "✓" : "✗"}
                                     </span>
                                   ))}
                                 </>

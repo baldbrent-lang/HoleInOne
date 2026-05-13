@@ -2932,6 +2932,8 @@ def detect_swings_from_audio(
     before_impact_sec: float = 2.5,
     after_impact_sec: float = 5.0,
     min_peak_ratio: float = 6.0,
+    highpass_hz: float = 1500.0,
+    max_attack_sec: float = 0.030,
     debug: dict | None = None,
 ) -> list[dict]:
     """Find every club-on-ball impact in a long video by scanning its
@@ -2961,6 +2963,8 @@ def detect_swings_from_audio(
             "reason": None,
             "min_peak_ratio_used": float(min_peak_ratio),
             "min_separation_sec": float(min_separation_sec),
+            "highpass_hz_used": float(highpass_hz),
+            "max_attack_sec_used": float(max_attack_sec),
         })
 
     if not HAS_NP or shutil.which("ffmpeg") is None:
@@ -2968,6 +2972,14 @@ def detect_swings_from_audio(
         if debug is not None:
             debug["reason"] = "numpy or ffmpeg not installed"
         return []
+    # High-pass before envelope extraction: a club-on-ball strike has
+    # most of its energy > 1.5 kHz (the sharp 'crack'). Voices peak
+    # 200-2 kHz, train rumble / wind / engine noise sit below 200 Hz.
+    # Filtering at 1.5 kHz collapses those false-positive sources
+    # while preserving the impact transient.
+    audio_filter_args: list[str] = []
+    if highpass_hz and highpass_hz > 0:
+        audio_filter_args = ["-af", f"highpass=f={float(highpass_hz)}"]
     try:
         proc = subprocess.run(
             [
@@ -2975,6 +2987,7 @@ def detect_swings_from_audio(
                 "-i", str(input_path),
                 "-vn", "-ac", "1",
                 "-ar", str(AUDIO_SAMPLE_RATE),
+                *audio_filter_args,
                 "-f", "s16le", "-",
             ],
             capture_output=True, timeout=120, check=False,
@@ -3023,42 +3036,84 @@ def detect_swings_from_audio(
     # threshold. Second pass: greedy non-max suppression within
     # min_separation — keep the loudest peak in each cluster.
     above = envelope > threshold
-    raw_peaks: list[tuple[int, float]] = []
     n = envelope.size
-    # Local-max in a small ±5-sample neighborhood (cheap & sufficient
-    # given the envelope smoothing already done).
+    # Raw peaks tagged with attack time: (pos, peak_value, attack_sec,
+    # passes_attack). Attack time = (peak_pos - last sample below 10 %
+    # of peak amplitude within a look-back window) / sample_rate. A
+    # real club-on-ball impact rises from noise to peak in < 20 ms;
+    # voices, rumble, and most ambient sounds are sustained and ramp
+    # up over 50+ ms, so the attack filter drops them while keeping
+    # impulsive transients.
+    max_attack_samples = max(1, int(max_attack_sec * AUDIO_SAMPLE_RATE))
+    attack_lookback = max(win, max_attack_samples * 3)
+    raw_peaks: list[tuple[int, float, float, bool]] = []
     for i in range(5, n - 5):
         if not above[i]:
             continue
         v = float(envelope[i])
-        if (
+        if not (
             v >= envelope[i - 1] and v >= envelope[i + 1]
             and v >= envelope[i - 3] and v >= envelope[i + 3]
             and v >= envelope[i - 5] and v >= envelope[i + 5]
         ):
-            raw_peaks.append((i, v))
+            continue
+        thresh10 = 0.10 * v
+        start_look = max(0, i - attack_lookback)
+        # np.argwhere is slow per-peak, but the lookback window is small
+        # (a few hundred samples). Walk back to the most recent sub-10 %
+        # crossing.
+        attack_samples: int | None = None
+        for k in range(i - 1, start_look - 1, -1):
+            if float(envelope[k]) < thresh10:
+                attack_samples = i - k
+                break
+        if attack_samples is None:
+            attack_samples = attack_lookback + 1  # never fell below — fail.
+        attack_sec = attack_samples / float(AUDIO_SAMPLE_RATE)
+        passes_attack = attack_sec <= max_attack_sec
+        raw_peaks.append((i, v, attack_sec, passes_attack))
+
+    n_raw = len(raw_peaks)
+    attack_filtered = [(p, v) for p, v, _a, ok in raw_peaks if ok]
     if debug is not None:
-        debug["n_raw_peaks"] = len(raw_peaks)
-    if not raw_peaks:
+        debug["n_raw_peaks"] = n_raw
+        debug["n_after_attack"] = len(attack_filtered)
+    if not attack_filtered:
         log.info(
-            "ai_tracer: detect_swings — no peaks above %.4f (median=%.4f)",
-            threshold, median,
+            "ai_tracer: detect_swings — %d raw peaks, 0 passed attack filter "
+            "(<= %dms); median=%.4f threshold=%.4f",
+            n_raw, int(max_attack_sec * 1000), median, threshold,
         )
         if debug is not None:
             debug["reason"] = (
+                f"{n_raw} raw peak(s) but none had attack <= {int(max_attack_sec*1000)}ms"
+                if n_raw else
                 f"no local maxima above threshold (median={median:.4f}, "
                 f"threshold={threshold:.4f}, min_peak_ratio={min_peak_ratio})"
             )
             debug["n_after_nms"] = 0
-            debug["top_peaks"] = []
+            # Surface raw peaks anyway so the operator can see why they
+            # all failed (which were too slow).
+            top = sorted(raw_peaks, key=lambda t: -t[1])[:15]
+            top_sorted_by_time = sorted(top, key=lambda t: t[0])
+            debug["top_peaks"] = [
+                {
+                    "peak_sec": round(pos / float(AUDIO_SAMPLE_RATE), 2),
+                    "ratio": round(float(v) / median, 2) if median > 0 else None,
+                    "attack_ms": round(a * 1000, 1),
+                    "passes_attack": ok,
+                    "kept": False,
+                }
+                for pos, v, a, ok in top_sorted_by_time
+            ]
         return []
 
     # Sort by amplitude desc, then walk; for each candidate peak, if
     # we haven't already accepted a peak within ±min_sep samples, take
     # this one.
-    raw_peaks.sort(key=lambda t: -t[1])
+    attack_filtered.sort(key=lambda t: -t[1])
     accepted_positions: list[int] = []
-    for pos, _v in raw_peaks:
+    for pos, _v in attack_filtered:
         if any(abs(pos - acc) < min_sep for acc in accepted_positions):
             continue
         accepted_positions.append(pos)
@@ -3066,8 +3121,9 @@ def detect_swings_from_audio(
 
     if debug is not None:
         kept_set = set(accepted_positions)
-        # Top 15 by amplitude so the operator can see which peaks the
-        # detector found and which got suppressed by NMS.
+        # Top 15 from ALL raw peaks (including attack-rejected) so the
+        # operator can see which were dropped for being too slow vs.
+        # which survived through NMS.
         top = sorted(raw_peaks, key=lambda t: -t[1])[:15]
         top_sorted_by_time = sorted(top, key=lambda t: t[0])
         debug["n_after_nms"] = len(accepted_positions)
@@ -3075,9 +3131,11 @@ def detect_swings_from_audio(
             {
                 "peak_sec": round(pos / float(AUDIO_SAMPLE_RATE), 2),
                 "ratio": round(float(v) / median, 2) if median > 0 else None,
+                "attack_ms": round(a * 1000, 1),
+                "passes_attack": ok,
                 "kept": pos in kept_set,
             }
-            for pos, v in top_sorted_by_time
+            for pos, v, a, ok in top_sorted_by_time
         ]
 
     segments: list[dict] = []
