@@ -3610,25 +3610,10 @@ def run_full_ai_tracer_pipeline(
         return result
     addr_idx = int(address_info["address_frame"])
 
-    # --- Step 2: ball-at-address (classical CV first, Claude fallback) ---
-    # We only need the ball pixel coords as a ball-tracking seed;
-    # handedness isn't used downstream. The CV detector votes across
-    # ~5 frames near address so a stationary ball gets reinforced
-    # while scattered range balls / white tee markers don't. Falls
-    # back to the Claude handedness call only when CV returns no
-    # confirmed candidate.
-    handedness_info = find_ball_at_address_cv(input_path, addr_idx)
-    if not handedness_info.get("ok"):
-        log.info(
-            "ai_tracer: CV ball-at-address miss (%s); falling back to Claude",
-            handedness_info.get("error"),
-        )
-        handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
+    # --- Step 2: handedness + landmarks ---
+    handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
     result["handedness"] = handedness_info
-    if handedness_info.get("ok") and handedness_info.get("method") != "classical_cv":
-        # Only annotate the address image with shaft when we have the
-        # full Claude output (hands_x/y, shaft direction). CV path
-        # has ball coords only — no shaft to draw.
+    if handedness_info.get("ok"):
         annotate_address_with_shaft(
             input_path, addr_idx, handedness_info, address_image_path,
         )
