@@ -210,7 +210,7 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}`, {
       method: "DELETE", adminPassword: key,
     }),
-  testCutLongUpload: (key, uploadId, detector = "motion") =>
+  testCutLongUpload: (key, uploadId, detector = "motion", opts = {}) =>
     // Form-encoded POST so we get FastAPI's Form(...) parsing without
     // needing the JSON path in request().
     new Promise((resolve, reject) => {
@@ -227,6 +227,9 @@ export const api = {
       xhr.onerror = () => reject(new Error("network error"));
       const fd = new FormData();
       fd.append("detector", detector);
+      if (opts.audioMinPeakRatio != null) {
+        fd.append("audio_min_peak_ratio", String(opts.audioMinPeakRatio));
+      }
       xhr.send(fd);
     }),
   retryTracer: (key, clipId) =>

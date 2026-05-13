@@ -2932,6 +2932,7 @@ def detect_swings_from_audio(
     before_impact_sec: float = 2.5,
     after_impact_sec: float = 5.0,
     min_peak_ratio: float = 6.0,
+    debug: dict | None = None,
 ) -> list[dict]:
     """Find every club-on-ball impact in a long video by scanning its
     audio for sharp transients, then return one swing window per
@@ -2955,8 +2956,17 @@ def detect_swings_from_audio(
     Empty list when no audio, no peaks above threshold, or ffmpeg /
     numpy unavailable. Never raises.
     """
+    if debug is not None:
+        debug.update({
+            "reason": None,
+            "min_peak_ratio_used": float(min_peak_ratio),
+            "min_separation_sec": float(min_separation_sec),
+        })
+
     if not HAS_NP or shutil.which("ffmpeg") is None:
         log.info("ai_tracer: detect_swings_from_audio — missing numpy / ffmpeg")
+        if debug is not None:
+            debug["reason"] = "numpy or ffmpeg not installed"
         return []
     try:
         proc = subprocess.run(
@@ -2971,6 +2981,8 @@ def detect_swings_from_audio(
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         log.warning("ai_tracer: detect_swings ffmpeg failed: %s", exc)
+        if debug is not None:
+            debug["reason"] = f"ffmpeg failed: {exc}"
         return []
     if proc.returncode != 0 or not proc.stdout:
         log.info(
@@ -2978,19 +2990,34 @@ def detect_swings_from_audio(
             proc.returncode,
             proc.stderr.decode("utf-8", "ignore")[:120],
         )
+        if debug is not None:
+            debug["reason"] = "no audio stream"
         return []
     samples = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
     if samples.size == 0:
+        if debug is not None:
+            debug["reason"] = "empty audio buffer"
         return []
     duration_sec = float(samples.size) / AUDIO_SAMPLE_RATE
     win = max(1, int(AUDIO_SAMPLE_RATE * AUDIO_ENVELOPE_WINDOW_MS / 1000.0))
     if samples.size <= win:
+        if debug is not None:
+            debug["reason"] = f"audio shorter than envelope window ({win} samples)"
         return []
     kernel = np.ones(win, dtype=np.float32) / float(win)
     envelope = np.convolve(np.abs(samples), kernel, mode="same")
     median = float(np.median(envelope))
-    threshold = max(median * min_peak_ratio, 0.02)
+    raw_threshold = median * min_peak_ratio
+    threshold = max(raw_threshold, 0.02)
+    threshold_floor_hit = threshold > raw_threshold
     min_sep = int(min_separation_sec * AUDIO_SAMPLE_RATE)
+    if debug is not None:
+        debug.update({
+            "duration_sec": round(duration_sec, 2),
+            "median_envelope": median,
+            "threshold": threshold,
+            "threshold_floor_hit": threshold_floor_hit,
+        })
 
     # Two-pass peak finder. First pass: every local maximum above
     # threshold. Second pass: greedy non-max suppression within
@@ -3010,11 +3037,20 @@ def detect_swings_from_audio(
             and v >= envelope[i - 5] and v >= envelope[i + 5]
         ):
             raw_peaks.append((i, v))
+    if debug is not None:
+        debug["n_raw_peaks"] = len(raw_peaks)
     if not raw_peaks:
         log.info(
             "ai_tracer: detect_swings — no peaks above %.4f (median=%.4f)",
             threshold, median,
         )
+        if debug is not None:
+            debug["reason"] = (
+                f"no local maxima above threshold (median={median:.4f}, "
+                f"threshold={threshold:.4f}, min_peak_ratio={min_peak_ratio})"
+            )
+            debug["n_after_nms"] = 0
+            debug["top_peaks"] = []
         return []
 
     # Sort by amplitude desc, then walk; for each candidate peak, if
@@ -3027,6 +3063,22 @@ def detect_swings_from_audio(
             continue
         accepted_positions.append(pos)
     accepted_positions.sort()
+
+    if debug is not None:
+        kept_set = set(accepted_positions)
+        # Top 15 by amplitude so the operator can see which peaks the
+        # detector found and which got suppressed by NMS.
+        top = sorted(raw_peaks, key=lambda t: -t[1])[:15]
+        top_sorted_by_time = sorted(top, key=lambda t: t[0])
+        debug["n_after_nms"] = len(accepted_positions)
+        debug["top_peaks"] = [
+            {
+                "peak_sec": round(pos / float(AUDIO_SAMPLE_RATE), 2),
+                "ratio": round(float(v) / median, 2) if median > 0 else None,
+                "kept": pos in kept_set,
+            }
+            for pos, v in top_sorted_by_time
+        ]
 
     segments: list[dict] = []
     for pos in accepted_positions:

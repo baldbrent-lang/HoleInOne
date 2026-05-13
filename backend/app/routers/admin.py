@@ -1432,6 +1432,7 @@ TESTCUTS_SUBDIR = "_testcuts"
 def test_cut_long_upload(
     upload_id: int,
     detector: str = Form("motion"),
+    audio_min_peak_ratio: float = Form(10.0),
     db: Session = Depends(get_db),
 ):
     """Dry-run the swing-cutting half of the long-upload pipeline.
@@ -1467,7 +1468,12 @@ def test_cut_long_upload(
     detector = (detector or "motion").lower()
     debug: dict = {}
     if detector == "audio":
-        windows = detect_swings_from_audio(src_path, fps=tee_fps)
+        windows = detect_swings_from_audio(
+            src_path,
+            fps=tee_fps,
+            min_peak_ratio=float(audio_min_peak_ratio),
+            debug=debug,
+        )
     else:
         detector = "motion"
         windows = detect_swings_from_motion(src_path, fps=tee_fps, debug=debug)
@@ -1528,7 +1534,7 @@ def test_cut_long_upload(
         "tee_fps": tee_fps,
         "n_windows": len(windows),
         "dual_camera": green_path is not None,
-        "debug": debug if detector == "motion" else None,
+        "debug": debug or None,
         "cuts": cuts,
     }
 

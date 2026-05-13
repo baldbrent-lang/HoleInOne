@@ -49,6 +49,7 @@ export default function AdminLongUpload() {
   const [testCutting, setTestCutting] = useState({}); // {id: true}
   const [testCutResults, setTestCutResults] = useState({}); // {id: {detector, cuts, ...}}
   const [testCutDetector, setTestCutDetector] = useState({}); // {id: "motion"|"audio"}
+  const [audioMinRatio, setAudioMinRatio] = useState({}); // {id: number}
   const [showSource, setShowSource] = useState({}); // {id: true}
   const videoRef = useRef(null);
 
@@ -106,10 +107,15 @@ export default function AdminLongUpload() {
 
   async function testCutPrior(uploadId) {
     const detector = testCutDetector[uploadId] || "motion";
+    const opts = {};
+    if (detector === "audio") {
+      const ratio = parseFloat(audioMinRatio[uploadId]);
+      if (Number.isFinite(ratio) && ratio > 0) opts.audioMinPeakRatio = ratio;
+    }
     setTestCutting((t) => ({ ...t, [uploadId]: true }));
     setError(null);
     try {
-      const data = await api.testCutLongUpload(adminPassword, uploadId, detector);
+      const data = await api.testCutLongUpload(adminPassword, uploadId, detector, opts);
       setTestCutResults((r) => ({ ...r, [uploadId]: data }));
     } catch (e) {
       setError(e.message);
@@ -324,6 +330,21 @@ export default function AdminLongUpload() {
                         <option value="motion">motion</option>
                         <option value="audio">audio</option>
                       </select>
+                      {(testCutDetector[u.id] || "motion") === "audio" && (
+                        <input
+                          type="number"
+                          min="1"
+                          step="0.5"
+                          value={audioMinRatio[u.id] ?? 10}
+                          onChange={(e) =>
+                            setAudioMinRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                          }
+                          disabled={!!testCutting[u.id] || missing || busy}
+                          className="small"
+                          style={{ width: 60, fontSize: 12, padding: "2px 6px" }}
+                          title="Minimum peak/median ratio. Higher = stricter (only the loudest thwacks). Default 10."
+                        />
+                      )}
                       <button
                         type="button"
                         className="secondary small"
@@ -441,6 +462,34 @@ export default function AdminLongUpload() {
                         <div className="tiny muted" style={{ marginBottom: 8, fontFamily: "monospace", lineHeight: 1.4 }}>
                           {testCutResults[u.id].debug.reason ? (
                             <div className="err-text">reason: {testCutResults[u.id].debug.reason}</div>
+                          ) : testCutResults[u.id].detector === "audio" ? (
+                            <>
+                              audio: median={testCutResults[u.id].debug.median_envelope?.toFixed(4)}{" "}
+                              · threshold={testCutResults[u.id].debug.threshold?.toFixed(4)}{" "}
+                              (×{testCutResults[u.id].debug.min_peak_ratio_used})
+                              {testCutResults[u.id].debug.threshold_floor_hit && (
+                                <> · <span className="warn-text">floor 0.02 active</span></>
+                              )}
+                              <br />
+                              peaks: raw={testCutResults[u.id].debug.n_raw_peaks}
+                              {" "}· kept_after_nms={testCutResults[u.id].debug.n_after_nms}
+                              {" "}· min_sep={testCutResults[u.id].debug.min_separation_sec}s
+                              {" "}over {testCutResults[u.id].debug.duration_sec?.toFixed(1)}s
+                              {Array.isArray(testCutResults[u.id].debug.top_peaks) &&
+                                testCutResults[u.id].debug.top_peaks.length > 0 && (
+                                <>
+                                  <br />
+                                  top peaks (sec, ×ratio, kept-by-nms) — raise the
+                                  ratio above the loudest unwanted peak to filter it out:
+                                  <br />
+                                  {testCutResults[u.id].debug.top_peaks.map((p, i) => (
+                                    <span key={i} style={{ marginRight: 10 }}>
+                                      {p.peak_sec}s ×{p.ratio} {p.kept ? "✓" : "✗"}
+                                    </span>
+                                  ))}
+                                </>
+                              )}
+                            </>
                           ) : (
                             <>
                               motion: median={testCutResults[u.id].debug.median_motion?.toFixed(4)}{" "}
