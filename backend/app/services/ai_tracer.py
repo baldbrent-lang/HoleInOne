@@ -175,7 +175,25 @@ REFINE_IMPACT_FRAME_W = 768
 # vision tile threshold — above that, images get internally resized
 # without benefit, so we sit right at the sweet spot. Parallel calls
 # keep wall time manageable across the typical 30-60 frame flight.
-BALL_TRACK_FRAME_W = 1568
+# Width we send the ROI crop at on the per-frame ball-track call.
+# 2000 is above Anthropic's "auto-resize" threshold so we pay slightly
+# more in vision tokens, but the ball footprint in pixel area grows
+# proportionally — matters for the 3-15 px ball that's the whole
+# point of this pipeline.
+BALL_TRACK_FRAME_W = 2000
+
+# Adaptive contrast enhancement (CLAHE on the L channel of LAB) is
+# applied to the cropped frame BEFORE it's JPEG-encoded for the API
+# whenever the crop's grayscale standard deviation is below
+# CLAHE_CONTRAST_THRESHOLD. This rescues ball detection on overcast
+# / flat-lit clips where the white ball sits at near-equal luminance
+# to the grey sky. Skipped on high-contrast scenes (bright day with
+# blue sky) where boosting contrast would just amplify false-positive
+# whites like clouds and flags.
+CLAHE_CONTRAST_THRESHOLD = 45.0
+CLAHE_CLIP_LIMIT = 2.0
+CLAHE_TILE_SIZE = 8
+
 # Default frame budget by source fps:
 #   <50 fps : 20 consecutive frames (~0.4-0.7 s of flight at 30/60 fps)
 #   50-100  : 40 consecutive frames (still every-frame, twice the
@@ -197,7 +215,7 @@ BALL_TRACK_CONCURRENCY = 8
 # upscale turns a ~600 px region into a ~1024 px image — same content,
 # more vision tiles, ball appears with ~1.7× more pixels per side.
 BALL_TRACK_CROP_NATIVE_SIZE = 600
-BALL_TRACK_CROP_SEND_W = 1024
+BALL_TRACK_CROP_SEND_W = 1568
 
 
 BALL_TRACK_PROMPT = (
@@ -361,6 +379,42 @@ def _resolve_model(model_override: str | None = None) -> str:
             model_override, MODEL,
         )
     return MODEL
+
+
+def _maybe_apply_clahe(frame):
+    """Run CLAHE on the frame's luma channel when the image looks low-
+    contrast (overcast / flat lighting). Returns a (possibly enhanced)
+    BGR ndarray and a boolean indicating whether the enhancement
+    actually fired. Cheap when skipped (~1 ms for the std check) and
+    cheap when applied (~5-10 ms for typical 1080p crops)."""
+    if not HAS_CV or frame is None or frame.size == 0:
+        return frame, False
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    except Exception:
+        return frame, False
+    if HAS_NP:
+        try:
+            std_dev = float(np.std(gray))
+        except Exception:
+            std_dev = float(gray.std()) if hasattr(gray, "std") else 100.0
+    else:
+        std_dev = 100.0
+    if std_dev >= CLAHE_CONTRAST_THRESHOLD:
+        return frame, False
+    try:
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l_chan, a_chan, b_chan = cv2.split(lab)
+        clahe = cv2.createCLAHE(
+            clipLimit=CLAHE_CLIP_LIMIT,
+            tileGridSize=(CLAHE_TILE_SIZE, CLAHE_TILE_SIZE),
+        )
+        l_eq = clahe.apply(l_chan)
+        merged = cv2.merge((l_eq, a_chan, b_chan))
+        enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+        return enhanced, True
+    except Exception:
+        return frame, False
 
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -1537,6 +1591,7 @@ def track_ball_after_impact(
     # Also stash the per-frame native dims so retry / coord-translation
     # downstream can map sent-coords back to native through the ROI.
     frames_data: dict[int, tuple[bytes, int, int, "np.ndarray"]] = {}
+    clahe_count = 0  # how many Phase-1 frames triggered the CLAHE boost
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         info["error"] = "could not re-open video"
@@ -1586,12 +1641,27 @@ def track_ball_after_impact(
                 api_frame = frame[y0:y1, x0:x1]
             else:
                 api_frame = frame
+            # Adaptive CLAHE: rescues low-contrast (overcast) frames
+            # where the white ball blends into a flat grey sky. No-op
+            # on normal-contrast images so it's safe to leave on.
+            api_frame, clahe_fired = _maybe_apply_clahe(api_frame)
+            if clahe_fired:
+                clahe_count += 1
             api_h, api_w = api_frame.shape[:2]
             if api_w > send_width:
                 scale = send_width / float(api_w)
                 resized = cv2.resize(
                     api_frame, (send_width, int(round(api_h * scale))),
                     interpolation=cv2.INTER_AREA,
+                )
+            elif api_w < send_width:
+                # Up-sample to send_width — the ball is small in pixel
+                # area; giving Claude a higher-res image lets the model
+                # spend more vision tiles on the ball region.
+                scale = send_width / float(api_w)
+                resized = cv2.resize(
+                    api_frame, (send_width, int(round(api_h * scale))),
+                    interpolation=cv2.INTER_CUBIC,
                 )
             else:
                 resized = api_frame
@@ -1807,6 +1877,9 @@ def track_ball_after_impact(
             if x1 <= x0 or y1 <= y0:
                 return idx, {"_error": "empty crop"}
             crop = native_frame[y0:y1, x0:x1]
+            # Same adaptive contrast boost as the Phase-1 ROI: helps
+            # the ball pop on overcast / flat-lit clips.
+            crop, _ = _maybe_apply_clahe(crop)
             crop_h, crop_w = crop.shape[:2]
             # Upscale the crop before sending so the ball occupies a
             # larger pixel footprint AND Anthropic processes it with
@@ -2037,6 +2110,7 @@ def track_ball_after_impact(
     info["n_frames_found"] = n_found
     info["n_frames_found_via_retry"] = n_retry_found
     info["first_lost_run_start"] = first_lost_run_start
+    info["n_frames_clahe_enhanced"] = clahe_count
     info["ok"] = True
     log.info(
         "ai_tracer: ball_track — found ball in %d/%d frames; first_lost_run_start=%s",

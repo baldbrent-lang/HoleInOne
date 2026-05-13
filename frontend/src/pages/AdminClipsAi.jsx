@@ -406,6 +406,9 @@ export default function AdminClipsAi() {
                       {ballTrack.n_frames_found_via_retry > 0 && (
                         <> (incl. <code>{ballTrack.n_frames_found_via_retry}</code> via hint retry)</>
                       )}
+                      {ballTrack.n_frames_clahe_enhanced > 0 && (
+                        <> · <code>{ballTrack.n_frames_clahe_enhanced}</code> frame{ballTrack.n_frames_clahe_enhanced === 1 ? "" : "s"} CLAHE-boosted</>
+                      )}
                       {ballTrack.first_lost_run_start != null && (
                         <> · lost from frame <code>{ballTrack.first_lost_run_start}</code></>
                       )}
