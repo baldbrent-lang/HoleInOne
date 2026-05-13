@@ -1773,7 +1773,27 @@ def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, 
     debug_name = f"{clip_path.stem}_candidates.jpg"
     debug_path = CLIPS_DIR / debug_name
 
-    info = render_tracer(clip_path, traced_path, debug_path)
+    # Use the audio-based impact detector (peak/median ≥30, back off
+    # AUDIO_IMPACT_PRE_PEAK_FRAMES) to anchor where ball flight starts.
+    # The classical-CV tracer then drops every detection / track point
+    # before that frame so the overlay only shows actual flight.
+    fps_val = probe_fps(clip_path) or 30.0
+    audio_impact = find_impact_via_audio(clip_path, fps_val)
+    impact_hint = (
+        int(audio_impact["impact_frame"])
+        if audio_impact.get("ok") and audio_impact.get("impact_frame") is not None
+        else None
+    )
+    log.info(
+        "tracer: audio impact hint for %s — frame=%s (ratio=%.1f, ok=%s)",
+        clip_path.name,
+        impact_hint,
+        audio_impact.get("ratio") or 0.0,
+        audio_impact.get("ok"),
+    )
+
+    info = render_tracer(clip_path, traced_path, debug_path, impact_frame_hint=impact_hint)
+    info["audio_impact"] = audio_impact
     debug_url = (
         f"{settings.app_base_url}/uploads/clips/{debug_name}"
         if debug_path.exists() else None

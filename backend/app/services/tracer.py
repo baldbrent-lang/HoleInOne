@@ -314,7 +314,12 @@ def have_tracer() -> bool:
     return HAS_CV
 
 
-def render_tracer(input_path: Path, output_path: Path, debug_path: Path | None = None) -> dict:
+def render_tracer(
+    input_path: Path,
+    output_path: Path,
+    debug_path: Path | None = None,
+    impact_frame_hint: int | None = None,
+) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
 
     If `debug_path` is provided, also save a JPG of the first frame that
@@ -334,7 +339,7 @@ def render_tracer(input_path: Path, output_path: Path, debug_path: Path | None =
     if not HAS_CV:
         return {"ok": False, "error": "opencv not installed", "n_points": 0, "n_candidates": 0}
     try:
-        return _render(input_path, output_path, debug_path)
+        return _render(input_path, output_path, debug_path, impact_frame_hint=impact_frame_hint)
     except Exception as exc:  # pragma: no cover
         log.warning("tracer crashed on %s: %s", input_path, exc)
         try:
@@ -346,7 +351,12 @@ def render_tracer(input_path: Path, output_path: Path, debug_path: Path | None =
 
 # --- internals --------------------------------------------------------------
 
-def _render(input_path: Path, output_path: Path, debug_path: Path | None = None) -> dict:
+def _render(
+    input_path: Path,
+    output_path: Path,
+    debug_path: Path | None = None,
+    impact_frame_hint: int | None = None,
+) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         return {"ok": False, "error": "could not open video", "n_points": 0, "n_candidates": 0}
@@ -857,8 +867,11 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
     if debug_path is not None:
         filmstrip = _sample_filmstrip(input_path, total_frames_scanned)
         # Grab the impact frame snapshot for the debug-image inset, if
-        # the direct tracker identified one.
+        # the direct tracker identified one. Caller-supplied hint
+        # (audio-based, much more reliable) overrides when present.
         impact_frame_idx = direct_info.get("impact_frame") if direct_info else None
+        if impact_frame_hint is not None:
+            impact_frame_idx = int(impact_frame_hint)
         impact_det_pos = direct_info.get("impact_det") if direct_info else None
         impact_snapshot = _grab_frame(input_path, impact_frame_idx) if impact_frame_idx is not None else None
         _write_debug(
@@ -897,6 +910,20 @@ def _render(input_path: Path, output_path: Path, debug_path: Path | None = None)
             "tracer: extended track %d → %d points (residual %.2fpx)",
             len(seed_track), len(track), _residual(track),
         )
+
+    # Drop any track points before the (audio-derived, if available)
+    # impact frame so the rendered overlay only shows ball flight, not
+    # body / club movement during setup or backswing.
+    if impact_frame_hint is not None:
+        cutoff = int(impact_frame_hint)
+        track = [d for d in track if int(d.frame) >= cutoff]
+        if not track:
+            return {
+                "ok": False,
+                "error": "no track points after audio impact frame",
+                "n_candidates": len(detections),
+                "n_points": 0,
+            }
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
@@ -1475,21 +1502,16 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
         return
 
     if base is not None:
-        if hot_mask is not None:
-            target_size = native_size if native_size else (base.shape[1], base.shape[0])
-            scaled = cv2.resize(
-                hot_mask, target_size, interpolation=cv2.INTER_NEAREST,
-            )
-            tint = np.zeros_like(base)
-            tint[..., 2] = 200  # red in BGR
-            mask3 = scaled.astype(bool)
-            base[mask3] = (0.55 * base[mask3] + 0.45 * tint[mask3]).astype(np.uint8)
-        # Body x-center axis (informational only — no side shading now
-        # that the left/right blocking filter is gone).
-        if body_x_det is not None and det_scale > 0:
-            body_x_native = int(body_x_det / det_scale)
-            cv2.line(base, (body_x_native, 0), (body_x_native, base.shape[0]),
-                     (255, 220, 0), 2, cv2.LINE_AA)
+        # Filter detections to post-impact when we have a confident
+        # audio-based impact frame. Pre-impact dots are usually body /
+        # club movement during the backswing and just clutter the view.
+        if impact_frame_idx is not None:
+            all_detections = [
+                d for d in all_detections if int(d.frame) >= int(impact_frame_idx)
+            ]
+            seed_detections = [
+                d for d in seed_detections if int(d.frame) >= int(impact_frame_idx)
+            ]
         if ball_pos_native is not None:
             bx_native = int(ball_pos_native[0])
             by_native = int(ball_pos_native[1])
@@ -1512,67 +1534,16 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                     base, "ball?", (bx_native + 14, by_native + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.50, (180, 180, 255), 1, cv2.LINE_AA,
                 )
-        if club_line_det is not None and det_scale > 0:
-            cx1, cy1, cx2, cy2 = club_line_det
-            cv2.line(
-                base,
-                (int(cx1 / det_scale), int(cy1 / det_scale)),
-                (int(cx2 / det_scale), int(cy2 / det_scale)),
-                (0, 200, 255), 3, cv2.LINE_AA,
-            )
-            tag = f"club: {handedness}" if handedness else "club"
-            cv2.putText(
-                base, tag,
-                (int(cx2 / det_scale) + 10, int(cy2 / det_scale) - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2, cv2.LINE_AA,
-            )
-        # Foot-line cutoff: anything below this y was rejected as
-        # divot debris / practice balls / shadow.
-        if body_bottom_det is not None and det_scale > 0:
-            foot_y_native = int((body_bottom_det + 15) / det_scale)
-            cv2.line(
-                base, (0, foot_y_native), (base.shape[1], foot_y_native),
-                (255, 100, 200), 2, cv2.LINE_AA,
-            )
+        # Post-impact ball-candidate dots — yellow = every detection that
+        # survived the hot-mask filter, green = seeds that passed the
+        # upward-streak prefilter. Everything else (hot-mask red shading,
+        # body / club / foot lines, picked-track magenta, status banner)
+        # was removed so the operator can eyeball the actual ball arc
+        # against the resting-ball anchor without visual noise.
         for d in all_detections:
             cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
-        # Surviving upward-streak seeds: bigger, brighter, opaque green.
         for d in seed_detections:
             cv2.circle(base, (int(d.x), int(d.y)), 4, (0, 255, 0), -1, cv2.LINE_AA)
-        # Picked track (what the rendered tracer will follow). Drawn in
-        # magenta so the operator can spot when the linker chose the
-        # club arc or some other chain over the obvious ball flight.
-        if picked_track:
-            pts = [(int(d.x), int(d.y)) for d in sorted(picked_track, key=lambda p: p.frame)]
-            for i in range(1, len(pts)):
-                cv2.line(base, pts[i - 1], pts[i], (255, 0, 255), 3, cv2.LINE_AA)
-            for px, py in pts:
-                cv2.circle(base, (px, py), 5, (255, 0, 255), 2, cv2.LINE_AA)
-        # Impact-frame inset: small thumbnail of the frame the tracker
-        # identified as the moment of impact, with a red ring at the
-        # detection it took as the first-ball-in-flight point. Lets the
-        # operator visually verify the algorithm picked the right frame
-        # and the right ball position.
-        if busiest_cands:
-            for cx, cy, r in busiest_cands:
-                cv2.circle(base, (int(cx), int(cy)), max(int(r) + 2, 4), (0, 0, 255), 2)
-        secs = total_frames / fps if fps > 0 else 0.0
-        raw_str = f"raw: {n_raw}  |  " if n_raw is not None else ""
-        if busiest_cands:
-            msg = (
-                f"clip: {total_frames}f / {secs:.1f}s  |  "
-                f"busiest frame {busiest_idx}: {len(busiest_cands)} cands  |  "
-                f"{raw_str}post-mask: {len(all_detections)}  |  "
-                f"upward-streak: {len(seed_detections)}"
-            )
-        else:
-            msg = (
-                f"clip: {total_frames}f / {secs:.1f}s  |  "
-                f"0 cands survived hot-mask  |  {raw_str}post-mask: 0  |  upward-streak: 0"
-            )
-        cv2.rectangle(base, (0, 0), (base.shape[1], 40), (0, 0, 0), -1)
-        cv2.putText(base, msg, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
-                    (0, 0, 255), 2, cv2.LINE_AA)
 
     strip = None
     if filmstrip:
