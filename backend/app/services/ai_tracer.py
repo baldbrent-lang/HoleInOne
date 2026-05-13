@@ -2690,6 +2690,191 @@ def find_impact_via_audio(input_path: Path, fps: float) -> dict:
     return info
 
 
+def detect_swings_from_motion(
+    input_path: Path,
+    fps: float | None = None,
+    sample_height: int = 180,
+    min_swing_sec: float = 0.5,
+    max_swing_sec: float = 3.5,
+    min_separation_sec: float = 5.0,
+    before_motion_sec: float = 1.5,
+    after_motion_sec: float = 3.0,
+    motion_ratio: float = 4.0,
+) -> list[dict]:
+    """Find every swing in a long tee-side video by scanning for bursts
+    of high pixel motion.
+
+    The tee camera is essentially static between swings — the player
+    stands almost still during setup, then the swing produces a ~0.8 s
+    burst of huge frame-to-frame motion. We decode the video at low
+    resolution (`sample_height` px tall, grayscale), compute the mean
+    absolute difference between consecutive frames, smooth that signal,
+    threshold against the median, and group contiguous high-motion runs.
+
+    Returns the same shape as detect_swings_from_audio so the rest of
+    the pipeline can swallow it interchangeably:
+
+        [
+          {
+            "peak_time_sec": float,   # time of max motion in the burst
+            "start_sec": float,       # max(0, burst_start - before_motion_sec)
+            "end_sec": float,         # min(duration, burst_end + after_motion_sec)
+            "ratio": float,           # burst-peak motion / median motion
+            "confidence": "high" | "medium" | "low",
+            "burst_duration_sec": float,
+          },
+          ...
+        ]
+
+    Empty list when opencv / numpy is missing, the video has < 2 frames,
+    or no motion bursts pass the duration + amplitude gates. Never
+    raises.
+    """
+    if not HAS_CV or not HAS_NP:
+        log.info("ai_tracer: detect_swings_from_motion — missing opencv / numpy")
+        return []
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        log.warning("ai_tracer: detect_swings_from_motion — cannot open %s", input_path)
+        return []
+
+    try:
+        src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if src_fps <= 0:
+            src_fps = 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if total_frames <= 2:
+            return []
+
+        # We don't need full-rate motion — 10 Hz is plenty to find ~1 s
+        # swing bursts and keeps the scan fast on long videos.
+        target_hz = 10.0
+        step = max(1, int(round(src_fps / target_hz)))
+        effective_hz = src_fps / step
+
+        diffs: list[float] = []
+        prev_gray = None
+        idx = -1
+        kept = 0
+        while True:
+            idx += 1
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            if idx % step != 0:
+                continue
+            h, w = frame.shape[:2]
+            if h > sample_height:
+                scale = sample_height / float(h)
+                new_w = max(1, int(round(w * scale)))
+                frame = cv2.resize(frame, (new_w, sample_height), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if prev_gray is not None:
+                d = cv2.absdiff(gray, prev_gray)
+                diffs.append(float(d.mean()))
+            prev_gray = gray
+            kept += 1
+    finally:
+        cap.release()
+
+    if len(diffs) < 4:
+        return []
+
+    motion = np.asarray(diffs, dtype=np.float32)
+    # Smooth with a ~300 ms window so we get one peak per swing instead
+    # of jitter from individual frames.
+    smooth_win = max(1, int(round(0.3 * effective_hz)))
+    if smooth_win > 1 and smooth_win < motion.size:
+        kernel = np.ones(smooth_win, dtype=np.float32) / float(smooth_win)
+        motion = np.convolve(motion, kernel, mode="same")
+
+    median = float(np.median(motion))
+    if median <= 1e-6:
+        median = 1e-6
+    threshold = median * motion_ratio
+    above = motion > threshold
+
+    # Walk contiguous True runs. Each run = one motion burst.
+    duration_sec = (len(diffs) - 1) / effective_hz if effective_hz > 0 else 0.0
+    bursts: list[tuple[int, int, int, float]] = []  # (start_i, end_i, peak_i, peak_v)
+    i = 0
+    n = above.size
+    while i < n:
+        if not above[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and above[j]:
+            j += 1
+        # [i, j) is one above-threshold run.
+        seg = motion[i:j]
+        peak_off = int(np.argmax(seg))
+        bursts.append((i, j - 1, i + peak_off, float(seg[peak_off])))
+        i = j
+
+    # Duration filter — real swings last ~0.6–2 s. Drop sub-blip
+    # (twitches, single-frame flashes) and over-long runs (someone
+    # walking through frame, camera bump, panning).
+    accepted: list[tuple[int, int, int, float]] = []
+    for s_i, e_i, p_i, p_v in bursts:
+        burst_sec = (e_i - s_i) / effective_hz if effective_hz > 0 else 0.0
+        if burst_sec < min_swing_sec or burst_sec > max_swing_sec:
+            continue
+        accepted.append((s_i, e_i, p_i, p_v))
+
+    if not accepted:
+        log.info(
+            "ai_tracer: detect_swings_from_motion — %d raw bursts, 0 passed "
+            "duration filter [%.1f, %.1f] s (median=%.4f threshold=%.4f)",
+            len(bursts), min_swing_sec, max_swing_sec, median, threshold,
+        )
+        return []
+
+    # Non-max suppression — collapse bursts whose peaks land within
+    # min_separation_sec of each other (e.g. practice swing + real
+    # swing in quick succession) keeping the louder one.
+    accepted.sort(key=lambda t: -t[3])
+    chosen_peaks: list[int] = []
+    keep: list[tuple[int, int, int, float]] = []
+    min_sep = int(min_separation_sec * effective_hz)
+    for s_i, e_i, p_i, p_v in accepted:
+        if any(abs(p_i - cp) < min_sep for cp in chosen_peaks):
+            continue
+        chosen_peaks.append(p_i)
+        keep.append((s_i, e_i, p_i, p_v))
+    keep.sort(key=lambda t: t[2])
+
+    segments: list[dict] = []
+    for s_i, e_i, p_i, p_v in keep:
+        start_t = s_i / effective_hz
+        end_t = e_i / effective_hz
+        peak_t = p_i / effective_hz
+        ratio = p_v / median if median > 0 else float("inf")
+        if ratio >= 12:
+            conf = "high"
+        elif ratio >= 6:
+            conf = "medium"
+        else:
+            conf = "low"
+        segments.append({
+            "peak_time_sec": float(peak_t),
+            "start_sec": float(max(0.0, start_t - before_motion_sec)),
+            "end_sec": float(min(duration_sec, end_t + after_motion_sec)),
+            "ratio": float(ratio) if ratio != float("inf") else None,
+            "confidence": conf,
+            "burst_duration_sec": float(end_t - start_t),
+        })
+
+    log.info(
+        "ai_tracer: detect_swings_from_motion — %d swings (raw=%d duration_ok=%d) "
+        "duration=%.1fs median_motion=%.4f threshold=%.4f hz=%.1f",
+        len(segments), len(bursts), len(accepted),
+        duration_sec, median, threshold, effective_hz,
+    )
+    return segments
+
+
 def detect_swings_from_audio(
     input_path: Path,
     fps: float | None = None,

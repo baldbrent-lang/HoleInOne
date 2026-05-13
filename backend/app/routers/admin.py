@@ -52,6 +52,7 @@ from ..services.ai_tracer import (
     render_tracer_video,
     run_full_ai_tracer_pipeline,
     detect_swings_from_audio,
+    detect_swings_from_motion,
 )
 from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
 
@@ -1422,6 +1423,92 @@ def delete_long_upload(upload_id: int, db: Session = Depends(get_db)):
     db.delete(row)
     db.commit()
     return {"deleted": True, "freed_bytes": freed}
+
+
+TESTCUTS_SUBDIR = "_testcuts"
+
+
+@router.post("/long-uploads/{upload_id}/test-cut")
+def test_cut_long_upload(
+    upload_id: int,
+    detector: str = Form("motion"),
+    db: Session = Depends(get_db),
+):
+    """Dry-run the swing-cutting half of the long-upload pipeline.
+
+    Runs the chosen swing detector on the stored tee video, cuts each
+    proposed window into a raw MP4 (no AI tracer, no matcher, no
+    VideoClip row), and returns playable URLs so the operator can
+    eyeball whether the cuts are right before paying for the full
+    pipeline.
+
+    Test cuts land in CLIPS_DIR/_testcuts/ so they don't pollute
+    /admin/clips. Calling this again for the same upload wipes the
+    previous test cuts first.
+
+    detector: 'motion' (default) | 'audio'
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "long upload has no tee file")
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+
+    tee_fps = probe_fps(src_path) or 30.0
+    detector = (detector or "motion").lower()
+    if detector == "audio":
+        windows = detect_swings_from_audio(src_path, fps=tee_fps)
+    else:
+        detector = "motion"
+        windows = detect_swings_from_motion(src_path, fps=tee_fps)
+
+    # Wipe any previous test cuts for this upload so re-running the
+    # detector doesn't accumulate stale files.
+    testcuts_dir = CLIPS_DIR / TESTCUTS_SUBDIR
+    testcuts_dir.mkdir(parents=True, exist_ok=True)
+    for old in testcuts_dir.glob(f"testcut-{upload_id}-*.mp4"):
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+    cuts: list[dict] = []
+    for idx, w in enumerate(windows):
+        start_sec = float(w["start_sec"])
+        end_sec = float(w["end_sec"])
+        out_name = f"testcut-{upload_id}-{idx:02d}-{secrets.token_hex(4)}.mp4"
+        out_path = testcuts_dir / out_name
+        ok = cut_segment(src_path, out_path, start_sec, end_sec)
+        cuts.append({
+            "index": idx,
+            "ok": bool(ok),
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "duration_sec": round(end_sec - start_sec, 2),
+            "peak_time_sec": float(w.get("peak_time_sec")) if w.get("peak_time_sec") is not None else None,
+            "ratio": w.get("ratio"),
+            "confidence": w.get("confidence"),
+            "burst_duration_sec": w.get("burst_duration_sec"),
+            "url": (
+                f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{out_name}"
+                if ok else None
+            ),
+        })
+
+    log.info(
+        "long-upload test-cut: upload=%s detector=%s windows=%d cuts_ok=%d",
+        upload_id, detector, len(windows), sum(1 for c in cuts if c["ok"]),
+    )
+    return {
+        "upload_id": upload_id,
+        "detector": detector,
+        "tee_fps": tee_fps,
+        "n_windows": len(windows),
+        "cuts": cuts,
+    }
 
 
 def _optional_int(v):

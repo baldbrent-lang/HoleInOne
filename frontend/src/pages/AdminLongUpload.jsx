@@ -46,6 +46,9 @@ export default function AdminLongUpload() {
   const [error, setError] = useState(null);
   const [priorUploads, setPriorUploads] = useState(null);
   const [reprocessing, setReprocessing] = useState({}); // {id: true}
+  const [testCutting, setTestCutting] = useState({}); // {id: true}
+  const [testCutResults, setTestCutResults] = useState({}); // {id: {detector, cuts, ...}}
+  const [testCutDetector, setTestCutDetector] = useState({}); // {id: "motion"|"audio"}
   const videoRef = useRef(null);
 
   const anyProcessing =
@@ -97,6 +100,20 @@ export default function AdminLongUpload() {
       setError(e.message);
     } finally {
       setReprocessing((r) => ({ ...r, [uploadId]: false }));
+    }
+  }
+
+  async function testCutPrior(uploadId) {
+    const detector = testCutDetector[uploadId] || "motion";
+    setTestCutting((t) => ({ ...t, [uploadId]: true }));
+    setError(null);
+    try {
+      const data = await api.testCutLongUpload(adminPassword, uploadId, detector);
+      setTestCutResults((r) => ({ ...r, [uploadId]: data }));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setTestCutting((t) => ({ ...t, [uploadId]: false }));
     }
   }
 
@@ -292,7 +309,29 @@ export default function AdminLongUpload() {
                         </div>
                       )}
                     </div>
-                    <div className="inline" style={{ gap: 6 }}>
+                    <div className="inline" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <select
+                        value={testCutDetector[u.id] || "motion"}
+                        onChange={(e) =>
+                          setTestCutDetector((d) => ({ ...d, [u.id]: e.target.value }))
+                        }
+                        disabled={!!testCutting[u.id] || missing || busy}
+                        className="small"
+                        style={{ fontSize: 12, padding: "2px 6px" }}
+                        title="Swing detector used for the test cut"
+                      >
+                        <option value="motion">motion</option>
+                        <option value="audio">audio</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="secondary small"
+                        onClick={() => testCutPrior(u.id)}
+                        disabled={!!testCutting[u.id] || missing || busy}
+                        title="Cut the tee video into proposed swing clips (no AI tracer, no matcher) so you can review the segmentation"
+                      >
+                        {testCutting[u.id] ? "Cutting…" : "Test cut"}
+                      </button>
                       <button
                         type="button"
                         className="small"
@@ -319,6 +358,60 @@ export default function AdminLongUpload() {
                       </button>
                     </div>
                   </div>
+
+                  {testCutResults[u.id] && (
+                    <div className="card tight" style={{ margin: "10px 0 0", background: "var(--surface-alt)" }}>
+                      <div className="small" style={{ marginBottom: 6 }}>
+                        <b>Test cut</b>{" "}
+                        <span className="muted">
+                          · detector: <code>{testCutResults[u.id].detector}</code>
+                          {" "}· {testCutResults[u.id].n_windows} window
+                          {testCutResults[u.id].n_windows === 1 ? "" : "s"}
+                          {testCutResults[u.id].tee_fps != null && (
+                            <> · {testCutResults[u.id].tee_fps} fps</>
+                          )}
+                        </span>
+                      </div>
+                      {testCutResults[u.id].cuts.length === 0 && (
+                        <div className="tiny muted">
+                          No swings detected. Try the other detector, or check the
+                          server log for the threshold/median trace.
+                        </div>
+                      )}
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                          gap: 8,
+                        }}
+                      >
+                        {testCutResults[u.id].cuts.map((c) => (
+                          <div key={c.index} style={{ minWidth: 0 }}>
+                            <div className="tiny muted" style={{ marginBottom: 2 }}>
+                              #{c.index + 1} · {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
+                              {" "}({c.duration_sec}s)
+                              {c.peak_time_sec != null && (
+                                <> · peak {c.peak_time_sec.toFixed(2)}s</>
+                              )}
+                              {c.ratio != null && <> · ×{c.ratio.toFixed(1)}</>}
+                              {c.confidence && <> · {c.confidence}</>}
+                            </div>
+                            {c.ok && c.url ? (
+                              <video
+                                src={c.url}
+                                controls
+                                playsInline
+                                preload="metadata"
+                                style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                              />
+                            ) : (
+                              <div className="tiny err-text">cut failed</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
