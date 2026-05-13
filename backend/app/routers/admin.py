@@ -696,25 +696,44 @@ def audio_impact_frame(
     if frame_idx is None:
         raise HTTPException(500, "audio impact returned no frame_idx")
 
+    # Derive the address frame using the same 1.5s-before-impact rule
+    # the production pipeline uses, then grab both frames.
+    address_offset_frames = int(round(1.5 * fps_val))
+    address_idx = max(0, int(frame_idx) - address_offset_frames)
+
     cap = cv2.VideoCapture(str(fpath))
     if not cap.isOpened():
         raise HTTPException(500, "could not open source for frame grab")
     try:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
-        ok, frame = cap.read()
+        ok_impact, impact_frame = cap.read()
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(address_idx))
+        ok_address, address_frame = cap.read()
     finally:
         cap.release()
-    if not ok or frame is None:
+    if not ok_impact or impact_frame is None:
         raise HTTPException(500, f"could not read frame {frame_idx}")
 
-    out_name = f"{fpath.stem}_audio_impact.jpg"
-    out_path = CLIPS_DIR / out_name
-    cv2.imwrite(str(out_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-    mtime = int(out_path.stat().st_mtime)
+    impact_name = f"{fpath.stem}_audio_impact.jpg"
+    impact_out = CLIPS_DIR / impact_name
+    cv2.imwrite(str(impact_out), impact_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    impact_mtime = int(impact_out.stat().st_mtime)
+
+    address_url: str | None = None
+    if ok_address and address_frame is not None:
+        address_name = f"{fpath.stem}_audio_address.jpg"
+        address_out = CLIPS_DIR / address_name
+        cv2.imwrite(str(address_out), address_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        address_mtime = int(address_out.stat().st_mtime)
+        address_url = f"{settings.app_base_url}/uploads/clips/{address_name}?v={address_mtime}"
+
     return {
         "ok": True,
         "clip_id": clip.id,
         "impact_frame": int(frame_idx),
+        "address_frame": int(address_idx),
+        "address_offset_frames": address_offset_frames,
+        "address_offset_sec": 1.5,
         "audio_peak_frame": info.get("audio_peak_frame"),
         "pre_peak_offset_frames": info.get("pre_peak_offset_frames"),
         "peak_time_sec": info.get("peak_time_sec"),
@@ -722,7 +741,8 @@ def audio_impact_frame(
         "min_ratio": info.get("min_ratio_used"),
         "highpass_hz": info.get("highpass_hz"),
         "fps": fps_val,
-        "image_url": f"{settings.app_base_url}/uploads/clips/{out_name}?v={mtime}",
+        "image_url": f"{settings.app_base_url}/uploads/clips/{impact_name}?v={impact_mtime}",
+        "address_image_url": address_url,
     }
 
 

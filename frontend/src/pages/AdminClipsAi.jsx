@@ -580,10 +580,10 @@ export default function AdminClipsAi() {
               <button
                 onClick={() => runAudioImpactFrame(c.id)}
                 disabled={!!audioImpactRunning[c.id] || !canAnalyze}
-                title="Detect impact frame via audio only (no AI). Returns a JPG of the picked frame so you can verify."
+                title="Detect impact frame via audio, then derive the address frame (impact - 1.5s) and grab both. No AI calls."
                 className="secondary"
               >
-                {audioImpactRunning[c.id] ? "Detecting…" : "Pick impact frame (audio)"}
+                {audioImpactRunning[c.id] ? "Detecting…" : "Pick impact + address (audio)"}
               </button>
               <label
                 className="small muted"
@@ -611,30 +611,61 @@ export default function AdminClipsAi() {
               )}
             </div>
             {audioImpact[c.id]?.ok && (
-              <div style={{ marginTop: 8 }}>
-                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  Audio-derived impact frame
-                  {" "}<span style={{ textTransform: "none" }}>
-                    · frame {audioImpact[c.id].impact_frame}
-                    {audioImpact[c.id].audio_peak_frame != null && audioImpact[c.id].pre_peak_offset_frames > 0 && (
-                      <> (audio peak {audioImpact[c.id].audio_peak_frame} − {audioImpact[c.id].pre_peak_offset_frames}f)</>
-                    )}
-                    {audioImpact[c.id].peak_time_sec != null && (
-                      <> · {audioImpact[c.id].peak_time_sec.toFixed(3)}s</>
-                    )}
-                    {audioImpact[c.id].ratio != null && (
-                      <> · ×{audioImpact[c.id].ratio.toFixed(1)}</>
-                    )}
-                  </span>
+              <div
+                style={{
+                  marginTop: 8,
+                  display: "grid",
+                  gridTemplateColumns: audioImpact[c.id].address_image_url
+                    ? "1fr 1fr" : "1fr",
+                  gap: 12,
+                }}
+              >
+                {audioImpact[c.id].address_image_url && (
+                  <div>
+                    <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                      Address frame{" "}
+                      <span style={{ textTransform: "none" }}>
+                        · frame {audioImpact[c.id].address_frame}
+                        {audioImpact[c.id].address_offset_sec != null && (
+                          <> (impact − {audioImpact[c.id].address_offset_sec}s)</>
+                        )}
+                      </span>
+                    </div>
+                    <img
+                      src={audioImpact[c.id].address_image_url}
+                      alt="audio-derived address frame"
+                      style={{
+                        width: "100%", borderRadius: 8,
+                        border: "1px solid var(--border)",
+                      }}
+                    />
+                  </div>
+                )}
+                <div>
+                  <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                    Impact frame{" "}
+                    <span style={{ textTransform: "none" }}>
+                      · frame {audioImpact[c.id].impact_frame}
+                      {audioImpact[c.id].audio_peak_frame != null && audioImpact[c.id].pre_peak_offset_frames > 0 && (
+                        <> (audio peak {audioImpact[c.id].audio_peak_frame} − {audioImpact[c.id].pre_peak_offset_frames}f)</>
+                      )}
+                      {audioImpact[c.id].peak_time_sec != null && (
+                        <> · {audioImpact[c.id].peak_time_sec.toFixed(3)}s</>
+                      )}
+                      {audioImpact[c.id].ratio != null && (
+                        <> · ×{audioImpact[c.id].ratio.toFixed(1)}</>
+                      )}
+                    </span>
+                  </div>
+                  <img
+                    src={audioImpact[c.id].image_url}
+                    alt="audio-derived impact frame"
+                    style={{
+                      width: "100%", borderRadius: 8,
+                      border: "1px solid var(--border)",
+                    }}
+                  />
                 </div>
-                <img
-                  src={audioImpact[c.id].image_url}
-                  alt="audio-derived impact frame"
-                  style={{
-                    width: "100%", maxWidth: 600, borderRadius: 8,
-                    border: "1px solid var(--border)",
-                  }}
-                />
               </div>
             )}
           </div>
