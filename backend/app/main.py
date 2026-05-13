@@ -118,6 +118,8 @@ def _migrate() -> None:
             statements.append("ALTER TABLE video_clips ADD COLUMN distance_from_pin_feet INTEGER")
         if "tracer_url" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN tracer_url TEXT")
+        if "tee_clip_url" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN tee_clip_url TEXT")
         if "is_highlight" not in clip_cols:
             # SQLite allows BOOLEAN; Postgres treats it as BOOLEAN natively.
             statements.append("ALTER TABLE video_clips ADD COLUMN is_highlight BOOLEAN DEFAULT FALSE")

@@ -126,6 +126,10 @@ export default function AdminClipsAi() {
         const tracerVideo = result?.tracer_video;
         const tracerVideoUrl = result?.tracer_video_url;
         const isComposite = (c.source_url || "").includes("_composite");
+        // A composite clip is still analyzable if the backend stored the raw
+        // tee-only cut alongside it. Only disable the button when no tee_clip_url
+        // is available to fall back to.
+        const canAnalyze = !isComposite || !!c.tee_clip_url;
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
             <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
@@ -511,8 +515,14 @@ export default function AdminClipsAi() {
             <div className="row" style={{ marginTop: 12, gap: 8 }}>
               <button
                 onClick={() => runOne(c.id)}
-                disabled={!!running[c.id] || isComposite}
-                title={isComposite ? "Composite clips not supported" : "Run address + handedness + impact pipeline"}
+                disabled={!!running[c.id] || !canAnalyze}
+                title={
+                  !canAnalyze
+                    ? "Composite clip with no raw tee cut on file — re-process the long upload to populate it"
+                    : isComposite
+                    ? "Composite — will analyze the stored raw tee cut"
+                    : "Run address + handedness + impact pipeline"
+                }
               >
                 <Icon name="play" size={14} />{" "}
                 {running[c.id] ? "Running…" : "Run AI analysis"}
@@ -536,7 +546,7 @@ export default function AdminClipsAi() {
               </label>
               {isComposite && (
                 <span className="small muted" style={{ alignSelf: "center" }}>
-                  Composite — not supported
+                  Composite — {canAnalyze ? "analyzing raw tee cut" : "no raw tee cut available"}
                 </span>
               )}
             </div>

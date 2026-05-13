@@ -146,6 +146,11 @@ class VideoClip(Base):
     # once the spike pipeline ships; until then the broadcast falls back to
     # source_url so the channel works without the tracer.
     tracer_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Raw tee-side cut without overlays or composite concatenation. Set when
+    # the dual-cam composite pipeline runs so the AI-analysis page can target
+    # a single-camera player-visible clip even though source_url points at the
+    # composite. Null for single-cam clips (source_url is already the raw cut).
+    tee_clip_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Marks a clip as eligible to play during dead time on the broadcast
     # channel ("highlights"). Auto-set for aces and CTP winners; operators
     # can toggle via the admin UI.

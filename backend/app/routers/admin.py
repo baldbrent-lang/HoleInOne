@@ -518,6 +518,7 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
             "created_at": c.created_at.isoformat() if c.created_at else None,
             "source_url": c.source_url,
             "tracer_url": c.tracer_url,
+            "tee_clip_url": c.tee_clip_url,
             "thumbnail_url": c.thumbnail_url,
             "ball_in_cup": bool(c.ball_in_cup),
             "processing_status": c.processing_status,
@@ -646,14 +647,21 @@ def ai_trace(
     clip = db.get(VideoClip, clip_id)
     if not clip:
         raise HTTPException(404, "clip not found")
-    if not clip.source_url:
-        raise HTTPException(400, "clip has no source_url")
-    fname = clip.source_url.rstrip("/").rsplit("/", 1)[-1]
+    # Prefer the raw tee-only cut for composite clips — source_url for
+    # dual-cam clips points at a composite that has the tracer overlay
+    # baked in and includes the green-side camera, which AI analysis
+    # can't make sense of.
+    analysis_url = clip.tee_clip_url or clip.source_url
+    if not analysis_url:
+        raise HTTPException(400, "clip has no analyzable source")
+    fname = analysis_url.rstrip("/").rsplit("/", 1)[-1]
     if not fname:
-        raise HTTPException(400, "could not parse filename from source_url")
+        raise HTTPException(400, "could not parse filename from analysis URL")
     if "_composite" in fname:
         raise HTTPException(
-            400, "ai-trace doesn't support composite clips (need raw halves)",
+            400,
+            "this clip is a composite and has no raw tee cut on file; "
+            "re-process the long upload to populate tee_clip_url",
         )
     fpath = CLIPS_DIR / fname
     if not fpath.exists():
@@ -993,9 +1001,20 @@ def _process_long_upload_segments(
                 if thumb_path else None
             )
 
+            tee_clip_public_url: str | None = None
             if composite_url:
                 public_source = composite_url
                 public_tracer = composite_url
+                # source_url points at the composite (tee-with-tracer + green),
+                # which AI analysis can't use because the player isn't visible
+                # in the green half and the tracer overlay is baked in. Keep a
+                # pointer to the raw tee cut so the AI page has a single-camera
+                # player-visible clip to target.
+                if seg_path.exists():
+                    compress_for_email(seg_path)
+                    tee_clip_public_url = (
+                        f"{settings.app_base_url}/uploads/clips/{seg_name}"
+                    )
             elif tracer_path and tracer_path.exists():
                 public_source = f"{settings.app_base_url}/uploads/clips/{tracer_path.name}"
                 public_tracer = public_source
@@ -1013,6 +1032,7 @@ def _process_long_upload_segments(
                 source_url=public_source,
                 thumbnail_url=thumb_url,
                 tracer_url=public_tracer,
+                tee_clip_url=tee_clip_public_url,
                 carry_yards=_optional_int(seg.get("carry_yards")),
                 apex_feet=_optional_int(seg.get("apex_feet")),
                 ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
