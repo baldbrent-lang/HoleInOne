@@ -1536,14 +1536,25 @@ def _write_debug(path, busiest_frame, busiest_idx, busiest_cands, first_frame,
                 )
         # Post-impact ball-candidate dots — yellow = every detection that
         # survived the hot-mask filter, green = seeds that passed the
-        # upward-streak prefilter. Everything else (hot-mask red shading,
-        # body / club / foot lines, picked-track magenta, status banner)
-        # was removed so the operator can eyeball the actual ball arc
-        # against the resting-ball anchor without visual noise.
+        # upward-streak prefilter. Each dot is labeled with its source
+        # frame number so the operator can trace a particular candidate
+        # back to the moment it was detected.
         for d in all_detections:
-            cv2.circle(base, (int(d.x), int(d.y)), 2, (0, 255, 255), -1, cv2.LINE_AA)
+            cx, cy = int(d.x), int(d.y)
+            cv2.circle(base, (cx, cy), 2, (0, 255, 255), -1, cv2.LINE_AA)
+            cv2.putText(
+                base, str(int(d.frame)),
+                (cx + 4, cy - 4),
+                cv2.FONT_HERSHEY_PLAIN, 0.6, (0, 255, 255), 1, cv2.LINE_AA,
+            )
         for d in seed_detections:
-            cv2.circle(base, (int(d.x), int(d.y)), 4, (0, 255, 0), -1, cv2.LINE_AA)
+            cx, cy = int(d.x), int(d.y)
+            cv2.circle(base, (cx, cy), 4, (0, 255, 0), -1, cv2.LINE_AA)
+            cv2.putText(
+                base, str(int(d.frame)),
+                (cx + 6, cy - 6),
+                cv2.FONT_HERSHEY_PLAIN, 0.7, (0, 255, 0), 1, cv2.LINE_AA,
+            )
 
     strip = None
     if filmstrip:
