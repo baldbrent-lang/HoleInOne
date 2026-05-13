@@ -286,8 +286,11 @@ export const api = {
       };
       xhr.onerror = () => reject(new Error("network error"));
       xhr.ontimeout = () => reject(new Error("timed out after 4 min"));
+      // Always send sensitivity (default 1.0) — FastAPI's multipart
+      // parser rejects an empty body with "There was an error parsing
+      // the body".
       const fd = new FormData();
-      if (sensitivity != null) fd.append("sensitivity", String(sensitivity));
+      fd.append("sensitivity", String(sensitivity ?? 1.0));
       xhr.send(fd);
     }),
   aiTrace: (key, clipId, model) => {
