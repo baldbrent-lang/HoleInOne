@@ -113,12 +113,13 @@ export default function Admin() {
   return (
     <div className="wrap wide">
       <div className="brand" style={{ justifyContent: "space-between", width: "100%" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div className="logo"><Icon name="flag" /></div>
-          <div>
-            <h1>GolfReelz</h1>
-            <div className="tag">Operator Console</div>
-          </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <img
+            src="/golfreelz-logo.png"
+            alt="GolfReelz"
+            style={{ height: 44, width: "auto", display: "block" }}
+          />
+          <div className="tag">Operator Console</div>
         </div>
       </div>
 
