@@ -805,7 +805,9 @@ def _run_long_upload_job(
                 green_src_path = candidate
 
             segs = list(seg_list or [])
+            auto_used = False
             if not segs and auto_detect_swings:
+                auto_used = True
                 tee_fps = probe_fps(src_path) or 30.0
                 # Combined audio + motion detector: an audio impact only
                 # counts when a motion burst peaks within ±3 s. Filters
@@ -822,6 +824,13 @@ def _run_long_upload_job(
                         "no swings detected (combined audio+motion found "
                         "no paired peaks within the 3s window)"
                     )
+
+            durations = [s["end_sec"] - s["start_sec"] for s in segs]
+            log.info(
+                "long-upload worker: upload=%s segs=%d source=%s durations=%s",
+                upload_id, len(segs), "auto-combined" if auto_used else "manual",
+                ", ".join(f"{d:.1f}s" for d in durations[:30]),
+            )
 
             # Publish total + reset progress so the polling UI can show
             # "X/Y processed" while the heavy work runs.
