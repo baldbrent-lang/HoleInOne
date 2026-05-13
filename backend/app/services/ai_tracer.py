@@ -2693,10 +2693,10 @@ def find_impact_via_audio(input_path: Path, fps: float) -> dict:
 def detect_swings_from_audio(
     input_path: Path,
     fps: float | None = None,
-    min_separation_sec: float = 4.0,
-    before_impact_sec: float = 3.0,
+    min_separation_sec: float = 6.0,
+    before_impact_sec: float = 2.5,
     after_impact_sec: float = 5.0,
-    min_peak_ratio: float = 4.0,
+    min_peak_ratio: float = 6.0,
 ) -> list[dict]:
     """Find every club-on-ball impact in a long video by scanning its
     audio for sharp transients, then return one swing window per
