@@ -720,6 +720,7 @@ def audio_impact_frame(
         "peak_time_sec": info.get("peak_time_sec"),
         "ratio": info.get("ratio"),
         "min_ratio": info.get("min_ratio_used"),
+        "highpass_hz": info.get("highpass_hz"),
         "fps": fps_val,
         "image_url": f"{settings.app_base_url}/uploads/clips/{out_name}?v={mtime}",
     }

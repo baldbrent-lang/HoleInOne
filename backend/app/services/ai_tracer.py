@@ -2598,6 +2598,7 @@ def find_impact_via_audio(
     input_path: Path,
     fps: float,
     min_ratio: float | None = None,
+    highpass_hz: float = 1500.0,
 ) -> dict:
     """Locate impact from the audio track.
 
@@ -2639,6 +2640,7 @@ def find_impact_via_audio(
         "median_envelope": None,
         "ratio": None,
         "duration_sec": None,
+        "highpass_hz": float(highpass_hz) if highpass_hz and highpass_hz > 0 else 0.0,
     }
 
     if not HAS_NP:
@@ -2653,6 +2655,14 @@ def find_impact_via_audio(
 
     # Extract mono PCM int16 audio at AUDIO_SAMPLE_RATE Hz to stdout.
     # -vn skips video, -ac 1 forces mono, -f s16le emits raw PCM.
+    # Apply the same 1.5 kHz high-pass filter the test-cut detector
+    # uses so the peak/median ratio reported here is comparable to
+    # what the operator sees on the long-upload audio detector. Without
+    # it, voices / rumble pump the median up and a real thwack reads
+    # as ×8-10 instead of ×80-150.
+    audio_filter_args: list[str] = []
+    if highpass_hz and highpass_hz > 0:
+        audio_filter_args = ["-af", f"highpass=f={float(highpass_hz)}"]
     try:
         proc = subprocess.run(
             [
@@ -2660,6 +2670,7 @@ def find_impact_via_audio(
                 "-i", str(input_path),
                 "-vn", "-ac", "1",
                 "-ar", str(AUDIO_SAMPLE_RATE),
+                *audio_filter_args,
                 "-f", "s16le", "-",
             ],
             capture_output=True, timeout=60, check=False,
