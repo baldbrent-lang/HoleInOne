@@ -47,7 +47,7 @@ TEXT_MUTED = (210, 218, 230, 255)
 
 # Animation timing (seconds)
 SLIDE_IN_SEC = 0.4
-HOLD_SEC = 2.6
+HOLD_SEC = 3.6
 SLIDE_OUT_SEC = 0.4
 
 # Font search paths — most Linux containers ship DejaVu. Try a couple of
