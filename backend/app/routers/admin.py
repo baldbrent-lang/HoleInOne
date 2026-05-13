@@ -1457,13 +1457,20 @@ def test_cut_long_upload(
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
+    green_path: Path | None = None
+    if row.green_filename:
+        gp = CLIPS_DIR / row.green_filename
+        if gp.exists():
+            green_path = gp
+
     tee_fps = probe_fps(src_path) or 30.0
     detector = (detector or "motion").lower()
+    debug: dict = {}
     if detector == "audio":
         windows = detect_swings_from_audio(src_path, fps=tee_fps)
     else:
         detector = "motion"
-        windows = detect_swings_from_motion(src_path, fps=tee_fps)
+        windows = detect_swings_from_motion(src_path, fps=tee_fps, debug=debug)
 
     # Wipe any previous test cuts for this upload so re-running the
     # detector doesn't accumulate stale files.
@@ -1479,12 +1486,23 @@ def test_cut_long_upload(
     for idx, w in enumerate(windows):
         start_sec = float(w["start_sec"])
         end_sec = float(w["end_sec"])
-        out_name = f"testcut-{upload_id}-{idx:02d}-{secrets.token_hex(4)}.mp4"
-        out_path = testcuts_dir / out_name
-        ok = cut_segment(src_path, out_path, start_sec, end_sec)
+        tok = secrets.token_hex(4)
+        tee_name = f"testcut-{upload_id}-{idx:02d}-tee-{tok}.mp4"
+        tee_out = testcuts_dir / tee_name
+        tee_ok = cut_segment(src_path, tee_out, start_sec, end_sec)
+
+        green_url: str | None = None
+        green_ok: bool | None = None
+        if green_path is not None:
+            green_name = f"testcut-{upload_id}-{idx:02d}-green-{tok}.mp4"
+            green_out = testcuts_dir / green_name
+            green_ok = cut_segment(green_path, green_out, start_sec, end_sec)
+            if green_ok:
+                green_url = f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{green_name}"
+
         cuts.append({
             "index": idx,
-            "ok": bool(ok),
+            "ok": bool(tee_ok),
             "start_sec": start_sec,
             "end_sec": end_sec,
             "duration_sec": round(end_sec - start_sec, 2),
@@ -1493,9 +1511,11 @@ def test_cut_long_upload(
             "confidence": w.get("confidence"),
             "burst_duration_sec": w.get("burst_duration_sec"),
             "url": (
-                f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{out_name}"
-                if ok else None
+                f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{tee_name}"
+                if tee_ok else None
             ),
+            "green_url": green_url,
+            "green_ok": green_ok,
         })
 
     log.info(
@@ -1507,6 +1527,8 @@ def test_cut_long_upload(
         "detector": detector,
         "tee_fps": tee_fps,
         "n_windows": len(windows),
+        "dual_camera": green_path is not None,
+        "debug": debug if detector == "motion" else None,
         "cuts": cuts,
     }
 

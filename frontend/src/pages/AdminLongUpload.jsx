@@ -370,18 +370,56 @@ export default function AdminLongUpload() {
                           {testCutResults[u.id].tee_fps != null && (
                             <> · {testCutResults[u.id].tee_fps} fps</>
                           )}
+                          {testCutResults[u.id].dual_camera && <> · dual-cam</>}
                         </span>
                       </div>
+                      {testCutResults[u.id].debug && (
+                        <div className="tiny muted" style={{ marginBottom: 8, fontFamily: "monospace", lineHeight: 1.4 }}>
+                          {testCutResults[u.id].debug.reason ? (
+                            <div className="err-text">reason: {testCutResults[u.id].debug.reason}</div>
+                          ) : (
+                            <>
+                              motion: median={testCutResults[u.id].debug.median_motion?.toFixed(4)}{" "}
+                              · threshold={testCutResults[u.id].debug.threshold?.toFixed(4)}{" "}
+                              (×{testCutResults[u.id].debug.motion_ratio_used})
+                              {" "}· max={testCutResults[u.id].debug.max_motion?.toFixed(4)}
+                              <br />
+                              bursts: raw={testCutResults[u.id].debug.n_raw_bursts}
+                              {" "}· duration_ok={testCutResults[u.id].debug.n_duration_ok}
+                              {" "}· final={testCutResults[u.id].debug.n_final}
+                              {" "}· sampled @ {testCutResults[u.id].debug.effective_hz?.toFixed(1)} Hz
+                              {" "}over {testCutResults[u.id].debug.duration_sec?.toFixed(1)}s
+                              {Array.isArray(testCutResults[u.id].debug.top_raw_bursts) &&
+                                testCutResults[u.id].debug.top_raw_bursts.length > 0 && (
+                                <>
+                                  <br />
+                                  top raw bursts (sec, dur, ×ratio, passes-duration):
+                                  <br />
+                                  {testCutResults[u.id].debug.top_raw_bursts.map((b, i) => (
+                                    <span key={i} style={{ marginRight: 10 }}>
+                                      [{b.start_sec}-{b.end_sec}] {b.duration_sec}s ×{b.peak_ratio}{" "}
+                                      {b.passes_duration ? "✓" : "✗"}
+                                    </span>
+                                  ))}
+                                </>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
                       {testCutResults[u.id].cuts.length === 0 && (
                         <div className="tiny muted">
-                          No swings detected. Try the other detector, or check the
-                          server log for the threshold/median trace.
+                          No swings detected. The diagnostic line above shows
+                          whether the median/threshold was too high or the
+                          duration filter rejected everything.
                         </div>
                       )}
                       <div
                         style={{
                           display: "grid",
-                          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                          gridTemplateColumns: testCutResults[u.id].dual_camera
+                            ? "repeat(auto-fill, minmax(360px, 1fr))"
+                            : "repeat(auto-fill, minmax(220px, 1fr))",
                           gap: 8,
                         }}
                       >
@@ -396,17 +434,38 @@ export default function AdminLongUpload() {
                               {c.ratio != null && <> · ×{c.ratio.toFixed(1)}</>}
                               {c.confidence && <> · {c.confidence}</>}
                             </div>
-                            {c.ok && c.url ? (
-                              <video
-                                src={c.url}
-                                controls
-                                playsInline
-                                preload="metadata"
-                                style={{ width: "100%", borderRadius: 6, background: "#000" }}
-                              />
-                            ) : (
-                              <div className="tiny err-text">cut failed</div>
-                            )}
+                            <div
+                              style={{
+                                display: "grid",
+                                gridTemplateColumns: testCutResults[u.id].dual_camera ? "1fr 1fr" : "1fr",
+                                gap: 4,
+                              }}
+                            >
+                              {c.ok && c.url ? (
+                                <video
+                                  src={c.url}
+                                  controls
+                                  playsInline
+                                  preload="metadata"
+                                  style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                                />
+                              ) : (
+                                <div className="tiny err-text">tee cut failed</div>
+                              )}
+                              {testCutResults[u.id].dual_camera && (
+                                c.green_url ? (
+                                  <video
+                                    src={c.green_url}
+                                    controls
+                                    playsInline
+                                    preload="metadata"
+                                    style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                                  />
+                                ) : c.green_ok === false ? (
+                                  <div className="tiny err-text">green cut failed</div>
+                                ) : null
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>

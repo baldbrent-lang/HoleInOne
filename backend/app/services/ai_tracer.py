@@ -2700,6 +2700,7 @@ def detect_swings_from_motion(
     before_motion_sec: float = 3.5,
     after_motion_sec: float = 5.0,
     motion_ratio: float = 4.0,
+    debug: dict | None = None,
 ) -> list[dict]:
     """Find every swing in a long tee-side video by scanning for bursts
     of high pixel motion.
@@ -2730,13 +2731,26 @@ def detect_swings_from_motion(
     or no motion bursts pass the duration + amplitude gates. Never
     raises.
     """
+    if debug is not None:
+        debug.update({
+            "reason": None,
+            "motion_ratio_used": float(motion_ratio),
+            "sample_height": int(sample_height),
+            "min_swing_sec": float(min_swing_sec),
+            "max_swing_sec": float(max_swing_sec),
+        })
+
     if not HAS_CV or not HAS_NP:
         log.info("ai_tracer: detect_swings_from_motion — missing opencv / numpy")
+        if debug is not None:
+            debug["reason"] = "opencv or numpy not installed"
         return []
 
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         log.warning("ai_tracer: detect_swings_from_motion — cannot open %s", input_path)
+        if debug is not None:
+            debug["reason"] = "could not open video"
         return []
 
     try:
@@ -2745,6 +2759,8 @@ def detect_swings_from_motion(
             src_fps = 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         if total_frames <= 2:
+            if debug is not None:
+                debug["reason"] = f"video has only {total_frames} frame(s)"
             return []
 
         # We don't need full-rate motion — 10 Hz is plenty to find ~1 s
@@ -2779,6 +2795,8 @@ def detect_swings_from_motion(
         cap.release()
 
     if len(diffs) < 4:
+        if debug is not None:
+            debug["reason"] = f"only {len(diffs)} usable frame diffs"
         return []
 
     motion = np.asarray(diffs, dtype=np.float32)
@@ -2872,6 +2890,36 @@ def detect_swings_from_motion(
         len(segments), len(bursts), len(accepted),
         duration_sec, median, threshold, effective_hz,
     )
+    if debug is not None:
+        # Top-10 raw bursts (regardless of duration filter) so we can
+        # see whether the duration gate or the amplitude gate was the
+        # one that nuked everything.
+        ranked = sorted(bursts, key=lambda t: -t[3])[:10]
+        debug.update({
+            "effective_hz": float(effective_hz),
+            "duration_sec": float(duration_sec),
+            "n_motion_samples": int(motion.size),
+            "median_motion": float(median),
+            "threshold": float(threshold),
+            "min_motion": float(motion.min()),
+            "max_motion": float(motion.max()),
+            "n_raw_bursts": len(bursts),
+            "n_duration_ok": len(accepted),
+            "n_final": len(segments),
+            "top_raw_bursts": [
+                {
+                    "start_sec": round(s_i / effective_hz, 2) if effective_hz else 0.0,
+                    "end_sec": round(e_i / effective_hz, 2) if effective_hz else 0.0,
+                    "duration_sec": round((e_i - s_i) / effective_hz, 2) if effective_hz else 0.0,
+                    "peak_sec": round(p_i / effective_hz, 2) if effective_hz else 0.0,
+                    "peak_ratio": round(p_v / median, 2) if median > 0 else None,
+                    "passes_duration": (
+                        min_swing_sec <= ((e_i - s_i) / effective_hz if effective_hz else 0) <= max_swing_sec
+                    ),
+                }
+                for s_i, e_i, p_i, p_v in ranked
+            ],
+        })
     return segments
 
 
