@@ -383,16 +383,12 @@ def _resolve_model(model_override: str | None = None) -> str:
 
 
 def _resolve_frame_picker_model(model_override: str | None = None) -> str:
-    """Frame-picker tasks (address, handedness, pick impact, refine
-    impact) always use Haiku 4.5 — they're multiple-choice problems on
-    pre-extracted labeled thumbnails where Haiku matches Opus accuracy
-    at ~1/5 the cost. The model_override parameter from the UI is
-    intentionally ignored here: it's plumbed through to the ball
-    tracker (the only call where per-pixel accuracy actually
-    dominates), and forcing all six steps onto Opus via the UI was
-    silently undoing the cost reduction. If you ever want to force
-    Opus on the pickers for A/B testing, edit this function directly."""
-    return "claude-haiku-4-5"
+    """Routes back to _resolve_model so the four frame-picker tasks run
+    on whatever the operator picked (Opus by default). We tried Haiku
+    here for cost — accuracy regressed too much in practice, so reverted.
+    Kept the helper in place in case we want per-task model routing
+    later (e.g. send handedness to Haiku but keep address on Opus)."""
+    return _resolve_model(model_override)
 
 
 def _maybe_apply_clahe(frame):
