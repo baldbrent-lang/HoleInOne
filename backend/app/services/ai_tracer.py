@@ -2697,8 +2697,8 @@ def detect_swings_from_motion(
     min_swing_sec: float = 0.5,
     max_swing_sec: float = 3.5,
     min_separation_sec: float = 5.0,
-    before_motion_sec: float = 1.5,
-    after_motion_sec: float = 3.0,
+    before_motion_sec: float = 3.5,
+    after_motion_sec: float = 5.0,
     motion_ratio: float = 4.0,
 ) -> list[dict]:
     """Find every swing in a long tee-side video by scanning for bursts
