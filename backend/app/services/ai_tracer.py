@@ -2705,9 +2705,10 @@ def render_tracer_video(
                             cv2.LINE_AA,
                         )
                         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-                if rest_xy is not None:
-                    cv2.circle(frame, rest_xy, 12, (0, 0, 0), 4, cv2.LINE_AA)
-                    cv2.circle(frame, rest_xy, 10, TRACER_REST_RING, 3, cv2.LINE_AA)
+                # Resting-ball indicator at the origin removed too — operator
+                # wants nothing but the smoothed tracer line in the final
+                # production output. rest_xy is still threaded through the
+                # pipeline for the debug image / future use.
             # Per-frame ball ring removed for production output. The
             # smoothed tracer polyline is enough on its own; the ring
             # used to "pop" frame-to-frame which read as visual noise.
