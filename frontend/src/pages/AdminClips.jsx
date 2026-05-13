@@ -107,6 +107,12 @@ export default function AdminClips() {
         const info = result?.tracer_info;
         const debugUrl = result?.tracer_debug_url;
         const isComposite = (c.source_url || "").includes("_composite");
+        // For dual-cam composites the page shows the raw tee cut + runs
+        // the tracer on it; the composite source_url is unusable for the
+        // classical-CV tracer (overlay baked in, green half concatenated).
+        const sourceUrlForPlayer =
+          isComposite && c.tee_clip_url ? c.tee_clip_url : c.source_url;
+        const canRetry = !isComposite || !!c.tee_clip_url;
         return (
           <div key={c.id} className="card" style={{ marginBottom: 12 }}>
             <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
@@ -135,9 +141,16 @@ export default function AdminClips() {
 
             <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div>
-                <div className="tiny upper muted" style={{ marginBottom: 4 }}>Source</div>
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  Source
+                  {isComposite && c.tee_clip_url && (
+                    <span className="muted" style={{ marginLeft: 6 }}>
+                      · raw tee cut (composite hidden for tracer iteration)
+                    </span>
+                  )}
+                </div>
                 <video
-                  src={c.source_url}
+                  src={sourceUrlForPlayer}
                   poster={c.thumbnail_url || undefined}
                   controls
                   style={{ width: "100%", borderRadius: 8, background: "#000" }}
@@ -200,8 +213,14 @@ export default function AdminClips() {
             <div className="row" style={{ marginTop: 12 }}>
               <button
                 onClick={() => retryOne(c.id)}
-                disabled={!!retrying[c.id] || isComposite}
-                title={isComposite ? "Composite clips need raw halves — re-upload" : "Re-run the tracer with current thresholds"}
+                disabled={!!retrying[c.id] || !canRetry}
+                title={
+                  !canRetry
+                    ? "Composite clip with no raw tee cut on file — re-process the long upload to populate it"
+                    : isComposite
+                    ? "Re-run the classical-CV tracer on the stored raw tee cut"
+                    : "Re-run the tracer with current thresholds"
+                }
               >
                 <Icon name="play" size={14} />{" "}
                 {retrying[c.id] ? "Running tracer…" : "Retry tracer"}

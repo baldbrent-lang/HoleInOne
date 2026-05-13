@@ -603,16 +603,23 @@ def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
     clip = db.get(VideoClip, clip_id)
     if not clip:
         raise HTTPException(404, "clip not found")
-    if not clip.source_url:
-        raise HTTPException(400, "clip has no source_url")
+    # Prefer the raw tee-only cut for composite clips — source_url for
+    # dual-cam clips points at a composite that the classical CV tracer
+    # can't make sense of (tracer overlay baked in + concatenated green
+    # half).
+    tracer_input_url = clip.tee_clip_url or clip.source_url
+    if not tracer_input_url:
+        raise HTTPException(400, "clip has no tracer input URL")
     # Pull the file name from the URL — we stored it as
     # {base}/uploads/clips/{fname}. Use the URL's last segment.
-    fname = clip.source_url.rstrip("/").rsplit("/", 1)[-1]
+    fname = tracer_input_url.rstrip("/").rsplit("/", 1)[-1]
     if not fname:
-        raise HTTPException(400, "could not parse filename from source_url")
+        raise HTTPException(400, "could not parse filename from tracer input URL")
     if "_composite" in fname:
         raise HTTPException(
-            400, "retry-tracer doesn't yet support composite clips (need raw halves)",
+            400,
+            "this clip is a composite and has no raw tee cut on file; "
+            "re-process the long upload to populate tee_clip_url",
         )
     fpath = CLIPS_DIR / fname
     if not fpath.exists():
