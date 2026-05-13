@@ -20,6 +20,7 @@ export default function AdminClips() {
   const [error, setError] = useState(null);
   const [retrying, setRetrying] = useState({});      // {clip_id: true}
   const [sensitivity, setSensitivity] = useState({}); // {clip_id: float}
+  const [lightboxUrl, setLightboxUrl] = useState(null);
   const [results, setResults] = useState({});        // {clip_id: {tracer_url, tracer_info, tracer_debug_url}}
 
   async function load() {
@@ -188,12 +189,17 @@ export default function AdminClips() {
             {debugUrl && (
               <div style={{ marginTop: 10 }}>
                 <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                  Detector debug image
+                  Detector debug image{" "}
+                  <span style={{ textTransform: "none" }}>· click to enlarge</span>
                 </div>
                 <img
                   src={debugUrl}
                   alt="ball candidates debug"
-                  style={{ width: "100%", maxWidth: 800, borderRadius: 8, border: "1px solid var(--border)" }}
+                  onClick={() => setLightboxUrl(debugUrl)}
+                  style={{
+                    width: "100%", maxWidth: 800, borderRadius: 8,
+                    border: "1px solid var(--border)", cursor: "zoom-in",
+                  }}
                 />
               </div>
             )}
@@ -259,6 +265,36 @@ export default function AdminClips() {
           </div>
         );
       })}
+
+      {lightboxUrl && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setLightboxUrl(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.85)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 1000,
+            cursor: "zoom-out",
+            padding: 24,
+          }}
+        >
+          <img
+            src={lightboxUrl}
+            alt="debug image enlarged"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: "100%",
+              maxHeight: "100%",
+              borderRadius: 8,
+              cursor: "default",
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }
