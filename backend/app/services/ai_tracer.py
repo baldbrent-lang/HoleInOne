@@ -2841,12 +2841,43 @@ def detect_swings_from_motion(
             continue
         accepted.append((s_i, e_i, p_i, p_v))
 
+    def _populate_debug(n_final: int) -> None:
+        if debug is None:
+            return
+        ranked = sorted(bursts, key=lambda t: -t[3])[:10]
+        debug.update({
+            "effective_hz": float(effective_hz),
+            "duration_sec": float(duration_sec),
+            "n_motion_samples": int(motion.size),
+            "median_motion": float(median),
+            "threshold": float(threshold),
+            "min_motion": float(motion.min()),
+            "max_motion": float(motion.max()),
+            "n_raw_bursts": len(bursts),
+            "n_duration_ok": len(accepted),
+            "n_final": int(n_final),
+            "top_raw_bursts": [
+                {
+                    "start_sec": round(s_i / effective_hz, 2) if effective_hz else 0.0,
+                    "end_sec": round(e_i / effective_hz, 2) if effective_hz else 0.0,
+                    "duration_sec": round((e_i - s_i) / effective_hz, 2) if effective_hz else 0.0,
+                    "peak_sec": round(p_i / effective_hz, 2) if effective_hz else 0.0,
+                    "peak_ratio": round(p_v / median, 2) if median > 0 else None,
+                    "passes_duration": (
+                        min_swing_sec <= ((e_i - s_i) / effective_hz if effective_hz else 0) <= max_swing_sec
+                    ),
+                }
+                for s_i, e_i, p_i, p_v in ranked
+            ],
+        })
+
     if not accepted:
         log.info(
             "ai_tracer: detect_swings_from_motion — %d raw bursts, 0 passed "
             "duration filter [%.1f, %.1f] s (median=%.4f threshold=%.4f)",
             len(bursts), min_swing_sec, max_swing_sec, median, threshold,
         )
+        _populate_debug(0)
         return []
 
     # Non-max suppression — collapse bursts whose peaks land within
@@ -2890,36 +2921,7 @@ def detect_swings_from_motion(
         len(segments), len(bursts), len(accepted),
         duration_sec, median, threshold, effective_hz,
     )
-    if debug is not None:
-        # Top-10 raw bursts (regardless of duration filter) so we can
-        # see whether the duration gate or the amplitude gate was the
-        # one that nuked everything.
-        ranked = sorted(bursts, key=lambda t: -t[3])[:10]
-        debug.update({
-            "effective_hz": float(effective_hz),
-            "duration_sec": float(duration_sec),
-            "n_motion_samples": int(motion.size),
-            "median_motion": float(median),
-            "threshold": float(threshold),
-            "min_motion": float(motion.min()),
-            "max_motion": float(motion.max()),
-            "n_raw_bursts": len(bursts),
-            "n_duration_ok": len(accepted),
-            "n_final": len(segments),
-            "top_raw_bursts": [
-                {
-                    "start_sec": round(s_i / effective_hz, 2) if effective_hz else 0.0,
-                    "end_sec": round(e_i / effective_hz, 2) if effective_hz else 0.0,
-                    "duration_sec": round((e_i - s_i) / effective_hz, 2) if effective_hz else 0.0,
-                    "peak_sec": round(p_i / effective_hz, 2) if effective_hz else 0.0,
-                    "peak_ratio": round(p_v / median, 2) if median > 0 else None,
-                    "passes_duration": (
-                        min_swing_sec <= ((e_i - s_i) / effective_hz if effective_hz else 0) <= max_swing_sec
-                    ),
-                }
-                for s_i, e_i, p_i, p_v in ranked
-            ],
-        })
+    _populate_debug(len(segments))
     return segments
 
 
