@@ -589,7 +589,11 @@ def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
 
 
 @router.post("/clips/{clip_id}/retry-tracer")
-def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
+def retry_tracer(
+    clip_id: int,
+    sensitivity: float = Form(1.0),
+    db: Session = Depends(get_db),
+):
     """Re-run the classical-CV tracer on an existing clip's source file.
 
     For iteration: lets us tune detector thresholds and re-render the
@@ -624,7 +628,7 @@ def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
     fpath = CLIPS_DIR / fname
     if not fpath.exists():
         raise HTTPException(404, f"source file missing on disk: {fname}")
-    tracer_url, tracer_info, _, tracer_debug_url = _run_tracer(fpath)
+    tracer_url, tracer_info, _, tracer_debug_url = _run_tracer(fpath, sensitivity=float(sensitivity))
     clip.tracer_url = tracer_url
     db.add(AuditLog(actor="admin", action="retry_tracer", target=f"clip:{clip.id}",
                     detail=str(tracer_info)))
@@ -1758,13 +1762,19 @@ def _optional_int(v):
         return None
 
 
-def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, str | None]:
+def _run_tracer(
+    clip_path: Path,
+    sensitivity: float = 1.0,
+) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
     Returns (tracer_url, info, traced_path, debug_url). Best-effort: any
     failure here still returns a debug image URL so the operator can see
     what the detector is staring at (candidates circled in red, or a
     "0 candidates" overlay if the HSV/motion gates filtered everything).
+
+    `sensitivity` (default 1.0) is forwarded to render_tracer so the
+    AdminClips UI can iterate on detector strictness without redeploying.
     """
     if not have_tracer():
         return None, {"ok": False, "error": "opencv not installed"}, None, None
@@ -1792,8 +1802,13 @@ def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, 
         audio_impact.get("ok"),
     )
 
-    info = render_tracer(clip_path, traced_path, debug_path, impact_frame_hint=impact_hint)
+    info = render_tracer(
+        clip_path, traced_path, debug_path,
+        impact_frame_hint=impact_hint,
+        sensitivity=float(sensitivity),
+    )
     info["audio_impact"] = audio_impact
+    info["sensitivity"] = float(sensitivity)
     debug_url = (
         f"{settings.app_base_url}/uploads/clips/{debug_name}"
         if debug_path.exists() else None

@@ -267,11 +267,28 @@ export const api = {
       }
       xhr.send(fd);
     }),
-  retryTracer: (key, clipId) =>
+  retryTracer: (key, clipId, { sensitivity } = {}) =>
     // Tracer can run ~1-3 min on long clips. Time out at 4 min so the
     // UI doesn't spin forever if the server hangs or gets killed.
-    request(`/api/admin/clips/${clipId}/retry-tracer`, {
-      method: "POST", adminPassword: key, timeoutMs: 240_000,
+    // Optional `sensitivity` multiplier (>1 = looser, <1 = stricter)
+    // gets sent as a form param.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/clips/${clipId}/retry-tracer`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 240_000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 4 min"));
+      const fd = new FormData();
+      if (sensitivity != null) fd.append("sensitivity", String(sensitivity));
+      xhr.send(fd);
     }),
   aiTrace: (key, clipId, model) => {
     // Five Claude steps: address, handedness, rough impact, refined

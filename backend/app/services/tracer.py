@@ -14,8 +14,12 @@ the raw clip.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+# Serializes per-call sensitivity overrides — see render_tracer().
+_SENSITIVITY_LOCK = threading.Lock()
 
 log = logging.getLogger("golfreelz.tracer")
 
@@ -319,27 +323,46 @@ def render_tracer(
     output_path: Path,
     debug_path: Path | None = None,
     impact_frame_hint: int | None = None,
+    sensitivity: float = 1.0,
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
 
-    If `debug_path` is provided, also save a JPG of the first frame that
-    has any ball candidates (with every candidate circled in red),
-    regardless of whether the trajectory passed the parabolic-fit gate.
-    On total detection failure, saves the first frame of the video with
-    a "0 candidates" overlay so the operator can see what the detector
-    is staring at.
-
-    Returns a dict shaped like::
-        {ok: bool, residual_px: float|None, n_points: int,
-         n_candidates: int, frame_range: [int,int]|None, error: str|None}
-
-    Caller is responsible for handing the output to compress_for_email()
-    if browser-playable H.264 is needed (cv2 writes mp4v by default).
+    `sensitivity` (default 1.0) scales the four candidate-count knobs:
+    BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_UPWARD_CHAIN_LEN, and
+    MIN_UPWARD_DY_PER_FRAME. Values > 1 make the tracer pickier-against-
+    noise looser (more dots), values < 1 make it stricter. We patch the
+    module constants for the duration of the call under a lock so two
+    concurrent renders don't trample each other.
     """
     if not HAS_CV:
         return {"ok": False, "error": "opencv not installed", "n_points": 0, "n_candidates": 0}
     try:
-        return _render(input_path, output_path, debug_path, impact_frame_hint=impact_frame_hint)
+        if sensitivity == 1.0:
+            return _render(input_path, output_path, debug_path, impact_frame_hint=impact_frame_hint)
+        with _SENSITIVITY_LOCK:
+            global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
+            originals = (
+                BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA,
+                MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME,
+            )
+            try:
+                BG_VAR_THRESHOLD = max(5, int(round(originals[0] / sensitivity)))
+                MIN_CIRCULARITY = max(0.10, originals[1] / sensitivity)
+                MIN_BALL_AREA = max(1, int(round(originals[2] / sensitivity)))
+                MIN_UPWARD_CHAIN_LEN = max(2, int(round(originals[3] / sensitivity)))
+                MIN_UPWARD_DY_PER_FRAME = max(1.0, originals[4] / sensitivity)
+                log.info(
+                    "tracer: sensitivity=%.2f → bg_var=%d, min_circ=%.2f, "
+                    "min_area=%d, min_chain=%d, min_dy=%.1f",
+                    sensitivity, BG_VAR_THRESHOLD, MIN_CIRCULARITY,
+                    MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME,
+                )
+                return _render(input_path, output_path, debug_path, impact_frame_hint=impact_frame_hint)
+            finally:
+                (
+                    BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA,
+                    MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME,
+                ) = originals
     except Exception as exc:  # pragma: no cover
         log.warning("tracer crashed on %s: %s", input_path, exc)
         try:

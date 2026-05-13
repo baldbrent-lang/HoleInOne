@@ -19,6 +19,7 @@ export default function AdminClips() {
   const [clips, setClips] = useState(null);
   const [error, setError] = useState(null);
   const [retrying, setRetrying] = useState({});      // {clip_id: true}
+  const [sensitivity, setSensitivity] = useState({}); // {clip_id: float}
   const [results, setResults] = useState({});        // {clip_id: {tracer_url, tracer_info, tracer_debug_url}}
 
   async function load() {
@@ -37,8 +38,10 @@ export default function AdminClips() {
 
   async function retryOne(clipId) {
     setRetrying((r) => ({ ...r, [clipId]: true }));
+    const s = parseFloat(sensitivity[clipId]);
+    const opts = (Number.isFinite(s) && s > 0 && s !== 1.0) ? { sensitivity: s } : {};
     try {
-      const data = await api.retryTracer(adminPassword, clipId);
+      const data = await api.retryTracer(adminPassword, clipId, opts);
       setResults((r) => ({ ...r, [clipId]: data }));
       // Patch the clip in-place so the row reflects new tracer_url
       setClips((cs) =>
@@ -210,7 +213,29 @@ export default function AdminClips() {
               </p>
             )}
 
-            <div className="row" style={{ marginTop: 12 }}>
+            <div
+              className="row"
+              style={{ marginTop: 12, gap: 8, alignItems: "center", flexWrap: "wrap" }}
+            >
+              <label
+                className="small muted"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                title="Sensitivity multiplier. 1.0 = current defaults. Higher = more dots / looser filters (BG var, circularity, upward-streak length, upward dy). Lower = stricter."
+              >
+                sensitivity
+                <input
+                  type="number"
+                  min="0.2"
+                  max="5"
+                  step="0.1"
+                  value={sensitivity[c.id] ?? 1.0}
+                  onChange={(e) =>
+                    setSensitivity((s) => ({ ...s, [c.id]: e.target.value }))
+                  }
+                  disabled={!!retrying[c.id]}
+                  style={{ width: 64, fontSize: 13, padding: "2px 6px" }}
+                />
+              </label>
               <button
                 onClick={() => retryOne(c.id)}
                 disabled={!!retrying[c.id] || !canRetry}
