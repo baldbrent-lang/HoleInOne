@@ -180,6 +180,8 @@ export const api = {
   flaggedClips: (key) => request(`/api/admin/flagged-clips`, { adminPassword: key }),
   listAllClips: (key, limit = 100) =>
     request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
+  listBroadcastClips: (key, limit = 100) =>
+    request(`/api/admin/broadcast-clips?limit=${limit}`, { adminPassword: key }),
   retryTracer: (key, clipId) =>
     // Tracer can run ~1-3 min on long clips. Time out at 4 min so the
     // UI doesn't spin forever if the server hangs or gets killed.

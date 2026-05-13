@@ -75,6 +75,7 @@ export default function AdminClipsAi() {
         <Link to="/admin/long-upload">Long upload</Link>
         <Link to="/admin/clips">All clips</Link>
         <Link to="/admin/clips/ai" className="active">AI tracer</Link>
+        <Link to="/admin/broadcast-clips">Broadcast</Link>
         <Link to="/admin/showcase">Home videos</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>

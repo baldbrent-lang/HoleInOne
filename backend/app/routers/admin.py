@@ -524,6 +524,64 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
     return out
 
 
+@router.get("/broadcast-clips")
+def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
+    """List dual-camera composite clips for broadcast-style review.
+
+    Filters to clips whose source filename contains '_composite' —
+    the deliverable produced by the dual-camera path of long-upload
+    (tee tracer overlay spliced into the green-side landing). Newest
+    first. Same per-clip shape as /clips so the existing FPS / source-
+    device header line works without modification.
+    """
+    clips = (
+        db.query(VideoClip)
+        .filter(VideoClip.source_url.like("%_composite%"))
+        .order_by(VideoClip.created_at.desc())
+        .limit(max(1, min(500, limit)))
+        .all()
+    )
+    course_ids = {c.course_id for c in clips}
+    participant_ids = {c.participant_id for c in clips if c.participant_id}
+    courses = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
+    participants = (
+        {p.id: p for p in db.query(Participant).filter(Participant.id.in_(participant_ids)).all()}
+        if participant_ids else {}
+    )
+    out = []
+    for c in clips:
+        course = courses.get(c.course_id)
+        participant = participants.get(c.participant_id) if c.participant_id else None
+        fps_val: float | None = None
+        source_device: str | None = None
+        if c.source_url:
+            fname = c.source_url.rstrip("/").rsplit("/", 1)[-1]
+            if fname:
+                source_path = CLIPS_DIR / fname
+                if source_path.exists():
+                    fps_val = probe_fps(source_path)
+                    source_device = probe_source_device(source_path)
+        out.append({
+            "id": c.id,
+            "course_id": c.course_id,
+            "course_name": course.name if course else None,
+            "hole_number": c.hole_number,
+            "camera_type": c.camera_type,
+            "captured_at": c.captured_at.isoformat() if c.captured_at else None,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "source_url": c.source_url,
+            "tracer_url": c.tracer_url,
+            "thumbnail_url": c.thumbnail_url,
+            "ball_in_cup": bool(c.ball_in_cup),
+            "processing_status": c.processing_status,
+            "participant_id": c.participant_id,
+            "participant_name": participant.name if participant else None,
+            "fps": round(fps_val, 1) if fps_val is not None else None,
+            "source_device": source_device,
+        })
+    return out
+
+
 @router.post("/clips/{clip_id}/retry-tracer")
 def retry_tracer(clip_id: int, db: Session = Depends(get_db)):
     """Re-run the classical-CV tracer on an existing clip's source file.
