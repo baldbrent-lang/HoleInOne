@@ -176,13 +176,19 @@ REFINE_IMPACT_FRAME_W = 768
 # without benefit, so we sit right at the sweet spot. Parallel calls
 # keep wall time manageable across the typical 30-60 frame flight.
 BALL_TRACK_FRAME_W = 1568
-# Default frame budget. Slow-mo clips (≥50 fps) need ~2× as many
-# frames to span the same wall-clock duration of flight, so we
-# auto-bump to BALL_TRACK_MAX_FRAMES_HIGH_FPS when the source fps
-# crosses BALL_TRACK_HIGH_FPS_THRESHOLD. Caller can still override.
+# Default frame budget by source fps:
+#   <50 fps : 20 consecutive frames (~0.4-0.7 s of flight at 30/60 fps)
+#   50-100  : 40 consecutive frames (still every-frame, twice the
+#             budget to cover the same wall-clock duration)
+#   >100    : 40 frames sampled with STRIDE = 2 (every other frame,
+#             80-frame span). Cost stays at 40 Claude calls but
+#             the time window doubles to match what the lower-fps
+#             buckets cover in absolute time.
 BALL_TRACK_MAX_FRAMES = 20
 BALL_TRACK_MAX_FRAMES_HIGH_FPS = 40
 BALL_TRACK_HIGH_FPS_THRESHOLD = 50.0
+BALL_TRACK_VHIGH_FPS_THRESHOLD = 100.0
+BALL_TRACK_VHIGH_FPS_STRIDE = 2
 BALL_TRACK_CONCURRENCY = 8
 
 # Phase-2 retry sends a crop. Crop size is in NATIVE pixels (how much
@@ -1462,22 +1468,30 @@ def track_ball_after_impact(
         info["error"] = "video has no frames"
         return info
 
-    # Resolve frame budget. Slow-mo clips need more frames to span the
-    # same visible flight time; auto-bump unless caller explicitly set
-    # max_frames.
+    # Resolve frame budget + stride from clip fps. Goal: roughly the
+    # same wall-clock window of flight covered by ~20-40 Claude calls
+    # regardless of source fps.
+    stride = 1
     if max_frames is None:
-        if clip_fps >= BALL_TRACK_HIGH_FPS_THRESHOLD:
+        if clip_fps > BALL_TRACK_VHIGH_FPS_THRESHOLD:
+            # Slow-mo (>100 fps): same 40-call budget, but every other
+            # frame so we span 2× the time window.
+            max_frames = BALL_TRACK_MAX_FRAMES_HIGH_FPS
+            stride = BALL_TRACK_VHIGH_FPS_STRIDE
+        elif clip_fps >= BALL_TRACK_HIGH_FPS_THRESHOLD:
             max_frames = BALL_TRACK_MAX_FRAMES_HIGH_FPS
         else:
             max_frames = BALL_TRACK_MAX_FRAMES
         log.info(
-            "ai_tracer: ball_track — fps=%.1f → max_frames=%d",
-            clip_fps, max_frames,
+            "ai_tracer: ball_track — fps=%.1f → max_frames=%d, stride=%d "
+            "(spanning %d frames)",
+            clip_fps, max_frames, stride, max_frames * stride,
         )
 
     impact_frame_idx = int(impact_frame_idx)
-    last_frame = min(total_frames - 1, impact_frame_idx + max_frames - 1)
-    frame_indices = list(range(impact_frame_idx, last_frame + 1))
+    span = max_frames * stride
+    last_frame = min(total_frames - 1, impact_frame_idx + span - 1)
+    frame_indices = list(range(impact_frame_idx, last_frame + 1, stride))
     if not frame_indices:
         info["error"] = "no frames to process"
         return info
@@ -1539,13 +1553,15 @@ def track_ball_after_impact(
             if roi is None and ball_xy_native is not None:
                 bx = int(round(float(ball_xy_native[0])))
                 by = int(round(float(ball_xy_native[1])))
-                # Horizontal: ±45% of frame width around ball x — wide
-                # enough to cover hooks, slices and high-speed lateral
-                # drift. Vertical: from image top down to ball_y + 60
-                # (small buffer below for the very first impact frame
-                # where the ball might still be at rest, plus margin
-                # for the highlight ring).
-                half_w = int(native_w * 0.45)
+                # Horizontal: ±30% of frame width around ball x — gives
+                # 60% of the frame as a centered band on the ball flight
+                # zone. Tight enough to remove the side baskets / off-
+                # frame golfers / parked carts but wide enough to handle
+                # typical hooks and slices. Vertical: from image top
+                # down to ball_y + 60 (buffer for the very first
+                # impact frame where the ball might still be at rest,
+                # plus margin for the highlight ring).
+                half_w = int(native_w * 0.30)
                 buffer_below = 60
                 roi = (
                     max(0, bx - half_w),
