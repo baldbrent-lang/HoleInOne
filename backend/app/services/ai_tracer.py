@@ -383,19 +383,15 @@ def _resolve_model(model_override: str | None = None) -> str:
 
 
 def _resolve_frame_picker_model(model_override: str | None = None) -> str:
-    """Like _resolve_model but defaults to Haiku 4.5 for the four "pick a
-    frame from labeled candidates" tasks (address, handedness, pick
-    impact, refine impact). These are multiple-choice problems on
-    pre-extracted thumbnails where Haiku matches Opus accuracy at ~1/5
-    the cost. Operator-supplied model_override still wins so the AI
-    page can force Opus for A/B testing."""
-    if model_override:
-        if model_override in SUPPORTED_MODELS:
-            return model_override
-        log.warning(
-            "ai_tracer: ignoring unsupported model_override %r; using haiku",
-            model_override,
-        )
+    """Frame-picker tasks (address, handedness, pick impact, refine
+    impact) always use Haiku 4.5 — they're multiple-choice problems on
+    pre-extracted labeled thumbnails where Haiku matches Opus accuracy
+    at ~1/5 the cost. The model_override parameter from the UI is
+    intentionally ignored here: it's plumbed through to the ball
+    tracker (the only call where per-pixel accuracy actually
+    dominates), and forcing all six steps onto Opus via the UI was
+    silently undoing the cost reduction. If you ever want to force
+    Opus on the pickers for A/B testing, edit this function directly."""
     return "claude-haiku-4-5"
 
 
