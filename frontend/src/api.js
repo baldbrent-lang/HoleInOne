@@ -182,6 +182,30 @@ export const api = {
     request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
   listBroadcastClips: (key, limit = 100) =>
     request(`/api/admin/broadcast-clips?limit=${limit}`, { adminPassword: key }),
+  listLongUploads: (key, limit = 100) =>
+    request(`/api/admin/long-uploads?limit=${limit}`, { adminPassword: key }),
+  reprocessLongUpload: (key, uploadId, formData) =>
+    // Re-runs the segmenter + AI tracer + composite on a stored long
+    // upload. XHR-based so we get FormData support without rewriting
+    // the request helper.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/long-uploads/${uploadId}/reprocess`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(formData);
+    }),
+  deleteLongUpload: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}`, {
+      method: "DELETE", adminPassword: key,
+    }),
   retryTracer: (key, clipId) =>
     // Tracer can run ~1-3 min on long clips. Time out at 4 min so the
     // UI doesn't spin forever if the server hangs or gets killed.

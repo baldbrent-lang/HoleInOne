@@ -21,6 +21,7 @@ from ..models import (
     Course,
     HIOStatus,
     HoleInOneEvent,
+    LongVideoUpload,
     Participant,
     Showcase,
     TeeTime,
@@ -751,6 +752,203 @@ def ai_trace(
     }
 
 
+def _process_long_upload_segments(
+    db: Session,
+    course_id: int,
+    camera_type: str,
+    base_dt: datetime,
+    src_path: Path,
+    green_src_path: Path | None,
+    seg_list: list[dict],
+    dual_camera: bool,
+    ai_tracer_model: str | None,
+) -> list[dict]:
+    """Cut + process each swing segment from one (or two) source video(s).
+
+    Shared between the initial /clips/long-upload endpoint and the
+    /clips/long-uploads/{id}/reprocess endpoint so re-editing a stored
+    long upload runs the exact same pipeline.
+    """
+    results: list[dict] = []
+    for idx, seg in enumerate(seg_list):
+        try:
+            hole_number = int(seg["hole_number"])
+            start_sec = float(seg["start_sec"])
+            end_sec = float(seg["end_sec"])
+        except (KeyError, TypeError, ValueError):
+            results.append({"index": idx, "ok": False, "error": "missing or invalid hole_number / start_sec / end_sec"})
+            continue
+        if end_sec <= start_sec:
+            results.append({"index": idx, "ok": False, "error": "end_sec must be > start_sec"})
+            continue
+
+        seg_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.mp4"
+        seg_path = CLIPS_DIR / seg_name
+        ok = cut_segment(src_path, seg_path, start_sec, end_sec)
+        if not ok:
+            results.append({"index": idx, "ok": False, "error": "ffmpeg cut failed (or ffmpeg not installed)"})
+            continue
+
+        # --- Dual-camera branch -----------------------------------
+        if dual_camera and green_src_path is not None:
+            green_seg_name = f"{course_id}-h{hole_number}-green-{secrets.token_hex(6)}.mp4"
+            green_seg_path = CLIPS_DIR / green_seg_name
+            green_cut_ok = cut_segment(green_src_path, green_seg_path, start_sec, end_sec)
+            if not green_cut_ok:
+                seg_path.unlink(missing_ok=True)
+                results.append({"index": idx, "ok": False, "error": "green ffmpeg cut failed"})
+                continue
+
+            pipe = run_full_ai_tracer_pipeline(
+                seg_path,
+                output_dir=CLIPS_DIR,
+                output_prefix=seg_path.stem,
+                model=ai_tracer_model,
+            )
+
+            composite_url = None
+            composite_info: dict | None = None
+            composite_path: Path | None = None
+            cutover = pipe.get("cutover_time_sec")
+            tracer_path = pipe.get("tracer_video_path")
+            if (
+                pipe.get("ok") and tracer_path is not None
+                and cutover is not None and cutover > 0
+                and tracer_path.exists()
+            ):
+                tee_info = probe_video_info(tracer_path)
+                green_info = probe_video_info(green_seg_path)
+                tee_duration = float(tee_info.get("duration") or 0.0)
+                green_duration = float(green_info.get("duration") or 0.0)
+                switch_sec = max(0.0, min(cutover, tee_duration or cutover))
+                end_green_sec = max(switch_sec + 0.1, green_duration or (end_sec - start_sec))
+                composite_name = f"{seg_path.stem}_composite.mp4"
+                composite_path = CLIPS_DIR / composite_name
+                if concat_two_clips(
+                    tracer_path, 0.0, switch_sec,
+                    green_seg_path, switch_sec, end_green_sec,
+                    composite_path,
+                ):
+                    compress_for_email(composite_path)
+                    if composite_path.exists() and composite_path.stat().st_size > 0:
+                        composite_url = f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                        composite_info = {
+                            "switch_sec": round(switch_sec, 2),
+                            "end_sec": round(end_green_sec, 2),
+                            "fps": pipe.get("fps"),
+                            "tracer_frame_range": (pipe.get("tracer_video_info") or {}).get("frame_range"),
+                            "method": (pipe.get("impact") or {}).get("method"),
+                        }
+
+            thumb_source = tracer_path if (tracer_path and tracer_path.exists()) else seg_path
+            thumb_path = extract_thumbnail(thumb_source)
+            thumb_url = (
+                f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
+                if thumb_path else None
+            )
+
+            if composite_url:
+                public_source = composite_url
+                public_tracer = composite_url
+            elif tracer_path and tracer_path.exists():
+                public_source = f"{settings.app_base_url}/uploads/clips/{tracer_path.name}"
+                public_tracer = public_source
+            else:
+                compress_for_email(seg_path)
+                public_source = f"{settings.app_base_url}/uploads/clips/{seg_name}"
+                public_tracer = None
+
+            captured_dt = base_dt + timedelta(seconds=start_sec)
+            clip = VideoClip(
+                course_id=course_id,
+                hole_number=hole_number,
+                camera_type=camera_type,
+                captured_at=captured_dt,
+                source_url=public_source,
+                thumbnail_url=thumb_url,
+                tracer_url=public_tracer,
+                carry_yards=_optional_int(seg.get("carry_yards")),
+                apex_feet=_optional_int(seg.get("apex_feet")),
+                ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
+                distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
+                ball_in_cup=bool(seg.get("ball_in_cup", False)),
+                processing_status=ClipProcessingStatus.received.value,
+            )
+            db.add(clip)
+            db.flush()
+            participant = match_clip(db, clip)
+            if participant and clip.ball_in_cup:
+                notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+            db.commit()
+
+            results.append({
+                "index": idx,
+                "ok": True,
+                "clip_id": clip.id,
+                "hole_number": hole_number,
+                "captured_at": captured_dt.isoformat(),
+                "status": clip.processing_status,
+                "participant_id": clip.participant_id,
+                "participant_name": participant.name if participant else None,
+                "source_url": clip.source_url,
+                "tracer_url": clip.tracer_url,
+                "thumbnail_url": clip.thumbnail_url,
+                "issue_note": clip.issue_note,
+                "dual_camera": True,
+                "composite": composite_info,
+                "ai_tracer_error": pipe.get("error"),
+            })
+            continue
+
+        # --- Single-camera (original) branch ----------------------
+        compress_for_email(seg_path)
+        thumb_path = extract_thumbnail(seg_path)
+        thumb_url = (
+            f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
+            if thumb_path else None
+        )
+        tracer_url, _, _, _ = _run_tracer(seg_path)
+
+        captured_dt = base_dt + timedelta(seconds=start_sec)
+        clip = VideoClip(
+            course_id=course_id,
+            hole_number=hole_number,
+            camera_type=camera_type,
+            captured_at=captured_dt,
+            source_url=f"{settings.app_base_url}/uploads/clips/{seg_name}",
+            thumbnail_url=thumb_url,
+            tracer_url=tracer_url,
+            carry_yards=_optional_int(seg.get("carry_yards")),
+            apex_feet=_optional_int(seg.get("apex_feet")),
+            ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
+            distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
+            ball_in_cup=bool(seg.get("ball_in_cup", False)),
+            processing_status=ClipProcessingStatus.received.value,
+        )
+        db.add(clip)
+        db.flush()
+
+        participant = match_clip(db, clip)
+        if participant and clip.ball_in_cup:
+            notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+        db.commit()
+
+        results.append({
+            "index": idx,
+            "ok": True,
+            "clip_id": clip.id,
+            "hole_number": hole_number,
+            "captured_at": captured_dt.isoformat(),
+            "status": clip.processing_status,
+            "participant_id": clip.participant_id,
+            "participant_name": participant.name if participant else None,
+            "source_url": clip.source_url,
+            "tracer_url": clip.tracer_url,
+            "issue_note": clip.issue_note,
+        })
+    return results
+
+
 @router.post("/clips/long-upload")
 async def upload_long_video(
     course_id: int = Form(...),
@@ -888,202 +1086,230 @@ async def upload_long_video(
                 "Try marking segments manually.",
             )
 
-    results = []
+    results = _process_long_upload_segments(
+        db,
+        course_id=course_id,
+        camera_type=camera_type,
+        base_dt=base_dt,
+        src_path=src_path,
+        green_src_path=green_src_path,
+        seg_list=seg_list,
+        dual_camera=dual_camera,
+        ai_tracer_model=ai_tracer_model,
+    )
+
+    # Persist the long source(s) so the operator can re-edit / reprocess
+    # the same upload from /admin/long-upload without having to re-upload
+    # the file(s). The cleanup-on-exit step was removed deliberately —
+    # files now live in CLIPS_DIR alongside per-swing outputs and are
+    # tracked via the LongVideoUpload row below.
     try:
-        for idx, seg in enumerate(seg_list):
-            try:
-                hole_number = int(seg["hole_number"])
-                start_sec = float(seg["start_sec"])
-                end_sec = float(seg["end_sec"])
-            except (KeyError, TypeError, ValueError):
-                results.append({"index": idx, "ok": False, "error": "missing or invalid hole_number / start_sec / end_sec"})
-                continue
-            if end_sec <= start_sec:
-                results.append({"index": idx, "ok": False, "error": "end_sec must be > start_sec"})
-                continue
-
-            seg_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.mp4"
-            seg_path = CLIPS_DIR / seg_name
-            ok = cut_segment(src_path, seg_path, start_sec, end_sec)
-            if not ok:
-                results.append({"index": idx, "ok": False, "error": "ffmpeg cut failed (or ffmpeg not installed)"})
-                continue
-
-            # --- Dual-camera branch -----------------------------------
-            if dual_camera and green_src_path is not None:
-                green_seg_name = f"{course_id}-h{hole_number}-green-{secrets.token_hex(6)}.mp4"
-                green_seg_path = CLIPS_DIR / green_seg_name
-                green_cut_ok = cut_segment(green_src_path, green_seg_path, start_sec, end_sec)
-                if not green_cut_ok:
-                    seg_path.unlink(missing_ok=True)
-                    results.append({"index": idx, "ok": False, "error": "green ffmpeg cut failed"})
-                    continue
-
-                pipe = run_full_ai_tracer_pipeline(
-                    seg_path,
-                    output_dir=CLIPS_DIR,
-                    output_prefix=seg_path.stem,
-                    model=ai_tracer_model,
-                )
-
-                composite_url = None
-                composite_info: dict | None = None
-                composite_path: Path | None = None
-                cutover = pipe.get("cutover_time_sec")
-                tracer_path = pipe.get("tracer_video_path")
-                if (
-                    pipe.get("ok") and tracer_path is not None
-                    and cutover is not None and cutover > 0
-                    and tracer_path.exists()
-                ):
-                    # Probe both segments for duration so we can clip
-                    # the cutover at sensible bounds.
-                    tee_info = probe_video_info(tracer_path)
-                    green_info = probe_video_info(green_seg_path)
-                    tee_duration = float(tee_info.get("duration") or 0.0)
-                    green_duration = float(green_info.get("duration") or 0.0)
-                    switch_sec = max(0.0, min(cutover, tee_duration or cutover))
-                    end_green_sec = max(switch_sec + 0.1, green_duration or (end_sec - start_sec))
-                    composite_name = f"{seg_path.stem}_composite.mp4"
-                    composite_path = CLIPS_DIR / composite_name
-                    if concat_two_clips(
-                        tracer_path, 0.0, switch_sec,
-                        green_seg_path, switch_sec, end_green_sec,
-                        composite_path,
-                    ):
-                        compress_for_email(composite_path)
-                        if composite_path.exists() and composite_path.stat().st_size > 0:
-                            composite_url = f"{settings.app_base_url}/uploads/clips/{composite_name}"
-                            composite_info = {
-                                "switch_sec": round(switch_sec, 2),
-                                "end_sec": round(end_green_sec, 2),
-                                "fps": pipe.get("fps"),
-                                "tracer_frame_range": (pipe.get("tracer_video_info") or {}).get("frame_range"),
-                                "method": (pipe.get("impact") or {}).get("method"),
-                            }
-
-                # Thumbnail off the tee tracer (or fallback to tee cut).
-                thumb_source = tracer_path if (tracer_path and tracer_path.exists()) else seg_path
-                thumb_path = extract_thumbnail(thumb_source)
-                thumb_url = (
-                    f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
-                    if thumb_path else None
-                )
-
-                # Source URL exposed to the gallery is the composite
-                # (or the AI tracer mp4 if the composite step failed
-                # and we couldn't render the green half). Falls back
-                # to the raw tee cut if everything failed.
-                if composite_url:
-                    public_source = composite_url
-                    public_tracer = composite_url
-                elif tracer_path and tracer_path.exists():
-                    public_source = f"{settings.app_base_url}/uploads/clips/{tracer_path.name}"
-                    public_tracer = public_source
-                else:
-                    compress_for_email(seg_path)
-                    public_source = f"{settings.app_base_url}/uploads/clips/{seg_name}"
-                    public_tracer = None
-
-                captured_dt = base_dt + timedelta(seconds=start_sec)
-                clip = VideoClip(
-                    course_id=course_id,
-                    hole_number=hole_number,
-                    camera_type=camera_type,
-                    captured_at=captured_dt,
-                    source_url=public_source,
-                    thumbnail_url=thumb_url,
-                    tracer_url=public_tracer,
-                    carry_yards=_optional_int(seg.get("carry_yards")),
-                    apex_feet=_optional_int(seg.get("apex_feet")),
-                    ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
-                    distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
-                    ball_in_cup=bool(seg.get("ball_in_cup", False)),
-                    processing_status=ClipProcessingStatus.received.value,
-                )
-                db.add(clip)
-                db.flush()
-                participant = match_clip(db, clip)
-                if participant and clip.ball_in_cup:
-                    notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
-                db.commit()
-
-                results.append({
-                    "index": idx,
-                    "ok": True,
-                    "clip_id": clip.id,
-                    "hole_number": hole_number,
-                    "captured_at": captured_dt.isoformat(),
-                    "status": clip.processing_status,
-                    "participant_id": clip.participant_id,
-                    "participant_name": participant.name if participant else None,
-                    "source_url": clip.source_url,
-                    "tracer_url": clip.tracer_url,
-                    "thumbnail_url": clip.thumbnail_url,
-                    "issue_note": clip.issue_note,
-                    "dual_camera": True,
-                    "composite": composite_info,
-                    "ai_tracer_error": pipe.get("error"),
-                })
-                continue
-
-            # --- Single-camera (original) branch ----------------------
-            compress_for_email(seg_path)
-            thumb_path = extract_thumbnail(seg_path)
-            thumb_url = (
-                f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
-                if thumb_path else None
-            )
-            tracer_url, _, _, _ = _run_tracer(seg_path)
-
-            captured_dt = base_dt + timedelta(seconds=start_sec)
-            clip = VideoClip(
-                course_id=course_id,
-                hole_number=hole_number,
-                camera_type=camera_type,
-                captured_at=captured_dt,
-                source_url=f"{settings.app_base_url}/uploads/clips/{seg_name}",
-                thumbnail_url=thumb_url,
-                tracer_url=tracer_url,
-                carry_yards=_optional_int(seg.get("carry_yards")),
-                apex_feet=_optional_int(seg.get("apex_feet")),
-                ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
-                distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
-                ball_in_cup=bool(seg.get("ball_in_cup", False)),
-                processing_status=ClipProcessingStatus.received.value,
-            )
-            db.add(clip)
-            db.flush()
-
-            participant = match_clip(db, clip)
-            if participant and clip.ball_in_cup:
-                notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
-            db.commit()
-
-            results.append({
-                "index": idx,
-                "ok": True,
-                "clip_id": clip.id,
-                "hole_number": hole_number,
-                "captured_at": captured_dt.isoformat(),
-                "status": clip.processing_status,
-                "participant_id": clip.participant_id,
-                "participant_name": participant.name if participant else None,
-                "source_url": clip.source_url,
-                "tracer_url": clip.tracer_url,
-                "issue_note": clip.issue_note,
-            })
-    finally:
-        # Clean up the long source(s) — we don't keep them after cutting.
-        src_path.unlink(missing_ok=True)
-        if green_src_path is not None:
-            green_src_path.unlink(missing_ok=True)
+        n_seg = len(seg_list) if isinstance(seg_list, list) else 0
+        n_ok = sum(1 for r in results if r.get("ok"))
+        upload_row = LongVideoUpload(
+            course_id=course_id,
+            camera_type=camera_type,
+            base_captured_at=base_dt,
+            tee_filename=src_path.name,
+            green_filename=(green_src_path.name if green_src_path is not None else None),
+            tee_original_filename=(video.filename or None),
+            green_original_filename=(video_green.filename if video_green is not None else None),
+            last_n_segments=n_seg,
+            last_n_succeeded=n_ok,
+        )
+        db.add(upload_row)
+        db.commit()
+    except Exception as exc:
+        log.warning("long-upload: failed to persist LongVideoUpload row: %s", exc)
+        db.rollback()
 
     return {
         "results": results,
         "dual_camera": dual_camera,
         "auto_detect": auto_detect_info,
     }
+
+
+@router.get("/long-uploads")
+def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
+    """List previously-uploaded long videos so the operator can re-edit /
+    reprocess them without re-uploading. Newest first."""
+    rows = (
+        db.query(LongVideoUpload)
+        .order_by(LongVideoUpload.created_at.desc())
+        .limit(max(1, min(500, limit)))
+        .all()
+    )
+    course_ids = {r.course_id for r in rows}
+    courses = (
+        {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
+        if course_ids else {}
+    )
+    out = []
+    for r in rows:
+        tee_path = CLIPS_DIR / r.tee_filename if r.tee_filename else None
+        green_path = CLIPS_DIR / r.green_filename if r.green_filename else None
+        tee_exists = bool(tee_path and tee_path.exists())
+        green_exists = bool(green_path and green_path.exists())
+        tee_size = tee_path.stat().st_size if tee_exists else None
+        green_size = green_path.stat().st_size if green_exists else None
+        course = courses.get(r.course_id)
+        out.append({
+            "id": r.id,
+            "course_id": r.course_id,
+            "course_name": course.name if course else None,
+            "camera_type": r.camera_type,
+            "base_captured_at": r.base_captured_at.isoformat() if r.base_captured_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "tee_filename": r.tee_filename,
+            "tee_original_filename": r.tee_original_filename,
+            "tee_url": (
+                f"{settings.app_base_url}/uploads/clips/{r.tee_filename}"
+                if tee_exists else None
+            ),
+            "tee_size_mb": round(tee_size / 1024 / 1024, 1) if tee_size else None,
+            "tee_missing": (r.tee_filename is not None and not tee_exists),
+            "green_filename": r.green_filename,
+            "green_original_filename": r.green_original_filename,
+            "green_url": (
+                f"{settings.app_base_url}/uploads/clips/{r.green_filename}"
+                if green_exists else None
+            ),
+            "green_size_mb": round(green_size / 1024 / 1024, 1) if green_size else None,
+            "green_missing": (r.green_filename is not None and not green_exists),
+            "dual_camera": r.green_filename is not None,
+            "last_n_segments": r.last_n_segments,
+            "last_n_succeeded": r.last_n_succeeded,
+        })
+    return out
+
+
+@router.post("/long-uploads/{upload_id}/reprocess")
+def reprocess_long_upload(
+    upload_id: int,
+    segments: str = Form("[]"),
+    auto_detect_swings: bool = Form(True),
+    starting_hole: int = Form(1),
+    ai_tracer_model: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Re-cut / re-process a previously-uploaded long video without
+    re-uploading. Uses the same per-segment pipeline as the initial
+    POST /clips/long-upload, but reads the source file(s) from disk
+    via the stored LongVideoUpload row."""
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+    if not src_path or not src_path.exists():
+        raise HTTPException(
+            404,
+            f"tee source file missing on disk: {row.tee_filename}",
+        )
+    green_src_path: Path | None = None
+    if row.green_filename:
+        candidate = CLIPS_DIR / row.green_filename
+        if not candidate.exists():
+            raise HTTPException(
+                404,
+                f"green source file missing on disk: {row.green_filename}",
+            )
+        green_src_path = candidate
+
+    try:
+        seg_list = json.loads(segments or "[]")
+    except json.JSONDecodeError:
+        raise HTTPException(400, "segments must be a JSON array")
+    if not isinstance(seg_list, list):
+        raise HTTPException(400, "segments must be a JSON array")
+    if not seg_list and not auto_detect_swings:
+        raise HTTPException(
+            400,
+            "no segments supplied — pass auto_detect_swings=true or "
+            "provide segments manually",
+        )
+
+    auto_detect_info: dict | None = None
+    if not seg_list and auto_detect_swings:
+        tee_fps = probe_fps(src_path) or 30.0
+        detected = detect_swings_from_audio(src_path, fps=tee_fps)
+        auto_detect_info = {
+            "n_detected": len(detected),
+            "tee_fps": tee_fps,
+            "peaks": [
+                {
+                    "peak_time_sec": round(d["peak_time_sec"], 3),
+                    "ratio": (round(d["ratio"], 1) if d.get("ratio") is not None else None),
+                    "confidence": d.get("confidence"),
+                }
+                for d in detected
+            ],
+        }
+        for i, d in enumerate(detected):
+            seg_list.append({
+                "hole_number": starting_hole + i,
+                "start_sec": d["start_sec"],
+                "end_sec": d["end_sec"],
+            })
+        if not seg_list:
+            raise HTTPException(
+                400,
+                "no swing impacts detected in the tee video's audio — "
+                "try marking segments manually",
+            )
+
+    dual_camera = green_src_path is not None
+    results = _process_long_upload_segments(
+        db,
+        course_id=row.course_id,
+        camera_type=row.camera_type,
+        base_dt=row.base_captured_at,
+        src_path=src_path,
+        green_src_path=green_src_path,
+        seg_list=seg_list,
+        dual_camera=dual_camera,
+        ai_tracer_model=ai_tracer_model,
+    )
+
+    # Update the stored row's last-attempt stats.
+    try:
+        row.last_n_segments = len(seg_list)
+        row.last_n_succeeded = sum(1 for r in results if r.get("ok"))
+        db.commit()
+    except Exception as exc:
+        log.warning("long-upload: failed to update LongVideoUpload row %s: %s", row.id, exc)
+        db.rollback()
+
+    return {
+        "results": results,
+        "dual_camera": dual_camera,
+        "auto_detect": auto_detect_info,
+    }
+
+
+@router.delete("/long-uploads/{upload_id}")
+def delete_long_upload(upload_id: int, db: Session = Depends(get_db)):
+    """Delete a stored long upload + its source file(s) from disk.
+    Per-swing VideoClips produced from this upload are kept (they have
+    their own VideoClip rows). Returns the freed disk bytes for
+    confirmation."""
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    freed = 0
+    for fname in (row.tee_filename, row.green_filename):
+        if not fname:
+            continue
+        fp = CLIPS_DIR / fname
+        try:
+            if fp.exists():
+                freed += fp.stat().st_size
+                fp.unlink()
+        except Exception as exc:
+            log.warning("long-upload delete: failed to unlink %s: %s", fp, exc)
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "freed_bytes": freed}
 
 
 def _optional_int(v):

@@ -183,6 +183,29 @@ class AuditLog(Base):
     at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class LongVideoUpload(Base):
+    """A persisted long video (or pair of synced long videos) so the
+    operator can re-edit / re-process the same source on /admin/long-
+    upload without re-uploading. Filenames are stored relative to the
+    uploads/clips directory; the actual source files are kept on disk
+    indefinitely until the operator deletes them."""
+
+    __tablename__ = "long_video_uploads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"))
+    camera_type: Mapped[str] = mapped_column(String(40), default=CameraType.tee.value)
+    base_captured_at: Mapped[datetime] = mapped_column(DateTime)
+    tee_filename: Mapped[str] = mapped_column(String(200))
+    green_filename: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    tee_original_filename: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
+    green_original_filename: Mapped[Optional[str]] = mapped_column(String(400), nullable=True)
+    last_n_segments: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_n_succeeded: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class BroadcastView(Base):
     """Per-viewer dedup for the /broadcast/next playlist.
 

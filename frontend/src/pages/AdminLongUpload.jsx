@@ -45,12 +45,60 @@ export default function AdminLongUpload() {
   const [results, setResults] = useState(null);
   const [autoDetectInfo, setAutoDetectInfo] = useState(null);
   const [error, setError] = useState(null);
+  const [priorUploads, setPriorUploads] = useState(null);
+  const [reprocessing, setReprocessing] = useState({}); // {id: true}
   const videoRef = useRef(null);
 
   useEffect(() => {
     if (!adminPassword) return;
     api.listCourses(adminPassword).then(setCourses).catch((e) => setError(e.message));
+    refreshPriorUploads();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminPassword]);
+
+  async function refreshPriorUploads() {
+    try {
+      const list = await api.listLongUploads(adminPassword);
+      setPriorUploads(list);
+    } catch (e) {
+      // Non-fatal — fall back to the upload form alone.
+      setPriorUploads([]);
+    }
+  }
+
+  async function reprocessPrior(uploadId) {
+    setReprocessing((r) => ({ ...r, [uploadId]: true }));
+    setError(null);
+    setResults(null);
+    setAutoDetectInfo(null);
+    const fd = new FormData();
+    fd.append("segments", "[]");
+    fd.append("auto_detect_swings", "true");
+    fd.append("starting_hole", String(parseInt(startingHole, 10) || 1));
+    fd.append("ai_tracer_model", aiTracerModel);
+    try {
+      const data = await api.reprocessLongUpload(adminPassword, uploadId, fd);
+      setResults(data.results || []);
+      setAutoDetectInfo(data.auto_detect || null);
+      refreshPriorUploads();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setReprocessing((r) => ({ ...r, [uploadId]: false }));
+    }
+  }
+
+  async function deletePrior(uploadId) {
+    if (!window.confirm("Delete this stored long upload + its source files? Per-swing clips already produced from it are kept.")) {
+      return;
+    }
+    try {
+      await api.deleteLongUpload(adminPassword, uploadId);
+      refreshPriorUploads();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
 
   useEffect(() => {
     if (!file) { setVideoUrl(null); return; }
@@ -130,6 +178,7 @@ export default function AdminLongUpload() {
       const data = await api.longUploadClips(adminPassword, fd, setProgress);
       setResults(data.results || []);
       setAutoDetectInfo(data.auto_detect || null);
+      refreshPriorUploads();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -161,6 +210,72 @@ export default function AdminLongUpload() {
         <Link to="/admin/showcase">Home videos</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>
+
+      {priorUploads && priorUploads.length > 0 && (
+        <div className="card">
+          <h3 style={{ marginBottom: 6 }}>Previous long uploads</h3>
+          <p className="small muted" style={{ marginBottom: 10 }}>
+            Re-edit a stored long upload without re-uploading the source(s).
+            Reprocess uses the current <b>Auto-detect</b>, <b>Starting hole</b>,
+            and <b>AI tracer model</b> settings from the form below.
+          </p>
+          <div className="stack" style={{ gap: 8 }}>
+            {priorUploads.map((u) => {
+              const missing = u.tee_missing || u.green_missing;
+              return (
+                <div key={u.id} className="card tight" style={{ margin: 0, padding: 10 }}>
+                  <div className="inline" style={{ justifyContent: "space-between", width: "100%" }}>
+                    <div className="small">
+                      <b>#{u.id}</b>{" "}
+                      <span className="muted">
+                        · {u.course_name || `course #${u.course_id}`}{" "}
+                        · {u.base_captured_at ? new Date(u.base_captured_at).toLocaleString() : "—"}
+                        {u.dual_camera && <> · <span className="pill small">dual-cam</span></>}
+                      </span>
+                      <div className="tiny muted" style={{ marginTop: 2 }}>
+                        tee: <code>{u.tee_original_filename || u.tee_filename}</code>
+                        {u.tee_size_mb != null && <> · {u.tee_size_mb} MB</>}
+                        {u.tee_missing && <> · <span className="err-text">missing on disk</span></>}
+                        {u.dual_camera && (
+                          <>
+                            <br />
+                            green: <code>{u.green_original_filename || u.green_filename}</code>
+                            {u.green_size_mb != null && <> · {u.green_size_mb} MB</>}
+                            {u.green_missing && <> · <span className="err-text">missing on disk</span></>}
+                          </>
+                        )}
+                        {u.last_n_segments != null && (
+                          <> · last run: {u.last_n_succeeded ?? "?"}/{u.last_n_segments} succeeded</>
+                        )}
+                      </div>
+                    </div>
+                    <div className="inline" style={{ gap: 6 }}>
+                      <button
+                        type="button"
+                        className="small"
+                        onClick={() => reprocessPrior(u.id)}
+                        disabled={!!reprocessing[u.id] || missing}
+                        title={missing ? "Source file missing on disk" : "Re-cut + re-process this upload with current settings"}
+                      >
+                        {reprocessing[u.id] ? "Reprocessing…" : "Reprocess"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost small err-text"
+                        onClick={() => deletePrior(u.id)}
+                        disabled={!!reprocessing[u.id]}
+                        title="Delete this stored upload + its source files"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h3 style={{ marginBottom: 6 }}>Long video upload</h3>
