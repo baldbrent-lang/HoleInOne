@@ -20,6 +20,7 @@ export default function AdminBroadcastClips() {
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState({}); // {clip_id: true}
   const [copied, setCopied] = useState({});     // {clip_id: true} for ~1.5s
+  const [fileSharing, setFileSharing] = useState({}); // {clip_id: true} while we fetch the .mp4 for a file share
 
   /**
    * Compose the title / text / URL we hand to every share target.
@@ -99,6 +100,93 @@ export default function AdminBroadcastClips() {
 
   function facebookHref(c) {
     return `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(c.source_url || "")}`;
+  }
+
+  /**
+   * Build a descriptive filename for the downloaded / shared file.
+   * Keeps the destination apps (TikTok, Instagram) from showing a
+   * cryptic UUID as the clip's name.
+   */
+  function suggestedFilename(c) {
+    const slug = (c.participant_name || "golfreelz")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "golfreelz";
+    const hole = c.hole_number ? `_hole${c.hole_number}` : "";
+    return `${slug}${hole}.mp4`;
+  }
+
+  /**
+   * Fetch the clip's .mp4 as a File so we can hand it to
+   * navigator.share — the only way to natively post to Instagram /
+   * TikTok / other apps that don't accept URL-share intents.
+   */
+  async function fetchClipAsFile(c) {
+    if (!c.source_url) return null;
+    try {
+      const res = await fetch(c.source_url);
+      if (!res.ok) return null;
+      const blob = await res.blob();
+      return new File([blob], suggestedFilename(c), {
+        type: blob.type || "video/mp4",
+      });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Try a file-share via the OS share sheet (mobile native flow
+   * surfaces Instagram, TikTok, Stories, etc. as targets). On any
+   * failure — unsupported browser, fetch error, user cancel — fall
+   * back to downloading the .mp4 with a hint to open the target app.
+   *
+   * `appHint` is purely cosmetic, used in the fallback message.
+   */
+  async function fileShareForApp(c, appHint) {
+    if (!c.source_url) return;
+    setFileSharing((s) => ({ ...s, [c.id]: true }));
+    try {
+      const file = await fetchClipAsFile(c);
+      if (!file) {
+        window.alert(
+          `Couldn't fetch the clip to share. Try Download, then open ${appHint} and upload manually.`,
+        );
+        return;
+      }
+      if (
+        navigator.canShare &&
+        navigator.canShare({ files: [file] }) &&
+        navigator.share
+      ) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: buildShareInfo(c).title,
+            text: buildShareInfo(c).text,
+          });
+          return;
+        } catch (e) {
+          if (e && e.name === "AbortError") return; // user closed sheet
+          // fall through to download fallback
+        }
+      }
+      // Desktop / unsupported browsers: trigger a download and
+      // explain the manual next step.
+      const url = URL.createObjectURL(file);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      window.alert(
+        `Downloaded the clip as ${file.name}. Open ${appHint} on your phone and upload it from your camera roll / files.`,
+      );
+    } finally {
+      setFileSharing((s) => ({ ...s, [c.id]: false }));
+    }
   }
 
   async function load() {
@@ -324,6 +412,24 @@ export default function AdminBroadcastClips() {
               >
                 Facebook
               </a>
+              <button
+                type="button"
+                className="secondary small"
+                onClick={() => fileShareForApp(c, "Instagram")}
+                disabled={!c.source_url || !!fileSharing[c.id]}
+                title="On mobile: opens the OS share sheet with the video as a file (Instagram appears as a target). On desktop: downloads the .mp4 and reminds you to upload manually."
+              >
+                {fileSharing[c.id] ? "Preparing…" : "Instagram"}
+              </button>
+              <button
+                type="button"
+                className="secondary small"
+                onClick={() => fileShareForApp(c, "TikTok")}
+                disabled={!c.source_url || !!fileSharing[c.id]}
+                title="On mobile: opens the OS share sheet with the video as a file (TikTok appears as a target). On desktop: downloads the .mp4 and reminds you to upload manually."
+              >
+                {fileSharing[c.id] ? "Preparing…" : "TikTok"}
+              </button>
               <button
                 type="button"
                 className="ghost small err-text"
