@@ -49,6 +49,7 @@ export default function AdminLongUpload() {
   const [testCutting, setTestCutting] = useState({}); // {id: true}
   const [testCutResults, setTestCutResults] = useState({}); // {id: {detector, cuts, ...}}
   const [testCutDetector, setTestCutDetector] = useState({}); // {id: "motion"|"audio"}
+  const [showSource, setShowSource] = useState({}); // {id: true}
   const videoRef = useRef(null);
 
   const anyProcessing =
@@ -326,6 +327,21 @@ export default function AdminLongUpload() {
                       <button
                         type="button"
                         className="secondary small"
+                        onClick={() =>
+                          setShowSource((s) => ({ ...s, [u.id]: !s[u.id] }))
+                        }
+                        disabled={missing}
+                        title={
+                          missing
+                            ? "Source file missing on disk"
+                            : "Show the raw long video upload(s) inline so you can scrub and verify swings"
+                        }
+                      >
+                        {showSource[u.id] ? "Hide source" : "Show source"}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary small"
                         onClick={() => testCutPrior(u.id)}
                         disabled={!!testCutting[u.id] || missing || busy}
                         title="Cut the tee video into proposed swing clips (no AI tracer, no matcher) so you can review the segmentation"
@@ -358,6 +374,50 @@ export default function AdminLongUpload() {
                       </button>
                     </div>
                   </div>
+
+                  {showSource[u.id] && !missing && (u.tee_url || u.green_url) && (
+                    <div className="card tight" style={{ margin: "10px 0 0", background: "var(--surface-alt)" }}>
+                      <div className="small" style={{ marginBottom: 6 }}>
+                        <b>Source video{u.dual_camera ? "s" : ""}</b>
+                      </div>
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: u.dual_camera ? "1fr 1fr" : "1fr",
+                          gap: 8,
+                        }}
+                      >
+                        {u.tee_url && (
+                          <div style={{ minWidth: 0 }}>
+                            <div className="tiny muted" style={{ marginBottom: 2 }}>
+                              tee · <code>{u.tee_original_filename || u.tee_filename}</code>
+                            </div>
+                            <video
+                              src={u.tee_url}
+                              controls
+                              playsInline
+                              preload="metadata"
+                              style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                            />
+                          </div>
+                        )}
+                        {u.dual_camera && u.green_url && (
+                          <div style={{ minWidth: 0 }}>
+                            <div className="tiny muted" style={{ marginBottom: 2 }}>
+                              green · <code>{u.green_original_filename || u.green_filename}</code>
+                            </div>
+                            <video
+                              src={u.green_url}
+                              controls
+                              playsInline
+                              preload="metadata"
+                              style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {testCutResults[u.id] && (
                     <div className="card tight" style={{ margin: "10px 0 0", background: "var(--surface-alt)" }}>
