@@ -176,11 +176,12 @@ REFINE_IMPACT_FRAME_W = 768
 # without benefit, so we sit right at the sweet spot. Parallel calls
 # keep wall time manageable across the typical 30-60 frame flight.
 # Width we send the ROI crop at on the per-frame ball-track call.
-# 2000 is above Anthropic's "auto-resize" threshold so we pay slightly
-# more in vision tokens, but the ball footprint in pixel area grows
-# proportionally — matters for the 3-15 px ball that's the whole
-# point of this pipeline.
-BALL_TRACK_FRAME_W = 2000
+# 1568 is Anthropic's vision-tile threshold — above that, images get
+# internally resampled down to ~1568 anyway, so we were paying full
+# vision-token tariff for upload but Claude saw the same pixels. Sit
+# at the threshold to keep ball footprint maxed out without paying
+# for resampled-away resolution.
+BALL_TRACK_FRAME_W = 1568
 
 # Adaptive contrast enhancement (CLAHE on the L channel of LAB) is
 # applied to the cropped frame BEFORE it's JPEG-encoded for the API
@@ -379,6 +380,23 @@ def _resolve_model(model_override: str | None = None) -> str:
             model_override, MODEL,
         )
     return MODEL
+
+
+def _resolve_frame_picker_model(model_override: str | None = None) -> str:
+    """Like _resolve_model but defaults to Haiku 4.5 for the four "pick a
+    frame from labeled candidates" tasks (address, handedness, pick
+    impact, refine impact). These are multiple-choice problems on
+    pre-extracted thumbnails where Haiku matches Opus accuracy at ~1/5
+    the cost. Operator-supplied model_override still wins so the AI
+    page can force Opus for A/B testing."""
+    if model_override:
+        if model_override in SUPPORTED_MODELS:
+            return model_override
+        log.warning(
+            "ai_tracer: ignoring unsupported model_override %r; using haiku",
+            model_override,
+        )
+    return "claude-haiku-4-5"
 
 
 def _maybe_apply_clahe(frame):
@@ -590,7 +608,7 @@ def detect_handedness_at_address(
 
     Never raises.
     """
-    model = _resolve_model(model)
+    model = _resolve_frame_picker_model(model)
     info: dict = {
         "ok": False,
         "error": None,
@@ -741,7 +759,7 @@ def find_address_frame(
     disk so the caller can serve it for display. Never raises — every
     failure path ends with ok=False + a descriptive error.
     """
-    model = _resolve_model(model)
+    model = _resolve_frame_picker_model(model)
     info: dict = {
         "ok": False,
         "error": None,
@@ -912,7 +930,7 @@ def find_impact_frame_after_address(
     output_image_path file is the native-resolution impact frame
     with the same blue ball-circle drawn on it.
     """
-    model = _resolve_model(model)
+    model = _resolve_frame_picker_model(model)
     info: dict = {
         "ok": False,
         "error": None,
@@ -1181,7 +1199,7 @@ def refine_impact_frame(
     Returns dict with refined frame index, landmarks, confidence, notes,
     frames_sent, saved_image, image dimensions, and any error.
     """
-    model = _resolve_model(model)
+    model = _resolve_frame_picker_model(model)
     info: dict = {
         "ok": False,
         "error": None,
@@ -1794,6 +1812,32 @@ def track_ball_after_impact(
     BALL_TRACK_CROP_SIZE = BALL_TRACK_CROP_NATIVE_SIZE
     retry_results: dict[int, dict] = {}
     retry_targets = [idx for idx in frames_data if idx not in found_sent]
+    if found_sent and retry_targets:
+        # Cost guard: only retry frames inside the [first_found, last_found]
+        # window — beyond that the ball has clearly left the frame and the
+        # retry burns tokens for no signal. Also cap total retries at
+        # max(3, half of phase-1 hits) so phase 2's spend stays a small
+        # fraction of phase 1's. Pick the interior gaps closest to a found
+        # neighbor first since they're most likely to succeed.
+        _found_keys = sorted(found_sent.keys())
+        _first_found, _last_found = _found_keys[0], _found_keys[-1]
+        retry_targets = [
+            idx for idx in retry_targets
+            if _first_found <= idx <= _last_found
+        ]
+        _retry_cap = max(3, len(found_sent) // 2)
+        if len(retry_targets) > _retry_cap:
+            def _gap_score(idx: int) -> int:
+                return min(abs(idx - f) for f in _found_keys)
+            retry_targets.sort(key=_gap_score)
+            retry_targets = retry_targets[:_retry_cap]
+            retry_targets.sort()
+        log.info(
+            "ai_tracer: ball_track phase-2 — capped %d candidate retries to %d "
+            "(found=%d, range=[%d, %d])",
+            sum(1 for idx in frames_data if idx not in found_sent),
+            len(retry_targets), len(found_sent), _first_found, _last_found,
+        )
     if found_sent and retry_targets:
         # Resolve every Phase-1 found position to NATIVE coords once,
         # so prediction math is in a single coordinate system.
