@@ -293,6 +293,28 @@ export const api = {
       fd.append("sensitivity", String(sensitivity ?? 1.0));
       xhr.send(fd);
     }),
+  audioImpactFrame: (key, clipId, { minRatio = 25 } = {}) =>
+    // Synchronous, cheap (~1-2 s): runs only the audio impact detector
+    // and grabs the matching frame as a JPG. Test harness for swapping
+    // the AI impact-pick / refine steps out of the production tracer.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/clips/${clipId}/audio-impact-frame`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 30_000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 30 s"));
+      const fd = new FormData();
+      fd.append("min_ratio", String(minRatio));
+      xhr.send(fd);
+    }),
   aiTrace: (key, clipId, model) => {
     // Five Claude steps: address, handedness, rough impact, refined
     // impact, ball-track. The track step is up to 60 parallel calls

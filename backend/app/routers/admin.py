@@ -642,6 +642,89 @@ def retry_tracer(
     }
 
 
+@router.post("/clips/{clip_id}/audio-impact-frame")
+def audio_impact_frame(
+    clip_id: int,
+    min_ratio: float = Form(25.0),
+    db: Session = Depends(get_db),
+):
+    """Run the audio impact detector on a clip and return a JPG of the
+    frame it picked. Test endpoint: lets the operator verify the audio
+    pipeline can replace the AI impact-pick / refine-impact steps
+    before we wire it into the production AI tracer flow.
+
+    Uses tee_clip_url for composites (same fallback as /ai-trace) so
+    audio is read from a single-camera clip.
+    """
+    try:
+        import cv2  # local import: keeps admin.py importable even on
+                   # boxes where opencv-python isn't installed.
+    except ImportError:
+        raise HTTPException(500, "opencv required for frame grab")
+
+    clip = db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+    analysis_url = clip.tee_clip_url or clip.source_url
+    if not analysis_url:
+        raise HTTPException(400, "clip has no analyzable source")
+    fname = analysis_url.rstrip("/").rsplit("/", 1)[-1]
+    if not fname:
+        raise HTTPException(400, "could not parse filename from analysis URL")
+    if "_composite" in fname:
+        raise HTTPException(
+            400,
+            "this clip is a composite and has no raw tee cut on file; "
+            "re-process the long upload to populate tee_clip_url",
+        )
+    fpath = CLIPS_DIR / fname
+    if not fpath.exists():
+        raise HTTPException(404, f"source file missing on disk: {fname}")
+
+    fps_val = probe_fps(fpath) or 30.0
+    info = find_impact_via_audio(fpath, fps_val, min_ratio=float(min_ratio))
+    if not info.get("ok"):
+        return {
+            "ok": False,
+            "error": info.get("error") or "no impact found",
+            "ratio": info.get("ratio"),
+            "min_ratio": info.get("min_ratio_used", float(min_ratio)),
+            "audio": info,
+        }
+
+    frame_idx = info.get("impact_frame")
+    if frame_idx is None:
+        raise HTTPException(500, "audio impact returned no frame_idx")
+
+    cap = cv2.VideoCapture(str(fpath))
+    if not cap.isOpened():
+        raise HTTPException(500, "could not open source for frame grab")
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        raise HTTPException(500, f"could not read frame {frame_idx}")
+
+    out_name = f"{fpath.stem}_audio_impact.jpg"
+    out_path = CLIPS_DIR / out_name
+    cv2.imwrite(str(out_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    mtime = int(out_path.stat().st_mtime)
+    return {
+        "ok": True,
+        "clip_id": clip.id,
+        "impact_frame": int(frame_idx),
+        "audio_peak_frame": info.get("audio_peak_frame"),
+        "pre_peak_offset_frames": info.get("pre_peak_offset_frames"),
+        "peak_time_sec": info.get("peak_time_sec"),
+        "ratio": info.get("ratio"),
+        "min_ratio": info.get("min_ratio_used"),
+        "fps": fps_val,
+        "image_url": f"{settings.app_base_url}/uploads/clips/{out_name}?v={mtime}",
+    }
+
+
 @router.post("/clips/{clip_id}/ai-trace")
 def ai_trace(
     clip_id: int,

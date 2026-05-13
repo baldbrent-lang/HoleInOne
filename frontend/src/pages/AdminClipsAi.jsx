@@ -25,6 +25,9 @@ export default function AdminClipsAi() {
   const [running, setRunning] = useState({});
   const [results, setResults] = useState({});
   const [selectedModels, setSelectedModels] = useState({}); // {clipId: modelId}
+  const [audioImpact, setAudioImpact] = useState({});        // {clipId: {image_url, frame, ratio, error?}}
+  const [audioImpactRunning, setAudioImpactRunning] = useState({});
+  const [audioImpactMinRatio, setAudioImpactMinRatio] = useState({}); // {clipId: number}
 
   async function load() {
     try {
@@ -50,6 +53,20 @@ export default function AdminClipsAi() {
       setResults((r) => ({ ...r, [clipId]: { error: e.message } }));
     } finally {
       setRunning((r) => ({ ...r, [clipId]: false }));
+    }
+  }
+
+  async function runAudioImpactFrame(clipId) {
+    const ratio = parseFloat(audioImpactMinRatio[clipId] ?? 25);
+    const minRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 25;
+    setAudioImpactRunning((r) => ({ ...r, [clipId]: true }));
+    try {
+      const data = await api.audioImpactFrame(adminPassword, clipId, { minRatio });
+      setAudioImpact((r) => ({ ...r, [clipId]: data }));
+    } catch (e) {
+      setAudioImpact((r) => ({ ...r, [clipId]: { ok: false, error: e.message } }));
+    } finally {
+      setAudioImpactRunning((r) => ({ ...r, [clipId]: false }));
     }
   }
 
@@ -550,6 +567,76 @@ export default function AdminClipsAi() {
                 </span>
               )}
             </div>
+
+            {/* Audio-only impact-frame test. Skips the AI impact-pick +
+                refine-impact calls; just runs find_impact_via_audio at
+                a configurable min_ratio and returns the matching frame
+                as a JPG. Useful for verifying we can drop those two AI
+                calls from the production pipeline. */}
+            <div
+              className="row"
+              style={{ marginTop: 8, gap: 8, alignItems: "center", flexWrap: "wrap" }}
+            >
+              <button
+                onClick={() => runAudioImpactFrame(c.id)}
+                disabled={!!audioImpactRunning[c.id] || !canAnalyze}
+                title="Detect impact frame via audio only (no AI). Returns a JPG of the picked frame so you can verify."
+                className="secondary"
+              >
+                {audioImpactRunning[c.id] ? "Detecting…" : "Pick impact frame (audio)"}
+              </button>
+              <label
+                className="small muted"
+                style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                title="Min peak/median envelope ratio required. Higher = stricter; below this the detector returns no impact."
+              >
+                min ×ratio:
+                <input
+                  type="number"
+                  min="5"
+                  step="1"
+                  value={audioImpactMinRatio[c.id] ?? 25}
+                  onChange={(e) =>
+                    setAudioImpactMinRatio((m) => ({ ...m, [c.id]: e.target.value }))
+                  }
+                  disabled={!!audioImpactRunning[c.id]}
+                  style={{ width: 56, fontSize: 13, padding: "2px 6px" }}
+                />
+              </label>
+              {audioImpact[c.id] && audioImpact[c.id].ok === false && (
+                <span className="small err-text">
+                  ✗ {audioImpact[c.id].error}
+                  {audioImpact[c.id].ratio != null && <> (ratio ×{audioImpact[c.id].ratio.toFixed?.(1) ?? audioImpact[c.id].ratio})</>}
+                </span>
+              )}
+            </div>
+            {audioImpact[c.id]?.ok && (
+              <div style={{ marginTop: 8 }}>
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  Audio-derived impact frame
+                  {" "}<span style={{ textTransform: "none" }}>
+                    · frame {audioImpact[c.id].impact_frame}
+                    {audioImpact[c.id].audio_peak_frame != null && audioImpact[c.id].pre_peak_offset_frames > 0 && (
+                      <> (audio peak {audioImpact[c.id].audio_peak_frame} − {audioImpact[c.id].pre_peak_offset_frames}f)</>
+                    )}
+                    {audioImpact[c.id].peak_time_sec != null && (
+                      <> · {audioImpact[c.id].peak_time_sec.toFixed(3)}s</>
+                    )}
+                    {audioImpact[c.id].ratio != null && (
+                      <> · ×{audioImpact[c.id].ratio.toFixed(1)}</>
+                    )}
+                  </span>
+                </div>
+                <img
+                  src={audioImpact[c.id].image_url}
+                  alt="audio-derived impact frame"
+                  style={{
+                    width: "100%", maxWidth: 600, borderRadius: 8,
+                    border: "1px solid var(--border)",
+                  }}
+                />
+              </div>
+            )}
           </div>
         );
       })}

@@ -2594,7 +2594,11 @@ AUDIO_MIN_PEAK_OVER_MEDIAN = 30.0
 AUDIO_IMPACT_PRE_PEAK_FRAMES = 2
 
 
-def find_impact_via_audio(input_path: Path, fps: float) -> dict:
+def find_impact_via_audio(
+    input_path: Path,
+    fps: float,
+    min_ratio: float | None = None,
+) -> dict:
     """Locate impact from the audio track.
 
     A struck golf ball produces a sharp, isolated transient ("thwack")
@@ -2703,10 +2707,14 @@ def find_impact_via_audio(input_path: Path, fps: float) -> dict:
     else:
         ratio = peak_value / median
     info["ratio"] = ratio if ratio != float("inf") else None
-    if ratio < AUDIO_MIN_PEAK_OVER_MEDIAN:
+    effective_min_ratio = (
+        float(min_ratio) if min_ratio is not None else AUDIO_MIN_PEAK_OVER_MEDIAN
+    )
+    info["min_ratio_used"] = effective_min_ratio
+    if ratio < effective_min_ratio:
         info["error"] = (
             f"audio peak/median ratio too low ({ratio:.1f} < "
-            f"{AUDIO_MIN_PEAK_OVER_MEDIAN}); audio likely noisy or "
+            f"{effective_min_ratio}); audio likely noisy or "
             "lacks a clear impact"
         )
         return info
