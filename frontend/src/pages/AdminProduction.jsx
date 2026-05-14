@@ -1465,8 +1465,15 @@ function TracerStep({
   }
 
   function onEditorPointerDown(e) {
+    // Click auto-queues the position so navigating to another frame
+    // doesn't drop the work. Add Frame button is just for explicit
+    // confirmation now — clicking already commits.
     const pt = editorEventToFrame(e);
-    if (pt) setEditorBall(pt);
+    if (!pt) return;
+    setEditorBall(pt);
+    if (selectedFrame != null) {
+      setManualPositions((m) => ({ ...m, [selectedFrame]: pt }));
+    }
   }
 
   async function regenerate() {
@@ -1711,7 +1718,7 @@ function TracerStep({
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           {selectedFrame != null
-            ? "Click anywhere on the frame to place the ball. Add Frame queues it for the next render — Re-generate when you're done."
+            ? "Click on the ball to queue this frame as a tracer point. Navigate to other frames to add more. Re-generate when you're done."
             : "Click a frame card on the right to correct the AI's ball position."}
         </div>
       </div>
@@ -1746,21 +1753,13 @@ function TracerStep({
             <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
               <button
                 type="button"
-                style={{ width: "auto" }}
-                disabled={!editorBall}
-                onClick={applyEditorBall}
-                title="Add this frame's ball position to the tracer input. Re-generate when you're done queuing frames."
-              >
-                Add Frame
-              </button>
-              <button
-                type="button"
                 className="ghost"
                 style={{ width: "auto" }}
                 onClick={clearEditorBall}
                 disabled={!manualPositions[selectedFrame]}
+                title="Remove this frame from the tracer queue"
               >
-                Clear
+                Clear frame
               </button>
               <button
                 type="button"
