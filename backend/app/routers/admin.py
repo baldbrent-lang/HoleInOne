@@ -2573,10 +2573,21 @@ def update_camera(
     enabled: bool | None = Form(None),
     tee_box_roi: str | None = Form(None),  # JSON string {"x":N,"y":N,"w":N,"h":N}
     note: str | None = Form(None),
+    course_id: int | None = Form(None),
+    assigned_hole: int | None = Form(None),
+    assigned_role: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Patch a camera's display name / enabled flag / tee-box ROI /
-    note. Each field is optional; only sent fields get applied."""
+    note / course / hole / role. Each field is optional; only sent
+    fields get applied.
+
+    Moving a camera to a different course, hole, or role auto-unpairs
+    it if the existing pair would no longer be valid (pair must share
+    course + hole + have exactly one tee + one green). The partner
+    side is unlinked too so it doesn't end up pointing at a camera
+    that's not actually its pair anymore.
+    """
     cam = db.get(Camera, camera_id)
     if not cam:
         raise HTTPException(404, "camera not found")
@@ -2594,9 +2605,62 @@ def update_camera(
         if not isinstance(roi, dict) or not all(k in roi for k in ("x", "y", "w", "h")):
             raise HTTPException(400, "tee_box_roi must be an object with x/y/w/h")
         cam.tee_box_roi = roi
+
+    # Track placement changes (course / hole / role) so we can
+    # auto-unpair if the existing pair would no longer be valid.
+    placement_changed = False
+    if course_id is not None:
+        target_course = db.get(Course, int(course_id))
+        if not target_course:
+            raise HTTPException(404, "target course not found")
+        if cam.course_id != target_course.id:
+            cam.course_id = target_course.id
+            placement_changed = True
+    if assigned_hole is not None:
+        hole = int(assigned_hole)
+        if hole < 1 or hole > 18:
+            raise HTTPException(400, "assigned_hole must be 1..18")
+        if cam.assigned_hole != hole:
+            cam.assigned_hole = hole
+            placement_changed = True
+    if assigned_role is not None:
+        role = assigned_role.strip().lower()
+        if role not in _CAMERA_ROLES:
+            raise HTTPException(400, f"assigned_role must be one of {_CAMERA_ROLES}")
+        if cam.assigned_role != role:
+            cam.assigned_role = role
+            placement_changed = True
+
+    auto_unpaired = False
+    if placement_changed and cam.paired_with_camera_id:
+        partner = db.get(Camera, cam.paired_with_camera_id)
+        if partner is None:
+            cam.paired_with_camera_id = None  # stale link
+        else:
+            pair_still_valid = (
+                cam.course_id == partner.course_id
+                and cam.assigned_hole == partner.assigned_hole
+                and {cam.assigned_role, partner.assigned_role} == set(_CAMERA_ROLES)
+            )
+            if not pair_still_valid:
+                cam.paired_with_camera_id = None
+                partner.paired_with_camera_id = None
+                auto_unpaired = True
+
+    if placement_changed:
+        db.add(AuditLog(
+            actor="admin", action="move_camera", target=f"camera:{cam.id}",
+            detail=(
+                f"course={cam.course_id} hole={cam.assigned_hole} "
+                f"role={cam.assigned_role}"
+                + (" (auto-unpaired)" if auto_unpaired else "")
+            ),
+        ))
     db.commit()
     db.refresh(cam)
-    return _camera_to_dict(cam)
+    result = _camera_to_dict(cam)
+    result["auto_unpaired"] = auto_unpaired
+    return result
 
 
 @router.delete("/cameras/{camera_id}")

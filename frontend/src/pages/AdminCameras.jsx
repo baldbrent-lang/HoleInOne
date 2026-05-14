@@ -33,6 +33,8 @@ export default function AdminCameras() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState({}); // {camera_id: true}
   const [revealedToken, setRevealedToken] = useState({}); // {camera_id: true}
+  const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
+  const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "" });
 
   // New-camera form state
   const [newCourseId, setNewCourseId] = useState("");
@@ -125,6 +127,47 @@ export default function AdminCameras() {
     setBusy((b) => ({ ...b, [cam.id]: true }));
     try {
       await api.updateCamera(adminPassword, cam.id, { enabled: !cam.enabled });
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  function openMove(cam) {
+    setMoveDraft({
+      courseId: String(cam.course_id),
+      hole: String(cam.assigned_hole),
+      role: cam.assigned_role,
+    });
+    setMovingCam(cam.id);
+  }
+
+  function closeMove() {
+    setMovingCam(null);
+  }
+
+  async function submitMove(cam) {
+    const hole = parseInt(moveDraft.hole, 10);
+    const courseId = parseInt(moveDraft.courseId, 10);
+    if (!Number.isFinite(courseId) || !Number.isFinite(hole)) {
+      setError("Course and hole are required.");
+      return;
+    }
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    try {
+      const updated = await api.updateCamera(adminPassword, cam.id, {
+        courseId,
+        assignedHole: hole,
+        assignedRole: moveDraft.role,
+      });
+      if (updated && updated.auto_unpaired) {
+        window.alert(
+          "Move applied. This camera was auto-unpaired because the new placement no longer matched its previous partner's course / hole / role.",
+        );
+      }
+      closeMove();
       await load();
     } catch (e) {
       setError(e.message);
@@ -363,6 +406,13 @@ export default function AdminCameras() {
                   </button>
                   <button
                     type="button" className="secondary small"
+                    onClick={() => openMove(cam)} disabled={isBusy}
+                    title="Move this camera to a different course / hole / role"
+                  >
+                    Move
+                  </button>
+                  <button
+                    type="button" className="secondary small"
                     onClick={() => rotateToken(cam)} disabled={isBusy}
                     title="Mint a new auth_token for this camera"
                   >
@@ -376,6 +426,70 @@ export default function AdminCameras() {
                   </button>
                 </div>
               </div>
+
+              {movingCam === cam.id && (
+                <div
+                  className="card tight"
+                  style={{ margin: "10px 0 0", padding: 10, background: "var(--surface-alt)" }}
+                >
+                  <div className="small" style={{ marginBottom: 6 }}>
+                    <b>Move camera #{cam.id}</b>{" "}
+                    <span className="tiny muted">
+                      · changing course / hole / role will auto-unpair if the
+                      existing partner no longer fits
+                    </span>
+                  </div>
+                  <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+                    <div className="field" style={{ flex: 2, minWidth: 180 }}>
+                      <label className="small">Course</label>
+                      <select
+                        value={moveDraft.courseId}
+                        onChange={(e) => setMoveDraft((d) => ({ ...d, courseId: e.target.value }))}
+                        disabled={isBusy}
+                      >
+                        {courses.map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="field" style={{ flex: 1, minWidth: 80 }}>
+                      <label className="small">Hole</label>
+                      <input
+                        type="number" min="1" max="18"
+                        value={moveDraft.hole}
+                        onChange={(e) => setMoveDraft((d) => ({ ...d, hole: e.target.value }))}
+                        disabled={isBusy}
+                      />
+                    </div>
+                    <div className="field" style={{ flex: 1, minWidth: 100 }}>
+                      <label className="small">Role</label>
+                      <select
+                        value={moveDraft.role}
+                        onChange={(e) => setMoveDraft((d) => ({ ...d, role: e.target.value }))}
+                        disabled={isBusy}
+                      >
+                        <option value="tee">tee</option>
+                        <option value="green">green</option>
+                      </select>
+                    </div>
+                    <div className="inline" style={{ gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => submitMove(cam)}
+                        disabled={isBusy}
+                      >
+                        {isBusy ? "Saving…" : "Apply move"}
+                      </button>
+                      <button
+                        type="button" className="ghost"
+                        onClick={closeMove} disabled={isBusy}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}

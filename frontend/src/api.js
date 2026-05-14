@@ -231,6 +231,9 @@ export const api = {
     if (patch.teeBoxRoi !== undefined) {
       fd.append("tee_box_roi", JSON.stringify(patch.teeBoxRoi));
     }
+    if (patch.courseId !== undefined) fd.append("course_id", String(patch.courseId));
+    if (patch.assignedHole !== undefined) fd.append("assigned_hole", String(patch.assignedHole));
+    if (patch.assignedRole !== undefined) fd.append("assigned_role", patch.assignedRole);
     return request(`/api/admin/cameras/${cameraId}/update`, {
       method: "POST", adminPassword: key, body: fd,
     });
