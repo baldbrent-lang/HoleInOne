@@ -264,6 +264,13 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}`, {
       method: "DELETE", adminPassword: key,
     }),
+  autoDetectLongUpload: (key, uploadId) =>
+    // Cheap detection (audio impact + one Claude handedness call).
+    // Typically returns in 5-10s; bump the helper's default timeout
+    // so the Edit-wizard spinner doesn't fall over on cold-start.
+    request(`/api/admin/long-uploads/${uploadId}/auto-detect`, {
+      method: "POST", adminPassword: key, timeoutMs: 90_000,
+    }),
   processLongUploadSegment: (key, uploadId, { holeNumber, startSec, endSec, aiTracerModel }) =>
     // Synchronous endpoint that runs the full per-segment pipeline
     // (real cut + AI tracer + composite + VideoClip row) on ONE

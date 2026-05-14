@@ -247,6 +247,326 @@ function ProducedTile({ clips, onOpenViewer }) {
   );
 }
 
+function EditWizard({ row, adminPassword, onClose }) {
+  // Auto-detection wizard for single-swing uploads. On mount, hits the
+  // /long-uploads/{id}/auto-detect endpoint which runs the cheap part
+  // of the AI tracer pipeline (audio impact → address frame → Claude
+  // handedness call) and returns enough landmarks to seed manual
+  // tweaks: handedness, address frame JPG, ball-at-rest position,
+  // ball detection ROI, and a target estimate.
+  const [detection, setDetection] = useState(null);
+  const [running, setRunning] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!row) return;
+    let cancelled = false;
+    setRunning(true);
+    setError(null);
+    api
+      .autoDetectLongUpload(adminPassword, row.id)
+      .then((data) => { if (!cancelled) setDetection(data); })
+      .catch((e) => { if (!cancelled) setError(e.message); })
+      .finally(() => { if (!cancelled) setRunning(false); });
+    return () => { cancelled = true; };
+  }, [row, adminPassword]);
+
+  if (!row) return null;
+
+  const fw = detection?.frame_width;
+  const fh = detection?.frame_height;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Edit wizard for upload ${row.id}`}
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.85)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000, padding: 24, cursor: "zoom-out",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="card"
+        style={{
+          maxWidth: "min(960px, 95vw)", width: "100%",
+          maxHeight: "90vh", overflow: "auto",
+          cursor: "default", margin: 0,
+        }}
+      >
+        <div
+          className="row"
+          style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}
+        >
+          <div>
+            <h3 style={{ margin: 0 }}>Edit wizard</h3>
+            <div className="small muted">
+              Upload #{row.id} · {row.course_name || `course ${row.course_id}`} · single swing
+            </div>
+          </div>
+          <button
+            type="button"
+            className="ghost"
+            onClick={onClose}
+            style={{ width: "auto" }}
+          >
+            Close ✕
+          </button>
+        </div>
+
+        <div
+          className="card"
+          style={{
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid var(--border)",
+            margin: "0 0 12px",
+            padding: 12,
+          }}
+        >
+          {running && (
+            <div className="row" style={{ alignItems: "center", gap: 12 }}>
+              <div
+                className="shimmer"
+                style={{ width: 18, height: 18, borderRadius: "50%" }}
+              />
+              <span className="small">
+                Auto-detecting handedness, address frame, and ball position…
+              </span>
+            </div>
+          )}
+          {error && (
+            <div className="err-text small">
+              Auto-detect failed: {error}
+            </div>
+          )}
+          {!running && !error && detection && (
+            <DetectionPreview detection={detection} frameW={fw} frameH={fh} />
+          )}
+        </div>
+
+        <div
+          className="row"
+          style={{ gap: 8, justifyContent: "flex-end", marginTop: 6 }}
+        >
+          <button
+            type="button"
+            className="ghost"
+            onClick={onClose}
+            style={{ width: "auto" }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={running || !!error || !detection}
+            onClick={onClose}
+            style={{ width: "auto" }}
+            title="Save & continue — wiring lands next"
+          >
+            Save (stub)
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetectionPreview({ detection, frameW, frameH }) {
+  const addressUrl = detection.address?.image_url;
+  const ball = detection.ball_at_rest;
+  const roi = detection.ball_detection_area;
+  const target = detection.target;
+
+  // Convert native pixel coords to overlay percentages so the markers
+  // sit correctly on the address-frame JPG regardless of its on-screen
+  // size. Skip the overlay entirely if we don't have frame dimensions.
+  const hasDims = !!(frameW && frameH);
+  const pct = (v, span) => (hasDims ? `${(v / span) * 100}%` : "0%");
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(260px, 1.4fr) minmax(220px, 1fr)",
+          gap: 16,
+          alignItems: "flex-start",
+        }}
+      >
+        <div>
+          <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+            Address frame{" "}
+            {detection.address?.frame != null && (
+              <span style={{ textTransform: "none" }}>
+                · frame {detection.address.frame}
+              </span>
+            )}
+          </div>
+          <div
+            style={{
+              position: "relative",
+              width: "100%",
+              aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+              background: "var(--border, #222)",
+              borderRadius: 6,
+              overflow: "hidden",
+            }}
+          >
+            {addressUrl ? (
+              <img
+                src={addressUrl}
+                alt="Detected address frame"
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              />
+            ) : (
+              <div
+                className="muted small"
+                style={{
+                  position: "absolute", inset: 0,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                No address frame
+              </div>
+            )}
+
+            {hasDims && roi && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: pct(roi.x, frameW),
+                  top: pct(roi.y, frameH),
+                  width: pct(roi.w, frameW),
+                  height: pct(roi.h, frameH),
+                  border: "2px solid #22c55e",
+                  borderRadius: 4,
+                  pointerEvents: "none",
+                  boxShadow: "0 0 0 1px rgba(34,197,94,0.4)",
+                }}
+                title="Ball detection area"
+              />
+            )}
+
+            {hasDims && ball && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: pct(ball.x, frameW),
+                  top: pct(ball.y, frameH),
+                  width: 12, height: 12,
+                  borderRadius: "50%",
+                  background: "#22c55e",
+                  border: "2px solid #fff",
+                  transform: "translate(-50%, -50%)",
+                  pointerEvents: "none",
+                  boxShadow: "0 0 6px rgba(0,0,0,0.6)",
+                }}
+                title={`Ball at rest (${ball.x}, ${ball.y})`}
+              />
+            )}
+
+            {hasDims && ball && target && (
+              <svg
+                aria-hidden
+                viewBox={`0 0 ${frameW} ${frameH}`}
+                preserveAspectRatio="none"
+                style={{
+                  position: "absolute", inset: 0,
+                  width: "100%", height: "100%",
+                  pointerEvents: "none",
+                }}
+              >
+                <defs>
+                  <marker
+                    id="targetArrow"
+                    viewBox="0 0 10 10"
+                    refX="8" refY="5"
+                    markerWidth="6" markerHeight="6"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24" />
+                  </marker>
+                </defs>
+                <line
+                  x1={ball.x} y1={ball.y}
+                  x2={target.x} y2={target.y}
+                  stroke="#fbbf24"
+                  strokeWidth={Math.max(3, Math.round((frameW || 1280) / 320))}
+                  strokeLinecap="round"
+                  markerEnd="url(#targetArrow)"
+                />
+              </svg>
+            )}
+          </div>
+          <div className="tiny muted" style={{ marginTop: 6 }}>
+            Green dot = ball at rest · Green box = ball detection area ·
+            Yellow arrow = target direction.
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <DetectField
+            label="Handedness"
+            value={detection.handedness?.value
+              ? detection.handedness.value.charAt(0).toUpperCase() + detection.handedness.value.slice(1)
+              : "Unknown"}
+            sub={detection.handedness?.confidence
+              ? `Confidence: ${detection.handedness.confidence}`
+              : null}
+          />
+          <DetectField
+            label="Address frame"
+            value={detection.address?.frame != null
+              ? `Frame ${detection.address.frame}`
+              : "Not detected"}
+          />
+          <DetectField
+            label="Impact frame"
+            value={detection.impact?.frame != null
+              ? `Frame ${detection.impact.frame}`
+              : "Not detected"}
+            sub={detection.impact?.method ? `via ${detection.impact.method}` : null}
+          />
+          <DetectField
+            label="Resting ball"
+            value={ball ? `${ball.x}, ${ball.y} px` : "Not detected"}
+          />
+          <DetectField
+            label="Detection area"
+            value={roi
+              ? `${roi.w} × ${roi.h} px @ (${roi.x}, ${roi.y})`
+              : "Not detected"}
+          />
+          <DetectField
+            label="Target"
+            value={target ? `${target.x}, ${target.y} px` : "Not detected"}
+            sub={target?.method || null}
+          />
+          <DetectField
+            label="Frame size"
+            value={frameW && frameH ? `${frameW} × ${frameH} px` : "Unknown"}
+            sub={detection.fps ? `${detection.fps} fps` : null}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DetectField({ label, value, sub }) {
+  return (
+    <div>
+      <div className="tiny upper muted">{label}</div>
+      <div style={{ fontSize: "0.95rem" }}>{value}</div>
+      {sub && <div className="tiny muted">{sub}</div>}
+    </div>
+  );
+}
+
 function VideoLightbox({ url, title, onClose }) {
   if (!url) return null;
   return (
@@ -310,6 +630,7 @@ export default function AdminProduction() {
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title}
+  const [editingRow, setEditingRow] = useState(null);
 
   function openViewer(url, title) {
     if (!url) return;
@@ -350,9 +671,15 @@ export default function AdminProduction() {
   }
 
   function handleEdit(row) {
-    // Stub — the user will spec the editor surface. For now bounce to
-    // the existing long-upload page which already has segment editing.
-    window.location.href = `/admin/long-upload?upload_id=${row.id}`;
+    // Single-swing uploads open the EditWizard modal — auto-detection
+    // of handedness / address frame / ball position / ROI / target.
+    // Multiple-swing uploads still need the per-segment editor, so
+    // those bounce to the existing long-upload page.
+    if (row.swing_count === "single") {
+      setEditingRow(row);
+    } else {
+      window.location.href = `/admin/long-upload?upload_id=${row.id}`;
+    }
   }
 
   async function handleProduce(row) {
@@ -614,6 +941,14 @@ export default function AdminProduction() {
         title={viewer?.title}
         onClose={() => setViewer(null)}
       />
+
+      {editingRow && (
+        <EditWizard
+          row={editingRow}
+          adminPassword={adminPassword}
+          onClose={() => setEditingRow(null)}
+        />
+      )}
     </div>
   );
 }

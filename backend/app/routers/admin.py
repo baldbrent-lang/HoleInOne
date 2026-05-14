@@ -1957,6 +1957,148 @@ def reprocess_long_upload(
     }
 
 
+@router.post("/long-uploads/{upload_id}/auto-detect")
+def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
+    """Run the lightweight per-swing detection on this upload's tee
+    video and return: handedness, address frame (+ JPG), audio-detected
+    impact frame, ball-at-rest position, a derived ball-detection ROI
+    around that position, and a swing-direction "target" estimate.
+
+    Used by the single-swing Edit wizard on /admin/production. This
+    deliberately skips the per-frame ball-track Claude calls and the
+    tracer-video render — those run only when the operator hits
+    Produce. The cheap calls here (audio impact + one Claude
+    handedness call) usually return in ~5–10 s.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "upload has no tee video")
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+
+    fps_val = probe_fps(src_path) or 30.0
+
+    # --- Step 1: audio impact frame ---
+    audio_info = find_impact_via_audio(src_path, fps_val)
+    impact_frame = audio_info.get("impact_frame") if audio_info.get("ok") else None
+
+    # --- Step 2: address frame ---
+    address_image_path = CLIPS_DIR / f"detect-{upload_id}_address.jpg"
+    address_frame_idx: int | None = None
+    if impact_frame is not None:
+        # Address ≈ impact − 1.5s (matches run_full_ai_tracer_pipeline).
+        address_frame_idx = max(0, int(impact_frame) - int(round(1.5 * fps_val)))
+        try:
+            import cv2  # type: ignore
+            cap = cv2.VideoCapture(str(src_path))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, address_frame_idx)
+            ok_read, frame = cap.read()
+            cap.release()
+            if ok_read and frame is not None:
+                cv2.imwrite(str(address_image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        except Exception as exc:  # pragma: no cover
+            log.warning("auto-detect: address-frame grab failed: %s", exc)
+    else:
+        # Audio didn't find a confident impact — fall back to the
+        # Claude vision picker. Slower (one extra API call) but still
+        # cheaper than running ball-track.
+        addr_info = find_address_frame(src_path, output_image_path=address_image_path)
+        if addr_info.get("ok") and addr_info.get("address_frame") is not None:
+            address_frame_idx = int(addr_info["address_frame"])
+
+    # --- Step 3: handedness + ball at rest ---
+    handedness_info: dict = {}
+    if address_frame_idx is not None:
+        handedness_info = detect_handedness_at_address(src_path, address_frame_idx)
+
+    def _public_url(p: Path | None) -> str | None:
+        if not p or not p.exists():
+            return None
+        return f"{settings.app_base_url}/uploads/clips/{p.name}?v={int(p.stat().st_mtime)}"
+
+    handedness = handedness_info.get("handedness") if handedness_info else None
+    ball_x = handedness_info.get("ball_x") if handedness_info else None
+    ball_y = handedness_info.get("ball_y") if handedness_info else None
+    frame_w = handedness_info.get("image_width") if handedness_info else None
+    frame_h = handedness_info.get("image_height") if handedness_info else None
+
+    # --- Step 4: ball detection ROI ---
+    # Square bbox centred on the ball-at-rest position, ~12% of frame
+    # height on a side. Operator can resize/drag during the wizard.
+    detection_area = None
+    if (ball_x is not None and ball_y is not None
+            and frame_w and frame_h):
+        half = max(40, int(round(frame_h * 0.06)))
+        detection_area = {
+            "x": max(0, int(ball_x) - half),
+            "y": max(0, int(ball_y) - half),
+            "w": min(int(frame_w), int(ball_x) + half) - max(0, int(ball_x) - half),
+            "h": min(int(frame_h), int(ball_y) + half) - max(0, int(ball_y) - half),
+        }
+
+    # --- Step 5: target direction estimate ---
+    # For a behind-the-golfer camera (the standing assumption for the
+    # tee angle), the ball flies AWAY from the camera with a horizontal
+    # bias toward the trail side of the swing: a right-hander pulls
+    # slightly LEFT in frame, a left-hander pulls slightly RIGHT.
+    # Returning a unit-vector + a recommended off-screen anchor point
+    # gives the wizard enough to draw an arrow.
+    target = None
+    if handedness in ("right", "left") and frame_w and frame_h and ball_x is not None and ball_y is not None:
+        # Aim ~ 30% of frame width toward trail side, well above the ball.
+        dx = int(round(frame_w * (-0.25 if handedness == "right" else 0.25)))
+        dy = -int(round(frame_h * 0.35))
+        target = {
+            "x": max(0, min(int(frame_w) - 1, int(ball_x) + dx)),
+            "y": max(0, min(int(frame_h) - 1, int(ball_y) + dy)),
+            "method": f"derived from {handedness}-handed behind-camera assumption",
+        }
+
+    db.add(AuditLog(
+        actor="admin", action="auto_detect_long_upload",
+        target=f"long_upload:{upload_id}",
+        detail=(
+            f"handedness={handedness} address_frame={address_frame_idx} "
+            f"impact_frame={impact_frame} ball=({ball_x},{ball_y})"
+        ),
+    ))
+    db.commit()
+
+    return {
+        "upload_id": upload_id,
+        "fps": round(fps_val, 2) if fps_val else None,
+        "tee_url": (
+            f"{settings.app_base_url}/uploads/clips/{row.tee_filename}"
+            if row.tee_filename else None
+        ),
+        "frame_width": frame_w,
+        "frame_height": frame_h,
+        "handedness": {
+            "value": handedness,
+            "confidence": handedness_info.get("confidence") if handedness_info else None,
+            "notes": handedness_info.get("notes") if handedness_info else None,
+        },
+        "address": {
+            "frame": address_frame_idx,
+            "image_url": _public_url(address_image_path),
+        },
+        "impact": {
+            "frame": impact_frame,
+            "method": audio_info.get("method"),
+            "ratio": audio_info.get("ratio"),
+        },
+        "ball_at_rest": (
+            {"x": int(ball_x), "y": int(ball_y)}
+            if ball_x is not None and ball_y is not None else None
+        ),
+        "ball_detection_area": detection_area,
+        "target": target,
+    }
+
+
 @router.delete("/long-uploads/{upload_id}")
 def delete_long_upload(upload_id: int, db: Session = Depends(get_db)):
     """Delete a stored long upload + its source file(s) from disk.
