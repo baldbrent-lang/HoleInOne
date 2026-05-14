@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
 from .database import Base, engine
-from .routers import admin, auth, broadcast, gallery, operator, public, webhooks
+from .routers import admin, auth, broadcast, cameras, gallery, operator, public, webhooks
 
 # Our internal loggers (`golfreelz.tracer`, `golfreelz.admin`, etc.) default to
 # WARNING and uvicorn doesn't configure them, so INFO diagnostics were never
@@ -211,6 +211,7 @@ app.include_router(admin.router)
 app.include_router(auth.router)
 app.include_router(operator.router)
 app.include_router(broadcast.router)
+app.include_router(cameras.router)
 
 
 # --- Uploads (selfies) -------------------------------------------------------
