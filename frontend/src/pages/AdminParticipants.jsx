@@ -154,18 +154,17 @@ export default function AdminParticipants() {
       <Brand subtitle="Operator Console" />
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
-        <Link to="/admin/participants" className="active">Participants</Link>
+        <Link to="/admin/participants" className="active">Players</Link>
+        <Link to="/admin/courses">Courses</Link>
         <Link to="/admin/upload-videos">Upload</Link>
         <Link to="/admin/production">Production</Link>
-        <Link to="/admin/clips">All clips</Link>
-        <Link to="/admin/clips/ai">AI tracer</Link>
+        <Link to="/admin/produced-clips">Produced Clips</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
-        <Link to="/admin/cameras">Cameras</Link>
       </div>
 
       <div className="card">
         <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 12 }}>
-          <h3>Participants</h3>
+          <h3>Players</h3>
           <span className="small muted">
             {rows.length} result{rows.length === 1 ? "" : "s"}
             {" · "}
@@ -226,7 +225,7 @@ export default function AdminParticipants() {
           </div>
         ) : rows.length === 0 ? (
           <div className="muted center" style={{ padding: 30 }}>
-            No participants match your filters.
+            No players match your filters.
           </div>
         ) : (
           <table>

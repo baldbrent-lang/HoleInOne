@@ -160,13 +160,12 @@ export default function AdminClipsAi() {
       <Brand subtitle="Operator Console" />
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
-        <Link to="/admin/participants">Participants</Link>
+        <Link to="/admin/participants">Players</Link>
+        <Link to="/admin/courses">Courses</Link>
         <Link to="/admin/upload-videos">Upload</Link>
         <Link to="/admin/production">Production</Link>
-        <Link to="/admin/clips">All clips</Link>
-        <Link to="/admin/clips/ai" className="active">AI tracer</Link>
+        <Link to="/admin/produced-clips">Produced Clips</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
-        <Link to="/admin/cameras">Cameras</Link>
       </div>
 
       <div className="card">

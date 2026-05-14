@@ -13,6 +13,8 @@ import AdminBroadcastClips from "./pages/AdminBroadcastClips.jsx";
 import AdminCameras from "./pages/AdminCameras.jsx";
 import AdminUploadVideos from "./pages/AdminUploadVideos.jsx";
 import AdminProduction from "./pages/AdminProduction.jsx";
+import AdminProducedClips from "./pages/AdminProducedClips.jsx";
+import AdminCourses from "./pages/AdminCourses.jsx";
 import AdminShowcase from "./pages/AdminShowcase.jsx";
 import Login from "./pages/Login.jsx";
 import Signup from "./pages/Signup.jsx";
@@ -77,6 +79,8 @@ export default function App() {
         <Route path="/admin/cameras" element={<AdminCameras />} />
         <Route path="/admin/upload-videos" element={<AdminUploadVideos />} />
         <Route path="/admin/production" element={<AdminProduction />} />
+        <Route path="/admin/produced-clips" element={<AdminProducedClips />} />
+        <Route path="/admin/courses" element={<AdminCourses />} />
         <Route path="/admin/showcase" element={<AdminShowcase />} />
         <Route path="/admin/review" element={<AdminReview />} />
         <Route
