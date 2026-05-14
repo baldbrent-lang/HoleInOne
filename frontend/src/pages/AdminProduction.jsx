@@ -65,6 +65,9 @@ function uploadState(row) {
 }
 
 function MetaRow({ k, v }) {
+  // Empty string / null / undefined → blank value (no em-dash). The label
+  // stays so the rows in adjacent tiles still line up vertically.
+  const display = v === null || v === undefined || v === "" ? "" : v;
   return (
     <div
       style={{
@@ -76,7 +79,7 @@ function MetaRow({ k, v }) {
       }}
     >
       <span className="muted">{k}</span>
-      <span style={{ wordBreak: "break-word" }}>{v}</span>
+      <span style={{ wordBreak: "break-word" }}>{display}</span>
     </div>
   );
 }
@@ -86,12 +89,14 @@ function qualityText(qualityLabel, width, height) {
   if (qualityLabel && dims) return `${qualityLabel} · ${dims}`;
   if (qualityLabel) return qualityLabel;
   if (dims) return dims;
-  return "—";
+  return "";
 }
 
 function Thumb({ src, alt, missing, placeholder, onClick }) {
   // Shared thumbnail box for all three Production tiles. Clicking opens
-  // the video viewer when an onClick handler is provided.
+  // the video viewer when an onClick handler is provided. Width is
+  // 100% of the parent tile so the three tiles spread evenly via the
+  // outer flex container.
   const clickable = !!onClick;
   return (
     <div
@@ -107,10 +112,10 @@ function Thumb({ src, alt, missing, placeholder, onClick }) {
           }
         : undefined}
       style={{
-        width: 180,
-        height: 102,
+        width: "100%",
+        aspectRatio: "16 / 9",
         background: "var(--border, #222)",
-        borderRadius: 4,
+        borderRadius: 6,
         overflow: "hidden",
         display: "flex",
         alignItems: "center",
@@ -127,8 +132,8 @@ function Thumb({ src, alt, missing, placeholder, onClick }) {
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       ) : (
-        <span className="tiny muted">
-          {missing ? "file missing" : (placeholder || "no preview")}
+        <span className="small muted">
+          {missing ? "File missing" : (placeholder || "No preview")}
         </span>
       )}
       {clickable && src && (
@@ -140,7 +145,8 @@ function Thumb({ src, alt, missing, placeholder, onClick }) {
             background: "rgba(0,0,0,0.0)",
             transition: "background 120ms ease",
             color: "#fff",
-            fontSize: 28,
+            fontSize: 36,
+            textShadow: "0 2px 8px rgba(0,0,0,0.6)",
             pointerEvents: "none",
           }}
         >
@@ -152,25 +158,35 @@ function Thumb({ src, alt, missing, placeholder, onClick }) {
 }
 
 function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
-                     startsAt, missing, qualityLabel, width, height,
+                     startsAt, missing, notUploaded, qualityLabel, width, height,
                      videoUrl, onOpenViewer }) {
+  // When the tile has no underlying source (file missing or never
+  // uploaded), every meta row renders blank — the labels stay so the
+  // tiles in the row line up visually.
+  const hasSource = !!(thumb || videoUrl || durationSec != null);
   return (
-    <div style={{ width: 180, flexShrink: 0 }}>
+    <div style={{ flex: "1 1 0", minWidth: 200, maxWidth: 340 }}>
       <div className="tiny upper muted" style={{ marginBottom: 4 }}>{label}</div>
       <Thumb
         src={thumb}
         alt={`${label} thumbnail`}
         missing={missing}
+        placeholder={notUploaded ? "Not Uploaded" : "No preview"}
         onClick={videoUrl ? () => onOpenViewer(videoUrl, label) : undefined}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <MetaRow k="Quality" v={qualityText(qualityLabel, width, height)} />
-        <MetaRow k="Length" v={fmtDuration(durationSec)} />
-        <MetaRow k="Frames" v={nbFrames != null ? nbFrames : "—"} />
-        <MetaRow k="Frame rate" v={fps != null ? `${fps} fps` : "—"} />
-        <MetaRow k="Size" v={sizeMb != null ? `${sizeMb} MB` : "—"} />
-        <MetaRow k="Starts" v={fmtDateTime(startsAt)} />
-        <MetaRow k="Ends" v={fmtDateTime(addSeconds(startsAt, durationSec))} />
+        <MetaRow k="Quality" v={hasSource ? qualityText(qualityLabel, width, height) : ""} />
+        <MetaRow k="Length" v={durationSec != null ? fmtDuration(durationSec) : ""} />
+        <MetaRow k="Frames" v={nbFrames != null ? nbFrames : ""} />
+        <MetaRow k="Frame rate" v={fps != null ? `${fps} fps` : ""} />
+        <MetaRow k="Size" v={sizeMb != null ? `${sizeMb} MB` : ""} />
+        <MetaRow k="Starts" v={hasSource ? fmtDateTime(startsAt) : ""} />
+        <MetaRow
+          k="Ends"
+          v={hasSource && durationSec != null
+            ? fmtDateTime(addSeconds(startsAt, durationSec))
+            : ""}
+        />
       </div>
     </div>
   );
@@ -178,29 +194,30 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
 
 function ProducedTile({ clips, onOpenViewer }) {
   // Right-most tile on the Production card: thumbnail + summary of every
-  // produced clip cut from this upload. Falls back to a "not yet produced"
+  // produced clip cut from this upload. Falls back to a "Not produced"
   // placeholder when the worker hasn't emitted anything.
-  const first = clips?.[0];
-  const aces = (clips || []).filter((c) => c.ball_in_cup).length;
-  const holes = (clips || [])
-    .map((c) => c.hole_number)
-    .filter((h, i, a) => h != null && a.indexOf(h) === i);
+  const has = clips && clips.length > 0;
+  const first = has ? clips[0] : null;
+  const aces = has ? clips.filter((c) => c.ball_in_cup).length : 0;
+  const holes = has
+    ? clips.map((c) => c.hole_number).filter((h, i, a) => h != null && a.indexOf(h) === i)
+    : [];
   return (
-    <div style={{ width: 180, flexShrink: 0 }}>
+    <div style={{ flex: "1 1 0", minWidth: 200, maxWidth: 340 }}>
       <div className="tiny upper muted" style={{ marginBottom: 4 }}>
         Produced Video
       </div>
       <Thumb
         src={first?.thumbnail_url}
         alt="Produced clip thumbnail"
-        placeholder={clips?.length ? "no preview" : "not produced"}
+        placeholder={has ? "No preview" : "Not produced"}
         onClick={first?.video_url ? () => onOpenViewer(first.video_url, "Produced Video") : undefined}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <MetaRow k="Clips" v={clips?.length ? clips.length : "—"} />
-        <MetaRow k="Aces" v={aces || "—"} />
-        <MetaRow k="Holes" v={holes.length ? holes.join(", ") : "—"} />
-        {clips?.length > 1 && (
+        <MetaRow k="Clips" v={has ? clips.length : ""} />
+        <MetaRow k="Aces" v={has ? aces : ""} />
+        <MetaRow k="Holes" v={holes.length ? holes.join(", ") : ""} />
+        {has && clips.length > 1 && (
           <div style={{ marginTop: 4 }}>
             <div className="tiny upper muted" style={{ marginBottom: 2 }}>
               Open clip
@@ -449,7 +466,15 @@ export default function AdminProduction() {
                 flexWrap: "wrap",
               }}
             >
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+              <div
+                style={{
+                  flex: "1 1 600px",
+                  display: "flex",
+                  gap: 16,
+                  flexWrap: "wrap",
+                  alignItems: "flex-start",
+                }}
+              >
                 <VideoTile
                   label="Tee Angle (Raw Video)"
                   thumb={row.tee_thumbnail_url}
@@ -467,16 +492,17 @@ export default function AdminProduction() {
                 />
                 <VideoTile
                   label="Green Angle (Raw Video)"
-                  thumb={row.green_thumbnail_url}
-                  durationSec={row.green_duration_sec}
-                  nbFrames={row.green_nb_frames}
-                  fps={row.green_fps}
-                  sizeMb={row.green_size_mb}
-                  startsAt={row.base_captured_at}
+                  thumb={row.dual_camera ? row.green_thumbnail_url : null}
+                  durationSec={row.dual_camera ? row.green_duration_sec : null}
+                  nbFrames={row.dual_camera ? row.green_nb_frames : null}
+                  fps={row.dual_camera ? row.green_fps : null}
+                  sizeMb={row.dual_camera ? row.green_size_mb : null}
+                  startsAt={row.dual_camera ? row.base_captured_at : null}
                   missing={row.dual_camera ? row.green_missing : false}
-                  qualityLabel={row.green_quality_label}
-                  width={row.green_width}
-                  height={row.green_height}
+                  notUploaded={!row.dual_camera}
+                  qualityLabel={row.dual_camera ? row.green_quality_label : null}
+                  width={row.dual_camera ? row.green_width : null}
+                  height={row.dual_camera ? row.green_height : null}
                   videoUrl={row.dual_camera ? row.green_url : null}
                   onOpenViewer={openViewer}
                 />
@@ -486,8 +512,6 @@ export default function AdminProduction() {
                 />
               </div>
 
-              <div style={{ flex: 1, minWidth: 0 }} />
-
               <div
                 style={{
                   display: "flex",
@@ -495,6 +519,7 @@ export default function AdminProduction() {
                   gap: 8,
                   alignItems: "stretch",
                   minWidth: 160,
+                  flexShrink: 0,
                 }}
               >
                 {state === "processing" && (
