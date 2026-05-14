@@ -1430,18 +1430,25 @@ async def quick_upload_videos(
     base_captured_at: str = Form(...),
     video: UploadFile = File(...),
     video_green: UploadFile | None = File(None),
+    queue_only: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     """Simple operator-facing upload: save the tee video (plus optional
-    green-side video) and create a LongVideoUpload row in the 'pending'
-    state. Does NOT spawn the cut / AI-tracer / composite background
-    job — the operator goes to /admin/long-upload and clicks Reprocess
-    on the row when they're ready to produce.
+    green-side video) and create a LongVideoUpload row.
 
-    This is what backs /admin/upload, the simplified one-link nav
-    target. Power users who want to tune detection thresholds or
-    manually mark segments still use the full /clips/long-upload
-    endpoint via the Long upload page.
+    By default (queue_only=False) the cut / AI-tracer / composite
+    background job kicks off immediately with sane defaults
+    (auto-detect swings, starting hole 1, combined detector at
+    audio×5 / motion×2 thresholds). Operator can drop a video and
+    walk away.
+
+    When queue_only=True (the 'Don't Auto Produce' checkbox is set),
+    the row is created in 'pending' state and no processing thread
+    spawns — the operator goes to /admin/long-upload to inspect /
+    edit / kick off Reprocess manually.
+
+    Either way, this endpoint returns immediately so the upload UI
+    isn't blocked on the multi-minute processing phase.
     """
     course = db.get(Course, course_id)
     if not course:
@@ -1515,18 +1522,43 @@ async def quick_upload_videos(
     db.commit()
 
     log.info(
-        "quick-upload: upload=%s course=%s tee=%s green=%s",
-        upload_row.id, course_id, src_name, green_src_name,
+        "quick-upload: upload=%s course=%s tee=%s green=%s queue_only=%s",
+        upload_row.id, course_id, src_name, green_src_name, queue_only,
     )
+
+    # Unless the operator checked 'Don't Auto Produce', kick off the
+    # background processing job immediately with sane defaults — same
+    # path /admin/long-upload's Reprocess takes.
+    if not queue_only:
+        threading.Thread(
+            target=_run_long_upload_job,
+            kwargs={
+                "upload_id": upload_row.id,
+                "seg_list": [],
+                "auto_detect_swings": True,
+                "starting_hole": 1,
+                "ai_tracer_model": None,
+            },
+            daemon=True,
+            name=f"long-upload-{upload_row.id}",
+        ).start()
+        message = (
+            "Videos uploaded — processing started in the background. "
+            "Produced clips will appear on Broadcast when ready."
+        )
+    else:
+        message = (
+            "Videos uploaded and queued for editing. Open Long upload "
+            "and click Reprocess when you're ready to produce."
+        )
+
     return {
         "upload_id": upload_row.id,
         "processing_status": upload_row.processing_status,
         "dual_camera": dual_camera,
-        "message": (
-            "Videos uploaded and queued for production. Open Long "
-            "upload and click Reprocess on this row to start "
-            "processing."
-        ),
+        "queue_only": queue_only,
+        "auto_processing": not queue_only,
+        "message": message,
     }
 
 

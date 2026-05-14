@@ -35,6 +35,7 @@ export default function AdminUploadVideos() {
   const [datePlayed, setDatePlayed] = useState(todayLocalDate());
   const [teeFile, setTeeFile] = useState(null);
   const [greenFile, setGreenFile] = useState(null);
+  const [dontAutoProduce, setDontAutoProduce] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
@@ -67,6 +68,7 @@ export default function AdminUploadVideos() {
     fd.append("base_captured_at", baseCapturedAt);
     fd.append("video", teeFile, teeFile.name);
     if (greenFile) fd.append("video_green", greenFile, greenFile.name);
+    if (dontAutoProduce) fd.append("queue_only", "true");
 
     setUploading(true);
     setProgress(0);
@@ -110,10 +112,12 @@ export default function AdminUploadVideos() {
         <h3 style={{ marginBottom: 6 }}>Upload videos</h3>
         <p className="small muted" style={{ marginBottom: 14 }}>
           Drop a tee-angle video (and an optional green-side video) for
-          a round. We'll queue them for production — open{" "}
-          <Link to="/admin/long-upload">Long upload</Link> and hit
-          Reprocess on the row when you're ready to cut, trace, and
-          produce clips.
+          a round. Submit kicks off processing in the background —
+          produced clips appear on{" "}
+          <Link to="/admin/broadcast-clips">Broadcast</Link> when ready.
+          Check <i>Don't Auto Produce</i> below to queue the video for
+          editing on{" "}
+          <Link to="/admin/long-upload">Long upload</Link> instead.
         </p>
 
         {success && (
@@ -126,12 +130,15 @@ export default function AdminUploadVideos() {
               padding: 12,
             }}
           >
-            <b>Upload #{success.upload_id} queued.</b>{" "}
+            <b>Upload #{success.upload_id}{" "}
+              {success.auto_processing ? "started" : "queued"}.</b>{" "}
             <span className="small muted">{success.message}</span>
             <div style={{ marginTop: 8 }}>
-              <Link to="/admin/long-upload">
+              <Link to={success.auto_processing ? "/admin/broadcast-clips" : "/admin/long-upload"}>
                 <button className="small" style={{ width: "auto" }}>
-                  Go to Long upload →
+                  {success.auto_processing
+                    ? "Go to Broadcast →"
+                    : "Go to Long upload →"}
                 </button>
               </Link>
             </div>
@@ -203,11 +210,32 @@ export default function AdminUploadVideos() {
             </div>
           </div>
 
+          <div style={{ marginTop: 14 }}>
+            <label
+              className="small"
+              style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}
+            >
+              <input
+                type="checkbox"
+                checked={dontAutoProduce}
+                onChange={(e) => setDontAutoProduce(e.target.checked)}
+                disabled={uploading}
+                style={{ margin: 0 }}
+              />
+              <span>
+                <b>Don't Auto Produce.</b>{" "}
+                <span className="muted">
+                  Video will go in queue for editing prior to production.
+                </span>
+              </span>
+            </label>
+          </div>
+
           <div className="row" style={{ marginTop: 18, gap: 10, alignItems: "center" }}>
             <button type="submit" disabled={uploading}>
               {uploading
                 ? `Uploading… ${progress}%`
-                : "Upload Video(s)"}
+                : "Submit"}
             </button>
             {uploading && progress > 0 && progress < 100 && (
               <div
