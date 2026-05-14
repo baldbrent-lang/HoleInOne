@@ -242,6 +242,9 @@ export default function Home() {
           <div className="small"><code>/r/&lt;course_token&gt;</code> — mobile registration</div>
           <div className="small"><code>/g/&lt;gallery_token&gt;</code> — golfer gallery</div>
           <div className="small"><Link to="/admin">/admin</Link> — operator dashboard</div>
+          <div className="small"><Link to="/admin/long-upload">/admin/long-upload</Link> — long video upload + auto-cut</div>
+          <div className="small"><Link to="/admin/broadcast-clips">/admin/broadcast-clips</Link> — produced clips + share</div>
+          <div className="small"><Link to="/admin/cameras">/admin/cameras</Link> — on-course capture devices</div>
           <div className="small"><Link to="/admin/review">/admin/review</Link> — hole-in-one verification queue</div>
         </div>
       </div>
