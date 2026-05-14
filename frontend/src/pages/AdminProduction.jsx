@@ -289,6 +289,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   const [finalizing, setFinalizing] = useState(false);
   const [finalError, setFinalError] = useState(null);
   const [committing, setCommitting] = useState(false);
+  // Queued per-frame ball edits, hoisted from TracerStep so Step 3
+  // can show a red note and pass them to /render-tracer-fast.
+  const [manualPositions, setManualPositions] = useState({});
 
   useEffect(() => {
     if (!row) return;
@@ -410,6 +413,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   async function handleAdvanceToFinalize() {
     // Step 2 → Step 3. Reuse the cached final video when present;
     // otherwise apply the intro overlay on top of the rendered tracer.
+    // Manual ball-position edits are NOT applied here — Step 3 Next
+    // does that (cv2 fast render only, never Claude calls).
     if (finalUrl) {
       setStep("finalize");
       return;
@@ -434,9 +439,39 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   }
 
   async function handleSaveToProduced() {
-    if (!finalUrl) return;
+    // Step 3 Next. If the operator queued ball edits on Step 2, bake
+    // them in first via the cv2-only fast render (no AI calls), then
+    // re-apply graphics, then commit to Produced Clips. Otherwise
+    // just commit the already-finalized clip.
     setCommitting(true);
+    setFinalError(null);
     try {
+      const overrides = Object.entries(manualPositions).map(
+        ([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y })
+      );
+      let workingFinalUrl = finalUrl;
+      if (overrides.length > 0) {
+        setFinalizing(true);
+        try {
+          const fast = await api.renderWizardTracerFast(adminPassword, row.id, {
+            manual_positions: overrides,
+          });
+          setTracer({
+            url: fast.tracer_url,
+            frames: fast.ball_track_frames || [],
+          });
+          setManualPositions({});
+          const fin = await api.finalizeWizardVideo(adminPassword, row.id, {});
+          workingFinalUrl = fin.final_video_url;
+          setFinalUrl(workingFinalUrl);
+        } finally {
+          setFinalizing(false);
+        }
+      } else if (!workingFinalUrl) {
+        const fin = await api.finalizeWizardVideo(adminPassword, row.id, {});
+        workingFinalUrl = fin.final_video_url;
+        setFinalUrl(workingFinalUrl);
+      }
       await api.commitWizardClip(adminPassword, row.id);
       onSaved?.();
       onClose();
@@ -552,6 +587,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               frameH={fh}
               totalFrames={totalFrames}
               onSaved={onSaved}
+              manualPositions={manualPositions}
+              setManualPositions={setManualPositions}
             />
           )}
           {!running && !error && draft && step === "finalize" && (
@@ -562,10 +599,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               error={finalError}
               frameW={fw}
               frameH={fh}
-              onReRender={async () => {
-                setFinalUrl(null);
-                await handleAdvanceToFinalize();
-              }}
+              pendingEdits={Object.keys(manualPositions).length}
             />
           )}
         </div>
@@ -616,12 +650,16 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           {step === "finalize" && (
             <button
               type="button"
-              disabled={!finalUrl || committing || finalizing}
+              disabled={committing || finalizing}
               onClick={handleSaveToProduced}
               style={{ width: "auto" }}
-              title="Commit this clip to Produced Clips"
+              title={Object.keys(manualPositions).length > 0
+                ? "Re-render the tracer with the new ball positions, apply graphics, and commit to Produced Clips"
+                : "Commit this clip to Produced Clips"}
             >
-              {committing ? "Saving…" : "Save"}
+              {finalizing
+                ? "Re-rendering…"
+                : committing ? "Saving…" : "Next →"}
             </button>
           )}
         </div>
@@ -1327,11 +1365,11 @@ function TracerStep({
   row, adminPassword, draft, tracer, setTracer,
   rendering, setRendering, error, setError,
   frameW, frameH, totalFrames, onSaved,
+  manualPositions, setManualPositions,
 }) {
-  // Manual ball corrections accumulated since the last render. Each is
-  // a {frame, x, y} entry; clicking Re-generate ships these via the
-  // /render-tracer endpoint which merges them into ball_track_frames.
-  const [manualPositions, setManualPositions] = useState({});
+  // manualPositions / setManualPositions are hoisted to the wizard so
+  // Step 3 can see the queued edits (red note) and pass them to
+  // /render-tracer-fast on commit. Each entry is {frame: {x, y}}.
   const [selectedFrame, setSelectedFrame] = useState(null);
   const [editorBg, setEditorBg] = useState(null); // {url, frame}
   const [editorBall, setEditorBall] = useState(null); // {x, y}
@@ -1476,35 +1514,6 @@ function TracerStep({
     }
   }
 
-  async function regenerate() {
-    setRendering(true);
-    setError(null);
-    try {
-      const overrides = [];
-      Object.entries(manualPositions).forEach(([f, p]) => {
-        overrides.push({ frame: parseInt(f, 10), x: p.x, y: p.y });
-      });
-      const out = await api.renderWizardTracer(adminPassword, row.id, {
-        handedness: draft.handedness,
-        impact_frame: draft.impactFrame,
-        ball_at_rest: draft.ball,
-        manual_ball_positions: overrides,
-      });
-      setTracer({
-        url: out.tracer_url,
-        frames: out.ball_track_frames || [],
-      });
-      setManualPositions({});
-      setSelectedFrame(null);
-      setEditorBg(null);
-      setEditorBall(null);
-      onSaved?.();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setRendering(false);
-    }
-  }
 
   const zoomBtn = {
     background: "rgba(255,255,255,0.12)", color: "#fff",
@@ -1718,7 +1727,7 @@ function TracerStep({
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           {selectedFrame != null
-            ? "Click on the ball to queue this frame as a tracer point. Navigate to other frames to add more. Re-generate when you're done."
+            ? "Click on the ball to queue this frame as a tracer point. Navigate to other frames to add more. Continue to Step 3 — Next there re-renders the tracer (no AI calls)."
             : "Click a frame card on the right to correct the AI's ball position."}
         </div>
       </div>
@@ -1801,18 +1810,14 @@ function TracerStep({
           >
             + 5 frames
           </button>
-          <button
-            type="button"
-            style={{ width: "auto", marginLeft: "auto" }}
-            disabled={rendering || Object.keys(manualPositions).length === 0}
-            onClick={regenerate}
-          >
-            {rendering
-              ? "Re-rendering…"
-              : `Re-generate${Object.keys(manualPositions).length
-                ? ` (${Object.keys(manualPositions).length})`
-                : ""}`}
-          </button>
+          {Object.keys(manualPositions).length > 0 && (
+            <span
+              className="small"
+              style={{ marginLeft: "auto", alignSelf: "center", color: "var(--emerald-700)" }}
+            >
+              {Object.keys(manualPositions).length} point{Object.keys(manualPositions).length === 1 ? "" : "s"} queued
+            </span>
+          )}
         </div>
 
         <div className="tiny upper muted" style={{ marginTop: 4 }}>
@@ -1878,7 +1883,7 @@ function TracerStep({
           })}
           {!frames.length && (
             <div className="muted small">
-              No ball-track yet. Re-generate to populate.
+              No ball-track yet. Click a frame to add points, then Next on Step 3.
             </div>
           )}
         </div>
@@ -1887,8 +1892,9 @@ function TracerStep({
   );
 }
 
-function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, onReRender }) {
+function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, pendingEdits }) {
   const hasDims = !!(frameW && frameH);
+  const hasPending = pendingEdits > 0;
   return (
     <div
       style={{
@@ -1907,12 +1913,13 @@ function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, onReRe
           style={{
             flex: 1, minHeight: 0,
             display: "flex", alignItems: "center", justifyContent: "center",
+            position: "relative",
           }}
         >
           {finalizing ? (
             <div className="row" style={{ alignItems: "center", gap: 12 }}>
               <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
-              <span className="small">Applying graphics… 10–30s.</span>
+              <span className="small">Re-rendering tracer + graphics… 10–30s.</span>
             </div>
           ) : finalUrl ? (
             <video
@@ -1937,10 +1944,28 @@ function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, onReRe
               {error ? error : "Final video not rendered"}
             </div>
           )}
+          {hasPending && !finalizing && (
+            <div
+              role="note"
+              style={{
+                position: "absolute", left: 12, right: 12, bottom: 12,
+                background: "rgba(239, 68, 68, 0.92)",
+                color: "#fff",
+                padding: "10px 14px",
+                borderRadius: 6,
+                fontSize: "0.92rem",
+                boxShadow: "0 4px 14px rgba(0,0,0,0.4)",
+                textAlign: "center",
+              }}
+            >
+              Clicking <b>Next</b> will re-produce the tracer with the
+              updated path ({pendingEdits} new {pendingEdits === 1 ? "point" : "points"}).
+            </div>
+          )}
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           The player banner, course / hole / par / yardage are baked
-          in. Click <b>Save</b> to commit this clip to Produced Clips.
+          in. Click <b>Next</b> to commit this clip to Produced Clips.
         </div>
       </div>
 
@@ -1966,20 +1991,13 @@ function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, onReRe
           </div>
         </div>
 
-        <button
-          type="button"
-          className="ghost"
-          style={{ width: "100%" }}
-          onClick={onReRender}
-          disabled={finalizing}
-        >
-          {finalizing ? "Re-rendering…" : "Re-apply graphics"}
-        </button>
-
-        <div className="tiny muted">
-          Re-apply if you change anything on Step 1 or Step 2 — the
-          finalized video is cached until you click here.
-        </div>
+        {hasPending && (
+          <div className="small" style={{ color: "#ef4444" }}>
+            {pendingEdits} unsaved tracer point{pendingEdits === 1 ? "" : "s"} from Step 2.
+            Clicking <b>Next</b> will fold them into the tracer and
+            re-apply graphics — no AI calls.
+          </div>
+        )}
       </div>
     </div>
   );

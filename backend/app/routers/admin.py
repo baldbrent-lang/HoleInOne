@@ -2314,6 +2314,129 @@ def render_wizard_tracer(
     }
 
 
+@router.post("/long-uploads/{upload_id}/render-tracer-fast")
+def render_tracer_fast(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """Re-render the tracer overlay using ONLY what's already been
+    detected + any operator-supplied ball positions. No Claude calls,
+    no audio probing — pure cv2. Used by Step 3 of the Edit wizard
+    when the operator has added manual ball points and wants to bake
+    them in without burning more API spend.
+
+    Body (all optional, defaults pulled from edit_metrics):
+      manual_positions: list of {frame, x, y} pixel coords. Merged
+        into the existing ball_track_frames — overrides matching
+        frames, inserts new ones for frames the AI never tracked.
+
+    Returns the updated tracer URL + the merged ball_track_frames.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "upload has no tee video")
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+
+    saved = dict(row.edit_metrics or {})
+    existing = list(saved.get("ball_track_frames") or [])
+    manual_positions = payload.get("manual_positions") or []
+
+    # Merge: frame index → entry. Manual wins. Manual additions for
+    # frames the AI never visited are flagged manual=True / found=True
+    # so the renderer treats them as confirmed points.
+    by_frame: dict[int, dict] = {}
+    for rec in existing:
+        try:
+            f = int(rec.get("frame"))
+        except (TypeError, ValueError):
+            continue
+        by_frame[f] = {
+            "frame": f,
+            "found": bool(rec.get("found")),
+            "x": rec.get("x"),
+            "y": rec.get("y"),
+            "manual": bool(rec.get("manual", False)),
+            "image_url": rec.get("image_url"),
+        }
+    for mp in manual_positions:
+        try:
+            f = int(mp["frame"]); x = int(mp["x"]); y = int(mp["y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        prior = by_frame.get(f, {})
+        by_frame[f] = {
+            "frame": f,
+            "found": True,
+            "x": x,
+            "y": y,
+            "manual": True,
+            "image_url": prior.get("image_url"),
+        }
+    merged = sorted(by_frame.values(), key=lambda e: e["frame"])
+
+    # Pull anchor data from saved metrics. ball_at_rest seeds the
+    # starting point of the tracer line; impact_frame anchors the
+    # 'when the line begins' moment.
+    ball = saved.get("ball") or {}
+    ball_xy = None
+    try:
+        if ball and ball.get("x") is not None and ball.get("y") is not None:
+            ball_xy = (float(ball["x"]), float(ball["y"]))
+    except Exception:
+        ball_xy = None
+    try:
+        impact_idx = int(saved.get("impact_frame") or 0)
+    except (TypeError, ValueError):
+        impact_idx = 0
+
+    output_path = CLIPS_DIR / f"wizard-{upload_id}_tracer.mp4"
+    info = render_tracer_video(
+        src_path,
+        output_path,
+        ball_rest_xy_native=ball_xy,
+        impact_frame_idx=impact_idx,
+        track_frames=[
+            {"frame": e["frame"], "found": e["found"], "x": e["x"], "y": e["y"]}
+            for e in merged
+        ],
+    )
+    if not info.get("ok"):
+        raise HTTPException(500, f"tracer render failed: {info.get('error') or 'unknown'}")
+
+    compress_for_email(output_path)
+    tracer_url = (
+        f"{settings.app_base_url}/uploads/clips/{output_path.name}"
+        f"?v={int(output_path.stat().st_mtime)}"
+    )
+
+    saved["tracer_url"] = tracer_url
+    saved["tracer_info"] = info
+    saved["ball_track_frames"] = merged
+    # Re-finalizing was previously baked from the stale tracer — drop
+    # the cached final URL so Step 3 knows to re-apply graphics.
+    saved.pop("finalized_video_url", None)
+    row.edit_metrics = saved
+    db.add(row)
+    db.add(AuditLog(
+        actor="admin", action="render_tracer_fast",
+        target=f"long_upload:{upload_id}",
+        detail=f"merged_frames={len(merged)} manual={len(manual_positions)}",
+    ))
+    db.commit()
+    db.refresh(row)
+    return {
+        "upload_id": upload_id,
+        "tracer_url": tracer_url,
+        "ball_track_frames": merged,
+        "edit_metrics": row.edit_metrics,
+    }
+
+
 @router.post("/long-uploads/{upload_id}/finalize")
 def finalize_wizard_video(
     upload_id: int,

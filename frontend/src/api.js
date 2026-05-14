@@ -287,6 +287,13 @@ export const api = {
       method: "POST", body: overrides, adminPassword: key,
       timeoutMs: 5 * 60_000,
     }),
+  renderWizardTracerFast: (key, uploadId, payload = {}) =>
+    // cv2-only: merges manual_positions into the cached ball_track
+    // and re-renders the tracer overlay. No Claude calls.
+    request(`/api/admin/long-uploads/${uploadId}/render-tracer-fast`, {
+      method: "POST", body: payload, adminPassword: key,
+      timeoutMs: 90_000,
+    }),
   finalizeWizardVideo: (key, uploadId, payload = {}) =>
     request(`/api/admin/long-uploads/${uploadId}/finalize`, {
       method: "POST", body: payload, adminPassword: key,
