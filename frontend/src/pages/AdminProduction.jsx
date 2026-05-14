@@ -266,45 +266,145 @@ function ProducedTile({ clips, onOpenViewer }) {
  * a stub — wiring the draft back to the production pipeline lands
  * next.
  */
-function EditWizard({ row, adminPassword, onClose }) {
-  const [detection, setDetection] = useState(null);
-  const [running, setRunning] = useState(true);
-  const [error, setError] = useState(null);
-  // Editable draft, seeded from the auto-detect response.
+function EditWizard({ row, adminPassword, onClose, onSaved }) {
+  // Hydrate from whatever was already persisted: only auto-detect on
+  // the very first Edit. Subsequent re-opens skip the AI call and
+  // pre-fill the wizard from row.edit_metrics.
+  const saved = row?.edit_metrics || null;
+
   const [draft, setDraft] = useState(null);
-  // Which field is currently in edit mode. null = overview/read-only.
+  const [frameDims, setFrameDims] = useState({
+    width: null, height: null, totalFrames: null,
+  });
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState(null);
   const [editing, setEditing] = useState(null);
+  // 'metrics' = step 1 (handedness/frames/ball/ROI/target);
+  // 'tracer'  = step 2 (rendered tracer + per-frame ball editor).
+  const [step, setStep] = useState("metrics");
+  const [tracer, setTracer] = useState(null); // { url, frames }
+  const [renderingTracer, setRenderingTracer] = useState(false);
+  const [tracerError, setTracerError] = useState(null);
 
   useEffect(() => {
     if (!row) return;
     let cancelled = false;
+
+    function applySaved(s) {
+      setDraft({
+        handedness: s.handedness || "right",
+        addressFrame: s.address_frame ?? 0,
+        addressImageUrl: s.address_image_url || null,
+        impactFrame: s.impact_frame ?? 0,
+        ball: s.ball || null,
+        roi: s.roi || null,
+        target: s.target || null,
+      });
+      if (s.tracer_url || s.ball_track_frames) {
+        setTracer({
+          url: s.tracer_url || null,
+          frames: s.ball_track_frames || [],
+        });
+      }
+    }
+
+    // Already persisted → skip auto-detect entirely. Frame dims come
+    // straight off the upload's probe info.
+    if (saved && (saved.address_frame != null || saved.ball)) {
+      applySaved(saved);
+      setFrameDims({
+        width: row.tee_width || null,
+        height: row.tee_height || null,
+        totalFrames: row.tee_nb_frames || null,
+      });
+      return;
+    }
+
     setRunning(true);
     setError(null);
     api
       .autoDetectLongUpload(adminPassword, row.id)
-      .then((data) => {
+      .then(async (data) => {
         if (cancelled) return;
-        setDetection(data);
-        setDraft({
+        setFrameDims({
+          width: data.frame_width,
+          height: data.frame_height,
+          totalFrames: data.total_frames || row.tee_nb_frames || null,
+        });
+        const seeded = {
           handedness: data.handedness?.value || "right",
-          addressFrame: data.address?.frame ?? 0,
-          addressImageUrl: data.address?.image_url || null,
-          impactFrame: data.impact?.frame ?? 0,
+          address_frame: data.address?.frame ?? 0,
+          address_image_url: data.address?.image_url || null,
+          impact_frame: data.impact?.frame ?? 0,
           ball: data.ball_at_rest || null,
           roi: data.ball_detection_area || null,
           target: data.target ? { x: data.target.x, y: data.target.y } : null,
-        });
+        };
+        applySaved(seeded);
+        // Persist the auto-detected seed so we never re-run on re-open.
+        try {
+          await api.saveEditMetrics(adminPassword, row.id, seeded);
+          onSaved?.();
+        } catch (e) {
+          console.warn("seed-save failed", e);
+        }
       })
       .catch((e) => { if (!cancelled) setError(e.message); })
       .finally(() => { if (!cancelled) setRunning(false); });
     return () => { cancelled = true; };
-  }, [row, adminPassword]);
+  }, [row, adminPassword]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!row) return null;
 
-  const fw = detection?.frame_width;
-  const fh = detection?.frame_height;
-  const totalFrames = detection?.total_frames || null;
+  async function persistPatch(patch) {
+    try {
+      const r = await api.saveEditMetrics(adminPassword, row.id, patch);
+      onSaved?.(r);
+    } catch (e) {
+      console.warn("save metrics failed", e);
+    }
+  }
+
+  async function handleNext() {
+    // Persist current draft, then either reuse the cached tracer or
+    // render a fresh one.
+    await persistPatch({
+      handedness: draft.handedness,
+      address_frame: draft.addressFrame,
+      address_image_url: draft.addressImageUrl,
+      impact_frame: draft.impactFrame,
+      ball: draft.ball,
+      roi: draft.roi,
+      target: draft.target,
+    });
+    if (tracer?.url) {
+      setStep("tracer");
+      return;
+    }
+    setRenderingTracer(true);
+    setTracerError(null);
+    try {
+      const out = await api.renderWizardTracer(adminPassword, row.id, {
+        handedness: draft.handedness,
+        impact_frame: draft.impactFrame,
+        ball_at_rest: draft.ball,
+      });
+      setTracer({
+        url: out.tracer_url,
+        frames: out.ball_track_frames || [],
+      });
+      onSaved?.();
+      setStep("tracer");
+    } catch (e) {
+      setTracerError(e.message);
+    } finally {
+      setRenderingTracer(false);
+    }
+  }
+
+  const fw = frameDims.width;
+  const fh = frameDims.height;
+  const totalFrames = frameDims.totalFrames;
 
   return (
     <div
@@ -316,16 +416,17 @@ function EditWizard({ row, adminPassword, onClose }) {
         position: "fixed", inset: 0,
         background: "rgba(0,0,0,0.85)",
         display: "flex", alignItems: "center", justifyContent: "center",
-        zIndex: 1000, padding: 24, cursor: "zoom-out",
+        zIndex: 1000, padding: 16, cursor: "zoom-out",
       }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         className="card"
         style={{
-          maxWidth: "min(1200px, 96vw)", width: "100%",
-          maxHeight: "92vh", overflow: "auto",
+          maxWidth: "min(1400px, 98vw)", width: "100%",
+          maxHeight: "96vh", height: "96vh", overflow: "hidden",
           cursor: "default", margin: 0,
+          display: "flex", flexDirection: "column",
         }}
       >
         <div
@@ -333,7 +434,9 @@ function EditWizard({ row, adminPassword, onClose }) {
           style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}
         >
           <div>
-            <h3 style={{ margin: 0 }}>Edit wizard</h3>
+            <h3 style={{ margin: 0 }}>
+              Edit wizard {step === "tracer" ? "· Step 2: Tracer" : "· Step 1: Metrics"}
+            </h3>
             <div className="small muted">
               Upload #{row.id} · {row.course_name || `course ${row.course_id}`} · single swing
             </div>
@@ -353,27 +456,25 @@ function EditWizard({ row, adminPassword, onClose }) {
           style={{
             background: "rgba(255,255,255,0.04)",
             border: "1px solid var(--border)",
-            margin: "0 0 12px",
-            padding: 12,
+            margin: "0 0 10px",
+            padding: 10,
+            flex: 1,
+            overflow: "auto",
+            minHeight: 0,
           }}
         >
           {running && (
             <div className="row" style={{ alignItems: "center", gap: 12 }}>
-              <div
-                className="shimmer"
-                style={{ width: 18, height: 18, borderRadius: "50%" }}
-              />
+              <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
               <span className="small">
                 Auto-detecting handedness, address frame, and ball position…
               </span>
             </div>
           )}
           {error && (
-            <div className="err-text small">
-              Auto-detect failed: {error}
-            </div>
+            <div className="err-text small">Auto-detect failed: {error}</div>
           )}
-          {!running && !error && draft && (
+          {!running && !error && draft && step === "metrics" && (
             <WizardBody
               row={row}
               adminPassword={adminPassword}
@@ -384,14 +485,39 @@ function EditWizard({ row, adminPassword, onClose }) {
               frameW={fw}
               frameH={fh}
               totalFrames={totalFrames}
+              persistPatch={persistPatch}
+            />
+          )}
+          {!running && !error && draft && step === "tracer" && (
+            <TracerStep
+              row={row}
+              adminPassword={adminPassword}
+              draft={draft}
+              tracer={tracer}
+              setTracer={setTracer}
+              rendering={renderingTracer}
+              setRendering={setRenderingTracer}
+              error={tracerError}
+              setError={setTracerError}
+              frameW={fw}
+              frameH={fh}
+              totalFrames={totalFrames}
+              onSaved={onSaved}
             />
           )}
         </div>
 
-        <div
-          className="row"
-          style={{ gap: 8, justifyContent: "flex-end", marginTop: 6 }}
-        >
+        <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
+          {step === "tracer" && (
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setStep("metrics")}
+              style={{ width: "auto", marginRight: "auto" }}
+            >
+              ← Back
+            </button>
+          )}
           <button
             type="button"
             className="ghost"
@@ -400,15 +526,26 @@ function EditWizard({ row, adminPassword, onClose }) {
           >
             Cancel
           </button>
-          <button
-            type="button"
-            disabled={running || !!error || !draft}
-            onClick={onClose}
-            style={{ width: "auto" }}
-            title="Save & continue — wiring lands next"
-          >
-            Save (stub)
-          </button>
+          {step === "metrics" ? (
+            <button
+              type="button"
+              disabled={running || !!error || !draft || renderingTracer}
+              onClick={handleNext}
+              style={{ width: "auto" }}
+              title="Save metrics and render the tracer"
+            >
+              {renderingTracer ? "Rendering tracer…" : "Next →"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onClose}
+              style={{ width: "auto" }}
+              title="Send to Broadcast — wiring lands next"
+            >
+              Save to Broadcast (stub)
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -417,24 +554,19 @@ function EditWizard({ row, adminPassword, onClose }) {
 
 function WizardBody({
   row, adminPassword, draft, setDraft, editing, setEditing,
-  frameW, frameH, totalFrames,
+  frameW, frameH, totalFrames, persistPatch,
 }) {
   const hasDims = !!(frameW && frameH);
 
   // Frame-navigation modes ('address', 'impact') need a per-mode
   // working frame. Seed from draft and let ± step buttons mutate.
-  // Each mode keeps its own image URL so flipping between editors
-  // doesn't re-fetch on the way back.
   const [navFrame, setNavFrame] = useState(null);
   const [navUrl, setNavUrl] = useState(null);
   const [navTotal, setNavTotal] = useState(totalFrames);
   const [navLoading, setNavLoading] = useState(false);
 
-  // Reset / seed the navigator whenever we enter a frame-edit mode.
   useEffect(() => {
-    if (editing !== "address" && editing !== "impact") {
-      return;
-    }
+    if (editing !== "address" && editing !== "impact") return;
     const start = editing === "address" ? draft.addressFrame : draft.impactFrame;
     loadFrame(start);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -448,19 +580,22 @@ function WizardBody({
       setNavUrl(data.image_url);
       if (data.total_frames) setNavTotal(data.total_frames);
     } catch (e) {
-      // surface in console; modal stays usable
       console.warn("frame fetch failed", e);
     } finally {
       setNavLoading(false);
     }
   }
 
-  // Which frame image is shown on the left depends on the active
-  // editor. Frame editors (address/impact) show the in-flight nav
-  // frame; everything else shows the address frame.
+  function clampedStep(delta) {
+    const cur = navFrame ?? (editing === "impact" ? draft.impactFrame : draft.addressFrame);
+    const max = (navTotal ?? totalFrames ?? 1) - 1;
+    return Math.max(0, Math.min(max, (cur || 0) + delta));
+  }
+
   let leftImageUrl = draft.addressImageUrl;
   let leftFrameLabel = `Address frame · ${draft.addressFrame}`;
-  if (editing === "address" || editing === "impact") {
+  const showFrameNav = editing === "address" || editing === "impact";
+  if (showFrameNav) {
     leftImageUrl = navUrl || draft.addressImageUrl;
     const total = navTotal != null ? ` / ${navTotal - 1}` : "";
     leftFrameLabel =
@@ -473,29 +608,55 @@ function WizardBody({
         display: "grid",
         gridTemplateColumns: "minmax(320px, 1.5fr) minmax(260px, 1fr)",
         gap: 16,
-        alignItems: "flex-start",
+        height: "100%",
+        minHeight: 0,
       }}
     >
-      <div>
+      <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div className="tiny upper muted" style={{ marginBottom: 4 }}>
           {leftFrameLabel}
         </div>
-        <FramePreview
-          imageUrl={leftImageUrl}
-          frameW={frameW}
-          frameH={frameH}
-          editing={editing}
-          draft={draft}
-          setDraft={setDraft}
-          loading={navLoading}
-        />
+        <div
+          style={{
+            flex: 1, minHeight: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <FramePreview
+            imageUrl={leftImageUrl}
+            frameW={frameW}
+            frameH={frameH}
+            editing={editing}
+            draft={draft}
+            setDraft={setDraft}
+            loading={navLoading}
+            frameNav={showFrameNav ? {
+              current: navFrame,
+              total: navTotal,
+              onJumpStart: () => loadFrame(0),
+              onStepBack10: () => loadFrame(clampedStep(-10)),
+              onStepBack1: () => loadFrame(clampedStep(-1)),
+              onStepFwd1: () => loadFrame(clampedStep(1)),
+              onStepFwd10: () => loadFrame(clampedStep(10)),
+              onJumpEnd: () => {
+                const t = navTotal ?? totalFrames;
+                if (t) loadFrame(t - 1);
+              },
+            } : null}
+          />
+        </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           Green dot = ball at rest · Green box = ball-tracer detection
           area · Red flag = target. Click a field on the right to edit.
         </div>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div
+        style={{
+          display: "flex", flexDirection: "column", gap: 10,
+          overflowY: "auto", minHeight: 0, paddingRight: 4,
+        }}
+      >
         <EditableRow
           label="Handedness"
           value={draft.handedness === "left" ? "Left" : "Right"}
@@ -507,7 +668,10 @@ function WizardBody({
               type="button"
               className={draft.handedness === "right" ? "" : "ghost"}
               style={{ width: "auto", flex: 1 }}
-              onClick={() => setDraft((d) => ({ ...d, handedness: "right" }))}
+              onClick={() => {
+                setDraft((d) => ({ ...d, handedness: "right" }));
+                persistPatch({ handedness: "right" });
+              }}
             >
               Right
             </button>
@@ -515,7 +679,10 @@ function WizardBody({
               type="button"
               className={draft.handedness === "left" ? "" : "ghost"}
               style={{ width: "auto", flex: 1 }}
-              onClick={() => setDraft((d) => ({ ...d, handedness: "left" }))}
+              onClick={() => {
+                setDraft((d) => ({ ...d, handedness: "left" }));
+                persistPatch({ handedness: "left" });
+              }}
             >
               Left
             </button>
@@ -532,14 +699,14 @@ function WizardBody({
             current={navFrame}
             total={navTotal}
             loading={navLoading}
-            onStep={(delta) => loadFrame((navFrame ?? draft.addressFrame) + delta)}
+            onStep={(delta) => loadFrame(clampedStep(delta))}
             onApply={() => {
               if (navFrame == null) return;
+              const url = navUrl || draft.addressImageUrl;
               setDraft((d) => ({
-                ...d,
-                addressFrame: navFrame,
-                addressImageUrl: navUrl || d.addressImageUrl,
+                ...d, addressFrame: navFrame, addressImageUrl: url,
               }));
+              persistPatch({ address_frame: navFrame, address_image_url: url });
               setEditing(null);
             }}
           />
@@ -555,10 +722,11 @@ function WizardBody({
             current={navFrame}
             total={navTotal}
             loading={navLoading}
-            onStep={(delta) => loadFrame((navFrame ?? draft.impactFrame) + delta)}
+            onStep={(delta) => loadFrame(clampedStep(delta))}
             onApply={() => {
               if (navFrame == null) return;
               setDraft((d) => ({ ...d, impactFrame: navFrame }));
+              persistPatch({ impact_frame: navFrame });
               setEditing(null);
             }}
           />
@@ -566,9 +734,7 @@ function WizardBody({
 
         <EditableRow
           label="Resting ball"
-          value={draft.ball
-            ? `${draft.ball.x}, ${draft.ball.y} px`
-            : "Not set"}
+          value={draft.ball ? `${draft.ball.x}, ${draft.ball.y} px` : "Not set"}
           active={editing === "ball"}
           onActivate={() => setEditing(editing === "ball" ? null : "ball")}
         >
@@ -579,7 +745,10 @@ function WizardBody({
           <button
             type="button"
             style={{ width: "auto", marginTop: 6 }}
-            onClick={() => setEditing(null)}
+            onClick={() => {
+              if (draft.ball) persistPatch({ ball: draft.ball });
+              setEditing(null);
+            }}
           >
             Done
           </button>
@@ -603,8 +772,7 @@ function WizardBody({
                 className="ghost"
                 style={{ width: "auto" }}
                 onClick={() => setDraft((d) => ({
-                  ...d,
-                  roi: scaleRoi(d.roi, 0.85, frameW, frameH),
+                  ...d, roi: scaleRoi(d.roi, 0.85, frameW, frameH),
                 }))}
               >
                 Shrink
@@ -614,8 +782,7 @@ function WizardBody({
                 className="ghost"
                 style={{ width: "auto" }}
                 onClick={() => setDraft((d) => ({
-                  ...d,
-                  roi: scaleRoi(d.roi, 1.18, frameW, frameH),
+                  ...d, roi: scaleRoi(d.roi, 1.18, frameW, frameH),
                 }))}
               >
                 Grow
@@ -623,7 +790,10 @@ function WizardBody({
               <button
                 type="button"
                 style={{ width: "auto", marginLeft: "auto" }}
-                onClick={() => setEditing(null)}
+                onClick={() => {
+                  if (draft.roi) persistPatch({ roi: draft.roi });
+                  setEditing(null);
+                }}
               >
                 Done
               </button>
@@ -633,9 +803,7 @@ function WizardBody({
 
         <EditableRow
           label="Target"
-          value={draft.target
-            ? `${draft.target.x}, ${draft.target.y} px`
-            : "Not set"}
+          value={draft.target ? `${draft.target.x}, ${draft.target.y} px` : "Not set"}
           active={editing === "target"}
           onActivate={() => setEditing(editing === "target" ? null : "target")}
         >
@@ -646,7 +814,10 @@ function WizardBody({
           <button
             type="button"
             style={{ width: "auto", marginTop: 6 }}
-            onClick={() => setEditing(null)}
+            onClick={() => {
+              if (draft.target) persistPatch({ target: draft.target });
+              setEditing(null);
+            }}
           >
             Done
           </button>
@@ -732,7 +903,7 @@ function scaleRoi(roi, factor, frameW, frameH) {
   return { x, y, w, h };
 }
 
-function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading }) {
+function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading, frameNav }) {
   const hasDims = !!(frameW && frameH);
   const containerRef = useRef(null);
 
@@ -881,7 +1052,12 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
       onPointerDown={onFramePointerDown}
       style={{
         position: "relative",
-        width: "100%",
+        // Vertical-fit: aspect-ratio drives width when height fills the
+        // parent flex slot. maxWidth caps it on wide screens; maxHeight
+        // is the available flex space.
+        height: "100%",
+        maxHeight: "100%",
+        maxWidth: "100%",
         aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
         background: "var(--border, #222)",
         borderRadius: 6,
@@ -994,6 +1170,46 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
           onPointerDown={onTargetPointerDown}
         />
       )}
+
+      {frameNav && (
+        <FrameNavBar nav={frameNav} loading={loading} />
+      )}
+    </div>
+  );
+}
+
+function FrameNavBar({ nav, loading }) {
+  // Compact frame-step bar at the bottom of the preview. Only rendered
+  // when the wizard is in address / impact frame-pick mode.
+  const stop = (e) => e.stopPropagation();
+  const btn = {
+    background: "rgba(0,0,0,0.55)", color: "#fff",
+    border: "1px solid rgba(255,255,255,0.3)", borderRadius: 4,
+    width: 36, height: 30, fontSize: 13, fontWeight: 600,
+    cursor: "pointer", padding: 0,
+  };
+  return (
+    <div
+      onPointerDown={stop}
+      onClick={stop}
+      style={{
+        position: "absolute",
+        left: "50%", bottom: 10,
+        transform: "translateX(-50%)",
+        display: "flex", gap: 6, alignItems: "center",
+        background: "rgba(0,0,0,0.4)", padding: "6px 8px",
+        borderRadius: 6, backdropFilter: "blur(4px)",
+      }}
+    >
+      <button type="button" style={btn} disabled={loading} onClick={nav.onJumpStart} title="First frame">⏮</button>
+      <button type="button" style={btn} disabled={loading} onClick={nav.onStepBack10} title="−10 frames">−10</button>
+      <button type="button" style={btn} disabled={loading} onClick={nav.onStepBack1} title="−1 frame">−1</button>
+      <span style={{ color: "#fff", fontSize: 12, padding: "0 6px", minWidth: 70, textAlign: "center" }}>
+        {nav.current ?? "—"}{nav.total != null ? ` / ${nav.total - 1}` : ""}
+      </span>
+      <button type="button" style={btn} disabled={loading} onClick={nav.onStepFwd1} title="+1 frame">+1</button>
+      <button type="button" style={btn} disabled={loading} onClick={nav.onStepFwd10} title="+10 frames">+10</button>
+      <button type="button" style={btn} disabled={loading} onClick={nav.onJumpEnd} title="Last frame">⏭</button>
     </div>
   );
 }
@@ -1025,6 +1241,403 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
           strokeLinejoin="round" />
         <circle cx="6" cy="34" r="2.5" fill="#fff" />
       </svg>
+    </div>
+  );
+}
+
+function TracerStep({
+  row, adminPassword, draft, tracer, setTracer,
+  rendering, setRendering, error, setError,
+  frameW, frameH, totalFrames, onSaved,
+}) {
+  // Manual ball corrections accumulated since the last render. Each is
+  // a {frame, x, y} entry; clicking Re-generate ships these via the
+  // /render-tracer endpoint which merges them into ball_track_frames.
+  const [manualPositions, setManualPositions] = useState({});
+  const [selectedFrame, setSelectedFrame] = useState(null);
+  const [editorBg, setEditorBg] = useState(null); // {url, frame}
+  const [editorBall, setEditorBall] = useState(null); // {x, y}
+  const editorRef = useRef(null);
+
+  const frames = tracer?.frames || [];
+  const hasDims = !!(frameW && frameH);
+  const maxFrame = totalFrames ? totalFrames - 1 : null;
+
+  function mergedBallFor(f) {
+    const m = manualPositions[f.frame];
+    if (m) return { x: m.x, y: m.y, manual: true };
+    if (f.found && f.x != null && f.y != null) return { x: f.x, y: f.y, manual: !!f.manual };
+    return null;
+  }
+
+  async function loadEditorFrame(frameIdx) {
+    setSelectedFrame(frameIdx);
+    setEditorBg(null);
+    setEditorBall(null);
+    try {
+      const data = await api.getLongUploadFrame(adminPassword, row.id, frameIdx);
+      setEditorBg({ url: data.image_url, frame: data.frame });
+      const existing = (tracer?.frames || []).find((f) => f.frame === frameIdx);
+      const m = manualPositions[frameIdx];
+      if (m) setEditorBall({ x: m.x, y: m.y });
+      else if (existing?.found && existing.x != null) {
+        setEditorBall({ x: existing.x, y: existing.y });
+      }
+    } catch (e) {
+      console.warn("frame fetch failed", e);
+    }
+  }
+
+  function applyEditorBall() {
+    if (selectedFrame == null || !editorBall) return;
+    setManualPositions((m) => ({
+      ...m,
+      [selectedFrame]: { x: editorBall.x, y: editorBall.y },
+    }));
+  }
+
+  function clearEditorBall() {
+    if (selectedFrame == null) return;
+    setManualPositions((m) => {
+      const next = { ...m };
+      delete next[selectedFrame];
+      return next;
+    });
+  }
+
+  function addFrame(delta) {
+    const lastTracked = frames.length
+      ? Math.max(...frames.map((f) => f.frame))
+      : (selectedFrame ?? 0);
+    const target = Math.max(0, Math.min(maxFrame ?? lastTracked + delta, lastTracked + delta));
+    loadEditorFrame(target);
+  }
+
+  function editorEventToFrame(e) {
+    if (!editorRef.current || !hasDims) return null;
+    const r = editorRef.current.getBoundingClientRect();
+    const xPct = (e.clientX - r.left) / r.width;
+    const yPct = (e.clientY - r.top) / r.height;
+    return {
+      x: Math.max(0, Math.min(frameW - 1, Math.round(xPct * frameW))),
+      y: Math.max(0, Math.min(frameH - 1, Math.round(yPct * frameH))),
+    };
+  }
+
+  function onEditorPointerDown(e) {
+    const pt = editorEventToFrame(e);
+    if (pt) setEditorBall(pt);
+  }
+
+  async function regenerate() {
+    setRendering(true);
+    setError(null);
+    try {
+      const overrides = [];
+      Object.entries(manualPositions).forEach(([f, p]) => {
+        overrides.push({ frame: parseInt(f, 10), x: p.x, y: p.y });
+      });
+      const out = await api.renderWizardTracer(adminPassword, row.id, {
+        handedness: draft.handedness,
+        impact_frame: draft.impactFrame,
+        ball_at_rest: draft.ball,
+        manual_ball_positions: overrides,
+      });
+      setTracer({
+        url: out.tracer_url,
+        frames: out.ball_track_frames || [],
+      });
+      setManualPositions({});
+      setSelectedFrame(null);
+      setEditorBg(null);
+      setEditorBall(null);
+      onSaved?.();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRendering(false);
+    }
+  }
+
+  if (rendering && !tracer) {
+    return (
+      <div className="row" style={{ alignItems: "center", gap: 12 }}>
+        <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
+        <span className="small">Rendering tracer… this can take 30–60s.</span>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(320px, 1.5fr) minmax(280px, 1fr)",
+        gap: 16,
+        height: "100%",
+        minHeight: 0,
+      }}
+    >
+      <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+          {selectedFrame != null
+            ? `Editing frame ${selectedFrame}`
+            : "Rendered tracer"}
+        </div>
+        <div
+          style={{
+            flex: 1, minHeight: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          {selectedFrame != null ? (
+            <div
+              ref={editorRef}
+              onPointerDown={onEditorPointerDown}
+              style={{
+                position: "relative",
+                height: "100%", maxHeight: "100%", maxWidth: "100%",
+                aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+                background: "var(--border, #222)",
+                borderRadius: 6, overflow: "hidden",
+                cursor: "crosshair", userSelect: "none",
+              }}
+            >
+              {editorBg?.url ? (
+                <img
+                  src={editorBg.url}
+                  alt={`Frame ${selectedFrame}`}
+                  draggable={false}
+                  style={{
+                    width: "100%", height: "100%", objectFit: "cover",
+                    pointerEvents: "none",
+                  }}
+                />
+              ) : (
+                <div
+                  className="muted small"
+                  style={{
+                    position: "absolute", inset: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}
+                >
+                  Loading frame…
+                </div>
+              )}
+              {hasDims && editorBall && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${(editorBall.x / frameW) * 100}%`,
+                    top: `${(editorBall.y / frameH) * 100}%`,
+                    width: 18, height: 18,
+                    borderRadius: "50%",
+                    background: "#22c55e",
+                    border: "3px solid #fff",
+                    transform: "translate(-50%, -50%)",
+                    pointerEvents: "none",
+                    boxShadow: "0 0 8px rgba(0,0,0,0.7)",
+                  }}
+                />
+              )}
+            </div>
+          ) : tracer?.url ? (
+            <video
+              src={tracer.url}
+              controls
+              style={{
+                height: "100%", maxHeight: "100%", maxWidth: "100%",
+                aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+                background: "#000", borderRadius: 6,
+              }}
+            />
+          ) : (
+            <div
+              className="muted small"
+              style={{
+                width: "100%", aspectRatio: "16 / 9",
+                background: "var(--border, #222)", borderRadius: 6,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}
+            >
+              No tracer rendered yet
+            </div>
+          )}
+        </div>
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          {selectedFrame != null
+            ? "Click anywhere on the frame to place the ball. Apply to queue, Re-generate to render."
+            : "Click a frame card on the right to correct the AI's ball position."}
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex", flexDirection: "column", gap: 10,
+          overflowY: "auto", minHeight: 0, paddingRight: 4,
+        }}
+      >
+        {error && <div className="err-text small">{error}</div>}
+
+        {selectedFrame != null && (
+          <div
+            className="card"
+            style={{ margin: 0, padding: 10, background: "rgba(34,197,94,0.08)" }}
+          >
+            <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+              Frame {selectedFrame} editor
+            </div>
+            <div className="small" style={{ marginBottom: 6 }}>
+              Ball:{" "}
+              {editorBall
+                ? <b>{editorBall.x}, {editorBall.y} px</b>
+                : <span className="muted">no position</span>}
+              {manualPositions[selectedFrame] && (
+                <span className="small" style={{ marginLeft: 6, color: "var(--emerald-700)" }}>
+                  (queued)
+                </span>
+              )}
+            </div>
+            <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                style={{ width: "auto" }}
+                disabled={!editorBall}
+                onClick={applyEditorBall}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                style={{ width: "auto" }}
+                onClick={clearEditorBall}
+                disabled={!manualPositions[selectedFrame]}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                style={{ width: "auto", marginLeft: "auto" }}
+                onClick={() => { setSelectedFrame(null); setEditorBg(null); }}
+              >
+                Close
+              </button>
+            </div>
+            <div className="row" style={{ gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+              <button type="button" className="ghost" style={{ width: "auto" }}
+                onClick={() => loadEditorFrame(Math.max(0, selectedFrame - 5))}>−5</button>
+              <button type="button" className="ghost" style={{ width: "auto" }}
+                onClick={() => loadEditorFrame(Math.max(0, selectedFrame - 1))}>−1</button>
+              <button type="button" className="ghost" style={{ width: "auto" }}
+                onClick={() => loadEditorFrame(Math.min(maxFrame ?? selectedFrame + 1, selectedFrame + 1))}>+1</button>
+              <button type="button" className="ghost" style={{ width: "auto" }}
+                onClick={() => loadEditorFrame(Math.min(maxFrame ?? selectedFrame + 5, selectedFrame + 5))}>+5</button>
+            </div>
+          </div>
+        )}
+
+        <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto" }}
+            onClick={() => addFrame(1)}
+            title="Add the frame right after the last tracked one"
+          >
+            + 1 frame
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto" }}
+            onClick={() => addFrame(5)}
+          >
+            + 5 frames
+          </button>
+          <button
+            type="button"
+            style={{ width: "auto", marginLeft: "auto" }}
+            disabled={rendering || Object.keys(manualPositions).length === 0}
+            onClick={regenerate}
+          >
+            {rendering
+              ? "Re-rendering…"
+              : `Re-generate${Object.keys(manualPositions).length
+                ? ` (${Object.keys(manualPositions).length})`
+                : ""}`}
+          </button>
+        </div>
+
+        <div className="tiny upper muted" style={{ marginTop: 4 }}>
+          Per-frame ball-track ({frames.length})
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
+            gap: 6,
+          }}
+        >
+          {frames.map((f) => {
+            const ball = mergedBallFor(f);
+            const isQueued = !!manualPositions[f.frame];
+            return (
+              <button
+                key={f.frame}
+                type="button"
+                onClick={() => loadEditorFrame(f.frame)}
+                style={{
+                  width: "100%", padding: 0,
+                  border: selectedFrame === f.frame
+                    ? "2px solid #22c55e"
+                    : "1px solid var(--border)",
+                  borderRadius: 4, overflow: "hidden",
+                  background: "transparent", cursor: "pointer",
+                  textAlign: "left",
+                }}
+                title={`Frame ${f.frame}${ball ? ` · ${ball.x}, ${ball.y}` : " · no ball"}`}
+              >
+                <div style={{ position: "relative", aspectRatio: "16 / 9", background: "#222" }}>
+                  {f.image_url && (
+                    <img
+                      src={f.image_url}
+                      alt={`Frame ${f.frame}`}
+                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                    />
+                  )}
+                  {hasDims && ball && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: `${(ball.x / frameW) * 100}%`,
+                        top: `${(ball.y / frameH) * 100}%`,
+                        width: 10, height: 10, borderRadius: "50%",
+                        background: ball.manual || isQueued ? "#fbbf24" : "#22c55e",
+                        border: "2px solid #fff",
+                        transform: "translate(-50%, -50%)",
+                      }}
+                    />
+                  )}
+                </div>
+                <div className="tiny" style={{ padding: "3px 4px" }}>
+                  <b>f{f.frame}</b>
+                  <span className="muted">
+                    {" "}{f.found ? "found" : "no ball"}
+                    {isQueued ? " · queued" : ""}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+          {!frames.length && (
+            <div className="muted small">
+              No ball-track yet. Re-generate to populate.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1408,7 +2021,8 @@ export default function AdminProduction() {
         <EditWizard
           row={editingRow}
           adminPassword={adminPassword}
-          onClose={() => setEditingRow(null)}
+          onClose={() => { setEditingRow(null); load(); }}
+          onSaved={load}
         />
       )}
     </div>

@@ -115,6 +115,8 @@ def _migrate() -> None:
             statements.append(
                 "UPDATE long_video_uploads SET swing_count = 'multiple' WHERE swing_count IS NULL"
             )
+        if "edit_metrics" not in lvu_cols:
+            statements.append("ALTER TABLE long_video_uploads ADD COLUMN edit_metrics JSON")
 
     # VideoClip additions
     if "video_clips" in inspector.get_table_names():

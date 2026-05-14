@@ -275,6 +275,18 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}/frame?frame=${frame}`, {
       adminPassword: key, timeoutMs: 20_000,
     }),
+  saveEditMetrics: (key, uploadId, patch) =>
+    request(`/api/admin/long-uploads/${uploadId}/edit-metrics`, {
+      method: "POST", body: patch, adminPassword: key,
+    }),
+  renderWizardTracer: (key, uploadId, overrides = {}) =>
+    // Heavy: runs the full ai-trace pipeline (address + handedness +
+    // impact + ball-track + tracer render). Bump timeout to a few
+    // minutes so we don't fall over on cold starts.
+    request(`/api/admin/long-uploads/${uploadId}/render-tracer`, {
+      method: "POST", body: overrides, adminPassword: key,
+      timeoutMs: 5 * 60_000,
+    }),
   processLongUploadSegment: (key, uploadId, { holeNumber, startSec, endSec, aiTracerModel }) =>
     // Synchronous endpoint that runs the full per-segment pipeline
     // (real cut + AI tracer + composite + VideoClip row) on ONE

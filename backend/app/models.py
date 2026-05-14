@@ -230,6 +230,14 @@ class LongVideoUpload(Base):
     # Drives the Production-page UI state and the quick-upload's
     # decision to spawn the background job immediately.
     swing_count: Mapped[str] = mapped_column(String(20), default="multiple")
+    # Persisted state of the single-swing Edit wizard. Holds whatever
+    # the operator has Saved so far — handedness, address/impact frame
+    # indices, ball-at-rest pixel coords, detection-area ROI box,
+    # target (flag) point, the rendered tracer URL, and the per-frame
+    # ball-track positions. None until the wizard's first save; once
+    # set, the wizard re-opens with these values instead of re-running
+    # auto-detect.
+    edit_metrics: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 

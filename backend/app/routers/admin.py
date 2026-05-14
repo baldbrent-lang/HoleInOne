@@ -10,7 +10,7 @@ from pathlib import Path
 
 log = logging.getLogger("golfreelz.admin")
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Response, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -1861,6 +1861,7 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "green_missing": (r.green_filename is not None and not green_exists),
             "dual_camera": r.green_filename is not None,
             "produced_clips": produced,
+            "edit_metrics": r.edit_metrics,
             "last_n_segments": r.last_n_segments,
             "last_n_succeeded": r.last_n_succeeded,
             "processing_status": r.processing_status,
@@ -2146,6 +2147,170 @@ def long_upload_frame(
             f"{settings.app_base_url}/uploads/clips/{out_path.name}"
             f"?v={int(out_path.stat().st_mtime)}"
         ),
+    }
+
+
+@router.post("/long-uploads/{upload_id}/edit-metrics")
+def save_edit_metrics(
+    upload_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Upsert the operator's saved wizard state on a single-swing
+    upload. Body is merged into edit_metrics — pass only the fields
+    that changed. Re-opening the Edit wizard reads from this so
+    auto-detect only runs the very first time.
+
+    Recognised top-level keys: handedness, address_frame,
+    address_image_url, impact_frame, ball ({x,y}), roi ({x,y,w,h}),
+    target ({x,y}), tracer_url, ball_track_frames (list).
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    existing = dict(row.edit_metrics or {})
+    for k, v in payload.items():
+        existing[k] = v
+    row.edit_metrics = existing
+    db.add(row)
+    db.add(AuditLog(
+        actor="admin", action="save_edit_metrics",
+        target=f"long_upload:{upload_id}",
+        detail=str({k: (existing.get(k)) for k in payload.keys()}),
+    ))
+    db.commit()
+    db.refresh(row)
+    return {"upload_id": upload_id, "edit_metrics": row.edit_metrics}
+
+
+@router.post("/long-uploads/{upload_id}/render-tracer")
+def render_wizard_tracer(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """Run the full AI tracer pipeline (address + handedness + impact
+    + ball-track + tracer render) on this upload's tee video, with
+    operator overrides from the wizard's saved metrics. Persists the
+    rendered tracer URL + per-frame ball positions to edit_metrics
+    and returns them. Used by Step 2 of the Edit wizard.
+
+    Optional `payload` body keys (all override the saved metrics):
+      handedness ('right'|'left'), impact_frame (int),
+      ball_at_rest {x,y}, manual_ball_positions (list of
+      {frame,x,y}).
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "upload has no tee video")
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+
+    saved = dict(row.edit_metrics or {})
+
+    def _pick(*keys):
+        for k in keys:
+            v = payload.get(k)
+            if v is not None:
+                return v
+            v = saved.get(k)
+            if v is not None:
+                return v
+        return None
+
+    handedness = _pick("handedness")
+    if handedness not in (None, "right", "left", "unknown"):
+        handedness = None
+    impact_override = _pick("impact_frame")
+    ball_pt = _pick("ball", "ball_at_rest")
+    manual_positions = _pick("manual_ball_positions") or []
+
+    ball_at_rest_override = None
+    if isinstance(ball_pt, dict) and ball_pt.get("x") is not None:
+        ball_at_rest_override = (float(ball_pt["x"]), float(ball_pt["y"]))
+
+    pipe = run_full_ai_tracer_pipeline(
+        src_path,
+        output_dir=CLIPS_DIR,
+        output_prefix=f"wizard-{upload_id}",
+        impact_frame_override=int(impact_override) if impact_override is not None else None,
+        ball_at_rest_override=ball_at_rest_override,
+        manual_ball_positions=manual_positions or None,
+        handedness_override=handedness,
+    )
+
+    def _public_url(p):
+        if p is None or not Path(p).exists():
+            return None
+        return f"{settings.app_base_url}/uploads/clips/{Path(p).name}?v={int(Path(p).stat().st_mtime)}"
+
+    tracer_path = pipe.get("tracer_video_path")
+    tracer_info = pipe.get("tracer_video_info") or {}
+    tracer_url = None
+    if tracer_path is not None and tracer_info.get("ok"):
+        compress_for_email(tracer_path)
+        if Path(tracer_path).exists() and Path(tracer_path).stat().st_size > 0:
+            tracer_url = _public_url(tracer_path)
+
+    # Surface per-frame ball-track entries with public image URLs (the
+    # ai-trace pipeline writes a JPG per tracked frame next to the
+    # source video — same convention used by /clips/{id}/ai-trace).
+    ball_track_frames_out = []
+    for rec in pipe.get("ball_track_frames", []) or []:
+        filename = rec.get("image_filename")
+        url = None
+        if filename:
+            fp = CLIPS_DIR / filename
+            if fp.exists():
+                url = f"{settings.app_base_url}/uploads/clips/{filename}?v={int(fp.stat().st_mtime)}"
+        ball_track_frames_out.append({
+            "frame": rec.get("frame"),
+            "found": rec.get("found"),
+            "x": rec.get("x"),
+            "y": rec.get("y"),
+            "confidence": rec.get("confidence"),
+            "manual": rec.get("manual", False),
+            "image_url": url,
+        })
+
+    saved.update({
+        "handedness": pipe.get("handedness", {}).get("handedness") if pipe.get("handedness") else handedness,
+        "address_frame": (pipe.get("address") or {}).get("address_frame"),
+        "address_image_url": _public_url((pipe.get("address_image_path") or None)),
+        "impact_frame": (pipe.get("impact_refined") or pipe.get("impact") or {}).get("impact_frame"),
+        "impact_image_url": _public_url((pipe.get("impact_image_path") or None)),
+        "ball": (
+            {"x": int((pipe.get("handedness") or {}).get("ball_x") or 0),
+             "y": int((pipe.get("handedness") or {}).get("ball_y") or 0)}
+            if (pipe.get("handedness") or {}).get("ball_x") is not None else saved.get("ball")
+        ),
+        "tracer_url": tracer_url,
+        "tracer_info": tracer_info,
+        "ball_track_frames": ball_track_frames_out,
+    })
+    row.edit_metrics = saved
+    db.add(row)
+    db.add(AuditLog(
+        actor="admin", action="render_wizard_tracer",
+        target=f"long_upload:{upload_id}",
+        detail=str({
+            "tracer_ok": bool(tracer_url),
+            "n_frames": len(ball_track_frames_out),
+            "overrides": list(payload.keys()),
+        }),
+    ))
+    db.commit()
+    db.refresh(row)
+
+    return {
+        "upload_id": upload_id,
+        "tracer_url": tracer_url,
+        "ball_track_frames": ball_track_frames_out,
+        "edit_metrics": row.edit_metrics,
+        "pipeline_error": pipe.get("error"),
     }
 
 
