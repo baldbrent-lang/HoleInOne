@@ -298,12 +298,11 @@ export default function AdminLongUpload() {
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
-        <Link to="/admin/upload">Upload clip</Link>
-        <Link to="/admin/long-upload" className="active">Long upload</Link>
+        <Link to="/admin/upload-videos">Upload</Link>
+        <Link to="/admin/clips">All clips</Link>
+        <Link to="/admin/clips/ai">AI tracer</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
         <Link to="/admin/cameras">Cameras</Link>
-        <Link to="/admin/showcase">Home videos</Link>
-        <Link to="/admin/review">Hole-in-one review</Link>
       </div>
 
       {queuedUploadId != null && (

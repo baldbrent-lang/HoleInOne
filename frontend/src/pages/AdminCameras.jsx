@@ -235,8 +235,9 @@ export default function AdminCameras() {
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
-        <Link to="/admin/upload">Upload clip</Link>
-        <Link to="/admin/long-upload">Long upload</Link>
+        <Link to="/admin/upload-videos">Upload</Link>
+        <Link to="/admin/clips">All clips</Link>
+        <Link to="/admin/clips/ai">AI tracer</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
         <Link to="/admin/cameras" className="active">Cameras</Link>
       </div>

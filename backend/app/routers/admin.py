@@ -1424,6 +1424,112 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/clips/quick-upload")
+async def quick_upload_videos(
+    course_id: int = Form(...),
+    base_captured_at: str = Form(...),
+    video: UploadFile = File(...),
+    video_green: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    """Simple operator-facing upload: save the tee video (plus optional
+    green-side video) and create a LongVideoUpload row in the 'pending'
+    state. Does NOT spawn the cut / AI-tracer / composite background
+    job — the operator goes to /admin/long-upload and clicks Reprocess
+    on the row when they're ready to produce.
+
+    This is what backs /admin/upload, the simplified one-link nav
+    target. Power users who want to tune detection thresholds or
+    manually mark segments still use the full /clips/long-upload
+    endpoint via the Long upload page.
+    """
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "course not found")
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(400, "tee video must be a video file")
+    dual_camera = video_green is not None
+    if dual_camera and not (video_green.content_type or "").startswith("video/"):
+        raise HTTPException(400, "video_green must be a video file")
+
+    try:
+        base_dt = datetime.fromisoformat(base_captured_at.replace("Z", "+00:00"))
+        if base_dt.tzinfo is not None:
+            base_dt = base_dt.astimezone().replace(tzinfo=None)
+    except ValueError:
+        raise HTTPException(400, "invalid base_captured_at; use ISO 8601")
+
+    # Save the tee video.
+    data = await video.read()
+    if not data:
+        raise HTTPException(400, "empty tee video upload")
+    if len(data) > 1024 * 1024 * 1024:
+        raise HTTPException(413, "tee video too large (max 1GB)")
+    src_ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    if src_ext not in ("mp4", "mov", "webm", "m4v"):
+        src_ext = "mp4"
+    src_name = f"long-{course_id}-{secrets.token_hex(6)}.{src_ext}"
+    src_path = CLIPS_DIR / src_name
+    src_path.write_bytes(data)
+
+    # Save the green video if present.
+    green_src_name: str | None = None
+    green_original_filename: str | None = None
+    if dual_camera:
+        green_data = await video_green.read()
+        if not green_data:
+            src_path.unlink(missing_ok=True)
+            raise HTTPException(400, "empty green video upload")
+        if len(green_data) > 1024 * 1024 * 1024:
+            src_path.unlink(missing_ok=True)
+            raise HTTPException(413, "green video too large (max 1GB)")
+        g_ext = (video_green.filename or "").rsplit(".", 1)[-1].lower() if "." in (video_green.filename or "") else "mp4"
+        if g_ext not in ("mp4", "mov", "webm", "m4v"):
+            g_ext = "mp4"
+        green_src_name = f"long-{course_id}-green-{secrets.token_hex(6)}.{g_ext}"
+        (CLIPS_DIR / green_src_name).write_bytes(green_data)
+        green_original_filename = video_green.filename or None
+
+    upload_row = LongVideoUpload(
+        course_id=course_id,
+        camera_type="tee",
+        base_captured_at=base_dt,
+        tee_filename=src_name,
+        green_filename=green_src_name,
+        tee_original_filename=(video.filename or None),
+        green_original_filename=green_original_filename,
+        processing_status="pending",
+    )
+    db.add(upload_row)
+    db.commit()
+    db.refresh(upload_row)
+
+    db.add(AuditLog(
+        actor="admin", action="quick_upload_videos",
+        target=f"long_upload:{upload_row.id}",
+        detail=(
+            f"course={course_id} tee={src_name}"
+            + (f" green={green_src_name}" if green_src_name else "")
+        ),
+    ))
+    db.commit()
+
+    log.info(
+        "quick-upload: upload=%s course=%s tee=%s green=%s",
+        upload_row.id, course_id, src_name, green_src_name,
+    )
+    return {
+        "upload_id": upload_row.id,
+        "processing_status": upload_row.processing_status,
+        "dual_camera": dual_camera,
+        "message": (
+            "Videos uploaded and queued for production. Open Long "
+            "upload and click Reprocess on this row to start "
+            "processing."
+        ),
+    }
+
+
 @router.post("/clips/long-upload")
 async def upload_long_video(
     course_id: int = Form(...),

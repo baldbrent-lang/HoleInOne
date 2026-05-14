@@ -73,14 +73,11 @@ export default function AdminClips() {
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
-        <Link to="/admin/upload">Upload clip</Link>
-        <Link to="/admin/long-upload">Long upload</Link>
+        <Link to="/admin/upload-videos">Upload</Link>
         <Link to="/admin/clips" className="active">All clips</Link>
         <Link to="/admin/clips/ai">AI tracer</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
         <Link to="/admin/cameras">Cameras</Link>
-        <Link to="/admin/showcase">Home videos</Link>
-        <Link to="/admin/review">Hole-in-one review</Link>
       </div>
 
       <div className="card">
@@ -102,7 +99,7 @@ export default function AdminClips() {
 
       {clips?.length === 0 && (
         <div className="card muted center" style={{ padding: 40 }}>
-          No clips uploaded yet. <Link to="/admin/upload">Upload one →</Link>
+          No clips uploaded yet. <Link to="/admin/upload-videos">Upload one →</Link>
         </div>
       )}
 
