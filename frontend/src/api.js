@@ -34,7 +34,13 @@ async function operatorRequest(path) {
 }
 
 async function request(path, { method = "GET", body, adminPassword, auth = true, timeoutMs } = {}) {
-  const headers = { "Content-Type": "application/json" };
+  // FormData bodies get sent as multipart/form-data — the browser
+  // sets the Content-Type (incl. the boundary) automatically when we
+  // *don't* set it ourselves. JSON-style bodies keep the explicit
+  // application/json header.
+  const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+  const headers = {};
+  if (!isFormData) headers["Content-Type"] = "application/json";
   if (adminPassword) headers["X-Admin-Password"] = adminPassword;
   if (auth) {
     const t = getUserToken();
@@ -47,7 +53,7 @@ async function request(path, { method = "GET", body, adminPassword, auth = true,
     res = await fetch(`${API_BASE}${path}`, {
       method,
       headers,
-      body: body ? JSON.stringify(body) : undefined,
+      body: !body ? undefined : (isFormData ? body : JSON.stringify(body)),
       signal: controller?.signal,
     });
   } catch (e) {
@@ -188,6 +194,51 @@ export const api = {
     }),
   listLongUploads: (key, limit = 100) =>
     request(`/api/admin/long-uploads?limit=${limit}`, { adminPassword: key }),
+
+  // ---- Cameras (always-on capture devices) ----
+  listCameras: (key) =>
+    request(`/api/admin/cameras`, { adminPassword: key }),
+  createCamera: (key, { courseId, assignedHole, assignedRole, name }) => {
+    const fd = new FormData();
+    fd.append("course_id", String(courseId));
+    fd.append("assigned_hole", String(assignedHole));
+    fd.append("assigned_role", assignedRole);
+    fd.append("name", name || "");
+    return request(`/api/admin/cameras`, {
+      method: "POST", adminPassword: key, body: fd,
+    });
+  },
+  pairCameras: (key, cameraId, partnerId) => {
+    const fd = new FormData();
+    fd.append("partner_id", String(partnerId));
+    return request(`/api/admin/cameras/${cameraId}/pair`, {
+      method: "POST", adminPassword: key, body: fd,
+    });
+  },
+  unpairCamera: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}/unpair`, {
+      method: "POST", adminPassword: key,
+    }),
+  rotateCameraToken: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}/rotate-token`, {
+      method: "POST", adminPassword: key,
+    }),
+  updateCamera: (key, cameraId, patch) => {
+    const fd = new FormData();
+    if (patch.name !== undefined) fd.append("name", patch.name || "");
+    if (patch.enabled !== undefined) fd.append("enabled", patch.enabled ? "true" : "false");
+    if (patch.note !== undefined) fd.append("note", patch.note || "");
+    if (patch.teeBoxRoi !== undefined) {
+      fd.append("tee_box_roi", JSON.stringify(patch.teeBoxRoi));
+    }
+    return request(`/api/admin/cameras/${cameraId}/update`, {
+      method: "POST", adminPassword: key, body: fd,
+    });
+  },
+  deleteCamera: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}`, {
+      method: "DELETE", adminPassword: key,
+    }),
   reprocessLongUpload: (key, uploadId, formData) =>
     // Re-runs the segmenter + AI tracer + composite on a stored long
     // upload. XHR-based so we get FormData support without rewriting

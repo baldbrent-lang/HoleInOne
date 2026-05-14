@@ -78,6 +78,7 @@ export default function AdminClips() {
         <Link to="/admin/clips" className="active">All clips</Link>
         <Link to="/admin/clips/ai">AI tracer</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras">Cameras</Link>
         <Link to="/admin/showcase">Home videos</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>

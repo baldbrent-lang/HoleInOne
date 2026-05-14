@@ -221,6 +221,92 @@ class LongVideoUpload(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class Camera(Base):
+    """An on-course capture device — typically a Raspberry Pi paired
+    with a USB / CSI camera, mounted on or near one hole. Tee cameras
+    watch the tee box for a person and trigger; green cameras
+    continuously buffer and persist their buffer when the paired tee
+    camera fires.
+
+    Authentication is via a per-camera token (sent in the URL of every
+    event endpoint), not the admin password — that way devices in the
+    field don't need the operator password baked into their SD cards.
+    """
+
+    __tablename__ = "cameras"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
+    assigned_hole: Mapped[int] = mapped_column(Integer)
+    assigned_role: Mapped[str] = mapped_column(String(20))  # 'tee' | 'green'
+    # Paired camera (tee's pair = green, and vice versa). Nullable so
+    # a half-deployed hole still works; backend skips the dual-cam
+    # pair-up step when this is null.
+    paired_with_camera_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("cameras.id"), nullable=True,
+    )
+    # Per-camera secret used to auth /api/cameras/{token}/... requests.
+    # Long random URL-safe string; rotate by editing the row.
+    auth_token: Mapped[str] = mapped_column(
+        String(80), unique=True,
+        default=lambda: _token("cam_", 24),
+    )
+    # Display name the operator sets ("Hole 3 tee", "Hole 7 green").
+    name: Mapped[str] = mapped_column(String(120), default="")
+    # JSON-encoded {x, y, w, h} in the camera's native pixel coords —
+    # the bounding box the tee-side person detector treats as "on the
+    # tee". Green cameras leave this null.
+    tee_box_roi: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Last time the camera POSTed anything (heartbeat, event, upload).
+    # Backend's offline alert watches this.
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    firmware_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CameraEvent(Base):
+    """One detected event from a tee camera, with optional uploaded
+    clips from itself and its paired green camera. The row tracks
+    which Pis have called in and gives the backend something to
+    attach the produced VideoClip to.
+
+    Lifecycle:
+      1. Tee Pi POSTs /event-trigger → backend creates row,
+         status='triggered'.
+      2. Tee Pi finishes recording, POSTs /upload-event → tee_clip_filename
+         set, status='tee_uploaded'.
+      3. Green Pi finishes recording, POSTs /upload-event → green_clip_filename
+         set, status='paired_uploaded'.
+      4. Worker picks up paired rows, runs the per-segment pipeline,
+         flips to 'processed' with produced_clip_id set.
+    """
+
+    __tablename__ = "camera_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Operator-supplied session_id from the tee Pi (UUID4). Matches
+    # the tee's clip with the green's clip when they upload.
+    session_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    tee_camera_id: Mapped[int] = mapped_column(ForeignKey("cameras.id"), index=True)
+    green_camera_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("cameras.id"), nullable=True,
+    )
+    course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), index=True)
+    hole_number: Mapped[int] = mapped_column(Integer)
+    triggered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    tee_clip_filename: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    green_clip_filename: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # triggered | tee_uploaded | paired_uploaded | processed | failed
+    status: Mapped[str] = mapped_column(String(30), default="triggered")
+    # VideoClip row produced from the pair, once the pipeline runs.
+    produced_clip_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("video_clips.id"), nullable=True,
+    )
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class BroadcastView(Base):
     """Per-viewer dedup for the /broadcast/next playlist.
 

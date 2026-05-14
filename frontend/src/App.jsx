@@ -10,6 +10,7 @@ import AdminLongUpload from "./pages/AdminLongUpload.jsx";
 import AdminClips from "./pages/AdminClips.jsx";
 import AdminClipsAi from "./pages/AdminClipsAi.jsx";
 import AdminBroadcastClips from "./pages/AdminBroadcastClips.jsx";
+import AdminCameras from "./pages/AdminCameras.jsx";
 import AdminShowcase from "./pages/AdminShowcase.jsx";
 import Login from "./pages/Login.jsx";
 import Signup from "./pages/Signup.jsx";
@@ -71,6 +72,7 @@ export default function App() {
         <Route path="/admin/clips" element={<AdminClips />} />
         <Route path="/admin/clips/ai" element={<AdminClipsAi />} />
         <Route path="/admin/broadcast-clips" element={<AdminBroadcastClips />} />
+        <Route path="/admin/cameras" element={<AdminCameras />} />
         <Route path="/admin/showcase" element={<AdminShowcase />} />
         <Route path="/admin/review" element={<AdminReview />} />
         <Route

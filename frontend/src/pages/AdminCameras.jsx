@@ -1,0 +1,385 @@
+/**
+ * Camera management page — register / pair / rotate-token / disable
+ * the on-course capture devices. Phase 1 of the always-on hardware
+ * integration; the event-trigger + upload-event endpoints the Pis
+ * actually talk to land in phase 2.
+ */
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { api } from "../api.js";
+import { Brand } from "../components/Brand.jsx";
+
+const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
+const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
+
+function tsRel(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const sec = Math.round((Date.now() - d.getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}h ago`;
+  return `${Math.round(sec / 86400)}d ago`;
+}
+
+export default function AdminCameras() {
+  const adminPassword =
+    localStorage.getItem(ADMIN_PW_STORAGE) ||
+    localStorage.getItem(LEGACY_ADMIN_PW_STORAGE) ||
+    "";
+
+  const [cameras, setCameras] = useState(null);
+  const [courses, setCourses] = useState([]);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState({}); // {camera_id: true}
+  const [revealedToken, setRevealedToken] = useState({}); // {camera_id: true}
+
+  // New-camera form state
+  const [newCourseId, setNewCourseId] = useState("");
+  const [newHole, setNewHole] = useState("");
+  const [newRole, setNewRole] = useState("tee");
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  async function load() {
+    try {
+      const list = await api.listCameras(adminPassword);
+      setCameras(list);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  useEffect(() => {
+    if (!adminPassword) return;
+    api.listCourses(adminPassword).then(setCourses).catch((e) => setError(e.message));
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adminPassword]);
+
+  async function createCamera(e) {
+    e.preventDefault();
+    setError(null);
+    if (!newCourseId || !newHole) {
+      setError("Course and hole are required.");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.createCamera(adminPassword, {
+        courseId: parseInt(newCourseId, 10),
+        assignedHole: parseInt(newHole, 10),
+        assignedRole: newRole,
+        name: newName.trim(),
+      });
+      setNewHole("");
+      setNewName("");
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function pairWith(cam, partnerId) {
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    try {
+      await api.pairCameras(adminPassword, cam.id, partnerId);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  async function unpair(cam) {
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    try {
+      await api.unpairCamera(adminPassword, cam.id);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  async function rotateToken(cam) {
+    if (!window.confirm(
+      "Rotate this camera's auth token? The Pi will stop authenticating with the old token immediately — you'll need to re-provision the SD card.",
+    )) return;
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    try {
+      await api.rotateCameraToken(adminPassword, cam.id);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  async function toggleEnabled(cam) {
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    try {
+      await api.updateCamera(adminPassword, cam.id, { enabled: !cam.enabled });
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  async function deleteCamera(cam) {
+    if (!window.confirm(
+      `Delete camera #${cam.id} (${cam.name || `hole ${cam.assigned_hole} ${cam.assigned_role}`})? This can't be undone.`,
+    )) return;
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    try {
+      await api.deleteCamera(adminPassword, cam.id);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  async function copyToken(token) {
+    try {
+      await navigator.clipboard.writeText(token);
+    } catch (e) {
+      window.prompt("Copy this token:", token);
+    }
+  }
+
+  if (!adminPassword) {
+    return (
+      <div className="wrap">
+        <Brand subtitle="Operator Console" />
+        <div className="card center">
+          <h2>Admin password required</h2>
+          <Link to="/admin"><button style={{ marginTop: 10 }}>Sign in</button></Link>
+        </div>
+      </div>
+    );
+  }
+
+  // Pair candidates per camera: same course + same hole + opposite
+  // role + currently unpaired (or paired with this camera).
+  function pairCandidates(cam) {
+    if (!cameras) return [];
+    const oppositeRole = cam.assigned_role === "tee" ? "green" : "tee";
+    return cameras.filter((c) =>
+      c.id !== cam.id
+      && c.course_id === cam.course_id
+      && c.assigned_hole === cam.assigned_hole
+      && c.assigned_role === oppositeRole
+      && (!c.paired_with_camera_id || c.paired_with_camera_id === cam.id),
+    );
+  }
+
+  function findById(id) {
+    return cameras?.find((c) => c.id === id);
+  }
+
+  return (
+    <div className="wrap wide">
+      <Brand subtitle="Operator Console" />
+      <div className="nav">
+        <Link to="/admin">Dashboard</Link>
+        <Link to="/admin/participants">Participants</Link>
+        <Link to="/admin/upload">Upload clip</Link>
+        <Link to="/admin/long-upload">Long upload</Link>
+        <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras" className="active">Cameras</Link>
+      </div>
+
+      <div className="card">
+        <h3 style={{ marginBottom: 6 }}>Cameras</h3>
+        <p className="small muted" style={{ marginBottom: 0 }}>
+          Register each on-course capture device (one tee + one green per
+          par-3 hole). Each row's <code>auth_token</code> is the secret the
+          Pi uses to call <code>/api/cameras/&#123;token&#125;/...</code> — keep
+          it private and rotate it if a device is lost.
+        </p>
+      </div>
+
+      {error && <div className="card err-text small">{error}</div>}
+
+      <div className="card">
+        <h4 style={{ marginBottom: 8 }}>Register new camera</h4>
+        <form onSubmit={createCamera}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div className="field" style={{ flex: 2, minWidth: 200 }}>
+              <label className="small">Course</label>
+              <select
+                value={newCourseId}
+                onChange={(e) => setNewCourseId(e.target.value)}
+                disabled={creating}
+              >
+                <option value="">Pick a course…</option>
+                {courses.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field" style={{ flex: 1, minWidth: 80 }}>
+              <label className="small">Hole</label>
+              <input
+                type="number" min="1" max="18"
+                value={newHole}
+                onChange={(e) => setNewHole(e.target.value)}
+                disabled={creating}
+              />
+            </div>
+            <div className="field" style={{ flex: 1, minWidth: 120 }}>
+              <label className="small">Role</label>
+              <select value={newRole} onChange={(e) => setNewRole(e.target.value)} disabled={creating}>
+                <option value="tee">tee</option>
+                <option value="green">green</option>
+              </select>
+            </div>
+            <div className="field" style={{ flex: 2, minWidth: 200 }}>
+              <label className="small">Name (optional)</label>
+              <input
+                type="text" placeholder="Hole 3 tee — east tree"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                disabled={creating}
+              />
+            </div>
+            <div>
+              <button type="submit" disabled={creating}>
+                {creating ? "Creating…" : "Register"}
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+
+      {cameras === null && (
+        <div className="card"><div className="shimmer" style={{ height: 80 }} /></div>
+      )}
+
+      {cameras?.length === 0 && (
+        <div className="card muted center" style={{ padding: 40 }}>
+          No cameras registered yet. Use the form above to register the first one.
+        </div>
+      )}
+
+      <div className="stack" style={{ gap: 10 }}>
+        {cameras?.map((cam) => {
+          const partner = cam.paired_with_camera_id
+            ? findById(cam.paired_with_camera_id) : null;
+          const candidates = pairCandidates(cam);
+          const isBusy = !!busy[cam.id];
+          const tokenVisible = !!revealedToken[cam.id];
+          return (
+            <div key={cam.id} className="card tight" style={{ margin: 0, padding: 12 }}>
+              <div className="inline" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                <div className="small">
+                  <b>#{cam.id}</b>{" "}
+                  <span className={`pill small ${cam.enabled ? "ok" : "warn"}`}>
+                    {cam.enabled ? "enabled" : "disabled"}
+                  </span>{" "}
+                  <span className={`pill small ${cam.assigned_role === "tee" ? "" : "ok"}`}>
+                    {cam.assigned_role}
+                  </span>{" "}
+                  <span className="muted">
+                    · hole {cam.assigned_hole}
+                    {cam.name && <> · {cam.name}</>}
+                  </span>
+                  <div className="tiny muted" style={{ marginTop: 2 }}>
+                    last seen: {tsRel(cam.last_seen_at)}
+                    {cam.last_event_at && <> · last event: {tsRel(cam.last_event_at)} ({cam.last_event_status})</>}
+                    {cam.firmware_version && <> · fw {cam.firmware_version}</>}
+                  </div>
+                  <div className="tiny" style={{ marginTop: 6, fontFamily: "monospace" }}>
+                    auth_token:{" "}
+                    {tokenVisible ? (
+                      <>
+                        <code>{cam.auth_token}</code>
+                        <button
+                          type="button" className="ghost small"
+                          onClick={() => copyToken(cam.auth_token)}
+                          style={{ marginLeft: 8 }}
+                        >
+                          Copy
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button" className="ghost small"
+                        onClick={() => setRevealedToken((r) => ({ ...r, [cam.id]: true }))}
+                      >
+                        Show
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="inline" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  {partner ? (
+                    <span className="small muted">
+                      paired with{" "}
+                      <code>#{partner.id} ({partner.assigned_role})</code>
+                      {" "}
+                      <button
+                        type="button" className="ghost small"
+                        onClick={() => unpair(cam)} disabled={isBusy}
+                      >
+                        Unpair
+                      </button>
+                    </span>
+                  ) : candidates.length > 0 ? (
+                    <select
+                      defaultValue=""
+                      disabled={isBusy}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value, 10);
+                        if (Number.isFinite(v)) pairWith(cam, v);
+                      }}
+                      className="small"
+                      style={{ fontSize: 12 }}
+                    >
+                      <option value="">Pair with…</option>
+                      {candidates.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          #{p.id} ({p.assigned_role}) {p.name && `— ${p.name}`}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="tiny muted">no eligible partner</span>
+                  )}
+                  <button
+                    type="button" className="secondary small"
+                    onClick={() => toggleEnabled(cam)} disabled={isBusy}
+                  >
+                    {cam.enabled ? "Disable" : "Enable"}
+                  </button>
+                  <button
+                    type="button" className="secondary small"
+                    onClick={() => rotateToken(cam)} disabled={isBusy}
+                    title="Mint a new auth_token for this camera"
+                  >
+                    Rotate token
+                  </button>
+                  <button
+                    type="button" className="ghost small err-text"
+                    onClick={() => deleteCamera(cam)} disabled={isBusy}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

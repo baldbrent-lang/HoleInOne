@@ -19,6 +19,8 @@ from ..database import SessionLocal, get_db
 from ..deps import require_admin
 from ..models import (
     AuditLog,
+    Camera,
+    CameraEvent,
     ClipProcessingStatus,
     Course,
     HIOStatus,
@@ -2400,3 +2402,221 @@ def hio_decide(event_id: int, payload: HIOReviewAction, db: Session = Depends(ge
             notifications.notify_hio_confirmed(p.name, p.mobile, p.email, gallery_url)
     db.commit()
     return {"ok": True, "status": new_status}
+
+
+# ----------------------------------------------------------------------
+# Camera management (phase 1 of the on-course always-on hardware
+# integration). Devices in the field auth via per-camera token on
+# /api/cameras/{token}/... endpoints (phase 2); this section is the
+# operator-facing CRUD that those tokens are minted by.
+# ----------------------------------------------------------------------
+
+_CAMERA_ROLES = ("tee", "green")
+
+
+def _camera_to_dict(c: Camera, last_event: CameraEvent | None = None) -> dict:
+    """Shape a Camera row for the admin UI. Includes the auth_token
+    because operators need it to provision the Pi's SD card."""
+    return {
+        "id": c.id,
+        "course_id": c.course_id,
+        "assigned_hole": c.assigned_hole,
+        "assigned_role": c.assigned_role,
+        "paired_with_camera_id": c.paired_with_camera_id,
+        "auth_token": c.auth_token,
+        "name": c.name,
+        "tee_box_roi": c.tee_box_roi,
+        "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
+        "firmware_version": c.firmware_version,
+        "enabled": bool(c.enabled),
+        "note": c.note,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "last_event_at": (
+            last_event.triggered_at.isoformat()
+            if last_event and last_event.triggered_at else None
+        ),
+        "last_event_status": last_event.status if last_event else None,
+    }
+
+
+@router.get("/cameras")
+def list_cameras(db: Session = Depends(get_db)):
+    """Every registered camera, newest first. Includes the
+    most recent CameraEvent's status / timestamp for at-a-glance
+    health visibility."""
+    cams = db.query(Camera).order_by(Camera.created_at.desc()).all()
+    out: list[dict] = []
+    for c in cams:
+        last_evt = (
+            db.query(CameraEvent)
+            .filter(
+                (CameraEvent.tee_camera_id == c.id)
+                | (CameraEvent.green_camera_id == c.id)
+            )
+            .order_by(CameraEvent.triggered_at.desc())
+            .first()
+        )
+        out.append(_camera_to_dict(c, last_evt))
+    return out
+
+
+@router.post("/cameras")
+def create_camera(
+    course_id: int = Form(...),
+    assigned_hole: int = Form(...),
+    assigned_role: str = Form(...),
+    name: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Mint a new camera + auth_token. The operator runs this once per
+    physical device (or when rotating a stolen / lost device's token)
+    and uses the returned auth_token to provision the Pi's SD card."""
+    role = (assigned_role or "").strip().lower()
+    if role not in _CAMERA_ROLES:
+        raise HTTPException(400, f"assigned_role must be one of {_CAMERA_ROLES}")
+    course = db.get(Course, int(course_id))
+    if not course:
+        raise HTTPException(404, "course not found")
+    hole = int(assigned_hole)
+    if hole < 1 or hole > 18:
+        raise HTTPException(400, "assigned_hole must be 1..18")
+    cam = Camera(
+        course_id=course.id,
+        assigned_hole=hole,
+        assigned_role=role,
+        name=(name or "").strip()[:120],
+    )
+    db.add(cam)
+    db.flush()
+    db.add(AuditLog(
+        actor="admin", action="create_camera", target=f"camera:{cam.id}",
+        detail=f"course={course.id} hole={hole} role={role}",
+    ))
+    db.commit()
+    db.refresh(cam)
+    return _camera_to_dict(cam)
+
+
+@router.post("/cameras/{camera_id}/pair")
+def pair_camera(
+    camera_id: int,
+    partner_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Mark two cameras as paired (one tee + one green, same course
+    and hole). The relationship is mirrored — both rows point at each
+    other — so the event-trigger relay can look up the partner from
+    either side."""
+    cam = db.get(Camera, camera_id)
+    partner = db.get(Camera, int(partner_id))
+    if not cam or not partner:
+        raise HTTPException(404, "camera not found")
+    if cam.id == partner.id:
+        raise HTTPException(400, "camera cannot pair with itself")
+    if cam.course_id != partner.course_id or cam.assigned_hole != partner.assigned_hole:
+        raise HTTPException(400, "cameras must share course + hole to pair")
+    if {cam.assigned_role, partner.assigned_role} != set(_CAMERA_ROLES):
+        raise HTTPException(400, "pair must be exactly one tee + one green")
+    # Mirror the link on both sides.
+    cam.paired_with_camera_id = partner.id
+    partner.paired_with_camera_id = cam.id
+    db.add(AuditLog(
+        actor="admin", action="pair_cameras",
+        target=f"camera:{cam.id}", detail=f"partner={partner.id}",
+    ))
+    db.commit()
+    return {"ok": True, "cameras": [_camera_to_dict(cam), _camera_to_dict(partner)]}
+
+
+@router.post("/cameras/{camera_id}/unpair")
+def unpair_camera(camera_id: int, db: Session = Depends(get_db)):
+    """Clear pairing on both sides."""
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    partner = (
+        db.get(Camera, cam.paired_with_camera_id)
+        if cam.paired_with_camera_id else None
+    )
+    cam.paired_with_camera_id = None
+    if partner is not None:
+        partner.paired_with_camera_id = None
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/cameras/{camera_id}/rotate-token")
+def rotate_camera_token(camera_id: int, db: Session = Depends(get_db)):
+    """Mint a new auth_token for this camera (invalidating the old
+    one). Used when a device is lost / stolen / suspected compromised
+    — re-provision the Pi with the new token."""
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    # Import locally so the module's lazy enough that test bench scripts
+    # can import admin without pulling models' _token helper exposure.
+    from ..models import _token as _make_token
+    cam.auth_token = _make_token("cam_", 24)
+    db.add(AuditLog(
+        actor="admin", action="rotate_camera_token", target=f"camera:{cam.id}",
+        detail="",
+    ))
+    db.commit()
+    db.refresh(cam)
+    return {"ok": True, "auth_token": cam.auth_token}
+
+
+@router.post("/cameras/{camera_id}/update")
+def update_camera(
+    camera_id: int,
+    name: str | None = Form(None),
+    enabled: bool | None = Form(None),
+    tee_box_roi: str | None = Form(None),  # JSON string {"x":N,"y":N,"w":N,"h":N}
+    note: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Patch a camera's display name / enabled flag / tee-box ROI /
+    note. Each field is optional; only sent fields get applied."""
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if name is not None:
+        cam.name = name.strip()[:120]
+    if enabled is not None:
+        cam.enabled = bool(enabled)
+    if note is not None:
+        cam.note = note.strip() or None
+    if tee_box_roi is not None and tee_box_roi.strip():
+        try:
+            roi = json.loads(tee_box_roi)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "tee_box_roi must be valid JSON")
+        if not isinstance(roi, dict) or not all(k in roi for k in ("x", "y", "w", "h")):
+            raise HTTPException(400, "tee_box_roi must be an object with x/y/w/h")
+        cam.tee_box_roi = roi
+    db.commit()
+    db.refresh(cam)
+    return _camera_to_dict(cam)
+
+
+@router.delete("/cameras/{camera_id}")
+def delete_camera(camera_id: int, db: Session = Depends(get_db)):
+    """Hard-delete a camera row. Any partner's paired_with link is
+    cleared first so the partner doesn't end up pointing at a missing
+    row. CameraEvent rows referencing this camera are preserved (for
+    audit), but the FK will fail if you try to recreate one with the
+    same id — fine for normal use."""
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if cam.paired_with_camera_id:
+        partner = db.get(Camera, cam.paired_with_camera_id)
+        if partner is not None:
+            partner.paired_with_camera_id = None
+    db.add(AuditLog(
+        actor="admin", action="delete_camera", target=f"camera:{cam.id}",
+        detail=f"course={cam.course_id} hole={cam.assigned_hole} role={cam.assigned_role}",
+    ))
+    db.delete(cam)
+    db.commit()
+    return {"deleted": True, "camera_id": camera_id}

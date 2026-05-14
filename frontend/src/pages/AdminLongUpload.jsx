@@ -301,6 +301,7 @@ export default function AdminLongUpload() {
         <Link to="/admin/upload">Upload clip</Link>
         <Link to="/admin/long-upload" className="active">Long upload</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras">Cameras</Link>
         <Link to="/admin/showcase">Home videos</Link>
         <Link to="/admin/review">Hole-in-one review</Link>
       </div>
