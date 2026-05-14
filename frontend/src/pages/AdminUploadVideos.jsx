@@ -100,7 +100,7 @@ export default function AdminUploadVideos() {
   }
 
   return (
-    <div className="wrap">
+    <div className="wrap wide">
       <Brand subtitle="Operator Console" />
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
