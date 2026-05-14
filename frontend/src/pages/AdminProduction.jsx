@@ -64,16 +64,34 @@ function uploadState(row) {
   return "queued";
 }
 
-function VideoMeta({ label, thumb, durationSec, nbFrames, fps, sizeMb,
+function MetaRow({ k, v }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "70px 1fr",
+        gap: 6,
+        fontSize: "0.78rem",
+        lineHeight: 1.5,
+      }}
+    >
+      <span className="muted">{k}</span>
+      <span style={{ wordBreak: "break-word" }}>{v}</span>
+    </div>
+  );
+}
+
+function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
                      startsAt, missing }) {
   return (
-    <div style={{ flex: 1, minWidth: 240 }}>
-      <div className="small muted" style={{ marginBottom: 4 }}>{label}</div>
+    <div style={{ width: 180, flexShrink: 0 }}>
+      <div className="tiny upper muted" style={{ marginBottom: 4 }}>{label}</div>
       <div
         style={{
-          aspectRatio: "16/9",
+          width: 180,
+          height: 102,
           background: "var(--border, #222)",
-          borderRadius: 6,
+          borderRadius: 4,
           overflow: "hidden",
           display: "flex",
           alignItems: "center",
@@ -88,19 +106,18 @@ function VideoMeta({ label, thumb, durationSec, nbFrames, fps, sizeMb,
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
         ) : (
-          <span className="small muted">
+          <span className="tiny muted">
             {missing ? "file missing" : "no preview"}
           </span>
         )}
       </div>
-      <div className="tiny muted" style={{ lineHeight: 1.5 }}>
-        <div>Duration: <b>{fmtDuration(durationSec)}</b></div>
-        <div>Frames: <b>{nbFrames ?? "—"}</b> @ <b>{fps ?? "—"}</b> fps</div>
-        <div>Size: <b>{sizeMb != null ? `${sizeMb} MB` : "—"}</b></div>
-        <div>Starts: <b>{fmtDateTime(startsAt)}</b></div>
-        <div>
-          Ends: <b>{fmtDateTime(addSeconds(startsAt, durationSec))}</b>
-        </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <MetaRow k="Length" v={fmtDuration(durationSec)} />
+        <MetaRow k="Frames" v={nbFrames != null ? nbFrames : "—"} />
+        <MetaRow k="Frame rate" v={fps != null ? `${fps} fps` : "—"} />
+        <MetaRow k="Size" v={sizeMb != null ? `${sizeMb} MB` : "—"} />
+        <MetaRow k="Starts" v={fmtDateTime(startsAt)} />
+        <MetaRow k="Ends" v={fmtDateTime(addSeconds(startsAt, durationSec))} />
       </div>
     </div>
   );
@@ -256,71 +273,128 @@ export default function AdminProduction() {
               <span className="small muted">
                 Uploaded {fmtDateTime(row.created_at)}
               </span>
-              <div style={{ flex: 1 }} />
-              {state === "processing" && (
-                <span
-                  className="small"
-                  style={{
-                    padding: "2px 8px",
-                    borderRadius: 999,
-                    background: "rgba(255, 176, 0, 0.15)",
-                    border: "1px solid rgba(255, 176, 0, 0.5)",
-                  }}
-                >
-                  Production in Progress
-                </span>
-              )}
-              {state === "produced" && (
-                <span
-                  className="small"
-                  style={{
-                    padding: "2px 8px",
-                    borderRadius: 999,
-                    background: "rgba(40, 168, 92, 0.15)",
-                    border: "1px solid rgba(40, 168, 92, 0.5)",
-                  }}
-                >
-                  Produced · {row.last_n_succeeded}/{row.last_n_segments || row.last_n_succeeded} clips
-                </span>
-              )}
-              {state === "queued" && (
-                <span
-                  className="small"
-                  style={{
-                    padding: "2px 8px",
-                    borderRadius: 999,
-                    background: "rgba(120, 120, 120, 0.15)",
-                    border: "1px solid rgba(120, 120, 120, 0.5)",
-                  }}
-                >
-                  Queued
-                </span>
-              )}
             </div>
 
-            <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
-              <VideoMeta
-                label="Tee-angle"
-                thumb={row.tee_thumbnail_url}
-                durationSec={row.tee_duration_sec}
-                nbFrames={row.tee_nb_frames}
-                fps={row.tee_fps}
-                sizeMb={row.tee_size_mb}
-                startsAt={row.base_captured_at}
-                missing={row.tee_missing}
-              />
-              {row.dual_camera && (
-                <VideoMeta
-                  label="Green-side"
-                  thumb={row.green_thumbnail_url}
-                  durationSec={row.green_duration_sec}
-                  nbFrames={row.green_nb_frames}
-                  fps={row.green_fps}
-                  sizeMb={row.green_size_mb}
+            <div
+              style={{
+                display: "flex",
+                gap: 20,
+                alignItems: "flex-start",
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <VideoTile
+                  label="Tee-angle"
+                  thumb={row.tee_thumbnail_url}
+                  durationSec={row.tee_duration_sec}
+                  nbFrames={row.tee_nb_frames}
+                  fps={row.tee_fps}
+                  sizeMb={row.tee_size_mb}
                   startsAt={row.base_captured_at}
-                  missing={row.green_missing}
+                  missing={row.tee_missing}
                 />
-              )}
+                {row.dual_camera && (
+                  <VideoTile
+                    label="Green-side"
+                    thumb={row.green_thumbnail_url}
+                    durationSec={row.green_duration_sec}
+                    nbFrames={row.green_nb_frames}
+                    fps={row.green_fps}
+                    sizeMb={row.green_size_mb}
+                    startsAt={row.base_captured_at}
+                    missing={row.green_missing}
+                  />
+                )}
+              </div>
+
+              <div style={{ flex: 1, minWidth: 0 }} />
+
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  alignItems: "stretch",
+                  minWidth: 160,
+                }}
+              >
+                {state === "processing" && (
+                  <span
+                    className="small"
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      background: "rgba(255, 176, 0, 0.15)",
+                      border: "1px solid rgba(255, 176, 0, 0.5)",
+                      textAlign: "center",
+                    }}
+                  >
+                    Production in Progress
+                  </span>
+                )}
+                {state === "produced" && (
+                  <span
+                    className="small"
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      background: "rgba(40, 168, 92, 0.15)",
+                      border: "1px solid rgba(40, 168, 92, 0.5)",
+                      textAlign: "center",
+                    }}
+                  >
+                    Produced · {row.last_n_succeeded}/{row.last_n_segments || row.last_n_succeeded} clips
+                  </span>
+                )}
+                {state === "queued" && (
+                  <span
+                    className="small"
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      background: "rgba(120, 120, 120, 0.15)",
+                      border: "1px solid rgba(120, 120, 120, 0.5)",
+                      textAlign: "center",
+                    }}
+                  >
+                    Queued
+                  </span>
+                )}
+                <button
+                  className="small"
+                  onClick={() => handleEdit(row)}
+                  disabled={greyed || busy}
+                >
+                  Edit
+                </button>
+                {state === "produced" ? (
+                  <button
+                    className="small"
+                    onClick={() => handleProduce(row)}
+                    disabled={greyed || busy}
+                  >
+                    Re-Produce
+                  </button>
+                ) : (
+                  state === "queued" && (
+                    <button
+                      className="small"
+                      onClick={() => handleProduce(row)}
+                      disabled={greyed || busy}
+                    >
+                      Produce
+                    </button>
+                  )
+                )}
+                <button
+                  className="small danger"
+                  onClick={() => handleDelete(row)}
+                  disabled={greyed || busy}
+                >
+                  Delete
+                </button>
+              </div>
             </div>
 
             {row.last_error && (
@@ -328,49 +402,6 @@ export default function AdminProduction() {
                 {row.last_error}
               </div>
             )}
-
-            <div
-              className="row"
-              style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}
-            >
-              <button
-                className="small"
-                style={{ width: "auto" }}
-                onClick={() => handleEdit(row)}
-                disabled={greyed || busy}
-              >
-                Edit
-              </button>
-              {state === "produced" ? (
-                <button
-                  className="small"
-                  style={{ width: "auto" }}
-                  onClick={() => handleProduce(row)}
-                  disabled={greyed || busy}
-                >
-                  Re-Produce
-                </button>
-              ) : (
-                state === "queued" && (
-                  <button
-                    className="small"
-                    style={{ width: "auto" }}
-                    onClick={() => handleProduce(row)}
-                    disabled={greyed || busy}
-                  >
-                    Produce
-                  </button>
-                )
-              )}
-              <button
-                className="small danger"
-                style={{ width: "auto" }}
-                onClick={() => handleDelete(row)}
-                disabled={greyed || busy}
-              >
-                Delete
-              </button>
-            </div>
           </div>
         );
       })}
