@@ -89,36 +89,80 @@ function qualityText(qualityLabel, width, height) {
   return "—";
 }
 
+function Thumb({ src, alt, missing, placeholder, onClick }) {
+  // Shared thumbnail box for all three Production tiles. Clicking opens
+  // the video viewer when an onClick handler is provided.
+  const clickable = !!onClick;
+  return (
+    <div
+      role={clickable ? "button" : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={clickable ? onClick : undefined}
+      onKeyDown={clickable
+        ? (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onClick();
+            }
+          }
+        : undefined}
+      style={{
+        width: 180,
+        height: 102,
+        background: "var(--border, #222)",
+        borderRadius: 4,
+        overflow: "hidden",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        marginBottom: 8,
+        cursor: clickable ? "pointer" : "default",
+        position: "relative",
+      }}
+    >
+      {src ? (
+        <img
+          src={src}
+          alt={alt}
+          style={{ width: "100%", height: "100%", objectFit: "cover" }}
+        />
+      ) : (
+        <span className="tiny muted">
+          {missing ? "file missing" : (placeholder || "no preview")}
+        </span>
+      )}
+      {clickable && src && (
+        <span
+          aria-hidden
+          style={{
+            position: "absolute", inset: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(0,0,0,0.0)",
+            transition: "background 120ms ease",
+            color: "#fff",
+            fontSize: 28,
+            pointerEvents: "none",
+          }}
+        >
+          ▶
+        </span>
+      )}
+    </div>
+  );
+}
+
 function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
-                     startsAt, missing, qualityLabel, width, height }) {
+                     startsAt, missing, qualityLabel, width, height,
+                     videoUrl, onOpenViewer }) {
   return (
     <div style={{ width: 180, flexShrink: 0 }}>
       <div className="tiny upper muted" style={{ marginBottom: 4 }}>{label}</div>
-      <div
-        style={{
-          width: 180,
-          height: 102,
-          background: "var(--border, #222)",
-          borderRadius: 4,
-          overflow: "hidden",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          marginBottom: 8,
-        }}
-      >
-        {thumb ? (
-          <img
-            src={thumb}
-            alt={`${label} thumbnail`}
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-          />
-        ) : (
-          <span className="tiny muted">
-            {missing ? "file missing" : "no preview"}
-          </span>
-        )}
-      </div>
+      <Thumb
+        src={thumb}
+        alt={`${label} thumbnail`}
+        missing={missing}
+        onClick={videoUrl ? () => onOpenViewer(videoUrl, label) : undefined}
+      />
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <MetaRow k="Quality" v={qualityText(qualityLabel, width, height)} />
         <MetaRow k="Length" v={fmtDuration(durationSec)} />
@@ -127,6 +171,113 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
         <MetaRow k="Size" v={sizeMb != null ? `${sizeMb} MB` : "—"} />
         <MetaRow k="Starts" v={fmtDateTime(startsAt)} />
         <MetaRow k="Ends" v={fmtDateTime(addSeconds(startsAt, durationSec))} />
+      </div>
+    </div>
+  );
+}
+
+function ProducedTile({ clips, onOpenViewer }) {
+  // Right-most tile on the Production card: thumbnail + summary of every
+  // produced clip cut from this upload. Falls back to a "not yet produced"
+  // placeholder when the worker hasn't emitted anything.
+  const first = clips?.[0];
+  const aces = (clips || []).filter((c) => c.ball_in_cup).length;
+  const holes = (clips || [])
+    .map((c) => c.hole_number)
+    .filter((h, i, a) => h != null && a.indexOf(h) === i);
+  return (
+    <div style={{ width: 180, flexShrink: 0 }}>
+      <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+        Produced Video
+      </div>
+      <Thumb
+        src={first?.thumbnail_url}
+        alt="Produced clip thumbnail"
+        placeholder={clips?.length ? "no preview" : "not produced"}
+        onClick={first?.video_url ? () => onOpenViewer(first.video_url, "Produced Video") : undefined}
+      />
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <MetaRow k="Clips" v={clips?.length ? clips.length : "—"} />
+        <MetaRow k="Aces" v={aces || "—"} />
+        <MetaRow k="Holes" v={holes.length ? holes.join(", ") : "—"} />
+        {clips?.length > 1 && (
+          <div style={{ marginTop: 4 }}>
+            <div className="tiny upper muted" style={{ marginBottom: 2 }}>
+              Open clip
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {clips.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className="ghost"
+                  onClick={() => onOpenViewer(c.video_url, `Produced — hole ${c.hole_number}`)}
+                  style={{
+                    fontSize: "0.7rem",
+                    padding: "2px 8px",
+                    width: "auto",
+                  }}
+                  title={`Play produced clip for hole ${c.hole_number}`}
+                >
+                  #{c.id}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function VideoLightbox({ url, title, onClose }) {
+  if (!url) return null;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title || "Video viewer"}
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.85)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000, padding: 24, cursor: "zoom-out",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          maxWidth: "min(1280px, 95vw)", width: "100%",
+          cursor: "default",
+        }}
+      >
+        <div
+          className="row"
+          style={{
+            color: "#fff", marginBottom: 8, alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <b style={{ fontSize: "0.9rem" }}>{title || "Video"}</b>
+          <button
+            type="button"
+            className="ghost"
+            onClick={onClose}
+            style={{ width: "auto" }}
+          >
+            Close ✕
+          </button>
+        </div>
+        <video
+          src={url}
+          controls
+          autoPlay
+          style={{
+            width: "100%", maxHeight: "80vh",
+            background: "#000", borderRadius: 6,
+          }}
+        />
       </div>
     </div>
   );
@@ -141,6 +292,12 @@ export default function AdminProduction() {
   const [rows, setRows] = useState(null);
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
+  const [viewer, setViewer] = useState(null); // {url, title}
+
+  function openViewer(url, title) {
+    if (!url) return;
+    setViewer({ url, title });
+  }
 
   async function load() {
     setError(null);
@@ -294,7 +451,7 @@ export default function AdminProduction() {
             >
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
                 <VideoTile
-                  label="Tee-angle"
+                  label="Tee Angle (Raw Video)"
                   thumb={row.tee_thumbnail_url}
                   durationSec={row.tee_duration_sec}
                   nbFrames={row.tee_nb_frames}
@@ -305,22 +462,28 @@ export default function AdminProduction() {
                   qualityLabel={row.tee_quality_label}
                   width={row.tee_width}
                   height={row.tee_height}
+                  videoUrl={row.tee_url}
+                  onOpenViewer={openViewer}
                 />
-                {row.dual_camera && (
-                  <VideoTile
-                    label="Green-side"
-                    thumb={row.green_thumbnail_url}
-                    durationSec={row.green_duration_sec}
-                    nbFrames={row.green_nb_frames}
-                    fps={row.green_fps}
-                    sizeMb={row.green_size_mb}
-                    startsAt={row.base_captured_at}
-                    missing={row.green_missing}
-                    qualityLabel={row.green_quality_label}
-                    width={row.green_width}
-                    height={row.green_height}
-                  />
-                )}
+                <VideoTile
+                  label="Green Angle (Raw Video)"
+                  thumb={row.green_thumbnail_url}
+                  durationSec={row.green_duration_sec}
+                  nbFrames={row.green_nb_frames}
+                  fps={row.green_fps}
+                  sizeMb={row.green_size_mb}
+                  startsAt={row.base_captured_at}
+                  missing={row.dual_camera ? row.green_missing : false}
+                  qualityLabel={row.green_quality_label}
+                  width={row.green_width}
+                  height={row.green_height}
+                  videoUrl={row.dual_camera ? row.green_url : null}
+                  onOpenViewer={openViewer}
+                />
+                <ProducedTile
+                  clips={row.produced_clips}
+                  onOpenViewer={openViewer}
+                />
               </div>
 
               <div style={{ flex: 1, minWidth: 0 }} />
@@ -420,6 +583,12 @@ export default function AdminProduction() {
           </div>
         );
       })}
+
+      <VideoLightbox
+        url={viewer?.url}
+        title={viewer?.title}
+        onClose={() => setViewer(null)}
+      />
     </div>
   );
 }

@@ -1262,6 +1262,7 @@ def _process_long_upload_segments(
                 thumbnail_url=thumb_url,
                 tracer_url=public_tracer,
                 tee_clip_url=tee_clip_public_url,
+                long_upload_id=progress_upload_id,
                 carry_yards=_optional_int(seg.get("carry_yards")),
                 apex_feet=_optional_int(seg.get("apex_feet")),
                 ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
@@ -1316,6 +1317,7 @@ def _process_long_upload_segments(
             source_url=f"{settings.app_base_url}/uploads/clips/{seg_name}",
             thumbnail_url=thumb_url,
             tracer_url=tracer_url,
+            long_upload_id=progress_upload_id,
             carry_yards=_optional_int(seg.get("carry_yards")),
             apex_feet=_optional_int(seg.get("apex_feet")),
             ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
@@ -1777,6 +1779,38 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "quality_label": _quality_label(info.get("height")),
         }
 
+    # Bulk-load every produced clip for the uploads we're about to return.
+    # The Production card surfaces them as the third "Produced Video" tile.
+    upload_ids = [r.id for r in rows]
+    produced_by_upload: dict[int, list[VideoClip]] = {}
+    if upload_ids:
+        produced_rows = (
+            db.query(VideoClip)
+            .filter(VideoClip.long_upload_id.in_(upload_ids))
+            .order_by(VideoClip.captured_at.asc())
+            .all()
+        )
+        for clip in produced_rows:
+            produced_by_upload.setdefault(clip.long_upload_id, []).append(clip)
+
+    def _produced(upload_id: int) -> list[dict]:
+        clips = produced_by_upload.get(upload_id, [])
+        out = []
+        for c in clips:
+            # Prefer the tracer-rendered URL when we have one — it's the
+            # final on-air output. Fallback to source_url so single-cam
+            # clips still play before the tracer ships.
+            play_url = c.tracer_url or c.source_url
+            out.append({
+                "id": c.id,
+                "hole_number": c.hole_number,
+                "captured_at": c.captured_at.isoformat() if c.captured_at else None,
+                "video_url": play_url,
+                "thumbnail_url": c.thumbnail_url,
+                "ball_in_cup": bool(c.ball_in_cup),
+            })
+        return out
+
     out = []
     for r in rows:
         tee_path = CLIPS_DIR / r.tee_filename if r.tee_filename else None
@@ -1786,6 +1820,7 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
         tee_meta = _meta(tee_path, tee_exists)
         green_meta = _meta(green_path, green_exists)
         course = courses.get(r.course_id)
+        produced = _produced(r.id)
         out.append({
             "id": r.id,
             "course_id": r.course_id,
@@ -1825,6 +1860,7 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "green_quality_label": green_meta["quality_label"],
             "green_missing": (r.green_filename is not None and not green_exists),
             "dual_camera": r.green_filename is not None,
+            "produced_clips": produced,
             "last_n_segments": r.last_n_segments,
             "last_n_succeeded": r.last_n_succeeded,
             "processing_status": r.processing_status,

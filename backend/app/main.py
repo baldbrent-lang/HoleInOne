@@ -133,6 +133,8 @@ def _migrate() -> None:
             statements.append("UPDATE video_clips SET is_highlight = FALSE WHERE is_highlight IS NULL")
         if "highlight_tag" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN highlight_tag VARCHAR(60)")
+        if "long_upload_id" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN long_upload_id INTEGER")
 
     if not statements:
         return

@@ -129,6 +129,13 @@ class VideoClip(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"))
     participant_id: Mapped[Optional[int]] = mapped_column(ForeignKey("participants.id"), nullable=True)
+    # Set when this clip was cut from a LongVideoUpload by the production
+    # pipeline. Lets the /admin/production page surface the produced
+    # output next to the raw tee/green source thumbnails. NULL for
+    # clips uploaded individually via /clips/upload.
+    long_upload_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("long_video_uploads.id"), nullable=True, index=True,
+    )
     hole_number: Mapped[int] = mapped_column(Integer)
     camera_type: Mapped[str] = mapped_column(String(20), default=CameraType.tee.value)
     captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
