@@ -1,0 +1,26 @@
+[Unit]
+Description=GolfReelz Pi capture agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Match the user / paths used by install.sh — edit if you put the
+# agent somewhere other than /opt/golfreelz-agent.
+User=golfreelz
+Group=golfreelz
+WorkingDirectory=/opt/golfreelz-agent
+ExecStart=/opt/golfreelz-agent/venv/bin/python3 /opt/golfreelz-agent/golfreelz_agent.py /opt/golfreelz-agent/config.yaml
+Restart=on-failure
+RestartSec=10
+# Don't pin a memory limit — MediaPipe Pose can briefly use ~500 MB
+# on a Pi 5 8 GB, well within bounds.
+StandardOutput=journal
+StandardError=journal
+# If the backend rotates the camera's auth_token while we're running,
+# we'll get 404s on the next call and crash — Restart=on-failure
+# brings us back; on the next start the config still has the old
+# token. Operator has to ssh in and update config.yaml.
+
+[Install]
+WantedBy=multi-user.target

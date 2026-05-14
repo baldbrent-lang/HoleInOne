@@ -1,0 +1,11 @@
+# Local config (carries the auth_token; don't commit secrets)
+config.yaml
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Local working dir for in-flight recordings
+/tmp/
+*.mp4
