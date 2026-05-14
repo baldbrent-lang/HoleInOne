@@ -285,6 +285,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   const [tracer, setTracer] = useState(null); // { url, frames }
   const [renderingTracer, setRenderingTracer] = useState(false);
   const [tracerError, setTracerError] = useState(null);
+  const [finalUrl, setFinalUrl] = useState(null);
+  const [finalizing, setFinalizing] = useState(false);
+  const [finalError, setFinalError] = useState(null);
+  const [committing, setCommitting] = useState(false);
 
   useEffect(() => {
     if (!row) return;
@@ -306,6 +310,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           frames: s.ball_track_frames || [],
         });
       }
+      if (s.finalized_video_url) setFinalUrl(s.finalized_video_url);
     }
 
     // Already persisted → skip auto-detect entirely. Frame dims come
@@ -402,6 +407,46 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     }
   }
 
+  async function handleAdvanceToFinalize() {
+    // Step 2 → Step 3. Reuse the cached final video when present;
+    // otherwise apply the intro overlay on top of the rendered tracer.
+    if (finalUrl) {
+      setStep("finalize");
+      return;
+    }
+    if (!tracer?.url) {
+      setFinalError("No tracer video yet — re-run Step 2 first.");
+      setStep("finalize");
+      return;
+    }
+    setFinalizing(true);
+    setFinalError(null);
+    try {
+      const out = await api.finalizeWizardVideo(adminPassword, row.id, {});
+      setFinalUrl(out.final_video_url);
+      onSaved?.();
+    } catch (e) {
+      setFinalError(e.message);
+    } finally {
+      setFinalizing(false);
+      setStep("finalize");
+    }
+  }
+
+  async function handleSaveToProduced() {
+    if (!finalUrl) return;
+    setCommitting(true);
+    try {
+      await api.commitWizardClip(adminPassword, row.id);
+      onSaved?.();
+      onClose();
+    } catch (e) {
+      setFinalError(e.message);
+    } finally {
+      setCommitting(false);
+    }
+  }
+
   const fw = frameDims.width;
   const fh = frameDims.height;
   const totalFrames = frameDims.totalFrames;
@@ -435,7 +480,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         >
           <div>
             <h3 style={{ margin: 0 }}>
-              Edit wizard {step === "tracer" ? "· Step 2: Tracer" : "· Step 1: Metrics"}
+              Edit wizard {step === "finalize"
+                ? "· Step 3: Final video"
+                : step === "tracer"
+                  ? "· Step 2: Tracer"
+                  : "· Step 1: Metrics"}
             </h3>
             <div className="small muted">
               Upload #{row.id} · {row.course_name || `course ${row.course_id}`} · single swing
@@ -505,15 +554,30 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               onSaved={onSaved}
             />
           )}
+          {!running && !error && draft && step === "finalize" && (
+            <FinalizeStep
+              row={row}
+              finalUrl={finalUrl}
+              finalizing={finalizing}
+              error={finalError}
+              frameW={fw}
+              frameH={fh}
+              onReRender={async () => {
+                setFinalUrl(null);
+                await handleAdvanceToFinalize();
+              }}
+            />
+          )}
         </div>
 
         <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
-          {step === "tracer" && (
+          {step !== "metrics" && (
             <button
               type="button"
               className="ghost"
-              onClick={() => setStep("metrics")}
+              onClick={() => setStep(step === "finalize" ? "tracer" : "metrics")}
               style={{ width: "auto", marginRight: "auto" }}
+              disabled={committing}
             >
               ← Back
             </button>
@@ -523,10 +587,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             className="ghost"
             onClick={onClose}
             style={{ width: "auto" }}
+            disabled={committing}
           >
             Cancel
           </button>
-          {step === "metrics" ? (
+          {step === "metrics" && (
             <button
               type="button"
               disabled={running || !!error || !draft || renderingTracer}
@@ -536,14 +601,27 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             >
               {renderingTracer ? "Rendering tracer…" : "Next →"}
             </button>
-          ) : (
+          )}
+          {step === "tracer" && (
             <button
               type="button"
-              onClick={onClose}
+              disabled={renderingTracer || finalizing}
+              onClick={handleAdvanceToFinalize}
               style={{ width: "auto" }}
-              title="Send to Broadcast — wiring lands next"
+              title="Apply graphics and review the final video"
             >
-              Save to Broadcast (stub)
+              {finalizing ? "Finalizing…" : "Next →"}
+            </button>
+          )}
+          {step === "finalize" && (
+            <button
+              type="button"
+              disabled={!finalUrl || committing || finalizing}
+              onClick={handleSaveToProduced}
+              style={{ width: "auto" }}
+              title="Commit this clip to Produced Clips"
+            >
+              {committing ? "Saving…" : "Save"}
             </button>
           )}
         </div>
@@ -1257,11 +1335,42 @@ function TracerStep({
   const [selectedFrame, setSelectedFrame] = useState(null);
   const [editorBg, setEditorBg] = useState(null); // {url, frame}
   const [editorBall, setEditorBall] = useState(null); // {x, y}
+  const [zoom, setZoom] = useState(1);
   const editorRef = useRef(null);
 
   const frames = tracer?.frames || [];
   const hasDims = !!(frameW && frameH);
   const maxFrame = totalFrames ? totalFrames - 1 : null;
+
+  // Pivot for the zoom transform — defaults to the ball detection
+  // ROI from Step 1 so the operator drops straight into the ball
+  // area. Falls back to the resting-ball point, then frame centre.
+  const focusPct = (() => {
+    const roi = draft?.roi;
+    if (roi && hasDims) {
+      return {
+        x: ((roi.x + roi.w / 2) / frameW) * 100,
+        y: ((roi.y + roi.h / 2) / frameH) * 100,
+      };
+    }
+    if (draft?.ball && hasDims) {
+      return {
+        x: (draft.ball.x / frameW) * 100,
+        y: (draft.ball.y / frameH) * 100,
+      };
+    }
+    return { x: 50, y: 50 };
+  })();
+
+  // Auto-zoom level that makes the ROI fill ~70% of the editor.
+  // Capped so the ball doesn't disappear off-screen at extreme ratios.
+  const autoZoom = (() => {
+    const roi = draft?.roi;
+    if (!roi || !hasDims) return 1;
+    const zx = (0.7 * frameW) / Math.max(1, roi.w);
+    const zy = (0.7 * frameH) / Math.max(1, roi.h);
+    return Math.max(1, Math.min(8, Math.min(zx, zy)));
+  })();
 
   function mergedBallFor(f) {
     const m = manualPositions[f.frame];
@@ -1274,6 +1383,7 @@ function TracerStep({
     setSelectedFrame(frameIdx);
     setEditorBg(null);
     setEditorBall(null);
+    setZoom(autoZoom);
     try {
       const data = await api.getLongUploadFrame(adminPassword, row.id, frameIdx);
       setEditorBg({ url: data.image_url, frame: data.frame });
@@ -1316,11 +1426,21 @@ function TracerStep({
   function editorEventToFrame(e) {
     if (!editorRef.current || !hasDims) return null;
     const r = editorRef.current.getBoundingClientRect();
+    // Pointer fraction of the editor container (pre-transform).
     const xPct = (e.clientX - r.left) / r.width;
     const yPct = (e.clientY - r.top) / r.height;
+    // Account for the CSS transform: scale(zoom) with transform-origin
+    // = focusPct%. After scaling, a point originally at (a, b) in the
+    // unscaled image (in editor-fraction coords) sits at
+    //   (ox + (a - ox) * zoom, oy + (b - oy) * zoom)
+    // in the editor. Invert to recover the image coord:
+    const ox = focusPct.x / 100;
+    const oy = focusPct.y / 100;
+    const imageX = ox + (xPct - ox) / zoom;
+    const imageY = oy + (yPct - oy) / zoom;
     return {
-      x: Math.max(0, Math.min(frameW - 1, Math.round(xPct * frameW))),
-      y: Math.max(0, Math.min(frameH - 1, Math.round(yPct * frameH))),
+      x: Math.max(0, Math.min(frameW - 1, Math.round(imageX * frameW))),
+      y: Math.max(0, Math.min(frameH - 1, Math.round(imageY * frameH))),
     };
   }
 
@@ -1358,6 +1478,13 @@ function TracerStep({
       setRendering(false);
     }
   }
+
+  const zoomBtn = {
+    background: "rgba(255,255,255,0.12)", color: "#fff",
+    border: "1px solid rgba(255,255,255,0.3)", borderRadius: 4,
+    width: 28, height: 26, fontSize: 13, fontWeight: 600,
+    cursor: "pointer", padding: 0,
+  };
 
   if (rendering && !tracer) {
     return (
@@ -1403,43 +1530,101 @@ function TracerStep({
                 cursor: "crosshair", userSelect: "none",
               }}
             >
-              {editorBg?.url ? (
-                <img
-                  src={editorBg.url}
-                  alt={`Frame ${selectedFrame}`}
-                  draggable={false}
-                  style={{
-                    width: "100%", height: "100%", objectFit: "cover",
-                    pointerEvents: "none",
-                  }}
-                />
-              ) : (
-                <div
-                  className="muted small"
-                  style={{
-                    position: "absolute", inset: 0,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}
-                >
-                  Loading frame…
-                </div>
-              )}
-              {hasDims && editorBall && (
-                <div
-                  style={{
-                    position: "absolute",
-                    left: `${(editorBall.x / frameW) * 100}%`,
-                    top: `${(editorBall.y / frameH) * 100}%`,
-                    width: 18, height: 18,
-                    borderRadius: "50%",
-                    background: "#22c55e",
-                    border: "3px solid #fff",
-                    transform: "translate(-50%, -50%)",
-                    pointerEvents: "none",
-                    boxShadow: "0 0 8px rgba(0,0,0,0.7)",
-                  }}
-                />
-              )}
+              {/* Scaled scene so the ball detection ROI fills the
+                  viewer when first opened. transform-origin pins the
+                  ROI centre as the zoom pivot. Overlays positioned in
+                  frame % live inside this div so they track the zoom. */}
+              <div
+                style={{
+                  position: "absolute", inset: 0,
+                  transform: `scale(${zoom})`,
+                  transformOrigin: `${focusPct.x}% ${focusPct.y}%`,
+                  transition: "transform 120ms ease",
+                }}
+              >
+                {editorBg?.url ? (
+                  <img
+                    src={editorBg.url}
+                    alt={`Frame ${selectedFrame}`}
+                    draggable={false}
+                    style={{
+                      width: "100%", height: "100%", objectFit: "cover",
+                      pointerEvents: "none",
+                    }}
+                  />
+                ) : (
+                  <div
+                    className="muted small"
+                    style={{
+                      position: "absolute", inset: 0,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}
+                  >
+                    Loading frame…
+                  </div>
+                )}
+                {hasDims && editorBall && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: `${(editorBall.x / frameW) * 100}%`,
+                      top: `${(editorBall.y / frameH) * 100}%`,
+                      width: 18, height: 18,
+                      borderRadius: "50%",
+                      background: "#22c55e",
+                      border: "3px solid #fff",
+                      // Counter-scale so the marker stays a constant
+                      // visual size at any zoom level.
+                      transform: `translate(-50%, -50%) scale(${1 / zoom})`,
+                      pointerEvents: "none",
+                      boxShadow: "0 0 8px rgba(0,0,0,0.7)",
+                    }}
+                  />
+                )}
+              </div>
+
+              {/* Zoom controls anchored to the editor (outside the
+                  scaled scene so the controls stay at constant size). */}
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute", right: 8, top: 8,
+                  display: "flex", gap: 6,
+                  background: "rgba(0,0,0,0.45)", padding: "4px 6px",
+                  borderRadius: 6, backdropFilter: "blur(4px)",
+                }}
+              >
+                <button
+                  type="button"
+                  style={zoomBtn}
+                  disabled={zoom <= 1.05}
+                  onClick={() => setZoom((z) => Math.max(1, z / 1.4))}
+                  title="Zoom out"
+                >−</button>
+                <span style={{ color: "#fff", fontSize: 12, padding: "0 6px", alignSelf: "center" }}>
+                  {zoom.toFixed(1)}×
+                </span>
+                <button
+                  type="button"
+                  style={zoomBtn}
+                  disabled={zoom >= 15.9}
+                  onClick={() => setZoom((z) => Math.min(16, z * 1.4))}
+                  title="Zoom in"
+                >+</button>
+                <button
+                  type="button"
+                  style={{ ...zoomBtn, width: 44 }}
+                  onClick={() => setZoom(autoZoom)}
+                  title="Auto zoom to ball detection area"
+                >Auto</button>
+                <button
+                  type="button"
+                  style={{ ...zoomBtn, width: 36 }}
+                  onClick={() => setZoom(1)}
+                  title="Fit full frame"
+                >Fit</button>
+              </div>
             </div>
           ) : tracer?.url ? (
             <video
@@ -1636,6 +1821,104 @@ function TracerStep({
               No ball-track yet. Re-generate to populate.
             </div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, onReRender }) {
+  const hasDims = !!(frameW && frameH);
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(320px, 1.6fr) minmax(260px, 1fr)",
+        gap: 16,
+        height: "100%",
+        minHeight: 0,
+      }}
+    >
+      <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+          Final video — tracer + on-screen graphics
+        </div>
+        <div
+          style={{
+            flex: 1, minHeight: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          {finalizing ? (
+            <div className="row" style={{ alignItems: "center", gap: 12 }}>
+              <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
+              <span className="small">Applying graphics… 10–30s.</span>
+            </div>
+          ) : finalUrl ? (
+            <video
+              src={finalUrl}
+              controls
+              autoPlay
+              style={{
+                height: "100%", maxHeight: "100%", maxWidth: "100%",
+                aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+                background: "#000", borderRadius: 6,
+              }}
+            />
+          ) : (
+            <div
+              className="muted small"
+              style={{
+                width: "100%", aspectRatio: "16 / 9",
+                background: "var(--border, #222)", borderRadius: 6,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}
+            >
+              {error ? error : "Final video not rendered"}
+            </div>
+          )}
+        </div>
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          The player banner, course / hole / par / yardage are baked
+          in. Click <b>Save</b> to commit this clip to Produced Clips.
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "flex", flexDirection: "column", gap: 10,
+          overflowY: "auto", minHeight: 0, paddingRight: 4,
+        }}
+      >
+        {error && <div className="err-text small">{error}</div>}
+
+        <div
+          className="card"
+          style={{ margin: 0, padding: 10, background: "rgba(34,197,94,0.06)" }}
+        >
+          <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+            Ready for Produced Clips
+          </div>
+          <div className="small">
+            Upload #{row.id}
+            <br />
+            {row.course_name || `Course ${row.course_id}`}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          className="ghost"
+          style={{ width: "100%" }}
+          onClick={onReRender}
+          disabled={finalizing}
+        >
+          {finalizing ? "Re-rendering…" : "Re-apply graphics"}
+        </button>
+
+        <div className="tiny muted">
+          Re-apply if you change anything on Step 1 or Step 2 — the
+          finalized video is cached until you click here.
         </div>
       </div>
     </div>

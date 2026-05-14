@@ -2314,6 +2314,167 @@ def render_wizard_tracer(
     }
 
 
+@router.post("/long-uploads/{upload_id}/finalize")
+def finalize_wizard_video(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """Apply the same on-screen graphics the AI-clips page produces
+    (player banner + course/hole/par/yardage) on top of the wizard's
+    rendered tracer. Writes a separate `wizard-{id}_final.mp4` so
+    re-finalizing doesn't overwrite the raw tracer. Persists the
+    final URL into edit_metrics.finalized_video_url and returns it.
+
+    Optional body keys (override per-call):
+      player_name (str): defaults to None (no name shown).
+      hole_number (int): defaults to 1.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    saved = dict(row.edit_metrics or {})
+    tracer_url = saved.get("tracer_url")
+    if not tracer_url:
+        raise HTTPException(
+            400, "no rendered tracer yet — finish Step 2 first")
+    fname = tracer_url.rstrip("/").split("?")[0].rsplit("/", 1)[-1]
+    tracer_path = CLIPS_DIR / fname
+    if not tracer_path.exists():
+        raise HTTPException(404, f"tracer file missing on disk: {fname}")
+
+    final_path = CLIPS_DIR / f"wizard-{upload_id}_final.mp4"
+    # Copy tracer → final, then apply intro overlay in-place on the
+    # copy. Keeps the bare tracer available for re-finalize / debug.
+    try:
+        import shutil
+        shutil.copyfile(tracer_path, final_path)
+    except Exception as exc:
+        raise HTTPException(500, f"copy failed: {exc}")
+
+    course = db.get(Course, row.course_id) if row.course_id else None
+    course_name = course.name if course else ""
+    hole_number = int(payload.get("hole_number") or 1)
+    yardage = 101
+    if course and course.hole_yardages:
+        raw_y = course.hole_yardages.get(str(hole_number))
+        try:
+            if raw_y is not None:
+                yardage = int(raw_y)
+        except (TypeError, ValueError):
+            pass
+    player_name = payload.get("player_name") or "Brent Baldwin"
+
+    try:
+        apply_intro_overlay_inplace(
+            final_path,
+            player_name=player_name,
+            course_name=course_name,
+            hole_number=hole_number,
+            par=3,
+            yardage=yardage,
+        )
+    except Exception as exc:  # pragma: no cover
+        log.warning("finalize: intro overlay failed for upload %s: %s",
+                    upload_id, exc)
+
+    compress_for_email(final_path)
+    final_url = (
+        f"{settings.app_base_url}/uploads/clips/{final_path.name}"
+        f"?v={int(final_path.stat().st_mtime)}"
+    )
+
+    saved["finalized_video_url"] = final_url
+    saved["finalized_player_name"] = player_name
+    saved["finalized_hole_number"] = hole_number
+    saved["finalized_yardage"] = yardage
+    row.edit_metrics = saved
+    db.add(row)
+    db.add(AuditLog(
+        actor="admin", action="finalize_wizard_video",
+        target=f"long_upload:{upload_id}",
+        detail=f"final={final_path.name} hole={hole_number} player={player_name}",
+    ))
+    db.commit()
+    db.refresh(row)
+    return {
+        "upload_id": upload_id,
+        "final_video_url": final_url,
+        "edit_metrics": row.edit_metrics,
+    }
+
+
+@router.post("/long-uploads/{upload_id}/commit")
+def commit_wizard_clip(
+    upload_id: int,
+    db: Session = Depends(get_db),
+):
+    """Promote the wizard's finalized video to a real VideoClip so it
+    shows up on Produced Clips and Broadcast. Idempotent: re-running
+    after Save just updates the existing clip's tracer_url + sets
+    delivered_at. Returns the clip id + URLs.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    saved = dict(row.edit_metrics or {})
+    final_url = saved.get("finalized_video_url")
+    tracer_url = saved.get("tracer_url")
+    if not final_url:
+        raise HTTPException(400, "no finalized video — run Step 3 first")
+
+    # Re-use any existing wizard clip on this upload (avoids duplicates
+    # when the operator Save's twice).
+    clip = (
+        db.query(VideoClip)
+        .filter(VideoClip.long_upload_id == upload_id)
+        .order_by(VideoClip.created_at.desc())
+        .first()
+    )
+    hole_number = int(saved.get("finalized_hole_number") or 1)
+    if not clip:
+        clip = VideoClip(
+            course_id=row.course_id,
+            hole_number=hole_number,
+            camera_type="tee",
+            captured_at=row.base_captured_at or _utcnow_naive(),
+            source_url=tracer_url or final_url,
+            tracer_url=final_url,
+            tee_clip_url=tracer_url,
+            long_upload_id=upload_id,
+            processing_status=ClipProcessingStatus.received.value,
+        )
+        db.add(clip)
+    else:
+        clip.tracer_url = final_url
+        clip.source_url = tracer_url or final_url
+        clip.tee_clip_url = tracer_url
+        clip.hole_number = hole_number
+        if not clip.captured_at and row.base_captured_at:
+            clip.captured_at = row.base_captured_at
+    clip.delivered_at = _utcnow_naive()
+    row.processing_status = "completed"
+    row.processing_completed_at = _utcnow_naive()
+    row.last_n_segments = 1
+    row.last_n_succeeded = 1
+    db.add(row)
+    db.flush()
+
+    db.add(AuditLog(
+        actor="admin", action="commit_wizard_clip",
+        target=f"long_upload:{upload_id}",
+        detail=f"clip={clip.id} hole={hole_number}",
+    ))
+    db.commit()
+    db.refresh(clip)
+    return {
+        "upload_id": upload_id,
+        "clip_id": clip.id,
+        "tracer_url": clip.tracer_url,
+        "source_url": clip.source_url,
+    }
+
+
 @router.delete("/long-uploads/{upload_id}")
 def delete_long_upload(upload_id: int, db: Session = Depends(get_db)):
     """Delete a stored long upload + its source file(s) from disk.

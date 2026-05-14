@@ -287,6 +287,15 @@ export const api = {
       method: "POST", body: overrides, adminPassword: key,
       timeoutMs: 5 * 60_000,
     }),
+  finalizeWizardVideo: (key, uploadId, payload = {}) =>
+    request(`/api/admin/long-uploads/${uploadId}/finalize`, {
+      method: "POST", body: payload, adminPassword: key,
+      timeoutMs: 2 * 60_000,
+    }),
+  commitWizardClip: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/commit`, {
+      method: "POST", adminPassword: key,
+    }),
   processLongUploadSegment: (key, uploadId, { holeNumber, startSec, endSec, aiTracerModel }) =>
     // Synchronous endpoint that runs the full per-segment pipeline
     // (real cut + AI tracer + composite + VideoClip row) on ONE
