@@ -2039,22 +2039,17 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
             "h": min(int(frame_h), int(ball_y) + half) - max(0, int(ball_y) - half),
         }
 
-    # --- Step 5: target direction estimate ---
-    # For a behind-the-golfer camera (the standing assumption for the
-    # tee angle), the ball flies AWAY from the camera with a horizontal
-    # bias toward the trail side of the swing: a right-hander pulls
-    # slightly LEFT in frame, a left-hander pulls slightly RIGHT.
-    # Returning a unit-vector + a recommended off-screen anchor point
-    # gives the wizard enough to draw an arrow.
+    # --- Step 5: target (flag) point estimate ---
+    # No green-detection model yet, so default the flag to the upper
+    # quarter of the frame, centred horizontally. For the standard
+    # behind-the-golfer tee angle this lands near the horizon — close
+    # enough that the operator only has to nudge it in the wizard.
     target = None
-    if handedness in ("right", "left") and frame_w and frame_h and ball_x is not None and ball_y is not None:
-        # Aim ~ 30% of frame width toward trail side, well above the ball.
-        dx = int(round(frame_w * (-0.25 if handedness == "right" else 0.25)))
-        dy = -int(round(frame_h * 0.35))
+    if frame_w and frame_h:
         target = {
-            "x": max(0, min(int(frame_w) - 1, int(ball_x) + dx)),
-            "y": max(0, min(int(frame_h) - 1, int(ball_y) + dy)),
-            "method": f"derived from {handedness}-handed behind-camera assumption",
+            "x": int(round(frame_w * 0.5)),
+            "y": int(round(frame_h * 0.25)),
+            "method": "default par-3 flag estimate (upper-centre)",
         }
 
     db.add(AuditLog(
@@ -2096,6 +2091,61 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
         ),
         "ball_detection_area": detection_area,
         "target": target,
+    }
+
+
+@router.get("/long-uploads/{upload_id}/frame")
+def long_upload_frame(
+    upload_id: int, frame: int = 0, db: Session = Depends(get_db),
+):
+    """Grab a single frame from this upload's tee video as a JPG and
+    return its public URL. The wizard pages through frames (±1, ±10)
+    while the operator picks address / impact / ball-at-rest etc.
+
+    Frames are cached on disk under `detect-{id}-frame-{N}.jpg` so
+    re-visiting the same frame doesn't reseek. Use this for any
+    frame-level UI; address auto-detect already writes
+    `detect-{id}_address.jpg` via /auto-detect.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "upload has no tee video")
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+
+    import cv2  # type: ignore
+
+    cap = cv2.VideoCapture(str(src_path))
+    try:
+        if not cap.isOpened():
+            raise HTTPException(500, f"could not open {row.tee_filename}")
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        clamped = max(0, min(total - 1 if total else 0, int(frame)))
+        out_path = CLIPS_DIR / f"detect-{upload_id}-frame-{clamped}.jpg"
+        if not out_path.exists():
+            cap.set(cv2.CAP_PROP_POS_FRAMES, clamped)
+            ok, img = cap.read()
+            if not ok or img is None:
+                raise HTTPException(500, f"frame {clamped} unreadable")
+            cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    finally:
+        cap.release()
+
+    return {
+        "upload_id": upload_id,
+        "frame": clamped,
+        "total_frames": total,
+        "width": width,
+        "height": height,
+        "image_url": (
+            f"{settings.app_base_url}/uploads/clips/{out_path.name}"
+            f"?v={int(out_path.stat().st_mtime)}"
+        ),
     }
 
 

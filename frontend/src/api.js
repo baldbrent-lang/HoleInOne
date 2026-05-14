@@ -271,6 +271,10 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}/auto-detect`, {
       method: "POST", adminPassword: key, timeoutMs: 90_000,
     }),
+  getLongUploadFrame: (key, uploadId, frame) =>
+    request(`/api/admin/long-uploads/${uploadId}/frame?frame=${frame}`, {
+      adminPassword: key, timeoutMs: 20_000,
+    }),
   processLongUploadSegment: (key, uploadId, { holeNumber, startSec, endSec, aiTracerModel }) =>
     // Synchronous endpoint that runs the full per-segment pipeline
     // (real cut + AI tracer + composite + VideoClip row) on ONE

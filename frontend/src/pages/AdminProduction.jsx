@@ -15,7 +15,7 @@
  * Action handlers are stubs for now — the user will hand over the
  * functional spec next.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
@@ -247,16 +247,33 @@ function ProducedTile({ clips, onOpenViewer }) {
   );
 }
 
+/**
+ * Edit wizard for single-swing uploads.
+ *
+ * On mount we auto-detect handedness / address / impact / ball /
+ * ROI / target via the /auto-detect endpoint. Every field on the
+ * right is then click-to-edit:
+ *   - Handedness: Right ⇄ Left toggle.
+ *   - Address / Impact frame: scrub through the upload's frames
+ *     with ±1 / ±10 step buttons.
+ *   - Resting ball: drag a green dot on the address frame.
+ *   - Detection area: drag/resize a green rectangle on the address
+ *     frame.
+ *   - Target: drag a red flag on the address frame.
+ *
+ * Each editor has a local Apply button that commits the change to
+ * the wizard's draft. The outer Save button at the bottom is still
+ * a stub — wiring the draft back to the production pipeline lands
+ * next.
+ */
 function EditWizard({ row, adminPassword, onClose }) {
-  // Auto-detection wizard for single-swing uploads. On mount, hits the
-  // /long-uploads/{id}/auto-detect endpoint which runs the cheap part
-  // of the AI tracer pipeline (audio impact → address frame → Claude
-  // handedness call) and returns enough landmarks to seed manual
-  // tweaks: handedness, address frame JPG, ball-at-rest position,
-  // ball detection ROI, and a target estimate.
   const [detection, setDetection] = useState(null);
   const [running, setRunning] = useState(true);
   const [error, setError] = useState(null);
+  // Editable draft, seeded from the auto-detect response.
+  const [draft, setDraft] = useState(null);
+  // Which field is currently in edit mode. null = overview/read-only.
+  const [editing, setEditing] = useState(null);
 
   useEffect(() => {
     if (!row) return;
@@ -265,7 +282,19 @@ function EditWizard({ row, adminPassword, onClose }) {
     setError(null);
     api
       .autoDetectLongUpload(adminPassword, row.id)
-      .then((data) => { if (!cancelled) setDetection(data); })
+      .then((data) => {
+        if (cancelled) return;
+        setDetection(data);
+        setDraft({
+          handedness: data.handedness?.value || "right",
+          addressFrame: data.address?.frame ?? 0,
+          addressImageUrl: data.address?.image_url || null,
+          impactFrame: data.impact?.frame ?? 0,
+          ball: data.ball_at_rest || null,
+          roi: data.ball_detection_area || null,
+          target: data.target ? { x: data.target.x, y: data.target.y } : null,
+        });
+      })
       .catch((e) => { if (!cancelled) setError(e.message); })
       .finally(() => { if (!cancelled) setRunning(false); });
     return () => { cancelled = true; };
@@ -275,6 +304,7 @@ function EditWizard({ row, adminPassword, onClose }) {
 
   const fw = detection?.frame_width;
   const fh = detection?.frame_height;
+  const totalFrames = detection?.total_frames || null;
 
   return (
     <div
@@ -293,8 +323,8 @@ function EditWizard({ row, adminPassword, onClose }) {
         onClick={(e) => e.stopPropagation()}
         className="card"
         style={{
-          maxWidth: "min(960px, 95vw)", width: "100%",
-          maxHeight: "90vh", overflow: "auto",
+          maxWidth: "min(1200px, 96vw)", width: "100%",
+          maxHeight: "92vh", overflow: "auto",
           cursor: "default", margin: 0,
         }}
       >
@@ -343,8 +373,18 @@ function EditWizard({ row, adminPassword, onClose }) {
               Auto-detect failed: {error}
             </div>
           )}
-          {!running && !error && detection && (
-            <DetectionPreview detection={detection} frameW={fw} frameH={fh} />
+          {!running && !error && draft && (
+            <WizardBody
+              row={row}
+              adminPassword={adminPassword}
+              draft={draft}
+              setDraft={setDraft}
+              editing={editing}
+              setEditing={setEditing}
+              frameW={fw}
+              frameH={fh}
+              totalFrames={totalFrames}
+            />
           )}
         </div>
 
@@ -362,7 +402,7 @@ function EditWizard({ row, adminPassword, onClose }) {
           </button>
           <button
             type="button"
-            disabled={running || !!error || !detection}
+            disabled={running || !!error || !draft}
             onClick={onClose}
             style={{ width: "auto" }}
             title="Save & continue — wiring lands next"
@@ -375,194 +415,616 @@ function EditWizard({ row, adminPassword, onClose }) {
   );
 }
 
-function DetectionPreview({ detection, frameW, frameH }) {
-  const addressUrl = detection.address?.image_url;
-  const ball = detection.ball_at_rest;
-  const roi = detection.ball_detection_area;
-  const target = detection.target;
-
-  // Convert native pixel coords to overlay percentages so the markers
-  // sit correctly on the address-frame JPG regardless of its on-screen
-  // size. Skip the overlay entirely if we don't have frame dimensions.
+function WizardBody({
+  row, adminPassword, draft, setDraft, editing, setEditing,
+  frameW, frameH, totalFrames,
+}) {
   const hasDims = !!(frameW && frameH);
-  const pct = (v, span) => (hasDims ? `${(v / span) * 100}%` : "0%");
+
+  // Frame-navigation modes ('address', 'impact') need a per-mode
+  // working frame. Seed from draft and let ± step buttons mutate.
+  // Each mode keeps its own image URL so flipping between editors
+  // doesn't re-fetch on the way back.
+  const [navFrame, setNavFrame] = useState(null);
+  const [navUrl, setNavUrl] = useState(null);
+  const [navTotal, setNavTotal] = useState(totalFrames);
+  const [navLoading, setNavLoading] = useState(false);
+
+  // Reset / seed the navigator whenever we enter a frame-edit mode.
+  useEffect(() => {
+    if (editing !== "address" && editing !== "impact") {
+      return;
+    }
+    const start = editing === "address" ? draft.addressFrame : draft.impactFrame;
+    loadFrame(start);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing]);
+
+  async function loadFrame(frameIdx) {
+    setNavLoading(true);
+    try {
+      const data = await api.getLongUploadFrame(adminPassword, row.id, frameIdx);
+      setNavFrame(data.frame);
+      setNavUrl(data.image_url);
+      if (data.total_frames) setNavTotal(data.total_frames);
+    } catch (e) {
+      // surface in console; modal stays usable
+      console.warn("frame fetch failed", e);
+    } finally {
+      setNavLoading(false);
+    }
+  }
+
+  // Which frame image is shown on the left depends on the active
+  // editor. Frame editors (address/impact) show the in-flight nav
+  // frame; everything else shows the address frame.
+  let leftImageUrl = draft.addressImageUrl;
+  let leftFrameLabel = `Address frame · ${draft.addressFrame}`;
+  if (editing === "address" || editing === "impact") {
+    leftImageUrl = navUrl || draft.addressImageUrl;
+    const total = navTotal != null ? ` / ${navTotal - 1}` : "";
+    leftFrameLabel =
+      `${editing === "address" ? "Address" : "Impact"} frame · ${navFrame ?? "—"}${total}`;
+  }
 
   return (
-    <div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(260px, 1.4fr) minmax(220px, 1fr)",
-          gap: 16,
-          alignItems: "flex-start",
-        }}
-      >
-        <div>
-          <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-            Address frame{" "}
-            {detection.address?.frame != null && (
-              <span style={{ textTransform: "none" }}>
-                · frame {detection.address.frame}
-              </span>
-            )}
-          </div>
-          <div
-            style={{
-              position: "relative",
-              width: "100%",
-              aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
-              background: "var(--border, #222)",
-              borderRadius: 6,
-              overflow: "hidden",
-            }}
-          >
-            {addressUrl ? (
-              <img
-                src={addressUrl}
-                alt="Detected address frame"
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
-            ) : (
-              <div
-                className="muted small"
-                style={{
-                  position: "absolute", inset: 0,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                }}
-              >
-                No address frame
-              </div>
-            )}
-
-            {hasDims && roi && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: pct(roi.x, frameW),
-                  top: pct(roi.y, frameH),
-                  width: pct(roi.w, frameW),
-                  height: pct(roi.h, frameH),
-                  border: "2px solid #22c55e",
-                  borderRadius: 4,
-                  pointerEvents: "none",
-                  boxShadow: "0 0 0 1px rgba(34,197,94,0.4)",
-                }}
-                title="Ball detection area"
-              />
-            )}
-
-            {hasDims && ball && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: pct(ball.x, frameW),
-                  top: pct(ball.y, frameH),
-                  width: 12, height: 12,
-                  borderRadius: "50%",
-                  background: "#22c55e",
-                  border: "2px solid #fff",
-                  transform: "translate(-50%, -50%)",
-                  pointerEvents: "none",
-                  boxShadow: "0 0 6px rgba(0,0,0,0.6)",
-                }}
-                title={`Ball at rest (${ball.x}, ${ball.y})`}
-              />
-            )}
-
-            {hasDims && ball && target && (
-              <svg
-                aria-hidden
-                viewBox={`0 0 ${frameW} ${frameH}`}
-                preserveAspectRatio="none"
-                style={{
-                  position: "absolute", inset: 0,
-                  width: "100%", height: "100%",
-                  pointerEvents: "none",
-                }}
-              >
-                <defs>
-                  <marker
-                    id="targetArrow"
-                    viewBox="0 0 10 10"
-                    refX="8" refY="5"
-                    markerWidth="6" markerHeight="6"
-                    orient="auto-start-reverse"
-                  >
-                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24" />
-                  </marker>
-                </defs>
-                <line
-                  x1={ball.x} y1={ball.y}
-                  x2={target.x} y2={target.y}
-                  stroke="#fbbf24"
-                  strokeWidth={Math.max(3, Math.round((frameW || 1280) / 320))}
-                  strokeLinecap="round"
-                  markerEnd="url(#targetArrow)"
-                />
-              </svg>
-            )}
-          </div>
-          <div className="tiny muted" style={{ marginTop: 6 }}>
-            Green dot = ball at rest · Green box = ball detection area ·
-            Yellow arrow = target direction.
-          </div>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(320px, 1.5fr) minmax(260px, 1fr)",
+        gap: 16,
+        alignItems: "flex-start",
+      }}
+    >
+      <div>
+        <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+          {leftFrameLabel}
         </div>
+        <FramePreview
+          imageUrl={leftImageUrl}
+          frameW={frameW}
+          frameH={frameH}
+          editing={editing}
+          draft={draft}
+          setDraft={setDraft}
+          loading={navLoading}
+        />
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          Green dot = ball at rest · Green box = ball-tracer detection
+          area · Red flag = target. Click a field on the right to edit.
+        </div>
+      </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <DetectField
-            label="Handedness"
-            value={detection.handedness?.value
-              ? detection.handedness.value.charAt(0).toUpperCase() + detection.handedness.value.slice(1)
-              : "Unknown"}
-            sub={detection.handedness?.confidence
-              ? `Confidence: ${detection.handedness.confidence}`
-              : null}
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <EditableRow
+          label="Handedness"
+          value={draft.handedness === "left" ? "Left" : "Right"}
+          active={editing === "handedness"}
+          onActivate={() => setEditing(editing === "handedness" ? null : "handedness")}
+        >
+          <div className="row" style={{ gap: 6 }}>
+            <button
+              type="button"
+              className={draft.handedness === "right" ? "" : "ghost"}
+              style={{ width: "auto", flex: 1 }}
+              onClick={() => setDraft((d) => ({ ...d, handedness: "right" }))}
+            >
+              Right
+            </button>
+            <button
+              type="button"
+              className={draft.handedness === "left" ? "" : "ghost"}
+              style={{ width: "auto", flex: 1 }}
+              onClick={() => setDraft((d) => ({ ...d, handedness: "left" }))}
+            >
+              Left
+            </button>
+          </div>
+        </EditableRow>
+
+        <EditableRow
+          label="Address frame"
+          value={`Frame ${draft.addressFrame}`}
+          active={editing === "address"}
+          onActivate={() => setEditing(editing === "address" ? null : "address")}
+        >
+          <FrameStepper
+            current={navFrame}
+            total={navTotal}
+            loading={navLoading}
+            onStep={(delta) => loadFrame((navFrame ?? draft.addressFrame) + delta)}
+            onApply={() => {
+              if (navFrame == null) return;
+              setDraft((d) => ({
+                ...d,
+                addressFrame: navFrame,
+                addressImageUrl: navUrl || d.addressImageUrl,
+              }));
+              setEditing(null);
+            }}
           />
-          <DetectField
-            label="Address frame"
-            value={detection.address?.frame != null
-              ? `Frame ${detection.address.frame}`
-              : "Not detected"}
+        </EditableRow>
+
+        <EditableRow
+          label="Impact frame"
+          value={`Frame ${draft.impactFrame}`}
+          active={editing === "impact"}
+          onActivate={() => setEditing(editing === "impact" ? null : "impact")}
+        >
+          <FrameStepper
+            current={navFrame}
+            total={navTotal}
+            loading={navLoading}
+            onStep={(delta) => loadFrame((navFrame ?? draft.impactFrame) + delta)}
+            onApply={() => {
+              if (navFrame == null) return;
+              setDraft((d) => ({ ...d, impactFrame: navFrame }));
+              setEditing(null);
+            }}
           />
-          <DetectField
-            label="Impact frame"
-            value={detection.impact?.frame != null
-              ? `Frame ${detection.impact.frame}`
-              : "Not detected"}
-            sub={detection.impact?.method ? `via ${detection.impact.method}` : null}
-          />
-          <DetectField
-            label="Resting ball"
-            value={ball ? `${ball.x}, ${ball.y} px` : "Not detected"}
-          />
-          <DetectField
-            label="Detection area"
-            value={roi
-              ? `${roi.w} × ${roi.h} px @ (${roi.x}, ${roi.y})`
-              : "Not detected"}
-          />
-          <DetectField
-            label="Target"
-            value={target ? `${target.x}, ${target.y} px` : "Not detected"}
-            sub={target?.method || null}
-          />
-          <DetectField
-            label="Frame size"
-            value={frameW && frameH ? `${frameW} × ${frameH} px` : "Unknown"}
-            sub={detection.fps ? `${detection.fps} fps` : null}
-          />
+        </EditableRow>
+
+        <EditableRow
+          label="Resting ball"
+          value={draft.ball
+            ? `${draft.ball.x}, ${draft.ball.y} px`
+            : "Not set"}
+          active={editing === "ball"}
+          onActivate={() => setEditing(editing === "ball" ? null : "ball")}
+        >
+          <div className="tiny muted">
+            Drag the green dot on the left to set the ball-at-rest
+            position. Address frame is shown.
+          </div>
+          <button
+            type="button"
+            style={{ width: "auto", marginTop: 6 }}
+            onClick={() => setEditing(null)}
+          >
+            Done
+          </button>
+        </EditableRow>
+
+        <EditableRow
+          label="Detection area"
+          value={draft.roi
+            ? `${draft.roi.w} × ${draft.roi.h} px @ (${draft.roi.x}, ${draft.roi.y})`
+            : "Not set"}
+          active={editing === "roi"}
+          onActivate={() => setEditing(editing === "roi" ? null : "roi")}
+        >
+          <div className="tiny muted">
+            Drag the green rectangle to move it. Drag any corner to resize.
+          </div>
+          {hasDims && draft.roi && (
+            <div className="row" style={{ gap: 6, marginTop: 6 }}>
+              <button
+                type="button"
+                className="ghost"
+                style={{ width: "auto" }}
+                onClick={() => setDraft((d) => ({
+                  ...d,
+                  roi: scaleRoi(d.roi, 0.85, frameW, frameH),
+                }))}
+              >
+                Shrink
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                style={{ width: "auto" }}
+                onClick={() => setDraft((d) => ({
+                  ...d,
+                  roi: scaleRoi(d.roi, 1.18, frameW, frameH),
+                }))}
+              >
+                Grow
+              </button>
+              <button
+                type="button"
+                style={{ width: "auto", marginLeft: "auto" }}
+                onClick={() => setEditing(null)}
+              >
+                Done
+              </button>
+            </div>
+          )}
+        </EditableRow>
+
+        <EditableRow
+          label="Target"
+          value={draft.target
+            ? `${draft.target.x}, ${draft.target.y} px`
+            : "Not set"}
+          active={editing === "target"}
+          onActivate={() => setEditing(editing === "target" ? null : "target")}
+        >
+          <div className="tiny muted">
+            Drag the red flag on the left to mark where the flag is
+            on the green.
+          </div>
+          <button
+            type="button"
+            style={{ width: "auto", marginTop: 6 }}
+            onClick={() => setEditing(null)}
+          >
+            Done
+          </button>
+        </EditableRow>
+
+        <div className="tiny muted" style={{ marginTop: 4 }}>
+          Frame size:{" "}
+          {frameW && frameH ? `${frameW} × ${frameH} px` : "unknown"}
+          {totalFrames ? ` · ${totalFrames} frames` : ""}
         </div>
       </div>
     </div>
   );
 }
 
-function DetectField({ label, value, sub }) {
+function EditableRow({ label, value, active, onActivate, children }) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border, #2a2a2a)",
+        borderRadius: 6,
+        padding: 8,
+        background: active ? "rgba(34,197,94,0.06)" : "transparent",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onActivate}
+        style={{
+          width: "100%", padding: 0, background: "transparent",
+          border: "none", textAlign: "left", cursor: "pointer", color: "inherit",
+        }}
+      >
+        <div className="tiny upper muted">{label}</div>
+        <div style={{ fontSize: "0.95rem" }}>{value}</div>
+      </button>
+      {active && (
+        <div style={{ marginTop: 8 }}>{children}</div>
+      )}
+    </div>
+  );
+}
+
+function FrameStepper({ current, total, loading, onStep, onApply }) {
+  const disabled = loading || current == null;
   return (
     <div>
-      <div className="tiny upper muted">{label}</div>
-      <div style={{ fontSize: "0.95rem" }}>{value}</div>
-      {sub && <div className="tiny muted">{sub}</div>}
+      <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+        <button type="button" className="ghost" style={{ width: "auto" }}
+          disabled={disabled} onClick={() => onStep(-10)}>−10</button>
+        <button type="button" className="ghost" style={{ width: "auto" }}
+          disabled={disabled} onClick={() => onStep(-1)}>−1</button>
+        <span className="small" style={{ alignSelf: "center", minWidth: 70, textAlign: "center" }}>
+          {current ?? "—"}{total != null ? ` / ${total - 1}` : ""}
+        </span>
+        <button type="button" className="ghost" style={{ width: "auto" }}
+          disabled={disabled} onClick={() => onStep(1)}>+1</button>
+        <button type="button" className="ghost" style={{ width: "auto" }}
+          disabled={disabled} onClick={() => onStep(10)}>+10</button>
+      </div>
+      <button
+        type="button"
+        style={{ width: "100%", marginTop: 8 }}
+        disabled={disabled}
+        onClick={onApply}
+      >
+        Save this frame
+      </button>
+    </div>
+  );
+}
+
+function scaleRoi(roi, factor, frameW, frameH) {
+  if (!roi) return roi;
+  const cx = roi.x + roi.w / 2;
+  const cy = roi.y + roi.h / 2;
+  const w = Math.max(20, Math.round(roi.w * factor));
+  const h = Math.max(20, Math.round(roi.h * factor));
+  let x = Math.round(cx - w / 2);
+  let y = Math.round(cy - h / 2);
+  x = Math.max(0, Math.min(frameW - w, x));
+  y = Math.max(0, Math.min(frameH - h, y));
+  return { x, y, w, h };
+}
+
+function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading }) {
+  const hasDims = !!(frameW && frameH);
+  const containerRef = useRef(null);
+
+  // Convert a pointer event to native pixel coords on the frame.
+  function eventToFrame(e) {
+    if (!containerRef.current || !hasDims) return null;
+    const r = containerRef.current.getBoundingClientRect();
+    const xPct = (e.clientX - r.left) / r.width;
+    const yPct = (e.clientY - r.top) / r.height;
+    return {
+      x: Math.max(0, Math.min(frameW - 1, Math.round(xPct * frameW))),
+      y: Math.max(0, Math.min(frameH - 1, Math.round(yPct * frameH))),
+    };
+  }
+
+  // Drag-the-ball handler. Pointer capture so the drag survives leaving
+  // the dot before releasing.
+  function onBallPointerDown(e) {
+    if (editing !== "ball") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const pt = eventToFrame(ev);
+      if (pt) setDraft((d) => ({ ...d, ball: pt }));
+    };
+    const up = () => {
+      target.releasePointerCapture?.(e.pointerId);
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  }
+
+  // Clicking anywhere on the frame in ball/target mode also moves the
+  // marker — easier than precision-grabbing the dot.
+  function onFramePointerDown(e) {
+    if (editing === "ball") {
+      const pt = eventToFrame(e);
+      if (pt) setDraft((d) => ({ ...d, ball: pt }));
+    } else if (editing === "target") {
+      const pt = eventToFrame(e);
+      if (pt) setDraft((d) => ({ ...d, target: pt }));
+    }
+  }
+
+  function onTargetPointerDown(e) {
+    if (editing !== "target") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const pt = eventToFrame(ev);
+      if (pt) setDraft((d) => ({ ...d, target: pt }));
+    };
+    const up = () => {
+      target.releasePointerCapture?.(e.pointerId);
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  }
+
+  // ROI body drag (move) — handlers below per-corner do resize.
+  function onRoiBodyPointerDown(e) {
+    if (editing !== "roi" || !draft.roi) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    const start = eventToFrame(e);
+    const origin = { ...draft.roi };
+    const move = (ev) => {
+      const pt = eventToFrame(ev);
+      if (!pt || !start) return;
+      const dx = pt.x - start.x;
+      const dy = pt.y - start.y;
+      const nx = Math.max(0, Math.min(frameW - origin.w, origin.x + dx));
+      const ny = Math.max(0, Math.min(frameH - origin.h, origin.y + dy));
+      setDraft((d) => ({ ...d, roi: { ...origin, x: nx, y: ny } }));
+    };
+    const up = () => {
+      target.releasePointerCapture?.(e.pointerId);
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  }
+
+  function onRoiHandlePointerDown(corner) {
+    return (e) => {
+      if (editing !== "roi" || !draft.roi) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const target = e.currentTarget;
+      target.setPointerCapture(e.pointerId);
+      const origin = { ...draft.roi };
+      const move = (ev) => {
+        const pt = eventToFrame(ev);
+        if (!pt) return;
+        let { x, y, w, h } = origin;
+        if (corner.includes("e")) w = Math.max(20, pt.x - x);
+        if (corner.includes("s")) h = Math.max(20, pt.y - y);
+        if (corner.includes("w")) {
+          const right = x + w;
+          x = Math.min(right - 20, Math.max(0, pt.x));
+          w = right - x;
+        }
+        if (corner.includes("n")) {
+          const bottom = y + h;
+          y = Math.min(bottom - 20, Math.max(0, pt.y));
+          h = bottom - y;
+        }
+        if (x + w > frameW) w = frameW - x;
+        if (y + h > frameH) h = frameH - y;
+        setDraft((d) => ({ ...d, roi: { x, y, w, h } }));
+      };
+      const up = () => {
+        target.releasePointerCapture?.(e.pointerId);
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", up);
+      };
+      target.addEventListener("pointermove", move);
+      target.addEventListener("pointerup", up);
+    };
+  }
+
+  const showRoi = !!draft.roi && (editing === null || editing === "roi"
+    || editing === "ball" || editing === "target");
+  const showBall = !!draft.ball;
+  const showTarget = !!draft.target;
+  const ballEditable = editing === "ball";
+  const targetEditable = editing === "target";
+  const roiEditable = editing === "roi";
+
+  const pct = (v, span) => `${(v / span) * 100}%`;
+
+  return (
+    <div
+      ref={containerRef}
+      onPointerDown={onFramePointerDown}
+      style={{
+        position: "relative",
+        width: "100%",
+        aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+        background: "var(--border, #222)",
+        borderRadius: 6,
+        overflow: "hidden",
+        cursor: (ballEditable || targetEditable) ? "crosshair" : "default",
+        userSelect: "none",
+      }}
+    >
+      {imageUrl ? (
+        <img
+          src={imageUrl}
+          alt="Frame preview"
+          draggable={false}
+          style={{
+            width: "100%", height: "100%", objectFit: "cover",
+            pointerEvents: "none",
+          }}
+        />
+      ) : (
+        <div
+          className="muted small"
+          style={{
+            position: "absolute", inset: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          {loading ? "Loading frame…" : "No frame"}
+        </div>
+      )}
+      {loading && imageUrl && (
+        <div
+          className="tiny"
+          style={{
+            position: "absolute", top: 6, right: 8,
+            background: "rgba(0,0,0,0.6)", padding: "2px 6px",
+            borderRadius: 4, color: "#fff",
+          }}
+        >
+          Loading…
+        </div>
+      )}
+
+      {hasDims && showRoi && draft.roi && (
+        <div
+          onPointerDown={onRoiBodyPointerDown}
+          style={{
+            position: "absolute",
+            left: pct(draft.roi.x, frameW),
+            top: pct(draft.roi.y, frameH),
+            width: pct(draft.roi.w, frameW),
+            height: pct(draft.roi.h, frameH),
+            border: "2px solid #22c55e",
+            borderRadius: 4,
+            cursor: roiEditable ? "move" : "default",
+            boxShadow: "0 0 0 1px rgba(34,197,94,0.4)",
+            pointerEvents: roiEditable ? "auto" : "none",
+            background: roiEditable ? "rgba(34,197,94,0.06)" : "transparent",
+          }}
+          title="Ball detection area"
+        >
+          {roiEditable && ["nw", "ne", "sw", "se"].map((corner) => (
+            <div
+              key={corner}
+              onPointerDown={onRoiHandlePointerDown(corner)}
+              style={{
+                position: "absolute",
+                width: 12, height: 12,
+                background: "#22c55e",
+                border: "2px solid #fff",
+                borderRadius: 2,
+                cursor: `${corner}-resize`,
+                left: corner.includes("w") ? -7 : "auto",
+                right: corner.includes("e") ? -7 : "auto",
+                top: corner.includes("n") ? -7 : "auto",
+                bottom: corner.includes("s") ? -7 : "auto",
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {hasDims && showBall && draft.ball && (
+        <div
+          onPointerDown={onBallPointerDown}
+          style={{
+            position: "absolute",
+            left: pct(draft.ball.x, frameW),
+            top: pct(draft.ball.y, frameH),
+            width: 16, height: 16,
+            borderRadius: "50%",
+            background: "#22c55e",
+            border: "2px solid #fff",
+            transform: "translate(-50%, -50%)",
+            cursor: ballEditable ? "grab" : "default",
+            boxShadow: "0 0 6px rgba(0,0,0,0.7)",
+            pointerEvents: ballEditable ? "auto" : "none",
+            touchAction: "none",
+          }}
+          title={`Ball at rest (${draft.ball.x}, ${draft.ball.y})`}
+        />
+      )}
+
+      {hasDims && showTarget && draft.target && (
+        <FlagMarker
+          x={draft.target.x}
+          y={draft.target.y}
+          frameW={frameW}
+          frameH={frameH}
+          editable={targetEditable}
+          onPointerDown={onTargetPointerDown}
+        />
+      )}
+    </div>
+  );
+}
+
+function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
+  // Flag rendered as inline SVG so it scales cleanly and stays
+  // visible against both grass and sky backgrounds.
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      style={{
+        position: "absolute",
+        left: `${(x / frameW) * 100}%`,
+        top: `${(y / frameH) * 100}%`,
+        width: 36, height: 36,
+        transform: "translate(-6px, -100%)",
+        cursor: editable ? "grab" : "default",
+        pointerEvents: editable ? "auto" : "none",
+        filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.7))",
+        touchAction: "none",
+      }}
+      title={`Target (${x}, ${y})`}
+    >
+      <svg viewBox="0 0 36 36" width="36" height="36" aria-hidden>
+        <line x1="6" y1="2" x2="6" y2="34"
+          stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+        <path d="M6 4 L28 9 L6 16 Z"
+          fill="#ef4444" stroke="#fff" strokeWidth="1.5"
+          strokeLinejoin="round" />
+        <circle cx="6" cy="34" r="2.5" fill="#fff" />
+      </svg>
     </div>
   );
 }
