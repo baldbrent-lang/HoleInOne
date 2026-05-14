@@ -28,6 +28,8 @@ export default function AdminClipsAi() {
   const [audioImpact, setAudioImpact] = useState({});        // {clipId: {image_url, frame, ratio, error?}}
   const [audioImpactRunning, setAudioImpactRunning] = useState({});
   const [audioImpactMinRatio, setAudioImpactMinRatio] = useState({}); // {clipId: number}
+  const [overrideDrafts, setOverrideDrafts] = useState({});   // {clipId: {impactFrame, maxFrames, ballAtRestX, ballAtRestY, manualJson}}
+  const [overridesOpen, setOverridesOpen] = useState({});      // {clipId: bool}
 
   async function load() {
     try {
@@ -43,17 +45,61 @@ export default function AdminClipsAi() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function runOne(clipId) {
+  async function runOne(clipId, overrides = {}) {
     setRunning((r) => ({ ...r, [clipId]: true }));
     const model = selectedModels[clipId] || "claude-opus-4-7";
     try {
-      const data = await api.aiTrace(adminPassword, clipId, model);
+      const data = await api.aiTrace(adminPassword, clipId, {
+        model,
+        ...overrides,
+      });
       setResults((r) => ({ ...r, [clipId]: data }));
     } catch (e) {
       setResults((r) => ({ ...r, [clipId]: { error: e.message } }));
     } finally {
       setRunning((r) => ({ ...r, [clipId]: false }));
     }
+  }
+
+  async function runWithOverrides(clipId) {
+    const draft = overrideDrafts[clipId] || {};
+    const overrides = {};
+    if (draft.impactFrame !== undefined && draft.impactFrame !== "") {
+      const n = parseInt(draft.impactFrame, 10);
+      if (Number.isFinite(n) && n >= 0) overrides.impactFrameOverride = n;
+    }
+    if (draft.maxFrames !== undefined && draft.maxFrames !== "") {
+      const n = parseInt(draft.maxFrames, 10);
+      if (Number.isFinite(n) && n > 0) overrides.ballTrackMaxFrames = n;
+    }
+    if (draft.ballAtRestX !== undefined && draft.ballAtRestX !== "") {
+      const n = parseInt(draft.ballAtRestX, 10);
+      if (Number.isFinite(n)) overrides.ballAtRestX = n;
+    }
+    if (draft.ballAtRestY !== undefined && draft.ballAtRestY !== "") {
+      const n = parseInt(draft.ballAtRestY, 10);
+      if (Number.isFinite(n)) overrides.ballAtRestY = n;
+    }
+    if (draft.manualJson !== undefined && draft.manualJson.trim() !== "") {
+      try {
+        const parsed = JSON.parse(draft.manualJson);
+        if (Array.isArray(parsed)) overrides.manualBallPositions = parsed;
+      } catch (e) {
+        setResults((r) => ({
+          ...r,
+          [clipId]: { error: `manual_ball_positions invalid JSON: ${e.message}` },
+        }));
+        return;
+      }
+    }
+    await runOne(clipId, overrides);
+  }
+
+  function setOverrideField(clipId, field, value) {
+    setOverrideDrafts((d) => ({
+      ...d,
+      [clipId]: { ...(d[clipId] || {}), [field]: value },
+    }));
   }
 
   async function runAudioImpactFrame(clipId) {
@@ -667,6 +713,156 @@ export default function AdminClipsAi() {
                     }}
                   />
                 </div>
+              </div>
+            )}
+
+            {/* Manual overrides — visible after AI has run at least
+                once. Lets the operator hand-correct anything the AI
+                got wrong: impact frame, how many frames to keep
+                tracking after impact, ball-at-rest position, and
+                missed-in-flight ball positions. Each override
+                bypasses the matching AI step entirely. */}
+            {result && !result.error && (
+              <div style={{ marginTop: 10 }}>
+                <button
+                  type="button"
+                  className="ghost small"
+                  onClick={() =>
+                    setOverridesOpen((o) => ({ ...o, [c.id]: !o[c.id] }))
+                  }
+                  style={{ width: "auto" }}
+                >
+                  {overridesOpen[c.id] ? "▼" : "▶"} Manual overrides
+                </button>
+                {overridesOpen[c.id] && (() => {
+                  const draft = overrideDrafts[c.id] || {};
+                  // Pre-fill defaults from AI's output so the operator
+                  // only has to edit what they want to change.
+                  const defaultImpact =
+                    impactRefined?.impact_frame ??
+                    impact?.impact_frame ?? "";
+                  // ball_x/y from handedness are in SENT image coords.
+                  // Convert to native coords for the override input,
+                  // since the override is interpreted as native pixels.
+                  let defaultRestX = "";
+                  let defaultRestY = "";
+                  const hb = result?.handedness;
+                  if (
+                    hb?.ball_x != null && hb?.ball_y != null
+                    && hb?.image_width && hb?.image_height
+                    && result?.ball_sent_dims
+                  ) {
+                    // hb is already in sent coords; just expose them
+                    // as-is — backend treats override as native, so we
+                    // need to scale to native. We don't have native
+                    // dims directly on the result, but ball_xy_sent /
+                    // ball_sent_dims is the same info. Simpler: use
+                    // ball_rest_xy_native when set.
+                    if (result.ball_rest_xy_native) {
+                      defaultRestX = Math.round(result.ball_rest_xy_native[0]);
+                      defaultRestY = Math.round(result.ball_rest_xy_native[1]);
+                    }
+                  }
+                  return (
+                    <div
+                      className="card tight"
+                      style={{ margin: "8px 0 0", padding: 10, background: "var(--surface-alt)" }}
+                    >
+                      <div className="tiny muted" style={{ marginBottom: 8 }}>
+                        Leave any field blank to keep the AI's value.
+                        Coords are in native source-video pixels (origin top-left).
+                      </div>
+                      <div className="row" style={{ gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+                        <label className="small" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          Impact frame
+                          <input
+                            type="number" min="0"
+                            placeholder={String(defaultImpact)}
+                            value={draft.impactFrame ?? ""}
+                            onChange={(e) => setOverrideField(c.id, "impactFrame", e.target.value)}
+                            disabled={!!running[c.id]}
+                            style={{ width: 90, fontSize: 13, padding: "2px 6px" }}
+                          />
+                        </label>
+                        <label className="small" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          Frames to track (post-impact)
+                          <input
+                            type="number" min="1" max="120"
+                            placeholder="12"
+                            value={draft.maxFrames ?? ""}
+                            onChange={(e) => setOverrideField(c.id, "maxFrames", e.target.value)}
+                            disabled={!!running[c.id]}
+                            style={{ width: 90, fontSize: 13, padding: "2px 6px" }}
+                          />
+                        </label>
+                        <label className="small" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          Ball-at-rest X (px)
+                          <input
+                            type="number"
+                            placeholder={String(defaultRestX)}
+                            value={draft.ballAtRestX ?? ""}
+                            onChange={(e) => setOverrideField(c.id, "ballAtRestX", e.target.value)}
+                            disabled={!!running[c.id]}
+                            style={{ width: 100, fontSize: 13, padding: "2px 6px" }}
+                          />
+                        </label>
+                        <label className="small" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          Ball-at-rest Y (px)
+                          <input
+                            type="number"
+                            placeholder={String(defaultRestY)}
+                            value={draft.ballAtRestY ?? ""}
+                            onChange={(e) => setOverrideField(c.id, "ballAtRestY", e.target.value)}
+                            disabled={!!running[c.id]}
+                            style={{ width: 100, fontSize: 13, padding: "2px 6px" }}
+                          />
+                        </label>
+                      </div>
+                      <div style={{ marginTop: 10 }}>
+                        <label className="small" style={{ display: "block", marginBottom: 4 }}>
+                          Manual ball positions for missed frames (JSON array):
+                        </label>
+                        <textarea
+                          rows={4}
+                          placeholder='[{"frame": 142, "x": 800, "y": 200}, {"frame": 145, "x": 850, "y": 180}]'
+                          value={draft.manualJson ?? ""}
+                          onChange={(e) => setOverrideField(c.id, "manualJson", e.target.value)}
+                          disabled={!!running[c.id]}
+                          style={{
+                            width: "100%", fontFamily: "monospace",
+                            fontSize: 12, padding: 8,
+                            border: "1px solid var(--border)", borderRadius: 6,
+                          }}
+                        />
+                        <div className="tiny muted" style={{ marginTop: 4 }}>
+                          One row per frame the AI missed (or got wrong).
+                          x/y are pixel coords in the source-video frame.
+                          Overrides existing AI ball positions on matching
+                          frame numbers; inserts new ones otherwise.
+                        </div>
+                      </div>
+                      <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                        <button
+                          type="button"
+                          onClick={() => runWithOverrides(c.id)}
+                          disabled={!!running[c.id] || !canAnalyze}
+                        >
+                          {running[c.id] ? "Re-running…" : "Re-run with overrides"}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost small"
+                          onClick={() =>
+                            setOverrideDrafts((d) => ({ ...d, [c.id]: {} }))
+                          }
+                          disabled={!!running[c.id]}
+                        >
+                          Clear all
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
           </div>

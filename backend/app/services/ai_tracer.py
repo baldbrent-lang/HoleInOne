@@ -3499,6 +3499,10 @@ def run_full_ai_tracer_pipeline(
     output_dir: Path,
     output_prefix: str,
     model: str | None = None,
+    impact_frame_override: int | None = None,
+    ball_track_max_frames_override: int | None = None,
+    ball_at_rest_override: tuple[float, float] | None = None,
+    manual_ball_positions: list[dict] | None = None,
 ) -> dict:
     """Run the complete AI tracer pipeline (address → handedness →
     impact → refine → ball-track → tracer render) on a single clip.
@@ -3509,6 +3513,24 @@ def run_full_ai_tracer_pipeline(
     computed `cutover_time_sec` (when the rendered tracer ends in
     clip-time, plus a 1s buffer) for downstream dual-camera composite
     use.
+
+    Optional manual overrides — used by the /admin/clips/ai page so an
+    operator can correct the AI's output without re-uploading:
+
+    - `impact_frame_override`: int frame index. Bypasses audio impact
+      detection and the AI vision fallback; address frame is derived
+      from this (impact − 1.5 s) too.
+    - `ball_track_max_frames_override`: int. Overrides the per-fps
+      default in track_ball_after_impact (e.g. 12 → 20 to keep
+      tracking a long flight).
+    - `ball_at_rest_override`: (x, y) in NATIVE pixel coords. Bypasses
+      the handedness Claude call; ball_xy_sent + ball_sent_dims get
+      set from this directly.
+    - `manual_ball_positions`: [{"frame": int, "x": int, "y": int},…]
+      in NATIVE pixel coords. Merged into ball_track frames after AI
+      tracking — overrides existing entries for matching frame
+      numbers and inserts new entries for frames AI missed entirely.
+      Each manual entry is flagged `manual: true` in the result.
 
     Never raises. The router that calls this is responsible for
     transcoding the tracer MP4 to H.264 for browser playback if it
@@ -3554,7 +3576,16 @@ def run_full_ai_tracer_pipeline(
 
     # --- Step 0: audio impact (used both to derive the address frame
     # and to short-circuit AI impact detection downstream) ---
-    audio_impact_info = find_impact_via_audio(input_path, fps_val)
+    # Manual impact_frame_override bypasses this entirely.
+    if impact_frame_override is not None:
+        audio_impact_info = {
+            "ok": False,
+            "error": "manual override active",
+            "method": "manual_override",
+            "impact_frame": int(impact_frame_override),
+        }
+    else:
+        audio_impact_info = find_impact_via_audio(input_path, fps_val)
 
     # --- Step 1: address frame ---
     # When audio impact is confident (ratio >= AUDIO_MIN_PEAK_OVER_MEDIAN
@@ -3562,9 +3593,41 @@ def run_full_ai_tracer_pipeline(
     # A golf swing from address to impact is < ~1.5 s; the golfer
     # holds address for at least a beat. So address ≈ impact − 1.5 s
     # is a safe heuristic that avoids the $0.05/clip API call.
+    # Manual override path derives the same way from the supplied
+    # impact frame.
     address_image_path = output_dir / f"{output_prefix}_address.jpg"
     address_info: dict
-    if audio_impact_info.get("ok") and audio_impact_info.get("impact_frame") is not None:
+    if impact_frame_override is not None:
+        addr_idx = max(0, int(impact_frame_override) - int(round(1.5 * fps_val)))
+        if HAS_CV:
+            try:
+                cap = cv2.VideoCapture(str(input_path))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, addr_idx)
+                ok_read, frame = cap.read()
+                cap.release()
+                if ok_read and frame is not None:
+                    cv2.imwrite(str(address_image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            except Exception as exc:  # pragma: no cover
+                log.warning("ai_tracer: manual-override address frame grab failed: %s", exc)
+        address_info = {
+            "ok": True,
+            "error": None,
+            "address_frame": addr_idx,
+            "confidence": "manual",
+            "notes": (
+                f"derived from manual impact override frame "
+                f"{int(impact_frame_override)} − {int(round(1.5 * fps_val))}f"
+            ),
+            "model": None,
+            "frames_sent": [],
+            "saved_image": address_image_path.exists(),
+            "method": "manual_derived",
+        }
+        log.info(
+            "ai_tracer: address frame derived from manual impact override — addr=%d (impact=%d)",
+            addr_idx, int(impact_frame_override),
+        )
+    elif audio_impact_info.get("ok") and audio_impact_info.get("impact_frame") is not None:
         addr_idx = max(0, int(audio_impact_info["impact_frame"]) - int(round(1.5 * fps_val)))
         if HAS_CV:
             try:
@@ -3608,9 +3671,42 @@ def run_full_ai_tracer_pipeline(
     addr_idx = int(address_info["address_frame"])
 
     # --- Step 2: handedness + landmarks ---
-    handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
+    # Manual ball_at_rest_override bypasses the Claude handedness call;
+    # we synthesize a handedness_info dict with the operator-supplied
+    # ball position in native pixel coords and let downstream code
+    # treat the native frame size as "what we sent to Claude" — no
+    # coord-space conversion needed.
+    if ball_at_rest_override is not None:
+        nw, nh = 0, 0
+        if HAS_CV:
+            cap = cv2.VideoCapture(str(input_path))
+            try:
+                if cap.isOpened():
+                    nw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    nh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            finally:
+                cap.release()
+        handedness_info = {
+            "ok": True,
+            "error": None,
+            "handedness": "unknown",
+            "ball_x": int(ball_at_rest_override[0]),
+            "ball_y": int(ball_at_rest_override[1]),
+            "image_width": nw,
+            "image_height": nh,
+            "confidence": "manual",
+            "method": "manual_override",
+            "model": None,
+            "notes": "ball-at-rest position supplied by operator",
+        }
+        log.info(
+            "ai_tracer: ball-at-rest overridden — (%d, %d) in %dx%d native",
+            int(ball_at_rest_override[0]), int(ball_at_rest_override[1]), nw, nh,
+        )
+    else:
+        handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
     result["handedness"] = handedness_info
-    if handedness_info.get("ok"):
+    if handedness_info.get("ok") and handedness_info.get("method") != "manual_override":
         annotate_address_with_shaft(
             input_path, addr_idx, handedness_info, address_image_path,
         )
@@ -3630,9 +3726,26 @@ def run_full_ai_tracer_pipeline(
     result["ball_xy_sent"] = ball_xy_sent
     result["ball_sent_dims"] = ball_sent_dims
 
-    # --- Step 3a: audio impact (already computed above; reuse) ---
+    # --- Step 3: impact ---
     impact_info: dict | None = None
-    if audio_impact_info.get("ok"):
+
+    # Step 3-manual: operator supplied an explicit impact frame —
+    # bypass audio AND AI vision detection.
+    if impact_frame_override is not None:
+        impact_info = {
+            "ok": True,
+            "error": None,
+            "impact_frame": int(impact_frame_override),
+            "confidence": "manual",
+            "notes": f"impact frame {int(impact_frame_override)} set manually by operator",
+            "method": "manual",
+            "model": None,
+            "frames_sent": [],
+            "audio": audio_impact_info,
+        }
+
+    # Step 3a: audio impact (already computed above; reuse)
+    if impact_info is None and audio_impact_info.get("ok"):
         audio_frame = audio_impact_info.get("impact_frame")
         if audio_frame is not None and audio_frame >= addr_idx:
             ratio_str = (
@@ -3689,7 +3802,7 @@ def run_full_ai_tracer_pipeline(
     # cost. We still produce an impact-frame JPG via cv2 so the
     # frontend can show what we picked.
     impact_image_path = output_dir / f"{output_prefix}_impact.jpg"
-    if impact_info.get("method") == "audio":
+    if impact_info.get("method") in ("audio", "manual"):
         if HAS_CV:
             try:
                 cap = cv2.VideoCapture(str(input_path))
@@ -3738,8 +3851,65 @@ def run_full_ai_tracer_pipeline(
         output_prefix=track_prefix,
         ball_xy_sent=ball_xy_sent,
         ball_sent_dims=ball_sent_dims,
+        max_frames=int(ball_track_max_frames_override)
+            if ball_track_max_frames_override is not None else None,
         model=model,
     )
+
+    # Step 5b: merge operator-supplied manual ball positions into the
+    # AI-tracked frames. Existing entries with the same frame number
+    # get overridden (ball coords + found=True + confidence=manual);
+    # missing frames get a brand-new entry inserted in frame order.
+    if manual_ball_positions:
+        frames_list = ball_track_info.get("frames") or []
+        by_frame = {
+            int(rec["frame"]): rec
+            for rec in frames_list if rec.get("frame") is not None
+        }
+        n_override = 0
+        n_inserted = 0
+        for manual in manual_ball_positions:
+            try:
+                fnum = int(manual.get("frame"))
+                mx = int(manual.get("x"))
+                my = int(manual.get("y"))
+            except (TypeError, ValueError, KeyError):
+                continue
+            if fnum in by_frame:
+                rec = by_frame[fnum]
+                prior_note = rec.get("notes") or ""
+                rec["x"] = mx
+                rec["y"] = my
+                rec["found"] = True
+                rec["confidence"] = "manual"
+                rec["manual"] = True
+                rec["notes"] = (
+                    f"manual override (was: {prior_note})"
+                    if prior_note else "manual override"
+                )
+                n_override += 1
+            else:
+                frames_list.append({
+                    "frame": fnum,
+                    "found": True,
+                    "x": mx,
+                    "y": my,
+                    "confidence": "manual",
+                    "notes": "manually added by operator",
+                    "manual": True,
+                    "retry": False,
+                    "image_filename": None,
+                })
+                n_inserted += 1
+        frames_list.sort(key=lambda r: int(r.get("frame") or 0))
+        ball_track_info["frames"] = frames_list
+        ball_track_info["n_manual_override"] = n_override
+        ball_track_info["n_manual_inserted"] = n_inserted
+        log.info(
+            "ai_tracer: merged %d manual ball position(s) — %d override, %d inserted",
+            n_override + n_inserted, n_override, n_inserted,
+        )
+
     result["ball_track"] = ball_track_info
     for rec in (ball_track_info.get("frames") or []):
         result["ball_track_frames"].append({
@@ -3750,6 +3920,7 @@ def run_full_ai_tracer_pipeline(
             "confidence": rec.get("confidence"),
             "notes": rec.get("notes"),
             "retry": rec.get("retry", False),
+            "manual": rec.get("manual", False),
             "image_filename": rec.get("image_filename"),
         })
 

@@ -369,15 +369,74 @@ export const api = {
       fd.append("min_ratio", String(minRatio));
       xhr.send(fd);
     }),
-  aiTrace: (key, clipId, model) => {
+  aiTrace: (key, clipId, modelOrOpts) => {
     // Five Claude steps: address, handedness, rough impact, refined
     // impact, ball-track. The track step is up to 60 parallel calls
     // and dominates wall time (~30-60 s on a typical swing). Cap at
     // 5 min so we don't time out the UI mid-track. Optional `model`
     // overrides the backend default for per-clip A/B testing.
-    const qs = model ? `?model=${encodeURIComponent(model)}` : "";
-    return request(`/api/admin/clips/${clipId}/ai-trace${qs}`, {
-      method: "POST", adminPassword: key, timeoutMs: 300_000,
+    //
+    // Backwards-compatible signature: pass a string for just the
+    // model, or an object for model + manual-override params:
+    //   { model, impactFrameOverride, ballTrackMaxFrames,
+    //     ballAtRestX, ballAtRestY, manualBallPositions }
+    // `manualBallPositions` is an array of {frame, x, y} in NATIVE
+    // pixel coords of the source video.
+    const opts = typeof modelOrOpts === "string"
+      ? { model: modelOrOpts }
+      : (modelOrOpts || {});
+    const qs = opts.model ? `?model=${encodeURIComponent(opts.model)}` : "";
+    const hasOverrides = (
+      opts.impactFrameOverride != null ||
+      opts.ballTrackMaxFrames != null ||
+      opts.ballAtRestX != null ||
+      opts.ballAtRestY != null ||
+      (opts.manualBallPositions && opts.manualBallPositions.length > 0)
+    );
+
+    // Fast path: no overrides → use the existing JSON request helper.
+    if (!hasOverrides) {
+      return request(`/api/admin/clips/${clipId}/ai-trace${qs}`, {
+        method: "POST", adminPassword: key, timeoutMs: 300_000,
+      });
+    }
+
+    // Override path: hand-roll XHR with multipart FormData so the
+    // backend's Form(...) params parse cleanly.
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/clips/${clipId}/ai-trace${qs}`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 300_000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 5 min"));
+      const fd = new FormData();
+      if (opts.impactFrameOverride != null) {
+        fd.append("impact_frame_override", String(opts.impactFrameOverride));
+      }
+      if (opts.ballTrackMaxFrames != null) {
+        fd.append("ball_track_max_frames", String(opts.ballTrackMaxFrames));
+      }
+      if (opts.ballAtRestX != null) {
+        fd.append("ball_at_rest_x", String(opts.ballAtRestX));
+      }
+      if (opts.ballAtRestY != null) {
+        fd.append("ball_at_rest_y", String(opts.ballAtRestY));
+      }
+      if (opts.manualBallPositions && opts.manualBallPositions.length > 0) {
+        fd.append(
+          "manual_ball_positions_json",
+          JSON.stringify(opts.manualBallPositions),
+        );
+      }
+      xhr.send(fd);
     });
   },
   listParticipants: (key, params = {}) => {

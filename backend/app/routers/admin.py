@@ -753,14 +753,30 @@ def audio_impact_frame(
 def ai_trace(
     clip_id: int,
     model: str | None = None,
+    impact_frame_override: int | None = Form(None),
+    ball_track_max_frames: int | None = Form(None),
+    ball_at_rest_x: int | None = Form(None),
+    ball_at_rest_y: int | None = Form(None),
+    manual_ball_positions_json: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    """AI analysis — step 2: identify the golfer's address frame.
+    """AI analysis — full pipeline (address + handedness + impact +
+    ball-track + tracer-render) on one clip.
 
-    Camera is always behind the golfer. This endpoint asks Claude
-    which frame in the clip shows the golfer at address (set up
-    over the ball, just before takeaway). The picked frame is
-    saved as a JPEG so the page can display it.
+    All overrides are optional. Supplying any of them swaps out the
+    corresponding AI step with operator-supplied values:
+
+    - impact_frame_override (int): bypasses audio + AI vision impact
+      detection. Address frame is auto-derived (impact − 1.5 s).
+    - ball_track_max_frames (int): replaces the per-fps default in
+      track_ball_after_impact. Higher = longer tracer arc.
+    - ball_at_rest_x, ball_at_rest_y (ints, native pixel coords):
+      bypass the handedness Claude call; ball-at-address position
+      is set from these.
+    - manual_ball_positions_json (string, JSON of
+      [{"frame":N,"x":X,"y":Y},…] in native pixel coords): merged
+      into the ball-track output after AI tracking. Override
+      existing frame entries OR insert new ones where AI missed.
     """
     clip = db.get(VideoClip, clip_id)
     if not clip:
@@ -784,8 +800,43 @@ def ai_trace(
     fpath = CLIPS_DIR / fname
     if not fpath.exists():
         raise HTTPException(404, f"source file missing on disk: {fname}")
+
+    # Parse + validate manual_ball_positions_json into the list-of-dicts
+    # shape the pipeline expects.
+    manual_positions: list[dict] | None = None
+    if manual_ball_positions_json:
+        try:
+            parsed = json.loads(manual_ball_positions_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, f"manual_ball_positions_json invalid JSON: {exc}")
+        if not isinstance(parsed, list):
+            raise HTTPException(400, "manual_ball_positions_json must be a JSON array")
+        manual_positions = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                raise HTTPException(400, "each manual position entry must be an object")
+            try:
+                manual_positions.append({
+                    "frame": int(entry["frame"]),
+                    "x": int(entry["x"]),
+                    "y": int(entry["y"]),
+                })
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(
+                    400,
+                    "each manual position entry needs integer frame, x, y",
+                )
+
+    ball_at_rest_override: tuple[float, float] | None = None
+    if ball_at_rest_x is not None and ball_at_rest_y is not None:
+        ball_at_rest_override = (float(ball_at_rest_x), float(ball_at_rest_y))
+
     pipe = run_full_ai_tracer_pipeline(
         fpath, output_dir=CLIPS_DIR, output_prefix=fpath.stem, model=model,
+        impact_frame_override=int(impact_frame_override) if impact_frame_override is not None else None,
+        ball_track_max_frames_override=int(ball_track_max_frames) if ball_track_max_frames is not None else None,
+        ball_at_rest_override=ball_at_rest_override,
+        manual_ball_positions=manual_positions,
     )
 
     def _public_url(p):
