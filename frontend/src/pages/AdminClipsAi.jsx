@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import DraggableMarker from "../components/DraggableMarker.jsx";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -28,8 +29,12 @@ export default function AdminClipsAi() {
   const [audioImpact, setAudioImpact] = useState({});        // {clipId: {image_url, frame, ratio, error?}}
   const [audioImpactRunning, setAudioImpactRunning] = useState({});
   const [audioImpactMinRatio, setAudioImpactMinRatio] = useState({}); // {clipId: number}
-  const [overrideDrafts, setOverrideDrafts] = useState({});   // {clipId: {impactFrame, maxFrames, ballAtRestX, ballAtRestY, manualJson}}
+  const [overrideDrafts, setOverrideDrafts] = useState({});   // {clipId: {impactFrame, maxFrames, ballAtRestX, ballAtRestY, manualJson, handedness}}
   const [overridesOpen, setOverridesOpen] = useState({});      // {clipId: bool}
+  // Per-frame manual ball positions populated by dragging the
+  // ball-track thumbnail markers. Shape: {clipId: {frameNumber: {x, y}}}
+  // — collapsed into the manualBallPositions array on submit.
+  const [manualPerFrame, setManualPerFrame] = useState({});
 
   async function load() {
     try {
@@ -80,10 +85,22 @@ export default function AdminClipsAi() {
       const n = parseInt(draft.ballAtRestY, 10);
       if (Number.isFinite(n)) overrides.ballAtRestY = n;
     }
+    if (draft.handedness && draft.handedness !== "auto") {
+      overrides.handednessOverride = draft.handedness;
+    }
+    // Combine per-frame drag overrides with any pasted JSON. Drag
+    // values win on duplicate frame numbers.
+    const merged = {};
     if (draft.manualJson !== undefined && draft.manualJson.trim() !== "") {
       try {
         const parsed = JSON.parse(draft.manualJson);
-        if (Array.isArray(parsed)) overrides.manualBallPositions = parsed;
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            if (entry && entry.frame != null) {
+              merged[entry.frame] = { x: entry.x, y: entry.y };
+            }
+          }
+        }
       } catch (e) {
         setResults((r) => ({
           ...r,
@@ -92,6 +109,16 @@ export default function AdminClipsAi() {
         return;
       }
     }
+    const perFrame = manualPerFrame[clipId] || {};
+    for (const [frame, pos] of Object.entries(perFrame)) {
+      merged[frame] = { x: pos.x, y: pos.y };
+    }
+    const positions = Object.entries(merged).map(([frame, pos]) => ({
+      frame: parseInt(frame, 10),
+      x: pos.x,
+      y: pos.y,
+    }));
+    if (positions.length > 0) overrides.manualBallPositions = positions;
     await runOne(clipId, overrides);
   }
 
@@ -250,11 +277,45 @@ export default function AdminClipsAi() {
                     Asking Claude…
                   </div>
                 ) : addrImage ? (
-                  <img
-                    src={addrImage}
-                    alt="Claude's pick for address frame"
-                    style={{ width: "100%", borderRadius: 8, background: "#000", display: "block" }}
-                  />
+                  (() => {
+                    // Drag the green ball-at-rest circle to correct
+                    // it. Initial position: AI's native-coord pick if
+                    // available, else the operator's prior override
+                    // draft, else null (image rendered without
+                    // marker; click anywhere to drop one).
+                    const draft = overrideDrafts[c.id] || {};
+                    let bx = null, by = null;
+                    if (draft.ballAtRestX !== undefined && draft.ballAtRestX !== "") {
+                      bx = parseInt(draft.ballAtRestX, 10);
+                    } else if (result?.ball_rest_xy_native) {
+                      bx = Math.round(result.ball_rest_xy_native[0]);
+                    }
+                    if (draft.ballAtRestY !== undefined && draft.ballAtRestY !== "") {
+                      by = parseInt(draft.ballAtRestY, 10);
+                    } else if (result?.ball_rest_xy_native) {
+                      by = Math.round(result.ball_rest_xy_native[1]);
+                    }
+                    return (
+                      <DraggableMarker
+                        imageUrl={addrImage}
+                        alt="Claude's pick for address frame — drag the green circle to correct ball-at-rest"
+                        x={bx}
+                        y={by}
+                        color="#22dd66"
+                        label="ball"
+                        size={26}
+                        imageStyle={{ borderRadius: 8 }}
+                        onChange={(nx, ny) => {
+                          setOverrideField(c.id, "ballAtRestX", String(nx));
+                          setOverrideField(c.id, "ballAtRestY", String(ny));
+                        }}
+                        onClick={(nx, ny) => {
+                          setOverrideField(c.id, "ballAtRestX", String(nx));
+                          setOverrideField(c.id, "ballAtRestY", String(ny));
+                        }}
+                      />
+                    );
+                  })()
                 ) : addr?.error ? (
                   <div
                     style={{
@@ -490,82 +551,151 @@ export default function AdminClipsAi() {
                   </div>
                 )}
                 {ballTrackFrames.length > 0 && (
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
-                      gap: 6,
-                    }}
-                  >
-                    {ballTrackFrames.map((rec) => {
-                      const tooltip = rec.found
-                        ? `Frame ${rec.frame} · ball at (${rec.x}, ${rec.y}) · ${rec.confidence || "—"}${rec.retry ? " · via retry" : ""}${rec.notes ? `\n${rec.notes}` : ""}`
-                        : `Frame ${rec.frame} · ball NOT FOUND${rec.notes ? `\n${rec.notes}` : ""}`;
-                      const badgeBg = rec.found
-                        ? (rec.retry ? "rgba(255,170,0,0.85)" : "rgba(40,150,80,0.85)")
-                        : "rgba(180,40,40,0.85)";
-                      const badgeText = rec.found
-                        ? (rec.retry ? `f${rec.frame} · retry` : `f${rec.frame}${rec.confidence ? ` · ${rec.confidence}` : ""}`)
-                        : `f${rec.frame} · no ball`;
-                      return (
-                        <div key={rec.frame} style={{ position: "relative" }}>
-                          {rec.image_url ? (
-                            <a
-                              href={rec.image_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              title={tooltip}
-                            >
-                              <img
-                                src={rec.image_url}
+                  <>
+                    <div className="tiny muted" style={{ marginBottom: 6 }}>
+                      Drag the green circle on any thumbnail to correct the AI's
+                      ball position for that frame. Click on a red ("no ball") frame
+                      to drop a marker where the ball actually is. Changes apply on
+                      the next "Re-run with overrides" click.
+                    </div>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                        gap: 6,
+                      }}
+                    >
+                      {ballTrackFrames.map((rec) => {
+                        const perFrameDraft = (manualPerFrame[c.id] || {})[rec.frame];
+                        const hasOverride = !!perFrameDraft;
+                        const mx = hasOverride
+                          ? perFrameDraft.x
+                          : (rec.found ? rec.x : null);
+                        const my = hasOverride
+                          ? perFrameDraft.y
+                          : (rec.found ? rec.y : null);
+                        const showMarker = mx != null && my != null;
+                        const tooltip = hasOverride
+                          ? `Frame ${rec.frame} · MANUAL override at (${mx}, ${my})`
+                          : (rec.found
+                            ? `Frame ${rec.frame} · AI: (${rec.x}, ${rec.y}) · ${rec.confidence || "—"}${rec.retry ? " · via retry" : ""}`
+                            : `Frame ${rec.frame} · ball NOT FOUND — click to drop marker`);
+                        const badgeBg = hasOverride
+                          ? "rgba(40,180,220,0.85)"
+                          : (rec.found
+                            ? (rec.retry ? "rgba(255,170,0,0.85)" : "rgba(40,150,80,0.85)")
+                            : "rgba(180,40,40,0.85)");
+                        const badgeText = hasOverride
+                          ? `f${rec.frame} · manual`
+                          : (rec.found
+                            ? (rec.retry ? `f${rec.frame} · retry` : `f${rec.frame}${rec.confidence ? ` · ${rec.confidence}` : ""}`)
+                            : `f${rec.frame} · no ball`);
+                        const markerColor = hasOverride
+                          ? "#28b4dc"
+                          : (rec.found ? "#22dd66" : "#ff6b6b");
+                        return (
+                          <div key={rec.frame} style={{ position: "relative" }} title={tooltip}>
+                            {rec.image_url ? (
+                              <DraggableMarker
+                                imageUrl={rec.image_url}
                                 alt={`Frame ${rec.frame}`}
-                                style={{
-                                  width: "100%",
-                                  display: "block",
+                                x={showMarker ? mx : null}
+                                y={showMarker ? my : null}
+                                color={markerColor}
+                                size={18}
+                                imageStyle={{
                                   borderRadius: 4,
-                                  background: "#000",
-                                  opacity: rec.found ? 1 : 0.65,
+                                  opacity: rec.found || hasOverride ? 1 : 0.65,
+                                }}
+                                onChange={(nx, ny) => {
+                                  setManualPerFrame((prev) => ({
+                                    ...prev,
+                                    [c.id]: {
+                                      ...(prev[c.id] || {}),
+                                      [rec.frame]: { x: nx, y: ny },
+                                    },
+                                  }));
+                                }}
+                                onClick={(nx, ny) => {
+                                  // Only treat clicks as drop-marker
+                                  // for frames the AI missed AND don't
+                                  // already have a manual override.
+                                  if (showMarker) return;
+                                  setManualPerFrame((prev) => ({
+                                    ...prev,
+                                    [c.id]: {
+                                      ...(prev[c.id] || {}),
+                                      [rec.frame]: { x: nx, y: ny },
+                                    },
+                                  }));
                                 }}
                               />
-                            </a>
-                          ) : (
+                            ) : (
+                              <div
+                                style={{
+                                  aspectRatio: "16/9",
+                                  display: "grid",
+                                  placeItems: "center",
+                                  border: "1px dashed var(--border)",
+                                  borderRadius: 4,
+                                  fontSize: 11,
+                                  padding: 4,
+                                  textAlign: "center",
+                                }}
+                                className="muted"
+                              >
+                                f{rec.frame}<br />no image
+                              </div>
+                            )}
                             <div
                               style={{
-                                aspectRatio: "16/9",
-                                display: "grid",
-                                placeItems: "center",
-                                border: "1px dashed var(--border)",
-                                borderRadius: 4,
-                                fontSize: 11,
-                                padding: 4,
-                                textAlign: "center",
+                                position: "absolute",
+                                left: 4,
+                                top: 4,
+                                background: badgeBg,
+                                color: "#fff",
+                                padding: "1px 5px",
+                                borderRadius: 3,
+                                fontSize: 10,
+                                fontWeight: 600,
+                                letterSpacing: 0.2,
+                                pointerEvents: "none",
                               }}
-                              className="muted"
-                              title={tooltip}
                             >
-                              f{rec.frame}<br />no image
+                              {badgeText}
                             </div>
-                          )}
-                          <div
-                            style={{
-                              position: "absolute",
-                              left: 4,
-                              top: 4,
-                              background: badgeBg,
-                              color: "#fff",
-                              padding: "1px 5px",
-                              borderRadius: 3,
-                              fontSize: 10,
-                              fontWeight: 600,
-                              letterSpacing: 0.2,
-                            }}
-                          >
-                            {badgeText}
+                            {hasOverride && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setManualPerFrame((prev) => {
+                                    const next = { ...(prev[c.id] || {}) };
+                                    delete next[rec.frame];
+                                    return { ...prev, [c.id]: next };
+                                  });
+                                }}
+                                style={{
+                                  position: "absolute",
+                                  right: 4,
+                                  top: 4,
+                                  background: "rgba(0,0,0,0.6)",
+                                  color: "#fff",
+                                  border: "none",
+                                  borderRadius: 3,
+                                  padding: "1px 5px",
+                                  fontSize: 10,
+                                  cursor: "pointer",
+                                }}
+                                title="Discard manual override for this frame"
+                              >
+                                ↶
+                              </button>
+                            )}
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -785,6 +915,20 @@ export default function AdminClipsAi() {
                           />
                         </label>
                         <label className="small" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          Handedness
+                          <select
+                            value={draft.handedness ?? "auto"}
+                            onChange={(e) => setOverrideField(c.id, "handedness", e.target.value)}
+                            disabled={!!running[c.id]}
+                            style={{ fontSize: 13, padding: "2px 6px" }}
+                          >
+                            <option value="auto">auto (use AI)</option>
+                            <option value="right">right-handed</option>
+                            <option value="left">left-handed</option>
+                            <option value="unknown">unknown</option>
+                          </select>
+                        </label>
+                        <label className="small" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                           Frames to track (post-impact)
                           <input
                             type="number" min="1" max="120"
@@ -841,7 +985,7 @@ export default function AdminClipsAi() {
                           frame numbers; inserts new ones otherwise.
                         </div>
                       </div>
-                      <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                      <div className="row" style={{ marginTop: 10, gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                         <button
                           type="button"
                           onClick={() => runWithOverrides(c.id)}
@@ -852,13 +996,23 @@ export default function AdminClipsAi() {
                         <button
                           type="button"
                           className="ghost small"
-                          onClick={() =>
-                            setOverrideDrafts((d) => ({ ...d, [c.id]: {} }))
-                          }
+                          onClick={() => {
+                            setOverrideDrafts((d) => ({ ...d, [c.id]: {} }));
+                            setManualPerFrame((p) => ({ ...p, [c.id]: {} }));
+                          }}
                           disabled={!!running[c.id]}
                         >
                           Clear all
                         </button>
+                        {(() => {
+                          const n = Object.keys(manualPerFrame[c.id] || {}).length;
+                          if (n === 0) return null;
+                          return (
+                            <span className="small muted">
+                              {n} per-frame drag override{n === 1 ? "" : "s"} queued
+                            </span>
+                          );
+                        })()}
                       </div>
                     </div>
                   );

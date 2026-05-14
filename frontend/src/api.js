@@ -391,7 +391,8 @@ export const api = {
       opts.ballTrackMaxFrames != null ||
       opts.ballAtRestX != null ||
       opts.ballAtRestY != null ||
-      (opts.manualBallPositions && opts.manualBallPositions.length > 0)
+      (opts.manualBallPositions && opts.manualBallPositions.length > 0) ||
+      (opts.handednessOverride && opts.handednessOverride !== "auto")
     );
 
     // Fast path: no overrides → use the existing JSON request helper.
@@ -435,6 +436,9 @@ export const api = {
           "manual_ball_positions_json",
           JSON.stringify(opts.manualBallPositions),
         );
+      }
+      if (opts.handednessOverride && opts.handednessOverride !== "auto") {
+        fd.append("handedness_override", opts.handednessOverride);
       }
       xhr.send(fd);
     });

@@ -758,6 +758,7 @@ def ai_trace(
     ball_at_rest_x: int | None = Form(None),
     ball_at_rest_y: int | None = Form(None),
     manual_ball_positions_json: str | None = Form(None),
+    handedness_override: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """AI analysis — full pipeline (address + handedness + impact +
@@ -831,12 +832,24 @@ def ai_trace(
     if ball_at_rest_x is not None and ball_at_rest_y is not None:
         ball_at_rest_override = (float(ball_at_rest_x), float(ball_at_rest_y))
 
+    handedness_clean: str | None = None
+    if handedness_override:
+        v = handedness_override.strip().lower()
+        if v in ("right", "left", "unknown"):
+            handedness_clean = v
+        elif v not in ("", "auto", "ai"):
+            raise HTTPException(
+                400,
+                "handedness_override must be 'right', 'left', or 'unknown'",
+            )
+
     pipe = run_full_ai_tracer_pipeline(
         fpath, output_dir=CLIPS_DIR, output_prefix=fpath.stem, model=model,
         impact_frame_override=int(impact_frame_override) if impact_frame_override is not None else None,
         ball_track_max_frames_override=int(ball_track_max_frames) if ball_track_max_frames is not None else None,
         ball_at_rest_override=ball_at_rest_override,
         manual_ball_positions=manual_positions,
+        handedness_override=handedness_clean,
     )
 
     def _public_url(p):

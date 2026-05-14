@@ -3503,6 +3503,7 @@ def run_full_ai_tracer_pipeline(
     ball_track_max_frames_override: int | None = None,
     ball_at_rest_override: tuple[float, float] | None = None,
     manual_ball_positions: list[dict] | None = None,
+    handedness_override: str | None = None,
 ) -> dict:
     """Run the complete AI tracer pipeline (address → handedness →
     impact → refine → ball-track → tracer render) on a single clip.
@@ -3689,7 +3690,11 @@ def run_full_ai_tracer_pipeline(
         handedness_info = {
             "ok": True,
             "error": None,
-            "handedness": "unknown",
+            "handedness": (
+                handedness_override
+                if handedness_override in ("right", "left", "unknown")
+                else "unknown"
+            ),
             "ball_x": int(ball_at_rest_override[0]),
             "ball_y": int(ball_at_rest_override[1]),
             "image_width": nw,
@@ -3705,6 +3710,18 @@ def run_full_ai_tracer_pipeline(
         )
     else:
         handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
+        # Operator can override just the handedness label without
+        # touching the AI's ball-at-rest pick.
+        if (
+            handedness_override in ("right", "left", "unknown")
+            and handedness_info.get("ok")
+        ):
+            handedness_info["handedness"] = handedness_override
+            handedness_info["confidence"] = "manual"
+            handedness_info["notes"] = (
+                (handedness_info.get("notes") or "")
+                + " | handedness manually set"
+            ).strip(" |")
     result["handedness"] = handedness_info
     if handedness_info.get("ok") and handedness_info.get("method") != "manual_override":
         annotate_address_with_shaft(
