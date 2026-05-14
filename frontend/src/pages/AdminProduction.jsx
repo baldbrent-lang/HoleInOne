@@ -1345,7 +1345,12 @@ function TracerStep({
   // Pivot for the zoom transform — defaults to the ball detection
   // ROI from Step 1 so the operator drops straight into the ball
   // area. Falls back to the resting-ball point, then frame centre.
-  const focusPct = (() => {
+  // Pan override. Defaults to null so the auto-computed ROI focus
+  // applies; arrow buttons in the zoom toolbar set it once the user
+  // wants to shift the viewable area.
+  const [focusOverride, setFocusOverride] = useState(null);
+
+  const autoFocusPct = (() => {
     const roi = draft?.roi;
     if (roi && hasDims) {
       return {
@@ -1361,6 +1366,20 @@ function TracerStep({
     }
     return { x: 50, y: 50 };
   })();
+  const focusPct = focusOverride || autoFocusPct;
+
+  function panBy(dx, dy) {
+    // Each press shifts the focus by ~30% of the visible region.
+    // visible region in frame-% = 100/zoom, so step = 30/zoom.
+    const step = 30 / Math.max(1, zoom);
+    setFocusOverride((prev) => {
+      const cur = prev || autoFocusPct;
+      return {
+        x: Math.max(0, Math.min(100, cur.x + dx * step)),
+        y: Math.max(0, Math.min(100, cur.y + dy * step)),
+      };
+    });
+  }
 
   // Auto-zoom level that makes the ROI fill ~70% of the editor.
   // Capped so the ball doesn't disappear off-screen at extreme ratios.
@@ -1384,6 +1403,7 @@ function TracerStep({
     setEditorBg(null);
     setEditorBall(null);
     setZoom(autoZoom);
+    setFocusOverride(null);
     try {
       const data = await api.getLongUploadFrame(adminPassword, row.id, frameIdx);
       setEditorBg({ url: data.image_url, frame: data.frame });
@@ -1615,15 +1635,55 @@ function TracerStep({
                 <button
                   type="button"
                   style={{ ...zoomBtn, width: 44 }}
-                  onClick={() => setZoom(autoZoom)}
+                  onClick={() => { setZoom(autoZoom); setFocusOverride(null); }}
                   title="Auto zoom to ball detection area"
                 >Auto</button>
                 <button
                   type="button"
                   style={{ ...zoomBtn, width: 36 }}
-                  onClick={() => setZoom(1)}
+                  onClick={() => { setZoom(1); setFocusOverride(null); }}
                   title="Fit full frame"
                 >Fit</button>
+                {/* Pan controls — only useful when zoomed past 1×.
+                    Each press shifts the viewable area by ~30% of
+                    the visible region in that direction. */}
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, 22px)",
+                  gridTemplateRows: "22px 22px",
+                  gap: 2, marginLeft: 4,
+                }}>
+                  <span />
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.y <= 0.1}
+                    onClick={() => panBy(0, -1)}
+                    title="Pan up"
+                  >↑</button>
+                  <span />
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.x <= 0.1}
+                    onClick={() => panBy(-1, 0)}
+                    title="Pan left"
+                  >←</button>
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.y >= 99.9}
+                    onClick={() => panBy(0, 1)}
+                    title="Pan down"
+                  >↓</button>
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.x >= 99.9}
+                    onClick={() => panBy(1, 0)}
+                    title="Pan right"
+                  >→</button>
+                </div>
               </div>
             </div>
           ) : tracer?.url ? (
@@ -1651,7 +1711,7 @@ function TracerStep({
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           {selectedFrame != null
-            ? "Click anywhere on the frame to place the ball. Apply to queue, Re-generate to render."
+            ? "Click anywhere on the frame to place the ball. Add Frame queues it for the next render — Re-generate when you're done."
             : "Click a frame card on the right to correct the AI's ball position."}
         </div>
       </div>
@@ -1689,8 +1749,9 @@ function TracerStep({
                 style={{ width: "auto" }}
                 disabled={!editorBall}
                 onClick={applyEditorBall}
+                title="Add this frame's ball position to the tracer input. Re-generate when you're done queuing frames."
               >
-                Apply
+                Add Frame
               </button>
               <button
                 type="button"
