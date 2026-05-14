@@ -368,12 +368,16 @@ def probe_source_device(path: Path) -> str | None:
 
 def probe_video_info(path: Path) -> dict:
     """Return a small dict of video diagnostics: codec, fps, nb_frames,
-    duration. Missing fields are None. Used to verify the output of the
-    tracer encode pipeline — cv2's mp4v writer can produce files whose
-    container duration looks right but whose timestamps are bunched up,
-    so we need to see the actual codec + frame count to spot it.
+    duration, width, height. Missing fields are None. Used to verify
+    the output of the tracer encode pipeline — cv2's mp4v writer can
+    produce files whose container duration looks right but whose
+    timestamps are bunched up, so we need to see the actual codec +
+    frame count to spot it.
     """
-    info: dict = {"codec": None, "fps": None, "nb_frames": None, "duration": None}
+    info: dict = {
+        "codec": None, "fps": None, "nb_frames": None, "duration": None,
+        "width": None, "height": None,
+    }
     if not have_ffmpeg():
         return info
     try:
@@ -381,7 +385,8 @@ def probe_video_info(path: Path) -> dict:
             [
                 "ffprobe", "-v", "error",
                 "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name,r_frame_rate,nb_frames:format=duration",
+                "-show_entries",
+                "stream=codec_name,r_frame_rate,nb_frames,width,height:format=duration",
                 "-of", "json", str(path),
             ],
             stderr=subprocess.STDOUT,
@@ -403,6 +408,12 @@ def probe_video_info(path: Path) -> dict:
             info["nb_frames"] = int(nb) if nb is not None else None
         except (TypeError, ValueError):
             info["nb_frames"] = None
+        for key in ("width", "height"):
+            v = stream.get(key)
+            try:
+                info[key] = int(v) if v is not None else None
+            except (TypeError, ValueError):
+                info[key] = None
         dur = (data.get("format") or {}).get("duration")
         try:
             info["duration"] = float(dur) if dur is not None else None

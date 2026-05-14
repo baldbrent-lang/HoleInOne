@@ -81,8 +81,16 @@ function MetaRow({ k, v }) {
   );
 }
 
+function qualityText(qualityLabel, width, height) {
+  const dims = width && height ? `${width}×${height}` : null;
+  if (qualityLabel && dims) return `${qualityLabel} · ${dims}`;
+  if (qualityLabel) return qualityLabel;
+  if (dims) return dims;
+  return "—";
+}
+
 function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
-                     startsAt, missing }) {
+                     startsAt, missing, qualityLabel, width, height }) {
   return (
     <div style={{ width: 180, flexShrink: 0 }}>
       <div className="tiny upper muted" style={{ marginBottom: 4 }}>{label}</div>
@@ -112,6 +120,7 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
         )}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <MetaRow k="Quality" v={qualityText(qualityLabel, width, height)} />
         <MetaRow k="Length" v={fmtDuration(durationSec)} />
         <MetaRow k="Frames" v={nbFrames != null ? nbFrames : "—"} />
         <MetaRow k="Frame rate" v={fps != null ? `${fps} fps` : "—"} />
@@ -293,6 +302,9 @@ export default function AdminProduction() {
                   sizeMb={row.tee_size_mb}
                   startsAt={row.base_captured_at}
                   missing={row.tee_missing}
+                  qualityLabel={row.tee_quality_label}
+                  width={row.tee_width}
+                  height={row.tee_height}
                 />
                 {row.dual_camera && (
                   <VideoTile
@@ -304,6 +316,9 @@ export default function AdminProduction() {
                     sizeMb={row.green_size_mb}
                     startsAt={row.base_captured_at}
                     missing={row.green_missing}
+                    qualityLabel={row.green_quality_label}
+                    width={row.green_width}
+                    height={row.green_height}
                   />
                 )}
               </div>

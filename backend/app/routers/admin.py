@@ -1735,12 +1735,30 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
         {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
         if course_ids else {}
     )
+    def _quality_label(height: int | None) -> str | None:
+        """Friendly resolution tier so the UI can show 'Quality: 720p HD'
+        without re-deriving the mapping client-side."""
+        if not height:
+            return None
+        if height >= 2160:
+            return "4K UHD"
+        if height >= 1440:
+            return "1440p QHD"
+        if height >= 1080:
+            return "1080p HD"
+        if height >= 720:
+            return "720p HD"
+        if height >= 480:
+            return "480p SD"
+        return f"{height}p"
+
     def _meta(path: Path | None, exists: bool) -> dict:
         """Bundle probe + thumbnail lookup for one source video. Skipping the
         probe entirely when the file is missing keeps list responses fast."""
         if not (path and exists):
             return {"size_mb": None, "duration_sec": None, "fps": None,
-                    "nb_frames": None, "thumbnail_url": None}
+                    "nb_frames": None, "thumbnail_url": None,
+                    "width": None, "height": None, "quality_label": None}
         size = path.stat().st_size
         info = probe_video_info(path)
         thumb = path.with_suffix(".jpg")
@@ -1754,6 +1772,9 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "fps": round(info["fps"], 2) if info.get("fps") else None,
             "nb_frames": info.get("nb_frames"),
             "thumbnail_url": thumb_url,
+            "width": info.get("width"),
+            "height": info.get("height"),
+            "quality_label": _quality_label(info.get("height")),
         }
 
     out = []
@@ -1784,6 +1805,9 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "tee_duration_sec": tee_meta["duration_sec"],
             "tee_fps": tee_meta["fps"],
             "tee_nb_frames": tee_meta["nb_frames"],
+            "tee_width": tee_meta["width"],
+            "tee_height": tee_meta["height"],
+            "tee_quality_label": tee_meta["quality_label"],
             "tee_missing": (r.tee_filename is not None and not tee_exists),
             "green_filename": r.green_filename,
             "green_original_filename": r.green_original_filename,
@@ -1796,6 +1820,9 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "green_duration_sec": green_meta["duration_sec"],
             "green_fps": green_meta["fps"],
             "green_nb_frames": green_meta["nb_frames"],
+            "green_width": green_meta["width"],
+            "green_height": green_meta["height"],
+            "green_quality_label": green_meta["quality_label"],
             "green_missing": (r.green_filename is not None and not green_exists),
             "dual_camera": r.green_filename is not None,
             "last_n_segments": r.last_n_segments,
