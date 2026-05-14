@@ -156,6 +156,7 @@ export default function AdminParticipants() {
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants" className="active">Participants</Link>
         <Link to="/admin/upload-videos">Upload</Link>
+        <Link to="/admin/production">Production</Link>
         <Link to="/admin/clips">All clips</Link>
         <Link to="/admin/clips/ai">AI tracer</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>

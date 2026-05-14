@@ -218,6 +218,11 @@ class LongVideoUpload(Base):
     processing_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 'single' = one swing, queue for manual editing before producing.
+    # 'multiple' = a full round / many swings; auto-process on upload.
+    # Drives the Production-page UI state and the quick-upload's
+    # decision to spawn the background job immediately.
+    swing_count: Mapped[str] = mapped_column(String(20), default="multiple")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 

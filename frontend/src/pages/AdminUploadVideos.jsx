@@ -35,7 +35,9 @@ export default function AdminUploadVideos() {
   const [datePlayed, setDatePlayed] = useState(todayLocalDate());
   const [teeFile, setTeeFile] = useState(null);
   const [greenFile, setGreenFile] = useState(null);
-  const [dontAutoProduce, setDontAutoProduce] = useState(false);
+  // 'multiple' = full round → auto-produce in the background.
+  // 'single'   = one swing → queue for editing on Production first.
+  const [swingCount, setSwingCount] = useState("multiple");
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
@@ -68,7 +70,7 @@ export default function AdminUploadVideos() {
     fd.append("base_captured_at", baseCapturedAt);
     fd.append("video", teeFile, teeFile.name);
     if (greenFile) fd.append("video_green", greenFile, greenFile.name);
-    if (dontAutoProduce) fd.append("queue_only", "true");
+    fd.append("swing_count", swingCount);
 
     setUploading(true);
     setProgress(0);
@@ -104,6 +106,7 @@ export default function AdminUploadVideos() {
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/upload-videos" className="active">Upload</Link>
+        <Link to="/admin/production">Production</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
         <Link to="/admin/cameras">Cameras</Link>
       </div>
@@ -112,12 +115,11 @@ export default function AdminUploadVideos() {
         <h3 style={{ marginBottom: 6 }}>Upload videos</h3>
         <p className="small muted" style={{ marginBottom: 14 }}>
           Drop a tee-angle video (and an optional green-side video) for
-          a round. Submit kicks off processing in the background —
-          produced clips appear on{" "}
+          a round. <b>Multiple swings</b> kicks off processing in the
+          background — produced clips appear on{" "}
           <Link to="/admin/broadcast-clips">Broadcast</Link> when ready.
-          Check <i>Don't Auto Produce</i> below to queue the video for
-          editing on{" "}
-          <Link to="/admin/long-upload">Long upload</Link> instead.
+          Pick <b>One swing</b> to queue the video for editing on{" "}
+          <Link to="/admin/production">Production</Link> before producing.
         </p>
 
         {success && (
@@ -134,11 +136,11 @@ export default function AdminUploadVideos() {
               {success.auto_processing ? "started" : "queued"}.</b>{" "}
             <span className="small muted">{success.message}</span>
             <div style={{ marginTop: 8 }}>
-              <Link to={success.auto_processing ? "/admin/broadcast-clips" : "/admin/long-upload"}>
+              <Link to={success.auto_processing ? "/admin/broadcast-clips" : "/admin/production"}>
                 <button className="small" style={{ width: "auto" }}>
                   {success.auto_processing
                     ? "Go to Broadcast →"
-                    : "Go to Long upload →"}
+                    : "Go to Production →"}
                 </button>
               </Link>
             </div>
@@ -211,24 +213,51 @@ export default function AdminUploadVideos() {
           </div>
 
           <div style={{ marginTop: 14 }}>
-            <label
-              className="small"
-              style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}
-            >
-              <input
-                type="checkbox"
-                checked={dontAutoProduce}
-                onChange={(e) => setDontAutoProduce(e.target.checked)}
-                disabled={uploading}
-                style={{ margin: 0 }}
-              />
-              <span>
-                <b>Don't Auto Produce.</b>{" "}
-                <span className="muted">
-                  Video will go in queue for editing prior to production.
-                </span>
-              </span>
+            <label className="small" style={{ display: "block", marginBottom: 6 }}>
+              How many swings is this video?
             </label>
+            <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
+              <label
+                className="small"
+                style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}
+              >
+                <input
+                  type="radio"
+                  name="swing_count"
+                  value="multiple"
+                  checked={swingCount === "multiple"}
+                  onChange={(e) => setSwingCount(e.target.value)}
+                  disabled={uploading}
+                  style={{ margin: 0 }}
+                />
+                <span>
+                  <b>Multiple swings</b>{" "}
+                  <span className="muted">
+                    — full round, auto-produces in the background.
+                  </span>
+                </span>
+              </label>
+              <label
+                className="small"
+                style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}
+              >
+                <input
+                  type="radio"
+                  name="swing_count"
+                  value="single"
+                  checked={swingCount === "single"}
+                  onChange={(e) => setSwingCount(e.target.value)}
+                  disabled={uploading}
+                  style={{ margin: 0 }}
+                />
+                <span>
+                  <b>One swing</b>{" "}
+                  <span className="muted">
+                    — queues on Production for editing first.
+                  </span>
+                </span>
+              </label>
+            </div>
           </div>
 
           <div className="row" style={{ marginTop: 18, gap: 10, alignItems: "center" }}>

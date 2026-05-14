@@ -1430,22 +1430,20 @@ async def quick_upload_videos(
     base_captured_at: str = Form(...),
     video: UploadFile = File(...),
     video_green: UploadFile | None = File(None),
-    queue_only: bool = Form(False),
+    swing_count: str = Form("multiple"),
     db: Session = Depends(get_db),
 ):
     """Simple operator-facing upload: save the tee video (plus optional
     green-side video) and create a LongVideoUpload row.
 
-    By default (queue_only=False) the cut / AI-tracer / composite
-    background job kicks off immediately with sane defaults
-    (auto-detect swings, starting hole 1, combined detector at
-    audio×5 / motion×2 thresholds). Operator can drop a video and
-    walk away.
-
-    When queue_only=True (the 'Don't Auto Produce' checkbox is set),
-    the row is created in 'pending' state and no processing thread
-    spawns — the operator goes to /admin/long-upload to inspect /
-    edit / kick off Reprocess manually.
+    `swing_count` drives the auto-produce decision:
+      - 'multiple' (default): full round / many swings. The cut /
+        AI-tracer / composite background job kicks off immediately
+        with sane defaults (auto-detect swings, starting hole 1,
+        combined detector at audio×5 / motion×2 thresholds).
+      - 'single': one swing per video. Queue the row for manual
+        editing on /admin/production before producing — no
+        background thread spawns.
 
     Either way, this endpoint returns immediately so the upload UI
     isn't blocked on the multi-minute processing phase.
@@ -1497,6 +1495,11 @@ async def quick_upload_videos(
         (CLIPS_DIR / green_src_name).write_bytes(green_data)
         green_original_filename = video_green.filename or None
 
+    swing_count_norm = (swing_count or "multiple").strip().lower()
+    if swing_count_norm not in ("single", "multiple"):
+        swing_count_norm = "multiple"
+    auto_process = swing_count_norm == "multiple"
+
     upload_row = LongVideoUpload(
         course_id=course_id,
         camera_type="tee",
@@ -1506,30 +1509,40 @@ async def quick_upload_videos(
         tee_original_filename=(video.filename or None),
         green_original_filename=green_original_filename,
         processing_status="pending",
+        swing_count=swing_count_norm,
     )
     db.add(upload_row)
     db.commit()
     db.refresh(upload_row)
 
+    # Generate poster thumbnails so the Production page card has a
+    # visual preview without re-probing the videos on every load.
+    try:
+        extract_thumbnail(src_path)
+        if green_src_name:
+            extract_thumbnail(CLIPS_DIR / green_src_name)
+    except Exception as exc:  # pragma: no cover
+        log.warning("quick-upload: thumbnail extraction failed: %s", exc)
+
     db.add(AuditLog(
         actor="admin", action="quick_upload_videos",
         target=f"long_upload:{upload_row.id}",
         detail=(
-            f"course={course_id} tee={src_name}"
+            f"course={course_id} tee={src_name} swing_count={swing_count_norm}"
             + (f" green={green_src_name}" if green_src_name else "")
         ),
     ))
     db.commit()
 
     log.info(
-        "quick-upload: upload=%s course=%s tee=%s green=%s queue_only=%s",
-        upload_row.id, course_id, src_name, green_src_name, queue_only,
+        "quick-upload: upload=%s course=%s tee=%s green=%s swing_count=%s",
+        upload_row.id, course_id, src_name, green_src_name, swing_count_norm,
     )
 
-    # Unless the operator checked 'Don't Auto Produce', kick off the
-    # background processing job immediately with sane defaults — same
-    # path /admin/long-upload's Reprocess takes.
-    if not queue_only:
+    # 'multiple' swing-count kicks off the cut / AI-tracer / composite
+    # background job immediately. 'single' queues for manual editing on
+    # /admin/production first.
+    if auto_process:
         threading.Thread(
             target=_run_long_upload_job,
             kwargs={
@@ -1543,12 +1556,13 @@ async def quick_upload_videos(
             name=f"long-upload-{upload_row.id}",
         ).start()
         message = (
-            "Videos uploaded — processing started in the background. "
-            "Produced clips will appear on Broadcast when ready."
+            "Multiple-swing upload — processing started in the "
+            "background. Produced clips will appear on Broadcast when "
+            "ready."
         )
     else:
         message = (
-            "Videos uploaded and queued for editing. Open Long upload "
+            "Single-swing upload — queued for editing on Production. "
             "and click Reprocess when you're ready to produce."
         )
 
@@ -1556,8 +1570,8 @@ async def quick_upload_videos(
         "upload_id": upload_row.id,
         "processing_status": upload_row.processing_status,
         "dual_camera": dual_camera,
-        "queue_only": queue_only,
-        "auto_processing": not queue_only,
+        "swing_count": swing_count_norm,
+        "auto_processing": auto_process,
         "message": message,
     }
 
@@ -1721,20 +1735,35 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
         {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
         if course_ids else {}
     )
+    def _meta(path: Path | None, exists: bool) -> dict:
+        """Bundle probe + thumbnail lookup for one source video. Skipping the
+        probe entirely when the file is missing keeps list responses fast."""
+        if not (path and exists):
+            return {"size_mb": None, "duration_sec": None, "fps": None,
+                    "nb_frames": None, "thumbnail_url": None}
+        size = path.stat().st_size
+        info = probe_video_info(path)
+        thumb = path.with_suffix(".jpg")
+        thumb_url = (
+            f"{settings.app_base_url}/uploads/clips/{thumb.name}"
+            if thumb.exists() else None
+        )
+        return {
+            "size_mb": round(size / 1024 / 1024, 1) if size else None,
+            "duration_sec": round(info["duration"], 1) if info.get("duration") else None,
+            "fps": round(info["fps"], 2) if info.get("fps") else None,
+            "nb_frames": info.get("nb_frames"),
+            "thumbnail_url": thumb_url,
+        }
+
     out = []
     for r in rows:
         tee_path = CLIPS_DIR / r.tee_filename if r.tee_filename else None
         green_path = CLIPS_DIR / r.green_filename if r.green_filename else None
         tee_exists = bool(tee_path and tee_path.exists())
         green_exists = bool(green_path and green_path.exists())
-        tee_size = tee_path.stat().st_size if tee_exists else None
-        green_size = green_path.stat().st_size if green_exists else None
-        tee_duration = (
-            probe_video_info(tee_path).get("duration") if tee_exists else None
-        )
-        green_duration = (
-            probe_video_info(green_path).get("duration") if green_exists else None
-        )
+        tee_meta = _meta(tee_path, tee_exists)
+        green_meta = _meta(green_path, green_exists)
         course = courses.get(r.course_id)
         out.append({
             "id": r.id,
@@ -1743,14 +1772,18 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "camera_type": r.camera_type,
             "base_captured_at": r.base_captured_at.isoformat() if r.base_captured_at else None,
             "created_at": r.created_at.isoformat() if r.created_at else None,
+            "swing_count": r.swing_count or "multiple",
             "tee_filename": r.tee_filename,
             "tee_original_filename": r.tee_original_filename,
             "tee_url": (
                 f"{settings.app_base_url}/uploads/clips/{r.tee_filename}"
                 if tee_exists else None
             ),
-            "tee_size_mb": round(tee_size / 1024 / 1024, 1) if tee_size else None,
-            "tee_duration_sec": round(tee_duration, 1) if tee_duration else None,
+            "tee_thumbnail_url": tee_meta["thumbnail_url"],
+            "tee_size_mb": tee_meta["size_mb"],
+            "tee_duration_sec": tee_meta["duration_sec"],
+            "tee_fps": tee_meta["fps"],
+            "tee_nb_frames": tee_meta["nb_frames"],
             "tee_missing": (r.tee_filename is not None and not tee_exists),
             "green_filename": r.green_filename,
             "green_original_filename": r.green_original_filename,
@@ -1758,8 +1791,11 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
                 f"{settings.app_base_url}/uploads/clips/{r.green_filename}"
                 if green_exists else None
             ),
-            "green_size_mb": round(green_size / 1024 / 1024, 1) if green_size else None,
-            "green_duration_sec": round(green_duration, 1) if green_duration else None,
+            "green_thumbnail_url": green_meta["thumbnail_url"],
+            "green_size_mb": green_meta["size_mb"],
+            "green_duration_sec": green_meta["duration_sec"],
+            "green_fps": green_meta["fps"],
+            "green_nb_frames": green_meta["nb_frames"],
             "green_missing": (r.green_filename is not None and not green_exists),
             "dual_camera": r.green_filename is not None,
             "last_n_segments": r.last_n_segments,

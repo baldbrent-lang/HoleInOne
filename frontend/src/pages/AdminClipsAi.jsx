@@ -162,6 +162,7 @@ export default function AdminClipsAi() {
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/upload-videos">Upload</Link>
+        <Link to="/admin/production">Production</Link>
         <Link to="/admin/clips">All clips</Link>
         <Link to="/admin/clips/ai" className="active">AI tracer</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>

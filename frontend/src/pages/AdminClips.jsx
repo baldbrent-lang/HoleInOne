@@ -74,6 +74,7 @@ export default function AdminClips() {
         <Link to="/admin">Dashboard</Link>
         <Link to="/admin/participants">Participants</Link>
         <Link to="/admin/upload-videos">Upload</Link>
+        <Link to="/admin/production">Production</Link>
         <Link to="/admin/clips" className="active">All clips</Link>
         <Link to="/admin/clips/ai">AI tracer</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>

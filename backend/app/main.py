@@ -108,6 +108,13 @@ def _migrate() -> None:
             statements.append(
                 "ALTER TABLE long_video_uploads ADD COLUMN last_error TEXT"
             )
+        if "swing_count" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN swing_count VARCHAR(20) DEFAULT 'multiple'"
+            )
+            statements.append(
+                "UPDATE long_video_uploads SET swing_count = 'multiple' WHERE swing_count IS NULL"
+            )
 
     # VideoClip additions
     if "video_clips" in inspector.get_table_names():
