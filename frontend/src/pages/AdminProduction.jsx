@@ -292,6 +292,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   // Queued per-frame ball edits, hoisted from TracerStep so Step 3
   // can show a red note and pass them to /render-tracer-fast.
   const [manualPositions, setManualPositions] = useState({});
+  // Multi-swing state. swings = [{idx, start_frame, end_frame, ...}, ...]
+  // selectedSwing = index of the swing currently being edited in the
+  // wizard. Both unused for single-swing rows.
+  const isMulti = row?.swing_count === "multiple";
+  const [swings, setSwings] = useState([]);
+  const [selectedSwing, setSelectedSwing] = useState(0);
+  const [detectingSwings, setDetectingSwings] = useState(false);
   // Editable on-screen graphics for Step 3. Hydrated from saved
   // edit_metrics; default yardage comes from the course's hole_yardages
   // for the chosen hole_number.
@@ -304,49 +311,78 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   // dirty (and thus need a re-finalize on Next).
   const [finalizedGraphics, setFinalizedGraphics] = useState(null);
 
+  function applySaved(s) {
+    setDraft({
+      handedness: s.handedness || "right",
+      addressFrame: s.address_frame ?? 0,
+      addressImageUrl: s.address_image_url || null,
+      impactFrame: s.impact_frame ?? 0,
+      startFrame: s.start_frame ?? null,
+      endFrame: s.end_frame ?? null,
+      ball: s.ball || null,
+      roi: s.roi || null,
+      target: s.target || null,
+    });
+    if (s.tracer_url || s.ball_track_frames) {
+      setTracer({
+        url: s.tracer_url || null,
+        frames: s.ball_track_frames || [],
+      });
+    }
+    if (s.finalized_video_url) setFinalUrl(s.finalized_video_url);
+    const hole = s.finalized_hole_number ?? 1;
+    const courseYards = row?.course_hole_yardages?.[String(hole)];
+    const yards = s.finalized_yardage
+      ?? (courseYards != null ? Number(courseYards) : 101);
+    const g = {
+      player_name: s.finalized_player_name || "Brent Baldwin",
+      hole_number: hole,
+      yardage: yards,
+    };
+    setGraphics(g);
+    if (s.finalized_video_url) setFinalizedGraphics(g);
+  }
+
   useEffect(() => {
     if (!row) return;
     let cancelled = false;
 
-    function applySaved(s) {
-      setDraft({
-        handedness: s.handedness || "right",
-        addressFrame: s.address_frame ?? 0,
-        addressImageUrl: s.address_image_url || null,
-        impactFrame: s.impact_frame ?? 0,
-        ball: s.ball || null,
-        roi: s.roi || null,
-        target: s.target || null,
-      });
-      if (s.tracer_url || s.ball_track_frames) {
-        setTracer({
-          url: s.tracer_url || null,
-          frames: s.ball_track_frames || [],
+    // Multi-swing: detect swings (if not cached), pick swing 0,
+    // hydrate from edit_metrics.swings[0].
+    if (isMulti) {
+      const cached = saved?.swings;
+      if (Array.isArray(cached) && cached.length > 0) {
+        setSwings(cached);
+        applySaved(cached[selectedSwing] || cached[0] || {});
+        setFrameDims({
+          width: saved.frame_width ?? row.tee_width ?? null,
+          height: saved.frame_height ?? row.tee_height ?? null,
+          totalFrames: row.tee_nb_frames || null,
         });
+        return;
       }
-      if (s.finalized_video_url) setFinalUrl(s.finalized_video_url);
-      // Hydrate Step-3 editable graphics from the last finalize.
-      // Yardage falls back to whatever the course has for this hole.
-      const hole = s.finalized_hole_number ?? 1;
-      const courseYards = row?.course_hole_yardages?.[String(hole)];
-      const yards = s.finalized_yardage
-        ?? (courseYards != null ? Number(courseYards) : 101);
-      const g = {
-        player_name: s.finalized_player_name || "Brent Baldwin",
-        hole_number: hole,
-        yardage: yards,
-      };
-      setGraphics(g);
-      // Mark this as the last-finalized snapshot only when we actually
-      // have a finalized video on file. Otherwise leave it null so the
-      // first Next click on Step 3 will always finalize.
-      if (s.finalized_video_url) setFinalizedGraphics(g);
+      setDetectingSwings(true);
+      setError(null);
+      api
+        .detectSwingsForUpload(adminPassword, row.id)
+        .then(async (data) => {
+          if (cancelled) return;
+          const list = data.swings || [];
+          setSwings(list);
+          setFrameDims({
+            width: row.tee_width || null,
+            height: row.tee_height || null,
+            totalFrames: row.tee_nb_frames || null,
+          });
+          if (list[0]) applySaved(list[0]);
+          try { onSaved?.(); } catch {}
+        })
+        .catch((e) => { if (!cancelled) setError(e.message); })
+        .finally(() => { if (!cancelled) setDetectingSwings(false); });
+      return () => { cancelled = true; };
     }
 
-    // Already persisted → skip auto-detect entirely. Frame dims come
-    // from edit_metrics first (cv2-rotated, matches the saved
-    // target/ball/ROI coords); fall back to the long-upload's probe
-    // dims when an old row hasn't been re-detected yet.
+    // Single-swing: hydrate from edit_metrics, else auto-detect.
     if (saved && (saved.address_frame != null || saved.ball)) {
       applySaved(saved);
       setFrameDims({
@@ -376,13 +412,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           ball: data.ball_at_rest || null,
           roi: data.ball_detection_area || null,
           target: data.target ? { x: data.target.x, y: data.target.y } : null,
-          // Persist the auto-detect's coord-system reference so every
-          // future re-open uses the same dims as the saved coords.
           frame_width: data.frame_width || null,
           frame_height: data.frame_height || null,
         };
         applySaved(seeded);
-        // Persist the auto-detected seed so we never re-run on re-open.
         try {
           await api.saveEditMetrics(adminPassword, row.id, seeded);
           onSaved?.();
@@ -395,10 +428,30 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     return () => { cancelled = true; };
   }, [row, adminPassword]);  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Multi-swing: re-hydrate the draft whenever the operator picks a
+  // different swing from the selector bar.
+  useEffect(() => {
+    if (!isMulti) return;
+    const sw = swings[selectedSwing];
+    if (sw) applySaved(sw);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSwing]);
+
   if (!row) return null;
 
   async function persistPatch(patch) {
     try {
+      if (isMulti) {
+        // Multi-swing: each patch is for the currently-selected swing.
+        // Merge into swings[selectedSwing] and persist the whole array.
+        const next = swings.map((sw, i) =>
+          i === selectedSwing ? { ...sw, ...patch } : sw
+        );
+        setSwings(next);
+        const r = await api.saveEditMetrics(adminPassword, row.id, { swings: next });
+        onSaved?.(r);
+        return;
+      }
       const r = await api.saveEditMetrics(adminPassword, row.id, patch);
       onSaved?.(r);
     } catch (e) {
@@ -580,7 +633,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                   : "· Step 1: Metrics"}
             </h3>
             <div className="small muted">
-              Upload #{row.id} · {row.course_name || `course ${row.course_id}`} · single swing
+              Upload #{row.id} · {row.course_name || `course ${row.course_id}`} ·{" "}
+              {isMulti
+                ? `multi-swing${swings.length ? ` (${swings.length})` : ""}`
+                : "single swing"}
             </div>
           </div>
           <button
@@ -613,10 +669,26 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               </span>
             </div>
           )}
-          {error && (
-            <div className="err-text small">Auto-detect failed: {error}</div>
+          {detectingSwings && (
+            <div className="row" style={{ alignItems: "center", gap: 12 }}>
+              <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
+              <span className="small">
+                Detecting swings (audio + motion)…
+              </span>
+            </div>
           )}
-          {!running && !error && draft && step === "metrics" && (
+          {error && (
+            <div className="err-text small">{error}</div>
+          )}
+          {isMulti && !detectingSwings && swings.length > 0 && (
+            <SwingSelectorBar
+              swings={swings}
+              selectedSwing={selectedSwing}
+              setSelectedSwing={setSelectedSwing}
+              fps={fw && fh ? null : null /* fps not used here */}
+            />
+          )}
+          {!running && !detectingSwings && !error && draft && step === "metrics" && (
             <WizardBody
               row={row}
               adminPassword={adminPassword}
@@ -728,6 +800,51 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   );
 }
 
+function SwingSelectorBar({ swings, selectedSwing, setSelectedSwing }) {
+  // Horizontal scroll of numbered swing chips. Sticky to the top of
+  // the wizard body so the operator can switch between swings on
+  // every step without losing context. Each chip shows the frame
+  // window so it's obvious where in the source video that swing
+  // lives.
+  return (
+    <div
+      style={{
+        display: "flex",
+        gap: 6,
+        overflowX: "auto",
+        marginBottom: 10,
+        paddingBottom: 4,
+        borderBottom: "1px solid var(--border, #2a2a2a)",
+      }}
+    >
+      {swings.map((sw, i) => {
+        const active = i === selectedSwing;
+        return (
+          <button
+            key={sw.idx ?? i}
+            type="button"
+            className={active ? "" : "ghost"}
+            onClick={() => setSelectedSwing(i)}
+            style={{
+              width: "auto", padding: "4px 10px",
+              flex: "0 0 auto", fontSize: "0.82rem",
+            }}
+            title={`Frames ${sw.start_frame ?? "—"}–${sw.end_frame ?? "—"}`}
+          >
+            Swing {i + 1}
+            <span
+              className="tiny"
+              style={{ marginLeft: 6, opacity: 0.75 }}
+            >
+              {sw.start_frame ?? "—"}–{sw.end_frame ?? "—"}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function WizardBody({
   row, adminPassword, draft, setDraft, editing, setEditing,
   frameW, frameH, totalFrames, persistPatch,
@@ -741,10 +858,19 @@ function WizardBody({
   const [navTotal, setNavTotal] = useState(totalFrames);
   const [navLoading, setNavLoading] = useState(false);
 
+  // Frame-pick modes: address, impact, start, end. Each seeds the
+  // navigator from the corresponding draft frame index when entered.
+  const FRAME_PICK_MODES = new Set(["address", "impact", "start", "end"]);
+  const frameForMode = {
+    address: draft.addressFrame,
+    impact: draft.impactFrame,
+    start: draft.startFrame ?? 0,
+    end: draft.endFrame ?? (totalFrames ? totalFrames - 1 : 0),
+  };
+
   useEffect(() => {
-    if (editing !== "address" && editing !== "impact") return;
-    const start = editing === "address" ? draft.addressFrame : draft.impactFrame;
-    loadFrame(start);
+    if (!FRAME_PICK_MODES.has(editing)) return;
+    loadFrame(frameForMode[editing] ?? 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
 
@@ -763,19 +889,23 @@ function WizardBody({
   }
 
   function clampedStep(delta) {
-    const cur = navFrame ?? (editing === "impact" ? draft.impactFrame : draft.addressFrame);
+    const cur = navFrame ?? frameForMode[editing] ?? 0;
     const max = (navTotal ?? totalFrames ?? 1) - 1;
     return Math.max(0, Math.min(max, (cur || 0) + delta));
   }
 
   let leftImageUrl = draft.addressImageUrl;
   let leftFrameLabel = `Address frame · ${draft.addressFrame}`;
-  const showFrameNav = editing === "address" || editing === "impact";
+  const showFrameNav = FRAME_PICK_MODES.has(editing);
   if (showFrameNav) {
     leftImageUrl = navUrl || draft.addressImageUrl;
     const total = navTotal != null ? ` / ${navTotal - 1}` : "";
+    const labels = {
+      address: "Address", impact: "Impact",
+      start: "Start", end: "End",
+    };
     leftFrameLabel =
-      `${editing === "address" ? "Address" : "Impact"} frame · ${navFrame ?? "—"}${total}`;
+      `${labels[editing] || "Frame"} frame · ${navFrame ?? "—"}${total}`;
   }
 
   return (
@@ -903,6 +1033,46 @@ function WizardBody({
               if (navFrame == null) return;
               setDraft((d) => ({ ...d, impactFrame: navFrame }));
               persistPatch({ impact_frame: navFrame });
+              setEditing(null);
+            }}
+          />
+        </EditableRow>
+
+        <EditableRow
+          label="Start frame"
+          value={draft.startFrame != null ? `Frame ${draft.startFrame}` : "Frame 0"}
+          active={editing === "start"}
+          onActivate={() => setEditing(editing === "start" ? null : "start")}
+        >
+          <FrameStepper
+            current={navFrame}
+            total={navTotal}
+            loading={navLoading}
+            onStep={(delta) => loadFrame(clampedStep(delta))}
+            onApply={() => {
+              if (navFrame == null) return;
+              setDraft((d) => ({ ...d, startFrame: navFrame }));
+              persistPatch({ start_frame: navFrame });
+              setEditing(null);
+            }}
+          />
+        </EditableRow>
+
+        <EditableRow
+          label="End frame"
+          value={draft.endFrame != null ? `Frame ${draft.endFrame}` : "—"}
+          active={editing === "end"}
+          onActivate={() => setEditing(editing === "end" ? null : "end")}
+        >
+          <FrameStepper
+            current={navFrame}
+            total={navTotal}
+            loading={navLoading}
+            onStep={(delta) => loadFrame(clampedStep(delta))}
+            onApply={() => {
+              if (navFrame == null) return;
+              setDraft((d) => ({ ...d, endFrame: navFrame }));
+              persistPatch({ end_frame: navFrame });
               setEditing(null);
             }}
           />
@@ -2360,15 +2530,11 @@ export default function AdminProduction() {
   }
 
   function handleEdit(row) {
-    // Single-swing uploads open the EditWizard modal — auto-detection
-    // of handedness / address frame / ball position / ROI / target.
-    // Multiple-swing uploads still need the per-segment editor, so
-    // those bounce to the existing long-upload page.
-    if (row.swing_count === "single") {
-      setEditingRow(row);
-    } else {
-      window.location.href = `/admin/long-upload?upload_id=${row.id}`;
-    }
+    // Both single-swing and multi-swing uploads open the EditWizard.
+    // The wizard switches its internal flow based on row.swing_count
+    // — single uses the flat edit_metrics; multi works on a per-swing
+    // edit_metrics.swings[] array with a swing-selector bar at the top.
+    setEditingRow(row);
   }
 
   async function handleProduce(row) {

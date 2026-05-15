@@ -1994,6 +1994,80 @@ def reprocess_long_upload(
     }
 
 
+@router.post("/long-uploads/{upload_id}/detect-swings")
+def detect_swings_for_upload(
+    upload_id: int,
+    db: Session = Depends(get_db),
+):
+    """Run combined audio + motion swing detection on the upload's
+    tee video and return the segments. Used by the multi-swing
+    Edit wizard to populate its per-swing list. Caches the segments
+    onto edit_metrics.swings so subsequent re-opens skip the probe.
+
+    Each returned swing has:
+      idx:           int (0-based)
+      start_frame:   int (~before impact)
+      end_frame:     int (~after impact)
+      address_frame: int (impact - 1.5s, clamped)
+      impact_frame:  int (audio peak)
+      fps:           float
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "upload has no tee video")
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+
+    fps_val = probe_fps(src_path) or 30.0
+    segments = detect_swings_combined(src_path, fps=fps_val)
+
+    swings: list[dict] = []
+    for i, seg in enumerate(segments):
+        start_sec = float(seg.get("start_sec") or 0.0)
+        end_sec = float(seg.get("end_sec") or start_sec)
+        peak_sec = float(seg.get("peak_sec") or (start_sec + end_sec) / 2)
+        start_frame = int(round(start_sec * fps_val))
+        end_frame = int(round(end_sec * fps_val))
+        impact_frame = int(round(peak_sec * fps_val))
+        address_frame = max(start_frame, impact_frame - int(round(1.5 * fps_val)))
+        swings.append({
+            "idx": i,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "address_frame": address_frame,
+            "impact_frame": impact_frame,
+            "fps": round(fps_val, 2) if fps_val else None,
+        })
+
+    saved = dict(row.edit_metrics or {})
+    # Merge — don't blow away per-swing edits the operator already
+    # made. We only seed swings that don't already exist.
+    existing = saved.get("swings") or []
+    by_idx = {int(s.get("idx", -1)): s for s in existing if isinstance(s, dict)}
+    for sw in swings:
+        if sw["idx"] not in by_idx:
+            by_idx[sw["idx"]] = sw
+    merged = [by_idx[i] for i in sorted(by_idx)]
+    saved["swings"] = merged
+    row.edit_metrics = saved
+    db.add(row)
+    db.add(AuditLog(
+        actor="admin", action="detect_swings",
+        target=f"long_upload:{upload_id}",
+        detail=f"n_swings={len(swings)} fps={fps_val:.2f}",
+    ))
+    db.commit()
+    db.refresh(row)
+    return {
+        "upload_id": upload_id,
+        "fps": round(fps_val, 2) if fps_val else None,
+        "swings": merged,
+    }
+
+
 @router.post("/long-uploads/{upload_id}/auto-detect")
 def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     """Run the lightweight per-swing detection on this upload's tee

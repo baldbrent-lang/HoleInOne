@@ -277,6 +277,13 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}/auto-detect`, {
       method: "POST", adminPassword: key, timeoutMs: 90_000,
     }),
+  detectSwingsForUpload: (key, uploadId) =>
+    // Multi-swing wizard: audio + motion swing detection only — no
+    // Claude calls. Returns the list of swing windows (start_frame
+    // / end_frame / address_frame / impact_frame per swing).
+    request(`/api/admin/long-uploads/${uploadId}/detect-swings`, {
+      method: "POST", adminPassword: key, timeoutMs: 90_000,
+    }),
   getLongUploadFrame: (key, uploadId, frame) =>
     request(`/api/admin/long-uploads/${uploadId}/frame?frame=${frame}`, {
       adminPassword: key, timeoutMs: 20_000,
