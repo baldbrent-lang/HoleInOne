@@ -344,12 +344,14 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     }
 
     // Already persisted → skip auto-detect entirely. Frame dims come
-    // straight off the upload's probe info.
+    // from edit_metrics first (cv2-rotated, matches the saved
+    // target/ball/ROI coords); fall back to the long-upload's probe
+    // dims when an old row hasn't been re-detected yet.
     if (saved && (saved.address_frame != null || saved.ball)) {
       applySaved(saved);
       setFrameDims({
-        width: row.tee_width || null,
-        height: row.tee_height || null,
+        width: saved.frame_width ?? row.tee_width ?? null,
+        height: saved.frame_height ?? row.tee_height ?? null,
         totalFrames: row.tee_nb_frames || null,
       });
       return;
@@ -374,6 +376,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           ball: data.ball_at_rest || null,
           roi: data.ball_detection_area || null,
           target: data.target ? { x: data.target.x, y: data.target.y } : null,
+          // Persist the auto-detect's coord-system reference so every
+          // future re-open uses the same dims as the saved coords.
+          frame_width: data.frame_width || null,
+          frame_height: data.frame_height || null,
         };
         applySaved(seeded);
         // Persist the auto-detected seed so we never re-run on re-open.
@@ -998,6 +1004,35 @@ function WizardBody({
           {frameW && frameH ? `${frameW} × ${frameH} px` : "unknown"}
           {totalFrames ? ` · ${totalFrames} frames` : ""}
         </div>
+
+        <button
+          type="button"
+          className="ghost"
+          style={{ width: "100%", marginTop: 6 }}
+          onClick={async () => {
+            if (!confirm(
+              "Re-run auto-detect from the source video? This wipes "
+              + "the current handedness / address / impact / ball / "
+              + "ROI / target and replaces them with a fresh detection."
+            )) return;
+            try {
+              await api.saveEditMetrics(adminPassword, row.id, {
+                handedness: null, address_frame: null,
+                address_image_url: null, impact_frame: null,
+                ball: null, roi: null, target: null,
+                frame_width: null, frame_height: null,
+                tracer_url: null, ball_track_frames: null,
+                finalized_video_url: null,
+              });
+              window.location.reload();
+            } catch (e) {
+              alert(`Re-detect failed: ${e.message}`);
+            }
+          }}
+          title="Wipe saved metrics and re-run auto-detect from the source video"
+        >
+          Re-detect from source
+        </button>
       </div>
     </div>
   );

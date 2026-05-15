@@ -2585,22 +2585,39 @@ def finalize_wizard_video(
         target_xy = None
 
     if target_xy is not None:
-        # Source video dims (what target.x/y are referenced against).
-        src_w_native = src_h_native = None
+        original_target = tuple(target_xy)
+        # Source-coord reference: prefer the dims the wizard explicitly
+        # saved alongside the target (so they're guaranteed to match
+        # the coord system target.x/y was clicked into). Fall back to
+        # a cv2 probe for old rows that pre-date the explicit save.
+        src_w_native = saved.get("frame_width")
+        src_h_native = saved.get("frame_height")
         try:
-            import cv2  # type: ignore
-            _cap_src = cv2.VideoCapture(str(src_path))
+            src_w_native = int(src_w_native) if src_w_native else None
+            src_h_native = int(src_h_native) if src_h_native else None
+        except (TypeError, ValueError):
+            src_w_native = src_h_native = None
+        if not (src_w_native and src_h_native):
             try:
-                src_w_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
-                src_h_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
-            finally:
-                _cap_src.release()
-        except Exception:  # pragma: no cover
-            pass
+                import cv2  # type: ignore
+                _cap_src = cv2.VideoCapture(str(src_path))
+                try:
+                    src_w_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
+                    src_h_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+                finally:
+                    _cap_src.release()
+            except Exception:  # pragma: no cover
+                pass
         # Final-file dims (what ffmpeg overlay will treat as the canvas).
         final_info = probe_video_info(final_path)
         final_w = final_info.get("width")
         final_h = final_info.get("height")
+        log.info(
+            "finalize: target_xy=%s src(cv2)=%sx%s final(ffprobe)=%sx%s "
+            "saved=%s",
+            original_target, src_w_native, src_h_native,
+            final_w, final_h, target_saved,
+        )
         if (src_w_native and src_h_native and final_w and final_h
                 and (src_w_native != final_w or src_h_native != final_h)):
             sx = float(final_w) / float(src_w_native)
@@ -2610,8 +2627,30 @@ def finalize_wizard_video(
                 int(round(target_xy[1] * sy)),
             )
             log.info(
-                "finalize: scaled target_xy %sx%s → %sx%s (target=%s)",
-                src_w_native, src_h_native, final_w, final_h, target_xy,
+                "finalize: scaled target_xy %s → %s (factor %.3f, %.3f)",
+                original_target, target_xy, sx, sy,
+            )
+        # Final safety net: if the resulting target lies outside the
+        # actual canvas, the saved coords were almost certainly in a
+        # different reference frame than we expect (e.g. a stale
+        # auto-detect from before the native-dim fix that referenced
+        # ~1024px). Re-scale assuming the *largest* of (frame-w, x,
+        # original-x) is the actual ref width — gives a sensible
+        # fallback instead of off-screen placement.
+        if (final_w and final_h
+                and (target_xy[0] >= final_w or target_xy[1] >= final_h)):
+            ref_w = max(final_w, target_xy[0] + 1, original_target[0] + 1)
+            ref_h = max(final_h, target_xy[1] + 1, original_target[1] + 1)
+            sx = float(final_w) / float(ref_w)
+            sy = float(final_h) / float(ref_h)
+            target_xy = (
+                int(round(original_target[0] * sx)),
+                int(round(original_target[1] * sy)),
+            )
+            log.warning(
+                "finalize: target was off-canvas; rescaled assuming ref %sx%s "
+                "→ %s",
+                ref_w, ref_h, target_xy,
             )
 
     try:
