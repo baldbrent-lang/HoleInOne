@@ -188,6 +188,12 @@ export const api = {
     request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
   listBroadcastClips: (key, limit = 100) =>
     request(`/api/admin/broadcast-clips?limit=${limit}`, { adminPassword: key }),
+  setClipBroadcast: (key, clipId, broadcast) =>
+    request(`/api/admin/clips/${clipId}/broadcast`, {
+      method: "POST",
+      body: broadcast == null ? {} : { broadcast: !!broadcast },
+      adminPassword: key,
+    }),
   deleteClip: (key, clipId) =>
     request(`/api/admin/clips/${clipId}`, {
       method: "DELETE", adminPassword: key,

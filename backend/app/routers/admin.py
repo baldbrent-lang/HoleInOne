@@ -524,6 +524,7 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
             "tee_clip_url": c.tee_clip_url,
             "thumbnail_url": c.thumbnail_url,
             "ball_in_cup": bool(c.ball_in_cup),
+            "is_highlight": bool(c.is_highlight),
             "processing_status": c.processing_status,
             "participant_id": c.participant_id,
             "participant_name": participant.name if participant else None,
@@ -533,19 +534,51 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
     return out
 
 
+@router.post("/clips/{clip_id}/broadcast")
+def toggle_clip_broadcast(
+    clip_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """Mark a produced clip as eligible for the Broadcast channel by
+    setting is_highlight. Optional body `{"broadcast": false}` clears
+    the flag. With no body the call toggles the current state.
+    """
+    clip = db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+    if "broadcast" in payload:
+        clip.is_highlight = bool(payload["broadcast"])
+    else:
+        clip.is_highlight = not bool(clip.is_highlight)
+    db.add(clip)
+    db.add(AuditLog(
+        actor="admin", action="toggle_clip_broadcast",
+        target=f"clip:{clip.id}",
+        detail=f"is_highlight={bool(clip.is_highlight)}",
+    ))
+    db.commit()
+    db.refresh(clip)
+    return {"clip_id": clip.id, "is_highlight": bool(clip.is_highlight)}
+
+
 @router.get("/broadcast-clips")
 def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
-    """List dual-camera composite clips for broadcast-style review.
-
-    Filters to clips whose source filename contains '_composite' —
-    the deliverable produced by the dual-camera path of long-upload
-    (tee tracer overlay spliced into the green-side landing). Newest
-    first. Same per-clip shape as /clips so the existing FPS / source-
-    device header line works without modification.
+    """List clips on the Broadcast channel — any clip an operator has
+    flagged with is_highlight=True, plus the legacy dual-camera
+    composites (source filename contains '_composite') so older
+    long-upload runs keep showing up without a backfill. Newest
+    first. Same per-clip shape as /clips so the existing FPS /
+    source-device header line works without modification.
     """
+    from sqlalchemy import or_  # local import — keeps the module
+                                # header lean
     clips = (
         db.query(VideoClip)
-        .filter(VideoClip.source_url.like("%_composite%"))
+        .filter(or_(
+            VideoClip.is_highlight.is_(True),
+            VideoClip.source_url.like("%_composite%"),
+        ))
         .order_by(VideoClip.created_at.desc())
         .limit(max(1, min(500, limit)))
         .all()
@@ -582,6 +615,7 @@ def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
             "tracer_url": c.tracer_url,
             "thumbnail_url": c.thumbnail_url,
             "ball_in_cup": bool(c.ball_in_cup),
+            "is_highlight": bool(c.is_highlight),
             "processing_status": c.processing_status,
             "participant_id": c.participant_id,
             "participant_name": participant.name if participant else None,
@@ -1808,6 +1842,7 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
                 "video_url": play_url,
                 "thumbnail_url": c.thumbnail_url,
                 "ball_in_cup": bool(c.ball_in_cup),
+                "is_highlight": bool(c.is_highlight),
             })
         return out
 

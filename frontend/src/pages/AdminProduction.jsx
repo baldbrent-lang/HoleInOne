@@ -2287,6 +2287,23 @@ export default function AdminProduction() {
     }
   }
 
+  async function handleBroadcast(row) {
+    // Toggle the produced clip's is_highlight flag so it shows up on
+    // the Broadcast channel. The Production card surfaces the latest
+    // produced_clip; that's what we operate on.
+    const clip = row.produced_clips?.[0];
+    if (!clip) return;
+    setBusyId(row.id);
+    try {
+      await api.setClipBroadcast(adminPassword, clip.id, !clip.is_highlight);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   function handleEdit(row) {
     // Single-swing uploads open the EditWizard modal — auto-detection
     // of handedness / address frame / ball position / ROI / target.
@@ -2534,6 +2551,27 @@ export default function AdminProduction() {
                     </button>
                   )
                 )}
+                {(() => {
+                  // Broadcast button is enabled when the wizard has
+                  // produced a clip on this upload. Toggles
+                  // is_highlight on the most-recent produced clip.
+                  const lastClip = row.produced_clips?.[0];
+                  const onBroadcast = !!lastClip?.is_highlight;
+                  return (
+                    <button
+                      className={onBroadcast ? "small" : "small ghost"}
+                      onClick={() => handleBroadcast(row)}
+                      disabled={greyed || busy || !lastClip}
+                      title={lastClip
+                        ? (onBroadcast
+                          ? "Remove from the Broadcast channel"
+                          : "Send the produced clip to the Broadcast channel")
+                        : "No produced clip yet"}
+                    >
+                      {onBroadcast ? "On Broadcast" : "Broadcast"}
+                    </button>
+                  );
+                })()}
                 <button
                   className="small danger"
                   onClick={() => handleDelete(row)}

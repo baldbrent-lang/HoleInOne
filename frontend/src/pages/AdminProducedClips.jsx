@@ -29,6 +29,7 @@ export default function AdminProducedClips() {
 
   const [clips, setClips] = useState(null);
   const [error, setError] = useState(null);
+  const [busyId, setBusyId] = useState(null);
 
   useEffect(() => {
     if (!adminPassword) return;
@@ -37,6 +38,21 @@ export default function AdminProducedClips() {
       .then((list) => setClips(list.filter(isProduced)))
       .catch((e) => setError(e.message));
   }, [adminPassword]);
+
+  async function toggleBroadcast(clip) {
+    setBusyId(clip.id);
+    try {
+      const next = !clip.is_highlight;
+      await api.setClipBroadcast(adminPassword, clip.id, next);
+      setClips((cs) => (cs || []).map(
+        (c) => (c.id === clip.id ? { ...c, is_highlight: next } : c)
+      ));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   if (!adminPassword) {
     return (
@@ -127,6 +143,20 @@ export default function AdminProducedClips() {
                 {c.captured_at ? new Date(c.captured_at).toLocaleString() : "—"}
                 {c.fps != null && <> · <code>{c.fps}</code> fps</>}
               </div>
+              <button
+                type="button"
+                className={c.is_highlight ? "" : "ghost"}
+                style={{ width: "100%", marginTop: 8 }}
+                onClick={() => toggleBroadcast(c)}
+                disabled={busyId === c.id}
+                title={c.is_highlight
+                  ? "Remove from the Broadcast channel"
+                  : "Send this clip to the Broadcast channel"}
+              >
+                {busyId === c.id
+                  ? "…"
+                  : c.is_highlight ? "On Broadcast" : "Broadcast"}
+              </button>
             </div>
           );
         })}
