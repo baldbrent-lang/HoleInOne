@@ -292,6 +292,17 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   // Queued per-frame ball edits, hoisted from TracerStep so Step 3
   // can show a red note and pass them to /render-tracer-fast.
   const [manualPositions, setManualPositions] = useState({});
+  // Editable on-screen graphics for Step 3. Hydrated from saved
+  // edit_metrics; default yardage comes from the course's hole_yardages
+  // for the chosen hole_number.
+  const [graphics, setGraphics] = useState({
+    player_name: "Brent Baldwin",
+    hole_number: 1,
+    yardage: 101,
+  });
+  // Last-finalized snapshot so we can tell when the graphics are
+  // dirty (and thus need a re-finalize on Next).
+  const [finalizedGraphics, setFinalizedGraphics] = useState(null);
 
   useEffect(() => {
     if (!row) return;
@@ -314,6 +325,22 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         });
       }
       if (s.finalized_video_url) setFinalUrl(s.finalized_video_url);
+      // Hydrate Step-3 editable graphics from the last finalize.
+      // Yardage falls back to whatever the course has for this hole.
+      const hole = s.finalized_hole_number ?? 1;
+      const courseYards = row?.course_hole_yardages?.[String(hole)];
+      const yards = s.finalized_yardage
+        ?? (courseYards != null ? Number(courseYards) : 101);
+      const g = {
+        player_name: s.finalized_player_name || "Brent Baldwin",
+        hole_number: hole,
+        yardage: yards,
+      };
+      setGraphics(g);
+      // Mark this as the last-finalized snapshot only when we actually
+      // have a finalized video on file. Otherwise leave it null so the
+      // first Next click on Step 3 will always finalize.
+      if (s.finalized_video_url) setFinalizedGraphics(g);
     }
 
     // Already persisted → skip auto-detect entirely. Frame dims come
@@ -427,8 +454,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     setFinalizing(true);
     setFinalError(null);
     try {
-      const out = await api.finalizeWizardVideo(adminPassword, row.id, {});
+      const out = await api.finalizeWizardVideo(adminPassword, row.id, {
+        player_name: graphics.player_name,
+        hole_number: Number(graphics.hole_number) || 1,
+        yardage: Number(graphics.yardage) || null,
+      });
       setFinalUrl(out.final_video_url);
+      setFinalizedGraphics({ ...graphics });
       onSaved?.();
     } catch (e) {
       setFinalError(e.message);
@@ -438,11 +470,21 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     }
   }
 
+  function graphicsDirty() {
+    if (!finalizedGraphics) return true; // never finalized yet
+    return (
+      (finalizedGraphics.player_name || "") !== (graphics.player_name || "")
+      || Number(finalizedGraphics.hole_number) !== Number(graphics.hole_number)
+      || Number(finalizedGraphics.yardage) !== Number(graphics.yardage)
+    );
+  }
+
   async function handleSaveToProduced() {
     // Step 3 Next. If the operator queued ball edits on Step 2, bake
-    // them in first via the cv2-only fast render (no AI calls), then
-    // re-apply graphics, then commit to Produced Clips. Otherwise
-    // just commit the already-finalized clip.
+    // them in first via the cv2-only fast render (no AI calls). If
+    // the on-screen graphics (player / hole / yardage) changed,
+    // re-finalize with the new values. Either way, end at Produced
+    // Clips. Never any Claude calls in this path.
     setCommitting(true);
     setFinalError(null);
     try {
@@ -450,6 +492,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         ([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y })
       );
       let workingFinalUrl = finalUrl;
+      const needsFinalize = overrides.length > 0 || graphicsDirty();
       if (overrides.length > 0) {
         setFinalizing(true);
         try {
@@ -461,16 +504,24 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             frames: fast.ball_track_frames || [],
           });
           setManualPositions({});
-          const fin = await api.finalizeWizardVideo(adminPassword, row.id, {});
-          workingFinalUrl = fin.final_video_url;
-          setFinalUrl(workingFinalUrl);
         } finally {
           setFinalizing(false);
         }
-      } else if (!workingFinalUrl) {
-        const fin = await api.finalizeWizardVideo(adminPassword, row.id, {});
-        workingFinalUrl = fin.final_video_url;
-        setFinalUrl(workingFinalUrl);
+      }
+      if (needsFinalize) {
+        setFinalizing(true);
+        try {
+          const fin = await api.finalizeWizardVideo(adminPassword, row.id, {
+            player_name: graphics.player_name,
+            hole_number: Number(graphics.hole_number) || 1,
+            yardage: Number(graphics.yardage) || null,
+          });
+          workingFinalUrl = fin.final_video_url;
+          setFinalUrl(workingFinalUrl);
+          setFinalizedGraphics({ ...graphics });
+        } finally {
+          setFinalizing(false);
+        }
       }
       await api.commitWizardClip(adminPassword, row.id);
       onSaved?.();
@@ -600,6 +651,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               frameW={fw}
               frameH={fh}
               pendingEdits={Object.keys(manualPositions).length}
+              graphics={graphics}
+              setGraphics={setGraphics}
+              graphicsDirty={graphicsDirty()}
             />
           )}
         </div>
@@ -1925,9 +1979,21 @@ function TracerStep({
   );
 }
 
-function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, pendingEdits }) {
+function FinalizeStep({
+  row, finalUrl, finalizing, error, frameW, frameH,
+  pendingEdits, graphics, setGraphics, graphicsDirty,
+}) {
   const hasDims = !!(frameW && frameH);
   const hasPending = pendingEdits > 0;
+  const dirtyForRender = hasPending || graphicsDirty;
+
+  function pickCourseYardage(hole) {
+    const map = row?.course_hole_yardages || {};
+    const v = map[String(hole)];
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
   return (
     <div
       style={{
@@ -1977,7 +2043,7 @@ function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, pendin
               {error ? error : "Final video not rendered"}
             </div>
           )}
-          {hasPending && !finalizing && (
+          {dirtyForRender && !finalizing && (
             <div
               role="note"
               style={{
@@ -1991,8 +2057,16 @@ function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, pendin
                 textAlign: "center",
               }}
             >
-              Clicking <b>Next</b> will re-produce the tracer with the
-              updated path ({pendingEdits} new {pendingEdits === 1 ? "point" : "points"}).
+              Clicking <b>Next</b> will re-produce the video
+              {hasPending && (
+                <> with the updated tracer path ({pendingEdits}{" "}
+                {pendingEdits === 1 ? "new point" : "new points"})</>
+              )}
+              {hasPending && graphicsDirty ? " and " : ""}
+              {graphicsDirty && (
+                <> with your updated graphics</>
+              )}
+              .
             </div>
           )}
         </div>
@@ -2022,6 +2096,80 @@ function FinalizeStep({ row, finalUrl, finalizing, error, frameW, frameH, pendin
             <br />
             {row.course_name || `Course ${row.course_id}`}
           </div>
+        </div>
+
+        <div
+          className="card"
+          style={{
+            margin: 0, padding: 10,
+            border: graphicsDirty
+              ? "1px solid rgba(239,68,68,0.5)"
+              : "1px solid var(--border)",
+          }}
+        >
+          <div className="tiny upper muted" style={{ marginBottom: 8 }}>
+            On-screen graphics
+          </div>
+          <div className="field" style={{ marginBottom: 8 }}>
+            <label className="small muted">Player</label>
+            <input
+              type="text"
+              value={graphics.player_name || ""}
+              onChange={(e) => setGraphics((g) => ({ ...g, player_name: e.target.value }))}
+              placeholder="Player name"
+              disabled={finalizing}
+            />
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <div className="field" style={{ flex: 1 }}>
+              <label className="small muted">Hole</label>
+              <input
+                type="number"
+                min={1} max={18}
+                value={graphics.hole_number ?? ""}
+                onChange={(e) => {
+                  const hole = Math.max(1, Math.min(18, parseInt(e.target.value, 10) || 1));
+                  setGraphics((g) => {
+                    // Auto-populate yardage from the course's
+                    // hole_yardages map for the new hole, unless the
+                    // user has already typed something. We treat the
+                    // current yardage as "user-overridden" only when
+                    // it differs from the previous hole's course value.
+                    const prevCourse = pickCourseYardage(g.hole_number);
+                    const newCourse = pickCourseYardage(hole);
+                    const userEdited = prevCourse != null
+                      && Number(g.yardage) !== prevCourse;
+                    return {
+                      ...g,
+                      hole_number: hole,
+                      yardage: userEdited
+                        ? g.yardage
+                        : (newCourse != null ? newCourse : g.yardage),
+                    };
+                  });
+                }}
+                disabled={finalizing}
+              />
+            </div>
+            <div className="field" style={{ flex: 1 }}>
+              <label className="small muted">Yards</label>
+              <input
+                type="number"
+                min={0}
+                value={graphics.yardage ?? ""}
+                onChange={(e) => setGraphics((g) => ({
+                  ...g,
+                  yardage: e.target.value === "" ? "" : Math.max(0, parseInt(e.target.value, 10) || 0),
+                }))}
+                disabled={finalizing}
+              />
+            </div>
+          </div>
+          {graphicsDirty && (
+            <div className="tiny" style={{ marginTop: 6, color: "#ef4444" }}>
+              Graphics changed since last render. Next will re-apply.
+            </div>
+          )}
         </div>
 
         {hasPending && (

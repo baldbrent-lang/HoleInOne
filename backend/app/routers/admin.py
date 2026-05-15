@@ -1825,6 +1825,7 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             "id": r.id,
             "course_id": r.course_id,
             "course_name": course.name if course else None,
+            "course_hole_yardages": (course.hole_yardages or {}) if course else {},
             "camera_type": r.camera_type,
             "base_captured_at": r.base_captured_at.isoformat() if r.base_captured_at else None,
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -2489,14 +2490,22 @@ def finalize_wizard_video(
     course = db.get(Course, row.course_id) if row.course_id else None
     course_name = course.name if course else ""
     hole_number = int(payload.get("hole_number") or 1)
-    yardage = 101
-    if course and course.hole_yardages:
-        raw_y = course.hole_yardages.get(str(hole_number))
-        try:
-            if raw_y is not None:
-                yardage = int(raw_y)
-        except (TypeError, ValueError):
-            pass
+    # yardage: prefer an explicit operator override → otherwise the
+    # course's hole_yardages entry → otherwise 101.
+    yardage_override = payload.get("yardage")
+    try:
+        yardage = int(yardage_override) if yardage_override is not None else None
+    except (TypeError, ValueError):
+        yardage = None
+    if yardage is None:
+        yardage = 101
+        if course and course.hole_yardages:
+            raw_y = course.hole_yardages.get(str(hole_number))
+            try:
+                if raw_y is not None:
+                    yardage = int(raw_y)
+            except (TypeError, ValueError):
+                pass
     player_name = payload.get("player_name") or "Brent Baldwin"
 
     try:
