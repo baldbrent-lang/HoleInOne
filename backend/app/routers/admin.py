@@ -2721,6 +2721,26 @@ def commit_wizard_clip(
         .first()
     )
     hole_number = int(saved.get("finalized_hole_number") or 1)
+
+    # Poster thumbnail for the Produced Video tile on /admin/production
+    # (and any other "produced clip" listing). Extracts a JPG next to
+    # the final video file; falls back to None so the UI shows the
+    # "No preview" placeholder if ffmpeg isn't available.
+    thumb_url: str | None = None
+    final_fname = (final_url or "").rstrip("/").split("?")[0].rsplit("/", 1)[-1]
+    if final_fname:
+        final_path = CLIPS_DIR / final_fname
+        if final_path.exists():
+            try:
+                thumb_path = extract_thumbnail(final_path)
+                if thumb_path is not None:
+                    thumb_url = (
+                        f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
+                        f"?v={int(thumb_path.stat().st_mtime)}"
+                    )
+            except Exception as exc:  # pragma: no cover
+                log.warning("commit_wizard_clip: thumbnail extract failed: %s", exc)
+
     # The Broadcast page (and SMS / share / download buttons) play
     # clip.source_url — so that URL has to be the finalized video
     # with the intro overlay graphics baked in. The bare tracer
@@ -2735,6 +2755,7 @@ def commit_wizard_clip(
             source_url=final_url,
             tracer_url=final_url,
             tee_clip_url=tracer_url,
+            thumbnail_url=thumb_url,
             long_upload_id=upload_id,
             processing_status=ClipProcessingStatus.received.value,
         )
@@ -2744,6 +2765,8 @@ def commit_wizard_clip(
         clip.source_url = final_url
         clip.tee_clip_url = tracer_url
         clip.hole_number = hole_number
+        if thumb_url:
+            clip.thumbnail_url = thumb_url
         if not clip.captured_at and row.base_captured_at:
             clip.captured_at = row.base_captured_at
     clip.delivered_at = _utcnow_naive()
