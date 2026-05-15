@@ -1040,10 +1040,16 @@ function WizardBody({
 
         <EditableRow
           label="Start frame"
-          value={draft.startFrame != null ? `Frame ${draft.startFrame}` : "Frame 0"}
+          value={draft.startFrame != null
+            ? `Frame ${draft.startFrame}`
+            : "Frame 0 (clip start)"}
           active={editing === "start"}
           onActivate={() => setEditing(editing === "start" ? null : "start")}
         >
+          <div className="tiny muted" style={{ marginBottom: 6 }}>
+            Step backward / forward to trim the clip in. Defaults to
+            the start of the source (frame 0).
+          </div>
           <FrameStepper
             current={navFrame}
             total={navTotal}
@@ -1060,10 +1066,18 @@ function WizardBody({
 
         <EditableRow
           label="End frame"
-          value={draft.endFrame != null ? `Frame ${draft.endFrame}` : "—"}
+          value={draft.endFrame != null
+            ? `Frame ${draft.endFrame}`
+            : (totalFrames
+              ? `Frame ${totalFrames - 1} (clip end)`
+              : "Clip end")}
           active={editing === "end"}
           onActivate={() => setEditing(editing === "end" ? null : "end")}
         >
+          <div className="tiny muted" style={{ marginBottom: 6 }}>
+            Step backward / forward to trim the clip out. Defaults to
+            the last frame of the source.
+          </div>
           <FrameStepper
             current={navFrame}
             total={navTotal}
