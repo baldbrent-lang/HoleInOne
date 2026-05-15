@@ -2400,8 +2400,16 @@ def render_tracer_fast(
         output_path,
         ball_rest_xy_native=ball_xy,
         impact_frame_idx=impact_idx,
+        # Forward the manual flag — the renderer pins manual anchors
+        # so the parabola fit can't reject them and weights them so
+        # they actually shape the rendered arc instead of getting
+        # outvoted by the AI's earlier points.
         track_frames=[
-            {"frame": e["frame"], "found": e["found"], "x": e["x"], "y": e["y"]}
+            {
+                "frame": e["frame"], "found": e["found"],
+                "x": e["x"], "y": e["y"],
+                "manual": e.get("manual", False),
+            }
             for e in merged
         ],
         # Operator-confirmed points should always be drawn — never

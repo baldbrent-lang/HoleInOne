@@ -2545,8 +2545,10 @@ def render_tracer_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     info["fps"] = float(fps)
 
-    # Build {frame_idx: (x, y)} for every successfully-located ball.
-    points_by_frame: dict[int, tuple[int, int]] = {}
+    # Build {frame_idx: (x, y, is_manual)} for every successfully-located
+    # ball. Manual entries are operator-confirmed: the fit treats them
+    # as pinned ground truth (never rejected, heavily weighted).
+    points_by_frame: dict[int, tuple[int, int, bool]] = {}
     for rec in track_frames or []:
         if not rec.get("found"):
             continue
@@ -2556,13 +2558,16 @@ def render_tracer_video(
         if f is None or x is None or y is None:
             continue
         try:
-            points_by_frame[int(f)] = (int(x), int(y))
+            points_by_frame[int(f)] = (int(x), int(y), bool(rec.get("manual", False)))
         except (TypeError, ValueError):
             continue
 
     # The full ordered list of tracer anchors: rest position first,
-    # then every found-ball position in chronological order.
+    # then every found-ball position in chronological order. We also
+    # track which anchor indices came from manual edits so they can
+    # be pinned + weighted in the fit.
     anchors: list[tuple[int, int, int]] = []  # (frame, x, y)
+    manual_anchor_idxs: set[int] = set()
     if ball_rest_xy_native is not None:
         anchors.append((
             int(impact_frame_idx),
@@ -2570,7 +2575,9 @@ def render_tracer_video(
             int(round(float(ball_rest_xy_native[1]))),
         ))
     for f in sorted(points_by_frame):
-        x, y = points_by_frame[f]
+        x, y, is_manual = points_by_frame[f]
+        if is_manual:
+            manual_anchor_idxs.add(len(anchors))
         anchors.append((f, x, y))
 
     # Fit a smooth parabola through the anchors, with iterative
@@ -2590,10 +2597,21 @@ def render_tracer_video(
     # outlier and the rendered tracer disconnects from the blue
     # ball-rest marker.
     rest_is_anchor_zero = ball_rest_xy_native is not None
-    pinned_set = {0} if rest_is_anchor_zero else None
+    pinned_set: set[int] = set(manual_anchor_idxs)
+    if rest_is_anchor_zero:
+        pinned_set.add(0)
+    if not pinned_set:
+        pinned_set = None  # type: ignore[assignment]
     if rest_is_anchor_zero and len(anchors) > 1:
-        # 5x weight on the rest, 1x on every detected ball position.
-        weight_list = [5.0] + [1.0] * (len(anchors) - 1)
+        # Rest = 5×, manual = 5×, AI-detected = 1×. Manual points pull
+        # the parabola toward themselves so additions past the AI's
+        # initial 12 frames actually shape the rendered arc.
+        weight_list = []
+        for i in range(len(anchors)):
+            if i == 0 or i in manual_anchor_idxs:
+                weight_list.append(5.0)
+            else:
+                weight_list.append(1.0)
     else:
         weight_list = None
     fit = _robust_quadratic_fit(
