@@ -285,6 +285,78 @@ def render_right_panel(
     return img
 
 
+def render_target_sign(yardage: int | None, pole_height: int = 130) -> Image.Image | None:
+    """Stake-style 'TO HOLE / N YDS' marker drawn into a transparent
+    PNG. The visible sign sits at the top of the image and a thin
+    pole extends down to the bottom — when composited the bottom of
+    the image is anchored at the target pixel coordinate, so the pole
+    appears to plant into the green at the flag.
+    """
+    if not HAS_PIL:
+        return None
+
+    yards = int(yardage) if yardage is not None else 0
+
+    sign_w = 168
+    header_h = 32
+    body_h = 38
+    sign_h = header_h + body_h
+    pole_h = max(20, int(pole_height))
+    height = sign_h + pole_h
+
+    bold_header = _find_font(FONT_CANDIDATES_BOLD, 16)
+    bold_body = _find_font(FONT_CANDIDATES_BOLD, 24)
+
+    img = Image.new("RGBA", (sign_w, height), (0, 0, 0, 0))
+
+    # Sign body: navy header above white body, both clipped to a
+    # rounded outer rectangle for the same visual language as the
+    # other intro panels.
+    sections = Image.new("RGBA", (sign_w, sign_h), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(sections)
+    sd.rectangle((0, 0, sign_w, header_h), fill=PANEL_BOTTOM_BLUE)
+    sd.rectangle((0, header_h, sign_w, sign_h), fill=(255, 255, 255, 245))
+
+    mask = Image.new("L", (sign_w, sign_h), 0)
+    md = ImageDraw.Draw(mask)
+    md.rounded_rectangle((0, 0, sign_w - 1, sign_h - 1), radius=6, fill=255)
+    img.paste(sections, (0, 0), mask)
+
+    draw = ImageDraw.Draw(img)
+    header_text = "TO HOLE"
+    w_h = _measure(header_text, bold_header)
+    header_font_size = getattr(bold_header, "size", 16)
+    draw.text(
+        ((sign_w - w_h) // 2,
+         (header_h - header_font_size) // 2),
+        header_text, fill=TEXT_PRIMARY, font=bold_header,
+    )
+
+    yds_text = f"{yards} YDS"
+    w_y = _measure(yds_text, bold_body)
+    body_font_size = getattr(bold_body, "size", 24)
+    draw.text(
+        ((sign_w - w_y) // 2,
+         header_h + (body_h - body_font_size) // 2),
+        yds_text, fill=PANEL_BOTTOM_BLUE, font=bold_body,
+    )
+
+    # Thin white pole with a dark outline so it reads against grass
+    # and sky alike. Plants into the target pixel when the image is
+    # anchored bottom-aligned at target.y.
+    pole_x = sign_w // 2
+    pole_w = 3
+    draw.rectangle(
+        (pole_x - pole_w - 1, sign_h, pole_x + pole_w + 1, height),
+        fill=(0, 0, 0, 200),
+    )
+    draw.rectangle(
+        (pole_x - pole_w, sign_h, pole_x + pole_w, height),
+        fill=(255, 255, 255, 235),
+    )
+    return img
+
+
 def _x_expr_left(panel_w: int, video_w: int, anchor_x: int) -> str:
     """ffmpeg overlay x= expression for the left panel.
 
@@ -324,6 +396,25 @@ def _x_expr_right(panel_w: int, video_w: int, anchor_right_pad: int) -> str:
     )
 
 
+def _y_expr_target(anchor_y: int) -> str:
+    """ffmpeg overlay y= expression for the target sign.
+
+    Drops down from y=-h (entirely above frame) to y=anchor_y during
+    slide-in, holds, then retracts back above the frame on slide-out.
+    Matches the timing of the left/right panel slides so all three
+    intro graphics appear and disappear together.
+    """
+    t_in = SLIDE_IN_SEC
+    t_hold_end = SLIDE_IN_SEC + HOLD_SEC
+    t_out = t_hold_end + SLIDE_OUT_SEC
+    return (
+        f"if(lt(t,{t_in}), -h+(h+{anchor_y})*t/{t_in}, "
+        f"if(lt(t,{t_hold_end}), {anchor_y}, "
+        f"if(lt(t,{t_out}), {anchor_y} - (h+{anchor_y})*(t-{t_hold_end})/{SLIDE_OUT_SEC}, "
+        f"-h)))"
+    )
+
+
 def apply_intro_overlay(
     input_video: Path,
     output_video: Path,
@@ -332,11 +423,17 @@ def apply_intro_overlay(
     hole_number: int | None,
     par: int | None,
     yardage: int | None,
+    target_xy: tuple[int, int] | None = None,
 ) -> bool:
     """Composite the slide-in/out intro panels onto input_video and
     write the result to output_video. Returns True on success, False
     on any failure (PIL missing, ffmpeg missing, panel render failure,
     ffmpeg failure). Leaves input_video untouched on failure.
+
+    When `target_xy` is supplied (native pixel coords on the source
+    video) an additional 'TO HOLE / N YDS' marker is rendered, with
+    its pole planting at that pixel. It slides in / holds / slides
+    out in sync with the left and right panels.
     """
     if not HAS_PIL:
         log.warning("intro_overlay: PIL not installed; skipping")
@@ -360,27 +457,65 @@ def apply_intro_overlay(
         log.warning("intro_overlay: panel render returned None")
         return False
 
+    # Optional: target-pin sign. Pole length is sized so the sign body
+    # sits ~24px from the top of the frame (or just above the target
+    # when the target is itself near the top). Bottom of the rendered
+    # PNG lines up with target.y at composite time.
+    target_sign = None
+    target_anchor_x: int | None = None
+    target_anchor_y: int | None = None
+    if target_xy is not None:
+        tx, ty = int(target_xy[0]), int(target_xy[1])
+        # Sign body is ~70px; leave 24px clearance above.
+        sign_label_h = 70
+        margin_above = 24
+        pole_len = max(20, ty - sign_label_h - margin_above)
+        sign_img = render_target_sign(yardage, pole_height=pole_len)
+        if sign_img is not None:
+            target_sign = sign_img
+            # Anchor the PNG so its BOTTOM is at ty and its CENTER is at tx.
+            target_anchor_x = tx - sign_img.width // 2
+            target_anchor_y = ty - sign_img.height
+            # Clamp negative top into frame (sign can't go above 0).
+            if target_anchor_y < 0:
+                target_anchor_y = 0
+
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
         left_png = td_path / "intro_left.png"
         right_png = td_path / "intro_right.png"
         left_img.save(left_png)
         right_img.save(right_png)
+        target_png = None
+        if target_sign is not None:
+            target_png = td_path / "intro_target.png"
+            target_sign.save(target_png)
 
         # 24 px padding off the top + sides; panels keep their rendered
         # size, x slides across the video width via the expressions.
         pad = 24
         left_x_expr = _x_expr_left(left_img.width, 0, pad)
         right_x_expr = _x_expr_right(right_img.width, 0, pad)
+
+        inputs = [
+            "-i", str(input_video),
+            "-i", str(left_png),
+            "-i", str(right_png),
+        ]
         filter_complex = (
             f"[0:v][1:v]overlay=x='{left_x_expr}':y={pad}:eval=frame[v1];"
             f"[v1][2:v]overlay=x='{right_x_expr}':y={pad}:eval=frame"
         )
+        if target_png is not None and target_anchor_y is not None:
+            inputs += ["-i", str(target_png)]
+            target_y_expr = _y_expr_target(target_anchor_y)
+            filter_complex += (
+                f"[v2];[v2][3:v]overlay="
+                f"x={target_anchor_x}:y='{target_y_expr}':eval=frame"
+            )
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
-            "-i", str(input_video),
-            "-i", str(left_png),
-            "-i", str(right_png),
+            *inputs,
             "-filter_complex", filter_complex,
             "-c:v", "libx264", "-preset", "veryfast",
             "-c:a", "copy",
@@ -398,8 +533,9 @@ def apply_intro_overlay(
         output_video.unlink(missing_ok=True)
         return False
     log.info(
-        "intro_overlay: rendered %s → %s (player=%s hole=%s par=%s yds=%s)",
+        "intro_overlay: rendered %s → %s (player=%s hole=%s par=%s yds=%s target=%s)",
         input_video.name, output_video.name, player_name, hole_number, par, yardage,
+        target_xy,
     )
     return True
 
@@ -411,6 +547,7 @@ def apply_intro_overlay_inplace(
     hole_number: int | None,
     par: int | None,
     yardage: int | None,
+    target_xy: tuple[int, int] | None = None,
 ) -> bool:
     """Same as apply_intro_overlay but writes to a temp file and
     atomically renames over `video_path`. Best-effort: returns False
@@ -419,6 +556,7 @@ def apply_intro_overlay_inplace(
     ok = apply_intro_overlay(
         video_path, tmp,
         player_name, course_name, hole_number, par, yardage,
+        target_xy=target_xy,
     )
     if not ok:
         tmp.unlink(missing_ok=True)

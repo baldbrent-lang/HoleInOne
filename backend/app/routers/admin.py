@@ -2508,6 +2508,18 @@ def finalize_wizard_video(
                 pass
     player_name = payload.get("player_name") or "Brent Baldwin"
 
+    # Target pixel for the 'TO HOLE / N YDS' stake overlay. Pulled
+    # from the wizard's saved target on Step 1 (red flag pin). Pass
+    # only when both coords are present and inside the frame; the
+    # overlay function clamps to the top of the frame internally.
+    target_xy: tuple[int, int] | None = None
+    target_saved = saved.get("target") or {}
+    try:
+        if target_saved.get("x") is not None and target_saved.get("y") is not None:
+            target_xy = (int(target_saved["x"]), int(target_saved["y"]))
+    except (TypeError, ValueError):
+        target_xy = None
+
     try:
         apply_intro_overlay_inplace(
             final_path,
@@ -2516,6 +2528,7 @@ def finalize_wizard_video(
             hole_number=hole_number,
             par=3,
             yardage=yardage,
+            target_xy=target_xy,
         )
     except Exception as exc:  # pragma: no cover
         log.warning("finalize: intro overlay failed for upload %s: %s",
