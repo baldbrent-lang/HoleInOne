@@ -492,8 +492,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       const overrides = Object.entries(manualPositions).map(
         ([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y })
       );
-      const needsFinalize =
-        overrides.length > 0 || graphicsDirty() || !finalUrl;
       if (overrides.length > 0) {
         setFinalizing(true);
         try {
@@ -509,7 +507,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           setFinalizing(false);
         }
       }
-      if (needsFinalize) {
+      // Always re-finalize on Produce. Skipping when nothing in
+      // the local state changed meant a cached finalUrl from before
+      // a backend fix would never get refreshed; the explicit click
+      // is the operator's signal to re-render regardless.
+      {
         setFinalizing(true);
         try {
           const fin = await api.finalizeWizardVideo(adminPassword, row.id, {
