@@ -2570,9 +2570,12 @@ def finalize_wizard_video(
     player_name = payload.get("player_name") or "Brent Baldwin"
 
     # Target pixel for the 'TO HOLE / N YDS' stake overlay. Pulled
-    # from the wizard's saved target on Step 1 (red flag pin). Pass
-    # only when both coords are present and inside the frame; the
-    # overlay function clamps to the top of the frame internally.
+    # from the wizard's saved target on Step 1 (red flag pin). The
+    # saved coords are in the source video's native dims, but the
+    # file we're about to overlay is the wizard tracer — which the
+    # tracer-render pipeline has already passed through
+    # compress_for_email and scaled to 1280px long-edge. Probe both
+    # so the target gets placed in the right spot on the final file.
     target_xy: tuple[int, int] | None = None
     target_saved = saved.get("target") or {}
     try:
@@ -2580,6 +2583,36 @@ def finalize_wizard_video(
             target_xy = (int(target_saved["x"]), int(target_saved["y"]))
     except (TypeError, ValueError):
         target_xy = None
+
+    if target_xy is not None:
+        # Source video dims (what target.x/y are referenced against).
+        src_w_native = src_h_native = None
+        try:
+            import cv2  # type: ignore
+            _cap_src = cv2.VideoCapture(str(src_path))
+            try:
+                src_w_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
+                src_h_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+            finally:
+                _cap_src.release()
+        except Exception:  # pragma: no cover
+            pass
+        # Final-file dims (what ffmpeg overlay will treat as the canvas).
+        final_info = probe_video_info(final_path)
+        final_w = final_info.get("width")
+        final_h = final_info.get("height")
+        if (src_w_native and src_h_native and final_w and final_h
+                and (src_w_native != final_w or src_h_native != final_h)):
+            sx = float(final_w) / float(src_w_native)
+            sy = float(final_h) / float(src_h_native)
+            target_xy = (
+                int(round(target_xy[0] * sx)),
+                int(round(target_xy[1] * sy)),
+            )
+            log.info(
+                "finalize: scaled target_xy %sx%s → %sx%s (target=%s)",
+                src_w_native, src_h_native, final_w, final_h, target_xy,
+            )
 
     try:
         apply_intro_overlay_inplace(
