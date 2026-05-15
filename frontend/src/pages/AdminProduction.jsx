@@ -480,19 +480,20 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   }
 
   async function handleSaveToProduced() {
-    // Step 3 Next. If the operator queued ball edits on Step 2, bake
-    // them in first via the cv2-only fast render (no AI calls). If
-    // the on-screen graphics (player / hole / yardage) changed,
-    // re-finalize with the new values. Either way, end at Produced
-    // Clips. Never any Claude calls in this path.
+    // Step 3 Produce. If the operator queued ball edits on Step 2,
+    // bake them in first via the cv2-only fast render (no Claude
+    // calls). If the on-screen graphics changed, re-finalize with
+    // the new values. Either way commit the clip to Produced Clips
+    // so it's broadcastable right after the run. Leaves the wizard
+    // open so the operator can review the result; Finish closes.
     setCommitting(true);
     setFinalError(null);
     try {
       const overrides = Object.entries(manualPositions).map(
         ([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y })
       );
-      let workingFinalUrl = finalUrl;
-      const needsFinalize = overrides.length > 0 || graphicsDirty();
+      const needsFinalize =
+        overrides.length > 0 || graphicsDirty() || !finalUrl;
       if (overrides.length > 0) {
         setFinalizing(true);
         try {
@@ -516,8 +517,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             hole_number: Number(graphics.hole_number) || 1,
             yardage: Number(graphics.yardage) || null,
           });
-          workingFinalUrl = fin.final_video_url;
-          setFinalUrl(workingFinalUrl);
+          setFinalUrl(fin.final_video_url);
           setFinalizedGraphics({ ...graphics });
         } finally {
           setFinalizing(false);
@@ -525,7 +525,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       }
       await api.commitWizardClip(adminPassword, row.id);
       onSaved?.();
-      onClose();
     } catch (e) {
       setFinalError(e.message);
     } finally {
@@ -647,6 +646,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               row={row}
               finalUrl={finalUrl}
               finalizing={finalizing}
+              committing={committing}
               error={finalError}
               frameW={fw}
               frameH={fh}
@@ -654,6 +654,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               graphics={graphics}
               setGraphics={setGraphics}
               graphicsDirty={graphicsDirty()}
+              alreadyProduced={!!finalUrl}
+              onProduce={handleSaveToProduced}
             />
           )}
         </div>
@@ -705,15 +707,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             <button
               type="button"
               disabled={committing || finalizing}
-              onClick={handleSaveToProduced}
+              onClick={onClose}
               style={{ width: "auto" }}
-              title={Object.keys(manualPositions).length > 0
-                ? "Re-render the tracer with the new ball positions, apply graphics, and commit to Produced Clips"
-                : "Commit this clip to Produced Clips"}
+              title="Close the wizard. The most recent Produce run is already on Produced Clips."
             >
-              {finalizing
-                ? "Re-rendering…"
-                : committing ? "Saving…" : "Next →"}
+              Finish
             </button>
           )}
         </div>
@@ -1980,12 +1978,19 @@ function TracerStep({
 }
 
 function FinalizeStep({
-  row, finalUrl, finalizing, error, frameW, frameH,
+  row, finalUrl, finalizing, committing, error, frameW, frameH,
   pendingEdits, graphics, setGraphics, graphicsDirty,
+  alreadyProduced, onProduce,
 }) {
   const hasDims = !!(frameW && frameH);
   const hasPending = pendingEdits > 0;
   const dirtyForRender = hasPending || graphicsDirty;
+  const busy = !!(finalizing || committing);
+  const produceLabel = busy
+    ? (finalizing ? "Producing…" : "Committing…")
+    : (alreadyProduced
+      ? (dirtyForRender ? "Re-Produce" : "Re-Produce")
+      : "Produce");
 
   function pickCourseYardage(hole) {
     const map = row?.course_hole_yardages || {};
@@ -2057,7 +2062,7 @@ function FinalizeStep({
                 textAlign: "center",
               }}
             >
-              Clicking <b>Next</b> will re-produce the video
+              Clicking <b>Produce</b> will re-render
               {hasPending && (
                 <> with the updated tracer path ({pendingEdits}{" "}
                 {pendingEdits === 1 ? "new point" : "new points"})</>
@@ -2072,7 +2077,8 @@ function FinalizeStep({
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           The player banner, course / hole / par / yardage are baked
-          in. Click <b>Next</b> to commit this clip to Produced Clips.
+          in. Click <b>Produce</b> on the right to (re-)render and
+          send to Produced Clips. <b>Finish</b> closes the wizard.
         </div>
       </div>
 
@@ -2167,15 +2173,27 @@ function FinalizeStep({
           </div>
           {graphicsDirty && (
             <div className="tiny" style={{ marginTop: 6, color: "#ef4444" }}>
-              Graphics changed since last render. Next will re-apply.
+              Graphics changed since last render. Produce will re-apply.
             </div>
           )}
         </div>
 
+        <button
+          type="button"
+          onClick={onProduce}
+          disabled={busy}
+          style={{ width: "100%" }}
+          title={alreadyProduced
+            ? "Re-render the tracer (cv2 only, no AI) with current ball points + graphics and update Produced Clips"
+            : "Render the final clip with current graphics and send to Produced Clips"}
+        >
+          {produceLabel}
+        </button>
+
         {hasPending && (
           <div className="small" style={{ color: "#ef4444" }}>
             {pendingEdits} unsaved tracer point{pendingEdits === 1 ? "" : "s"} from Step 2.
-            Clicking <b>Next</b> will fold them into the tracer and
+            Clicking <b>Produce</b> will fold them into the tracer and
             re-apply graphics — no AI calls.
           </div>
         )}
