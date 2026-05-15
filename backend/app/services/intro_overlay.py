@@ -457,26 +457,23 @@ def apply_intro_overlay(
         log.warning("intro_overlay: panel render returned None")
         return False
 
-    # Optional: target-pin sign. Pole length is sized so the sign body
-    # sits ~24px from the top of the frame (or just above the target
-    # when the target is itself near the top). Bottom of the rendered
-    # PNG lines up with target.y at composite time.
+    # Optional: target-pin sign. The sign body sits just above the
+    # target pixel with a short pole that plants into the green where
+    # the operator dropped the flag. When the target sits near the top
+    # of the frame the image is clamped to y=0 so the sign body never
+    # gets cut off.
     target_sign = None
     target_anchor_x: int | None = None
     target_anchor_y: int | None = None
     if target_xy is not None:
         tx, ty = int(target_xy[0]), int(target_xy[1])
-        # Sign body is ~70px; leave 24px clearance above.
-        sign_label_h = 70
-        margin_above = 24
-        pole_len = max(20, ty - sign_label_h - margin_above)
-        sign_img = render_target_sign(yardage, pole_height=pole_len)
+        short_pole = 40
+        sign_img = render_target_sign(yardage, pole_height=short_pole)
         if sign_img is not None:
             target_sign = sign_img
-            # Anchor the PNG so its BOTTOM is at ty and its CENTER is at tx.
+            # Anchor: image bottom (= pole tip) at ty, image center at tx.
             target_anchor_x = tx - sign_img.width // 2
             target_anchor_y = ty - sign_img.height
-            # Clamp negative top into frame (sign can't go above 0).
             if target_anchor_y < 0:
                 target_anchor_y = 0
 
