@@ -2623,13 +2623,18 @@ def commit_wizard_clip(
         .first()
     )
     hole_number = int(saved.get("finalized_hole_number") or 1)
+    # The Broadcast page (and SMS / share / download buttons) play
+    # clip.source_url — so that URL has to be the finalized video
+    # with the intro overlay graphics baked in. The bare tracer
+    # (no overlay) lives on tee_clip_url for the AI-tracer page to
+    # re-iterate against.
     if not clip:
         clip = VideoClip(
             course_id=row.course_id,
             hole_number=hole_number,
             camera_type="tee",
             captured_at=row.base_captured_at or _utcnow_naive(),
-            source_url=tracer_url or final_url,
+            source_url=final_url,
             tracer_url=final_url,
             tee_clip_url=tracer_url,
             long_upload_id=upload_id,
@@ -2638,7 +2643,7 @@ def commit_wizard_clip(
         db.add(clip)
     else:
         clip.tracer_url = final_url
-        clip.source_url = tracer_url or final_url
+        clip.source_url = final_url
         clip.tee_clip_url = tracer_url
         clip.hole_number = hole_number
         if not clip.captured_at and row.base_captured_at:
