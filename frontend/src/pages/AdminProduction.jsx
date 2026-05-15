@@ -393,38 +393,51 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       return;
     }
 
+    // Auto-detect runs at upload time and writes straight into
+    // edit_metrics, so the wizard never calls /auto-detect itself.
+    // If the saved blob is still empty when the wizard opens, the
+    // background detect hasn't finished yet (or this upload predates
+    // the upload-time spawn). Poll the row every few seconds until
+    // metrics show up; the operator can also click Re-detect to
+    // force a fresh run from the source.
     setRunning(true);
-    setError(null);
-    api
-      .autoDetectLongUpload(adminPassword, row.id)
-      .then(async (data) => {
-        if (cancelled) return;
-        setFrameDims({
-          width: data.frame_width,
-          height: data.frame_height,
-          totalFrames: data.total_frames || row.tee_nb_frames || null,
-        });
-        const seeded = {
-          handedness: data.handedness?.value || "right",
-          address_frame: data.address?.frame ?? 0,
-          address_image_url: data.address?.image_url || null,
-          impact_frame: data.impact?.frame ?? 0,
-          ball: data.ball_at_rest || null,
-          roi: data.ball_detection_area || null,
-          target: data.target ? { x: data.target.x, y: data.target.y } : null,
-          frame_width: data.frame_width || null,
-          frame_height: data.frame_height || null,
-        };
-        applySaved(seeded);
-        try {
-          await api.saveEditMetrics(adminPassword, row.id, seeded);
-          onSaved?.();
-        } catch (e) {
-          console.warn("seed-save failed", e);
+    const tick = async () => {
+      try {
+        const rows = await api.listLongUploads(adminPassword);
+        const fresh = (rows || []).find((r) => r.id === row.id);
+        const em = fresh?.edit_metrics;
+        if (em && (em.address_frame != null || em.ball)) {
+          if (cancelled) return;
+          applySaved(em);
+          setFrameDims({
+            width: em.frame_width ?? fresh.tee_width ?? null,
+            height: em.frame_height ?? fresh.tee_height ?? null,
+            totalFrames: fresh.tee_nb_frames || null,
+          });
+          setRunning(false);
+          return true;
         }
-      })
-      .catch((e) => { if (!cancelled) setError(e.message); })
-      .finally(() => { if (!cancelled) setRunning(false); });
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      }
+      return false;
+    };
+    (async () => {
+      // First check is immediate; then poll every 3s up to ~2 min.
+      if (await tick()) return;
+      for (let i = 0; i < 40 && !cancelled; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        if (cancelled) return;
+        if (await tick()) return;
+      }
+      if (!cancelled) {
+        setRunning(false);
+        setError(
+          "No saved metrics yet — auto-detect didn't complete. " +
+          "Click Re-detect from source on Step 1 to try again."
+        );
+      }
+    })();
     return () => { cancelled = true; };
   }, [row, adminPassword]);  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -691,7 +704,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             <div className="row" style={{ alignItems: "center", gap: 12 }}>
               <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
               <span className="small">
-                Auto-detecting handedness, address frame, and ball position…
+                Waiting for upload-time auto-detect to finish — usually 10–20s…
               </span>
             </div>
           )}
@@ -1221,25 +1234,20 @@ function WizardBody({
           style={{ width: "100%", marginTop: 6 }}
           onClick={async () => {
             if (!confirm(
-              "Re-run auto-detect from the source video? This wipes "
+              "Re-run auto-detect from the source video? This replaces "
               + "the current handedness / address / impact / ball / "
-              + "ROI / target and replaces them with a fresh detection."
+              + "ROI / target with a fresh detection."
             )) return;
             try {
-              await api.saveEditMetrics(adminPassword, row.id, {
-                handedness: null, address_frame: null,
-                address_image_url: null, impact_frame: null,
-                ball: null, roi: null, target: null,
-                frame_width: null, frame_height: null,
-                tracer_url: null, ball_track_frames: null,
-                finalized_video_url: null,
-              });
+              // Persist into edit_metrics directly; the wizard reads
+              // from there on next reload.
+              await api.autoDetectLongUpload(adminPassword, row.id);
               window.location.reload();
             } catch (e) {
               alert(`Re-detect failed: ${e.message}`);
             }
           }}
-          title="Wipe saved metrics and re-run auto-detect from the source video"
+          title="Re-run auto-detect from the source video and replace the current metrics"
         >
           Re-detect from source
         </button>

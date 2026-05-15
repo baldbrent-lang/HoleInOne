@@ -1607,8 +1607,10 @@ async def quick_upload_videos(
     )
 
     # 'multiple' swing-count kicks off the cut / AI-tracer / composite
-    # background job immediately. 'single' queues for manual editing on
-    # /admin/production first.
+    # background job immediately. 'single' kicks off the cheap
+    # auto-detect (audio impact + Claude handedness) so the Edit
+    # wizard opens with handedness / address / impact / ball / ROI /
+    # target already populated — no detection round-trip on open.
     if auto_process:
         threading.Thread(
             target=_run_long_upload_job,
@@ -1628,9 +1630,15 @@ async def quick_upload_videos(
             "ready."
         )
     else:
+        threading.Thread(
+            target=_run_auto_detect_seed,
+            args=(upload_row.id,),
+            daemon=True,
+            name=f"auto-detect-{upload_row.id}",
+        ).start()
         message = (
-            "Single-swing upload — queued for editing on Production. "
-            "and click Reprocess when you're ready to produce."
+            "Single-swing upload — auto-detecting metrics in the "
+            "background. Open Edit on Production to review."
         )
 
     return {
@@ -2099,18 +2107,45 @@ def detect_swings_for_upload(
     }
 
 
+def _run_auto_detect_seed(upload_id: int) -> dict | None:
+    """Background-friendly wrapper around the auto-detect pipeline.
+
+    Opens its own DB session, runs detection, persists every result
+    into edit_metrics so the Edit wizard can hydrate without making
+    any API calls. Spawned in a thread from /clips/quick-upload for
+    single-swing uploads, so by the time the operator clicks Edit
+    the wizard already has handedness / address / impact / ball /
+    ROI / target ready to display.
+
+    Returns the same dict shape /auto-detect serialises, or None on
+    error. Never raises.
+    """
+    from ..database import SessionLocal  # local — avoids router-load cycle
+    sess: Session = SessionLocal()
+    try:
+        try:
+            return auto_detect_long_upload(upload_id, db=sess)
+        except HTTPException as exc:
+            log.warning("background auto-detect %s skipped: %s", upload_id, exc.detail)
+            return None
+        except Exception:  # pragma: no cover
+            log.exception("background auto-detect %s failed", upload_id)
+            return None
+    finally:
+        sess.close()
+
+
 @router.post("/long-uploads/{upload_id}/auto-detect")
 def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     """Run the lightweight per-swing detection on this upload's tee
-    video and return: handedness, address frame (+ JPG), audio-detected
-    impact frame, ball-at-rest position, a derived ball-detection ROI
-    around that position, and a swing-direction "target" estimate.
+    video and PERSIST every result onto edit_metrics. Returns the
+    same data shape so callers (Edit wizard, or the background
+    upload-time spawner) can use either path.
 
-    Used by the single-swing Edit wizard on /admin/production. This
-    deliberately skips the per-frame ball-track Claude calls and the
-    tracer-video render — those run only when the operator hits
-    Produce. The cheap calls here (audio impact + one Claude
-    handedness call) usually return in ~5–10 s.
+    The cheap calls here (audio impact + one Claude handedness call)
+    usually return in ~5–10 s. The per-frame ball-track Claude calls
+    and the tracer-video render run only when the operator hits
+    Produce on Step 3.
     """
     row = db.get(LongVideoUpload, upload_id)
     if not row:
@@ -2220,6 +2255,33 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
             "method": "default par-3 flag estimate (upper-centre)",
         }
 
+    # Persist every detection result onto edit_metrics so the Edit
+    # wizard never has to call /auto-detect again — it just hydrates
+    # from edit_metrics on open. Idempotent: re-running auto-detect
+    # overwrites these fields (the operator's own subsequent
+    # adjustments via the per-field Apply buttons land here too).
+    address_image_url = _public_url(address_image_path)
+    saved = dict(row.edit_metrics or {})
+    saved.update({
+        "handedness": handedness or saved.get("handedness") or "right",
+        "address_frame": address_frame_idx if address_frame_idx is not None else saved.get("address_frame", 0),
+        "address_image_url": address_image_url or saved.get("address_image_url"),
+        "impact_frame": int(impact_frame) if impact_frame is not None else saved.get("impact_frame", 0),
+        "ball": (
+            {"x": int(ball_x), "y": int(ball_y)}
+            if ball_x is not None and ball_y is not None
+            else saved.get("ball")
+        ),
+        "roi": detection_area if detection_area is not None else saved.get("roi"),
+        "target": (
+            {"x": int(target["x"]), "y": int(target["y"])}
+            if target else saved.get("target")
+        ),
+        "frame_width": frame_w or saved.get("frame_width"),
+        "frame_height": frame_h or saved.get("frame_height"),
+    })
+    row.edit_metrics = saved
+    db.add(row)
     db.add(AuditLog(
         actor="admin", action="auto_detect_long_upload",
         target=f"long_upload:{upload_id}",
@@ -2246,7 +2308,7 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
         },
         "address": {
             "frame": address_frame_idx,
-            "image_url": _public_url(address_image_path),
+            "image_url": address_image_url,
         },
         "impact": {
             "frame": impact_frame,
