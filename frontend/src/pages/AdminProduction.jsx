@@ -1481,6 +1481,34 @@ function TracerStep({
     loadEditorFrame(target);
   }
 
+  async function regenerate() {
+    // cv2-only re-render: merges queued manual positions into the
+    // existing ball-track and renders the tracer overlay. No Claude.
+    setRendering(true);
+    setError(null);
+    try {
+      const overrides = Object.entries(manualPositions).map(
+        ([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y })
+      );
+      const out = await api.renderWizardTracerFast(adminPassword, row.id, {
+        manual_positions: overrides,
+      });
+      setTracer({
+        url: out.tracer_url,
+        frames: out.ball_track_frames || [],
+      });
+      setManualPositions({});
+      setSelectedFrame(null);
+      setEditorBg(null);
+      setEditorBall(null);
+      onSaved?.();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRendering(false);
+    }
+  }
+
   function editorEventToFrame(e) {
     if (!editorRef.current || !hasDims) return null;
     const r = editorRef.current.getBoundingClientRect();
@@ -1727,7 +1755,7 @@ function TracerStep({
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           {selectedFrame != null
-            ? "Click on the ball to queue this frame as a tracer point. Navigate to other frames to add more. Continue to Step 3 — Next there re-renders the tracer (no AI calls)."
+            ? "Click on the ball to queue this frame as a tracer point. Navigate to other frames and add more — including past the AI's 12-frame stop, all the way to the green. Re-generate tracer re-renders here (no AI calls)."
             : "Click a frame card on the right to correct the AI's ball position."}
         </div>
       </div>
@@ -1810,14 +1838,19 @@ function TracerStep({
           >
             + 5 frames
           </button>
-          {Object.keys(manualPositions).length > 0 && (
-            <span
-              className="small"
-              style={{ marginLeft: "auto", alignSelf: "center", color: "var(--emerald-700)" }}
-            >
-              {Object.keys(manualPositions).length} point{Object.keys(manualPositions).length === 1 ? "" : "s"} queued
-            </span>
-          )}
+          <button
+            type="button"
+            style={{ width: "auto", marginLeft: "auto" }}
+            disabled={rendering || Object.keys(manualPositions).length === 0}
+            onClick={regenerate}
+            title="Re-render the tracer with the queued points. cv2 only — no AI calls."
+          >
+            {rendering
+              ? "Re-rendering…"
+              : `Re-generate tracer${Object.keys(manualPositions).length
+                ? ` (${Object.keys(manualPositions).length})`
+                : ""}`}
+          </button>
         </div>
 
         <div className="tiny upper muted" style={{ marginTop: 4 }}>

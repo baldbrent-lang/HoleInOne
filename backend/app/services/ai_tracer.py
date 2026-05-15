@@ -2479,9 +2479,19 @@ def render_tracer_video(
     ball_rest_xy_native: tuple[float, float] | None,
     impact_frame_idx: int,
     track_frames: list[dict],
+    extend_to_last_anchor: bool = False,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
+
+    When `extend_to_last_anchor` is False (default) the rendered line
+    is truncated at the parabola's apex if apex falls before the last
+    anchor — a safety net for AI-only runs where late frames can
+    latch onto something downrange that bends the smoothed line back
+    on itself. When True the line is drawn all the way to the last
+    kept anchor, so an operator who's manually confirmed points past
+    the apex (a ball flying toward the green) gets the tracer they
+    asked for.
 
     The tracer:
       - Starts at the ball's at-rest position (anchored at the impact
@@ -2607,7 +2617,7 @@ def render_tracer_video(
             a_y = float(y_coef[0])
             b_y = float(y_coef[1])
             render_end = last_kept_frame
-            if a_y > 1e-6:
+            if a_y > 1e-6 and not extend_to_last_anchor:
                 apex_frame_f = -b_y / (2.0 * a_y)
                 if first_frame < apex_frame_f < last_kept_frame:
                     render_end = int(round(apex_frame_f))
