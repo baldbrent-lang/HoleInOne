@@ -2057,10 +2057,36 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
         return f"{settings.app_base_url}/uploads/clips/{p.name}?v={int(p.stat().st_mtime)}"
 
     handedness = handedness_info.get("handedness") if handedness_info else None
-    ball_x = handedness_info.get("ball_x") if handedness_info else None
-    ball_y = handedness_info.get("ball_y") if handedness_info else None
-    frame_w = handedness_info.get("image_width") if handedness_info else None
-    frame_h = handedness_info.get("image_height") if handedness_info else None
+    # Claude saw the address frame downscaled to image_width × image_height.
+    # ball_x / ball_y come back in those scaled coords. Scale them up to
+    # the source video's native pixel dimensions so every coordinate the
+    # wizard saves (ball-at-rest, ROI, target) is in the same reference
+    # frame as the ffmpeg overlay that produces the final clip.
+    sent_w = handedness_info.get("image_width") if handedness_info else None
+    sent_h = handedness_info.get("image_height") if handedness_info else None
+    try:
+        import cv2  # type: ignore
+        _cap = cv2.VideoCapture(str(src_path))
+        try:
+            native_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
+            native_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+        finally:
+            _cap.release()
+    except Exception:  # pragma: no cover
+        native_w = native_h = None
+
+    frame_w = native_w or sent_w
+    frame_h = native_h or sent_h
+
+    ball_x_raw = handedness_info.get("ball_x") if handedness_info else None
+    ball_y_raw = handedness_info.get("ball_y") if handedness_info else None
+    ball_x = ball_y = None
+    if (
+        ball_x_raw is not None and ball_y_raw is not None
+        and sent_w and sent_h and frame_w and frame_h
+    ):
+        ball_x = int(round(float(ball_x_raw) * frame_w / sent_w))
+        ball_y = int(round(float(ball_y_raw) * frame_h / sent_h))
 
     # --- Step 4: ball detection ROI ---
     # Square bbox centred on the ball-at-rest position, ~12% of frame
