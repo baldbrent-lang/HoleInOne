@@ -433,9 +433,35 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   useEffect(() => {
     if (!isMulti) return;
     const sw = swings[selectedSwing];
-    if (sw) applySaved(sw);
+    if (!sw) return;
+    applySaved(sw);
+
+    // /detect-swings only returns frame indices, not JPGs. The
+    // preview shows the address frame; lazy-fetch it on first
+    // selection of each swing, then cache the URL back into
+    // edit_metrics.swings so re-selecting is instant.
+    if (!sw.address_image_url && sw.address_frame != null) {
+      api
+        .getLongUploadFrame(adminPassword, row.id, sw.address_frame)
+        .then((data) => {
+          if (!data?.image_url) return;
+          setDraft((d) => ({ ...d, addressImageUrl: data.image_url }));
+          setSwings((prev) => {
+            const next = prev.map((s, i) =>
+              i === selectedSwing
+                ? { ...s, address_image_url: data.image_url }
+                : s
+            );
+            api
+              .saveEditMetrics(adminPassword, row.id, { swings: next })
+              .catch((e) => console.warn("cache addr url failed", e));
+            return next;
+          });
+        })
+        .catch((e) => console.warn("addr frame fetch failed", e));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSwing]);
+  }, [selectedSwing, swings.length]);
 
   if (!row) return null;
 

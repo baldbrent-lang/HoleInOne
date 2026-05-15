@@ -1069,6 +1069,37 @@ def _run_long_upload_job(
             # "X/Y processed" while the heavy work runs.
             row.last_n_segments = len(segs)
             row.last_n_succeeded = 0
+            # Persist the swing windows into edit_metrics so the
+            # Edit-wizard for multi-swing uploads can hydrate without
+            # re-running detect-swings. Each entry mirrors the shape
+            # the wizard expects: idx + frame indices + fps.
+            saved_em = dict(row.edit_metrics or {})
+            existing_swings = saved_em.get("swings") or []
+            by_idx = {int(s.get("idx", -1)): s for s in existing_swings if isinstance(s, dict)}
+            for i, seg in enumerate(segs):
+                if i in by_idx:
+                    continue
+                start_sec = float(seg.get("start_sec") or 0.0)
+                end_sec = float(seg.get("end_sec") or start_sec)
+                start_frame = int(round(start_sec * (tee_fps or 30.0)))
+                end_frame = int(round(end_sec * (tee_fps or 30.0)))
+                # Impact frame estimate sits 4.5 s into the window
+                # (matches detect_swings_combined's before_impact_sec).
+                impact_frame = int(round((start_sec + 4.5) * (tee_fps or 30.0)))
+                address_frame = max(
+                    start_frame,
+                    impact_frame - int(round(1.5 * (tee_fps or 30.0))),
+                )
+                by_idx[i] = {
+                    "idx": i,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "address_frame": address_frame,
+                    "impact_frame": impact_frame,
+                    "fps": round(tee_fps, 2) if tee_fps else None,
+                }
+            saved_em["swings"] = [by_idx[i] for i in sorted(by_idx)]
+            row.edit_metrics = saved_em
             db.commit()
 
             results = _process_long_upload_segments(
