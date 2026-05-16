@@ -2862,6 +2862,67 @@ def render_tracer_video(
         x_coef, y_coef, rejected_indices = fit
         rejected_frames = {anchors[i][0] for i in rejected_indices}
         kept = [a for i, a in enumerate(anchors) if i not in rejected_indices]
+        kept_indices = [
+            i for i in range(len(anchors)) if i not in rejected_indices
+        ]
+
+        # Re-fit constrained to pass EXACTLY through the rest anchor.
+        # The unconstrained weighted fit lands the parabola "near" the
+        # rest (weight=10x) but not on it; pinning the first rendered
+        # point to the exact rest pixel then created a visible kink
+        # between that pinned point and polyval's prediction at the
+        # next frame. Constraining the curve through the rest moves
+        # the math, not the geometry: every rendered point comes from
+        # polyval and the line starts exactly on the ball with no
+        # discontinuity.
+        if (
+            rest_is_anchor_zero and HAS_NP and len(kept) >= 3
+            and rest_anchor_frame is not None and 0 in kept_indices
+        ):
+            try:
+                f0 = float(rest_anchor_frame)
+                x0_rest = float(anchors[0][1])
+                y0_rest = float(anchors[0][2])
+                kept_frames = np.array([k[0] for k in kept], dtype=float)
+                kept_xs = np.array([k[1] for k in kept], dtype=float)
+                kept_ys = np.array([k[2] for k in kept], dtype=float)
+                if weight_list is not None:
+                    kept_ws = np.array(
+                        [weight_list[i] for i in kept_indices],
+                        dtype=float,
+                    )
+                else:
+                    kept_ws = np.ones(len(kept), dtype=float)
+                kept_ws = np.where(kept_ws > 0, kept_ws, 1e-3)
+                sqrt_w = np.sqrt(kept_ws)
+                # Substitute c = y0 - a·f0² - b·f0 into y = a·f² + b·f + c
+                # → (y - y0) = a·(f² - f0²) + b·(f - f0). Standard
+                # weighted lstsq on a/b, then back out c.
+                u_q = (kept_frames**2 - f0**2) * sqrt_w
+                v_q = (kept_frames - f0) * sqrt_w
+                A_q = np.column_stack([u_q, v_q])
+                b_q = (kept_ys - y0_rest) * sqrt_w
+                sol_q, *_ = np.linalg.lstsq(A_q, b_q, rcond=None)
+                a_q = float(sol_q[0])
+                b_q_coef = float(sol_q[1])
+                c_q = y0_rest - a_q * f0 * f0 - b_q_coef * f0
+                y_coef = np.array([a_q, b_q_coef, c_q])
+                # Same substitution for the linear x fit:
+                # x = m·f + k constrained by x0 = m·f0 + k.
+                v_x = (kept_frames - f0) * sqrt_w
+                b_x = (kept_xs - x0_rest) * sqrt_w
+                sol_x, *_ = np.linalg.lstsq(
+                    v_x[:, None], b_x, rcond=None,
+                )
+                m_x = float(sol_x[0])
+                k_x = x0_rest - m_x * f0
+                x_coef = np.array([m_x, k_x])
+            except Exception as exc:
+                log.warning(
+                    "ai_tracer: rest-constrained refit failed (%s) — "
+                    "falling back to unconstrained fit",
+                    exc,
+                )
         if kept:
             first_frame = kept[0][0]
             last_kept_frame = kept[-1][0]
@@ -2897,23 +2958,14 @@ def render_tracer_video(
                 ):
                     render_end = int(round(apex_frame_f))
             last_kept_frame_global = render_end
-            # Render every frame at the parabola's prediction —
-            # one smooth quadratic from rest to render_end. The rest
-            # position itself is pinned to its exact native pixel
-            # (typically only 1-2 px off the parabola's prediction
-            # at that frame, but pinning kills the ambiguity so the
-            # line literally starts at the ball).
-            rest_pin: tuple[int, int] | None = None
-            if rest_is_anchor_zero:
-                rest_pin = (
-                    int(anchors[0][1]), int(anchors[0][2]),
-                )
+            # Render every frame at the parabola's prediction — one
+            # smooth quadratic from rest to render_end. When the
+            # rest-constrained refit above succeeded, polyval at the
+            # first frame returns the exact rest pixel by construction,
+            # so the line starts on the ball with no kink.
             for f in range(first_frame, render_end + 1):
-                if f == first_frame and rest_pin is not None:
-                    x, y = rest_pin
-                else:
-                    x = int(round(float(np.polyval(x_coef, f))))
-                    y = int(round(float(np.polyval(y_coef, f))))
+                x = int(round(float(np.polyval(x_coef, f))))
+                y = int(round(float(np.polyval(y_coef, f))))
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
