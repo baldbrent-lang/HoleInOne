@@ -197,13 +197,6 @@ def _seed_default_courses() -> None:
             "hole_yardages": {"5": 207, "8": 197, "14": 194, "17": 221},
             "minutes_per_hole": 14,
         },
-        {
-            "name": "Baldwin Links",
-            "location": "",
-            "par3_holes": [3, 7, 12, 16],
-            "hole_yardages": {"3": 165, "7": 145, "12": 192, "16": 178},
-            "minutes_per_hole": 14,
-        },
     ]
     db = SessionLocal()
     try:
