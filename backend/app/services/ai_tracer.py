@@ -200,15 +200,17 @@ CLAHE_TILE_SIZE = 8
 #   <50 fps : 20 consecutive frames (~0.4-0.7 s of flight at 30/60 fps)
 #   50-100  : 40 consecutive frames (still every-frame, twice the
 #             budget to cover the same wall-clock duration)
-#   >100    : 40 frames sampled with STRIDE = 2 (every other frame,
-#             80-frame span). Cost stays at 40 Claude calls but
-#             the time window doubles to match what the lower-fps
-#             buckets cover in absolute time.
+#   >100    : 40 frames sampled with STRIDE = 5 (every fifth frame,
+#             200-frame span). Cost stays at 40 Claude calls; the
+#             ball barely moves between consecutive frames at 120 fps
+#             so sampling every other frame is wasteful — wider stride
+#             covers ~1.7s of flight (vs ~0.7s in the lower buckets)
+#             with the same API budget.
 BALL_TRACK_MAX_FRAMES = 12
 BALL_TRACK_MAX_FRAMES_HIGH_FPS = 40
 BALL_TRACK_HIGH_FPS_THRESHOLD = 50.0
 BALL_TRACK_VHIGH_FPS_THRESHOLD = 100.0
-BALL_TRACK_VHIGH_FPS_STRIDE = 2
+BALL_TRACK_VHIGH_FPS_STRIDE = 5
 BALL_TRACK_CONCURRENCY = 8
 
 # Phase-2 retry sends a crop. Crop size is in NATIVE pixels (how much
