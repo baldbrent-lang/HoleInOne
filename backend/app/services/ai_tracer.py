@@ -2573,11 +2573,11 @@ TRACER_REST_RING = (255, 60, 0)          # blue — ball-at-rest marker
 # misidentifications and the curve refits without them.
 TRAJ_OUTLIER_PX = 80
 TRAJ_OUTLIER_MAX_ITERS = 6
-# Fade-away tail after the last anchor: extend along the parabola's
-# tangent at render_end for `FRAME_LENGTH` frames of motion, split
-# into `SEGMENTS` sub-segments that alpha-blend down to zero.
-TRACER_FADE_FRAME_LENGTH = 4.0
-TRACER_FADE_SEGMENTS = 24
+# How many frames before the impact frame the rest-position anchor
+# sits. Operator wanted the tracer line to literally start at the
+# ball-at-rest position a beat before the swing strikes, so the
+# rendered curve begins 2 frames before impact instead of at impact.
+REST_ANCHOR_FRAMES_BEFORE_IMPACT = 2
 
 
 def _robust_quadratic_fit(
@@ -2810,9 +2810,13 @@ def render_tracer_video(
     # be pinned + weighted in the fit.
     anchors: list[tuple[int, int, int]] = []  # (frame, x, y)
     manual_anchor_idxs: set[int] = set()
+    rest_anchor_frame: int | None = None
     if ball_rest_xy_native is not None:
+        rest_anchor_frame = max(
+            0, int(impact_frame_idx) - REST_ANCHOR_FRAMES_BEFORE_IMPACT,
+        )
         anchors.append((
-            int(impact_frame_idx),
+            rest_anchor_frame,
             int(round(float(ball_rest_xy_native[0]))),
             int(round(float(ball_rest_xy_native[1]))),
         ))
@@ -2830,7 +2834,6 @@ def render_tracer_video(
     # legitimate marks with small click jitter just blend into the
     # fit.
     smoothed_points: list[tuple[int, int, int]] = []  # (frame, x, y)
-    fade_tail_points: list[tuple[int, int]] = []  # native pixel coords
     last_kept_frame_global: int | None = None
     rejected_frames: set[int] = set()
     # Only the rest position is immune to outlier rejection. Manual
@@ -2898,26 +2901,10 @@ def render_tracer_video(
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
-            # Fade-tail: extend along the parabola's tangent at
-            # `render_end` for ~4 frames of motion. The tangent
-            # naturally flattens out at apex (vy → 0) so the fade
-            # goes nearly horizontal there — never loops back down.
-            base_x = float(np.polyval(x_coef, render_end))
-            base_y = float(np.polyval(y_coef, render_end))
-            vx = float(np.polyval(np.polyder(x_coef), render_end))
-            vy = float(np.polyval(np.polyder(y_coef), render_end))
-            for i in range(1, TRACER_FADE_SEGMENTS + 1):
-                t = i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
-                fx = int(round(base_x + vx * t))
-                fy = int(round(base_y + vy * t))
-                if not (0 <= fx < width and 0 <= fy < height):
-                    break
-                fade_tail_points.append((fx, fy))
         log.info(
             "ai_tracer: tracer fit — %d anchors, %d rejected as outliers, "
-            "%d smoothed render points (parabola), %d fade-tail segments",
+            "%d smoothed render points (parabola)",
             len(anchors), len(rejected_indices), len(smoothed_points),
-            len(fade_tail_points),
         )
     else:
         # Not enough anchors for a stable fit (or numpy missing).
@@ -2966,32 +2953,6 @@ def render_tracer_video(
                         frame, visible,
                         total_points=len(smoothed_points),
                     )
-                # Fade-away tail. Renders only once the main line has
-                # reached its end (i.e. we're at or past the last
-                # accepted anchor frame). Each sub-segment is
-                # alpha-blended with linearly decreasing weight so the
-                # line visibly trails off along the parabola tangent.
-                # Thickness uses the END taper value so the fade picks
-                # up where the main tapered line left off.
-                if (
-                    fade_tail_points
-                    and last_kept_frame_global is not None
-                    and frame_idx >= last_kept_frame_global
-                    and visible
-                ):
-                    tail_anchor = visible[-1]
-                    walk = [tail_anchor, *fade_tail_points]
-                    for j in range(len(walk) - 1):
-                        alpha = 1.0 - (j / float(len(walk) - 1))
-                        if alpha <= 0.03:
-                            break
-                        overlay = frame.copy()
-                        cv2.line(
-                            overlay, walk[j], walk[j + 1],
-                            TRACER_LINE_COLOR, TRACER_LINE_THICKNESS_END,
-                            cv2.LINE_AA,
-                        )
-                        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
                 # Resting-ball indicator at the origin removed too — operator
                 # wants nothing but the smoothed tracer line in the final
                 # production output. rest_xy is still threaded through the

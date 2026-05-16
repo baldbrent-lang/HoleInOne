@@ -1696,6 +1696,31 @@ function TracerStep({
   const hasDims = !!(frameW && frameH);
   const maxFrame = totalFrames ? totalFrames - 1 : null;
 
+  // Synthetic "rest" entry shown as the first card in the grid: the
+  // ball at its resting position two frames before impact. The
+  // tracer renderer already anchors there (REST_ANCHOR_FRAMES_BEFORE_IMPACT
+  // on the backend); this entry just gives the operator a clickable
+  // card so they can verify or fine-tune the start of the line.
+  // Skipped when the AI already produced a frame at the same index
+  // or when we don't have impact/ball context yet.
+  const restFrame =
+    draft?.impactFrame != null
+      ? Math.max(0, draft.impactFrame - 2)
+      : null;
+  const restEntry =
+    draft?.ball && restFrame != null && !frames.some((f) => f.frame === restFrame)
+      ? {
+          frame: restFrame,
+          found: true,
+          x: draft.ball.x,
+          y: draft.ball.y,
+          manual: false,
+          image_url: null,
+          rest: true,
+        }
+      : null;
+  const displayFrames = restEntry ? [restEntry, ...frames] : frames;
+
   // Pivot for the zoom transform — defaults to the ball detection
   // ROI from Step 1 so the operator drops straight into the ball
   // area. Falls back to the resting-ball point, then frame centre.
@@ -1766,6 +1791,9 @@ function TracerStep({
       if (rec?.found && rec.x != null && rec.y != null) {
         return { x: rec.x, y: rec.y };
       }
+      if (f === restFrame && draft?.ball) {
+        return { x: draft.ball.x, y: draft.ball.y };
+      }
       return null;
     };
     const here = ballAt(frameIdx);
@@ -1812,6 +1840,9 @@ function TracerStep({
       if (m) setEditorBall({ x: m.x, y: m.y });
       else if (!clearedFrames.has(frameIdx) && existing?.found && existing.x != null) {
         setEditorBall({ x: existing.x, y: existing.y });
+      } else if (frameIdx === restFrame && draft?.ball) {
+        // Synthetic rest entry: show the rest position from Step 1.
+        setEditorBall({ x: draft.ball.x, y: draft.ball.y });
       }
     } catch (e) {
       console.warn("frame fetch failed", e);
@@ -2255,7 +2286,8 @@ function TracerStep({
         </div>
 
         <div className="tiny upper muted" style={{ marginTop: 4 }}>
-          Per-frame ball-track ({frames.length})
+          Per-frame ball-track ({displayFrames.length}
+          {restEntry ? " · incl. rest" : ""})
         </div>
         <div
           style={{
@@ -2264,7 +2296,7 @@ function TracerStep({
             gap: 6,
           }}
         >
-          {frames.map((f) => {
+          {displayFrames.map((f) => {
             const ball = mergedBallFor(f);
             const isQueued = !!manualPositions[f.frame];
             return (
@@ -2308,7 +2340,7 @@ function TracerStep({
                 <div className="tiny" style={{ padding: "3px 4px" }}>
                   <b>f{f.frame}</b>
                   <span className="muted">
-                    {" "}{f.found ? "found" : "no ball"}
+                    {" "}{f.rest ? "rest" : (f.found ? "found" : "no ball")}
                     {isQueued ? " · queued" : ""}
                   </span>
                 </div>
