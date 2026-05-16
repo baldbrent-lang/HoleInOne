@@ -1681,7 +1681,16 @@ function TracerStep({
   const [editorBg, setEditorBg] = useState(null); // {url, frame}
   const [editorBall, setEditorBall] = useState(null); // {x, y}
   const [zoom, setZoom] = useState(1);
+  // Frames the operator explicitly cleared. Sent to the backend so
+  // the renderer drops them from the ball track entirely (AI marks
+  // included). Reset after a successful re-render.
+  const [clearedFrames, setClearedFrames] = useState(() => new Set());
   const editorRef = useRef(null);
+
+  // Default zoom level when dropping straight onto a ball position.
+  // 3x is tight enough to nudge pixel-perfect, loose enough to keep
+  // surrounding context visible if the AI was a couple frames off.
+  const BALL_ZOOM = 3;
 
   const frames = tracer?.frames || [];
   const hasDims = !!(frameW && frameH);
@@ -1737,9 +1746,43 @@ function TracerStep({
   })();
 
   function mergedBallFor(f) {
+    if (clearedFrames.has(f.frame)) return null;
     const m = manualPositions[f.frame];
     if (m) return { x: m.x, y: m.y, manual: true };
     if (f.found && f.x != null && f.y != null) return { x: f.x, y: f.y, manual: !!f.manual };
+    return null;
+  }
+
+  // Returns the most useful ball position for centring the editor:
+  // manual mark on `frameIdx`, then AI detection on `frameIdx`, then
+  // walk backward to the most recent known position, then forward
+  // looking for the next known one. Skips frames the operator cleared.
+  function findCentringBall(frameIdx) {
+    const ballAt = (f) => {
+      if (clearedFrames.has(f)) return null;
+      const m = manualPositions[f];
+      if (m) return { x: m.x, y: m.y };
+      const rec = (tracer?.frames || []).find((r) => r.frame === f);
+      if (rec?.found && rec.x != null && rec.y != null) {
+        return { x: rec.x, y: rec.y };
+      }
+      return null;
+    };
+    const here = ballAt(frameIdx);
+    if (here) return here;
+    for (let f = frameIdx - 1; f >= 0; f--) {
+      const b = ballAt(f);
+      if (b) return b;
+    }
+    const ahead = [...(tracer?.frames || [])]
+      .map((r) => r.frame)
+      .concat(Object.keys(manualPositions).map((k) => parseInt(k, 10)))
+      .filter((f) => f > frameIdx)
+      .sort((a, b) => a - b);
+    for (const f of ahead) {
+      const b = ballAt(f);
+      if (b) return b;
+    }
     return null;
   }
 
@@ -1747,15 +1790,27 @@ function TracerStep({
     setSelectedFrame(frameIdx);
     setEditorBg(null);
     setEditorBall(null);
-    setZoom(autoZoom);
-    setFocusOverride(null);
+    // Centre + zoom on the ball (current frame, else last known). If
+    // nothing's ever been marked, fall back to the ROI auto-zoom so
+    // the operator still drops into the right neighbourhood.
+    const centring = findCentringBall(frameIdx);
+    if (centring && hasDims) {
+      setZoom(BALL_ZOOM);
+      setFocusOverride({
+        x: (centring.x / frameW) * 100,
+        y: (centring.y / frameH) * 100,
+      });
+    } else {
+      setZoom(autoZoom);
+      setFocusOverride(null);
+    }
     try {
       const data = await api.getLongUploadFrame(adminPassword, row.id, frameIdx);
       setEditorBg({ url: data.image_url, frame: data.frame });
       const existing = (tracer?.frames || []).find((f) => f.frame === frameIdx);
       const m = manualPositions[frameIdx];
       if (m) setEditorBall({ x: m.x, y: m.y });
-      else if (existing?.found && existing.x != null) {
+      else if (!clearedFrames.has(frameIdx) && existing?.found && existing.x != null) {
         setEditorBall({ x: existing.x, y: existing.y });
       }
     } catch (e) {
@@ -1773,11 +1828,24 @@ function TracerStep({
 
   function clearEditorBall() {
     if (selectedFrame == null) return;
+    // Drop any queued manual mark for this frame.
     setManualPositions((m) => {
       const next = { ...m };
       delete next[selectedFrame];
       return next;
     });
+    // If the AI had a detection here, mark the frame as explicitly
+    // cleared so the backend renderer drops it from the merged track
+    // on the next re-render.
+    const existing = (tracer?.frames || []).find((f) => f.frame === selectedFrame);
+    if (existing?.found && existing.x != null) {
+      setClearedFrames((s) => {
+        const next = new Set(s);
+        next.add(selectedFrame);
+        return next;
+      });
+    }
+    setEditorBall(null);
   }
 
   function addFrame(delta) {
@@ -1797,14 +1865,17 @@ function TracerStep({
       const overrides = Object.entries(manualPositions).map(
         ([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y })
       );
+      const cleared = Array.from(clearedFrames);
       const out = await api.renderWizardTracerFast(adminPassword, row.id, {
         manual_positions: overrides,
+        cleared_frames: cleared,
       });
       setTracer({
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
       });
       setManualPositions({});
+      setClearedFrames(new Set());
       setSelectedFrame(null);
       setEditorBg(null);
       setEditorBall(null);
@@ -1846,6 +1917,16 @@ function TracerStep({
     setEditorBall(pt);
     if (selectedFrame != null) {
       setManualPositions((m) => ({ ...m, [selectedFrame]: pt }));
+      // Marking a position un-clears the frame: the operator is
+      // putting a ball back, so we shouldn't tell the backend to
+      // drop it.
+      if (clearedFrames.has(selectedFrame)) {
+        setClearedFrames((s) => {
+          const next = new Set(s);
+          next.delete(selectedFrame);
+          return next;
+        });
+      }
     }
   }
 
@@ -2093,6 +2174,11 @@ function TracerStep({
                   (queued)
                 </span>
               )}
+              {clearedFrames.has(selectedFrame) && (
+                <span className="small" style={{ marginLeft: 6, color: "var(--danger)" }}>
+                  (cleared)
+                </span>
+              )}
             </div>
             <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
               <button
@@ -2100,8 +2186,13 @@ function TracerStep({
                 className="ghost"
                 style={{ width: "auto" }}
                 onClick={clearEditorBall}
-                disabled={!manualPositions[selectedFrame]}
-                title="Remove this frame from the tracer queue"
+                disabled={
+                  !manualPositions[selectedFrame]
+                  && !(tracer?.frames || []).some(
+                    (f) => f.frame === selectedFrame && f.found && f.x != null,
+                  )
+                }
+                title="Remove the ball mark on this frame (manual or AI). The renderer will drop this frame from the tracer track."
               >
                 Clear frame
               </button>
@@ -2148,14 +2239,17 @@ function TracerStep({
           <button
             type="button"
             style={{ width: "auto", marginLeft: "auto" }}
-            disabled={rendering || Object.keys(manualPositions).length === 0}
+            disabled={
+              rendering
+              || (Object.keys(manualPositions).length === 0 && clearedFrames.size === 0)
+            }
             onClick={regenerate}
-            title="Re-render the tracer with the queued points. cv2 only — no AI calls."
+            title="Re-render the tracer with the queued edits. cv2 only — no AI calls."
           >
             {rendering
               ? "Re-rendering…"
-              : `Re-generate tracer${Object.keys(manualPositions).length
-                ? ` (${Object.keys(manualPositions).length})`
+              : `Re-generate tracer${Object.keys(manualPositions).length + clearedFrames.size
+                ? ` (${Object.keys(manualPositions).length + clearedFrames.size})`
                 : ""}`}
           </button>
         </div>

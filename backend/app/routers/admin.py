@@ -2559,6 +2559,10 @@ def render_tracer_fast(
       manual_positions: list of {frame, x, y} pixel coords. Merged
         into the existing ball_track_frames — overrides matching
         frames, inserts new ones for frames the AI never tracked.
+      cleared_frames: list of frame indices the operator rejected on
+        the wizard. Dropped from the merged track entirely so the
+        renderer doesn't re-anchor to AI detections the operator
+        already said were wrong.
 
     Returns the updated tracer URL + the merged ball_track_frames.
     """
@@ -2574,6 +2578,17 @@ def render_tracer_fast(
     saved = dict(row.edit_metrics or {})
     existing = list(saved.get("ball_track_frames") or [])
     manual_positions = payload.get("manual_positions") or []
+    # Frames the operator explicitly cleared on the wizard. We drop
+    # these from the merged track entirely so the renderer doesn't
+    # anchor the tracer to a wrong AI detection the operator already
+    # rejected.
+    cleared_raw = payload.get("cleared_frames") or []
+    cleared_frames: set[int] = set()
+    for cf in cleared_raw:
+        try:
+            cleared_frames.add(int(cf))
+        except (TypeError, ValueError):
+            continue
 
     # Merge: frame index → entry. Manual wins. Manual additions for
     # frames the AI never visited are flagged manual=True / found=True
@@ -2583,6 +2598,8 @@ def render_tracer_fast(
         try:
             f = int(rec.get("frame"))
         except (TypeError, ValueError):
+            continue
+        if f in cleared_frames:
             continue
         by_frame[f] = {
             "frame": f,
@@ -2597,6 +2614,10 @@ def render_tracer_fast(
             f = int(mp["frame"]); x = int(mp["x"]); y = int(mp["y"])
         except (KeyError, TypeError, ValueError):
             continue
+        # A re-mark on a previously-cleared frame is the operator
+        # putting the ball back; the frontend already drops it from
+        # the cleared set, but be defensive in case payloads cross.
+        cleared_frames.discard(f)
         prior = by_frame.get(f, {})
         by_frame[f] = {
             "frame": f,
@@ -2665,7 +2686,10 @@ def render_tracer_fast(
     db.add(AuditLog(
         actor="admin", action="render_tracer_fast",
         target=f"long_upload:{upload_id}",
-        detail=f"merged_frames={len(merged)} manual={len(manual_positions)}",
+        detail=(
+            f"merged_frames={len(merged)} manual={len(manual_positions)} "
+            f"cleared={len(cleared_frames)}"
+        ),
     ))
     db.commit()
     db.refresh(row)
