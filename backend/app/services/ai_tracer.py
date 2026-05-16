@@ -2322,10 +2322,14 @@ TRACER_LINE_HALO = (15, 15, 80)          # deep maroon halo behind
 # Tapered thickness: thicker at the resting-ball end of the line,
 # narrower toward the apex / end-of-flight, so the line visually
 # narrows as the ball flies away from the camera (broadcast tracer
-# convention).
-TRACER_LINE_THICKNESS_START = 6
-TRACER_LINE_THICKNESS_END = 2
+# convention). Bumped to a sharper ratio so the "ball getting
+# smaller" cue reads from a glance.
+TRACER_LINE_THICKNESS_START = 10
+TRACER_LINE_THICKNESS_END = 1
 TRACER_LINE_THICKNESS = TRACER_LINE_THICKNESS_START  # legacy alias
+# Dash/gap constants kept for the classical tracer path; the AI
+# editing-wizard renderer is now a continuous solid line so these
+# are unused there.
 TRACER_DASH_LEN = 14
 TRACER_GAP_LEN = 10
 TRACER_BALL_RING = (0, 230, 255)         # yellow — ball at current frame
@@ -2339,15 +2343,21 @@ TRACER_REST_RING = (255, 60, 0)          # blue — ball-at-rest marker
 # misidentifications and the curve refits without them.
 TRAJ_OUTLIER_PX = 80
 TRAJ_OUTLIER_MAX_ITERS = 6
-# How many sub-frame samples the fade-away tail is split into. After
-# the last accepted anchor the tracer doesn't continue extrapolating;
-# instead it shows a brief comet-style tail that spans roughly one
-# frame's worth of ball motion (sampled along the same parabola the
-# main line was drawn through) and fades to zero opacity along its
-# length. Length 1.0 = exactly 1 frame of motion at the local
-# velocity; smaller values make the fade shorter.
-TRACER_FADE_FRAME_LENGTH = 1.0
-TRACER_FADE_SEGMENTS = 10
+# Light low-pass on the rendered spline output: smooths small
+# frame-to-frame click jitter without distorting the overall arc.
+# Each interior sample is pulled `weight` toward the average of its
+# immediate neighbors, `iterations` times. Endpoints (rest position
+# + last anchor) are left alone so the line still starts/ends where
+# the operator asked.
+TRACER_SMOOTH_ITERATIONS = 1
+TRACER_SMOOTH_WEIGHT = 0.25
+# Fade-away tail after the last anchor. Extrapolates the natural
+# trajectory using estimated velocity + acceleration from the last
+# few rendered points, so the tail curves the same way the spline
+# was curving instead of shooting off in a straight tangent.
+# `FRAME_LENGTH` = how many frames of motion the tail covers.
+TRACER_FADE_FRAME_LENGTH = 4.0
+TRACER_FADE_SEGMENTS = 24
 
 
 def _robust_quadratic_fit(
@@ -2492,6 +2502,37 @@ def _catmull_rom_interpolate(
     return out
 
 
+def _smooth_polyline(
+    points: list[tuple[int, int, int]],
+    iterations: int = TRACER_SMOOTH_ITERATIONS,
+    weight: float = TRACER_SMOOTH_WEIGHT,
+) -> list[tuple[int, int, int]]:
+    """Low-pass smoother for the rendered (frame, x, y) polyline.
+
+    Each interior point is pulled `weight` toward the average of its
+    immediate neighbors, `iterations` times. Endpoints are
+    untouched so the line still starts at the rest position and
+    ends at the operator's last anchor. Light settings (≤0.4 weight,
+    1–2 iterations) round out sub-pixel click jitter without pulling
+    the line visibly off the marks.
+    """
+    if len(points) < 3 or iterations <= 0:
+        return list(points)
+    cur = list(points)
+    for _ in range(iterations):
+        nxt = [cur[0]]
+        for i in range(1, len(cur) - 1):
+            f, x, y = cur[i]
+            xp, yp = cur[i - 1][1], cur[i - 1][2]
+            xn, yn = cur[i + 1][1], cur[i + 1][2]
+            new_x = (1.0 - weight) * x + weight * 0.5 * (xp + xn)
+            new_y = (1.0 - weight) * y + weight * 0.5 * (yp + yn)
+            nxt.append((f, int(round(new_x)), int(round(new_y))))
+        nxt.append(cur[-1])
+        cur = nxt
+    return cur
+
+
 def _draw_dashed_tracer(
     img,
     points: list[tuple[int, int]],
@@ -2500,17 +2541,18 @@ def _draw_dashed_tracer(
     start_thickness: int = TRACER_LINE_THICKNESS_START,
     end_thickness: int = TRACER_LINE_THICKNESS_END,
 ) -> None:
-    """Draw a dashed polyline through `points` with a halo behind it.
-    No-op when fewer than 2 points are provided. Style matches the
-    classical tracer so the visual language is consistent.
+    """Draw a solid tapered polyline through `points` with a halo
+    behind it. No-op when fewer than 2 points are provided.
 
-    Thickness linearly tapers from `start_thickness` at the first
-    point (the resting ball) to `end_thickness` at the last point
-    (apex / end of flight). `total_points` is the FULL final length
-    of the polyline — passing it keeps the per-frame growth of the
-    line tapered against the same reference span, so early frames
-    don't briefly look thin when only a few points are visible yet.
-    Defaults to `len(points)` when not provided (no taper context).
+    Despite the legacy name, this renderer is no longer dashed — the
+    operator preferred a continuous solid line so the tracer reads
+    as one stroke instead of a chain. Thickness linearly tapers from
+    `start_thickness` at the first point (the resting ball) to
+    `end_thickness` at the last (apex / end of flight). `total_points`
+    is the FULL final length of the polyline — passing it keeps the
+    per-frame growth tapered against the same reference span so
+    early frames don't briefly render as a thin stub before the full
+    taper develops.
     """
     if len(points) < 2:
         return
@@ -2526,58 +2568,23 @@ def _draw_dashed_tracer(
             start_thickness + (end_thickness - start_thickness) * frac
         )))
 
-    # Halo behind the dashes. With taper we draw it as per-segment
-    # lines so each segment's halo matches its dash thickness; without
-    # taper we keep the existing single-polyline fast path.
-    if not tapered and HAS_NP:
-        cv2.polylines(
-            img, [np.array(points, dtype=np.int32)],
-            False, TRACER_LINE_HALO,
-            start_thickness + 4, cv2.LINE_AA,
-        )
-    else:
-        for i in range(1, len(points)):
-            t = _thickness_at(i)
-            cv2.line(
-                img, points[i - 1], points[i],
-                TRACER_LINE_HALO, t + 4, cv2.LINE_AA,
-            )
-
-    accumulated = 0.0
-    drawing = True
+    # Halo behind the line: draw per-segment so each segment's halo
+    # matches the segment's tapered thickness. (Single polylines call
+    # would force a constant thickness across the whole stroke.)
     for i in range(1, len(points)):
-        x0, y0 = points[i - 1]
-        x1, y1 = points[i]
-        dx = float(x1 - x0)
-        dy = float(y1 - y0)
-        seg_len = (dx * dx + dy * dy) ** 0.5
-        if seg_len == 0:
-            continue
-        ux = dx / seg_len
-        uy = dy / seg_len
-        traveled = 0.0
-        cur_x = float(x0)
-        cur_y = float(y0)
-        seg_thickness = _thickness_at(i)
-        while traveled < seg_len:
-            target_seg = TRACER_DASH_LEN if drawing else TRACER_GAP_LEN
-            remaining = target_seg - accumulated
-            step = min(remaining, seg_len - traveled)
-            nx = cur_x + ux * step
-            ny = cur_y + uy * step
-            if drawing:
-                cv2.line(
-                    img,
-                    (int(cur_x), int(cur_y)), (int(nx), int(ny)),
-                    TRACER_LINE_COLOR, seg_thickness, cv2.LINE_AA,
-                )
-            cur_x = nx
-            cur_y = ny
-            traveled += step
-            accumulated += step
-            if accumulated >= target_seg:
-                drawing = not drawing
-                accumulated = 0.0
+        t = _thickness_at(i)
+        cv2.line(
+            img, points[i - 1], points[i],
+            TRACER_LINE_HALO, t + 4, cv2.LINE_AA,
+        )
+
+    # Solid foreground line on top of the halo.
+    for i in range(1, len(points)):
+        t = _thickness_at(i)
+        cv2.line(
+            img, points[i - 1], points[i],
+            TRACER_LINE_COLOR, t, cv2.LINE_AA,
+        )
 
 
 def render_tracer_video(
@@ -2775,20 +2782,41 @@ def render_tracer_video(
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
-            # Fade-tail: extend along the spline's last-segment
-            # direction for one frame's worth of motion. At apex the
-            # tangent flattens out so the fade goes nearly horizontal
-            # — never loops back down — and on non-truncated lines it
-            # picks up the local velocity from the spline.
+            # Light low-pass over the rendered points: rounds out the
+            # small frame-to-frame click jitter from the operator's
+            # marks so the curve reads as a smooth parabola instead of
+            # a series of straight micro-segments. Endpoints (rest
+            # position + last anchor) are preserved.
+            smoothed_points = _smooth_polyline(smoothed_points)
+            # Fade-tail: extrapolate using the last few rendered
+            # points' velocity + acceleration so the tail curves the
+            # same way the spline was curving — same trajectory the
+            # ball was on, not a straight tangent shot off the end.
+            if len(smoothed_points) >= 3:
+                p_last = smoothed_points[-1]
+                p_mid = smoothed_points[-2]
+                p_first = smoothed_points[-3]
+                base_x = float(p_last[1])
+                base_y = float(p_last[2])
+                vx = float(p_last[1] - p_mid[1])
+                vy = float(p_last[2] - p_mid[2])
+                ax = float((p_last[1] - p_mid[1]) - (p_mid[1] - p_first[1]))
+                ay = float((p_last[2] - p_mid[2]) - (p_mid[2] - p_first[2]))
+            elif len(smoothed_points) >= 2:
+                p_last = smoothed_points[-1]
+                p_mid = smoothed_points[-2]
+                base_x = float(p_last[1])
+                base_y = float(p_last[2])
+                vx = float(p_last[1] - p_mid[1])
+                vy = float(p_last[2] - p_mid[2])
+                ax = ay = 0.0
+            else:
+                base_x = base_y = vx = vy = ax = ay = 0.0
             if len(smoothed_points) >= 2:
-                base_x = float(smoothed_points[-1][1])
-                base_y = float(smoothed_points[-1][2])
-                vx = float(smoothed_points[-1][1] - smoothed_points[-2][1])
-                vy = float(smoothed_points[-1][2] - smoothed_points[-2][2])
                 for i in range(1, TRACER_FADE_SEGMENTS + 1):
                     t = i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
-                    fx = int(round(base_x + vx * t))
-                    fy = int(round(base_y + vy * t))
+                    fx = int(round(base_x + vx * t + 0.5 * ax * t * t))
+                    fy = int(round(base_y + vy * t + 0.5 * ay * t * t))
                     if not (0 <= fx < width and 0 <= fy < height):
                         break
                     fade_tail_points.append((fx, fy))
