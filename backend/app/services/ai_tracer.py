@@ -2721,19 +2721,17 @@ def render_tracer_video(
     ball_rest_xy_native: tuple[float, float] | None,
     impact_frame_idx: int,
     track_frames: list[dict],
-    extend_to_last_anchor: bool = False,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
 
-    When `extend_to_last_anchor` is False (default) the rendered line
-    is truncated at the parabola's apex if apex falls before the last
-    anchor — a safety net for AI-only runs where late frames can
-    latch onto something downrange that bends the smoothed line back
-    on itself. When True the line is drawn all the way to the last
-    kept anchor, so an operator who's manually confirmed points past
-    the apex (a ball flying toward the green) gets the tracer they
-    asked for.
+    The line stops at the parabola's apex (its mathematical vertex)
+    unless the last kept anchor sits visually below the apex by at
+    least DESCENT_THRESHOLD_PX — the signal that the operator (or
+    AI) actually confirmed the ball coming back down. Without that
+    signal we'd rather end at the peak than draw a "phantom descent"
+    produced by the parabola fit's vertex landing between marks the
+    operator placed near the apex.
 
     The tracer:
       - Starts at the ball's at-rest position (anchored at the impact
@@ -2867,18 +2865,36 @@ def render_tracer_video(
         if kept:
             first_frame = kept[0][0]
             last_kept_frame = kept[-1][0]
-            # Apex truncation (auto-only): stop the line at the
-            # parabola's vertex when it falls inside the kept range.
-            # In image coords y grows downward, so the vertex of
-            # a > 0 is the visual peak. Disabled in wizard mode
-            # (extend_to_last_anchor=True) so operator-confirmed
-            # descent points still draw.
+            # Apex truncation: stop the line at the parabola's vertex
+            # unless the operator marked CLEAR descent past it. In
+            # image coords y grows downward, so the vertex of a > 0
+            # is the visual peak.
+            #
+            # Even in wizard mode we apply this: when manual marks
+            # plateau near the peak (several marks at similar y) the
+            # math places the vertex BETWEEN them and the polyval
+            # samples between those marks dip slightly past it on the
+            # way back up — a "phantom descent" the operator didn't
+            # mark. Detecting genuine descent: the last anchor sits
+            # visually below the predicted apex by at least
+            # DESCENT_THRESHOLD_PX. If so the operator confirmed the
+            # ball coming down and we render through; if not we stop
+            # at the apex frame.
             a_y = float(y_coef[0])
             b_y = float(y_coef[1])
             render_end = last_kept_frame
-            if a_y > 1e-6 and not extend_to_last_anchor:
+            DESCENT_THRESHOLD_PX = 30.0
+            if a_y > 1e-6:
                 apex_frame_f = -b_y / (2.0 * a_y)
-                if first_frame < apex_frame_f < last_kept_frame:
+                apex_y_predicted = float(np.polyval(y_coef, apex_frame_f))
+                last_anchor_y = float(kept[-1][2])
+                user_marked_descent = (
+                    last_anchor_y > apex_y_predicted + DESCENT_THRESHOLD_PX
+                )
+                if (
+                    not user_marked_descent
+                    and first_frame < apex_frame_f < last_kept_frame
+                ):
                     render_end = int(round(apex_frame_f))
             last_kept_frame_global = render_end
             # Render every frame at the parabola's prediction —

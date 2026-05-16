@@ -2662,9 +2662,6 @@ def render_tracer_fast(
             }
             for e in merged
         ],
-        # Operator-confirmed points should always be drawn — never
-        # truncate at apex when the wizard is driving the render.
-        extend_to_last_anchor=True,
     )
     if not info.get("ok"):
         raise HTTPException(500, f"tracer render failed: {info.get('error') or 'unknown'}")
