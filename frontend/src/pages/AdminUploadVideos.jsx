@@ -110,6 +110,7 @@ export default function AdminUploadVideos() {
         <Link to="/admin/production">Production</Link>
         <Link to="/admin/produced-clips">Produced Clips</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras">Cameras</Link>
       </div>
 
       <div className="card">

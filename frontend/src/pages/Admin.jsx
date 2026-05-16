@@ -103,6 +103,7 @@ export default function Admin() {
         <Link to="/admin/production">Production</Link>
         <Link to="/admin/produced-clips">Produced Clips</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras">Cameras</Link>
         <button
           className="ghost"
           onClick={() => { localStorage.removeItem(ADMIN_PW_STORAGE); window.location.reload(); }}

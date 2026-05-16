@@ -2628,6 +2628,7 @@ export default function AdminProduction() {
         <Link to="/admin/production" className="active">Production</Link>
         <Link to="/admin/produced-clips">Produced Clips</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras">Cameras</Link>
       </div>
 
       <div className="card">

@@ -240,6 +240,7 @@ export default function AdminCameras() {
         <Link to="/admin/production">Production</Link>
         <Link to="/admin/produced-clips">Produced Clips</Link>
         <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras" className="active">Cameras</Link>
       </div>
 
       <div className="card">
