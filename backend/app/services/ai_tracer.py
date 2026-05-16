@@ -2431,6 +2431,67 @@ def _robust_quadratic_fit(
     return last_coefs[0], last_coefs[1], rejected
 
 
+def _catmull_rom_interpolate(
+    anchors: list[tuple[int, int, int]],
+) -> dict[int, tuple[int, int]]:
+    """Build a smooth curve passing through every anchor and return
+    a dict mapping every integer frame in [first.frame, last.frame]
+    to its interpolated (x, y).
+
+    Why a spline instead of the parabola: the parabola is a single
+    global shape, so sparse anchors past the AI's last detected frame
+    can pull its apex into the gap and dip the rendered line below
+    the operator's marks ("ball defies gravity" between two
+    near-apex manual marks the operator left 40+ frames apart).
+    Catmull-Rom interpolates each segment from local tangents, so
+    nothing happens in the gap that isn't suggested by the anchors
+    on its boundary — flat marks stay flat, ascending marks stay
+    ascending.
+
+    Uses uniform Catmull-Rom (alpha=0). Virtual endpoints are
+    reflected from the first/last real segment so boundary segments
+    don't need a special case. With 2 anchors the cubic basis
+    collapses to a straight line; with ≤1 anchors we just hand the
+    raw point back.
+
+    `anchors` must be sorted by frame with unique frame indices.
+    """
+    if len(anchors) < 2:
+        return {int(a[0]): (int(a[1]), int(a[2])) for a in anchors}
+
+    ext = list(anchors)
+    f0, x0, y0 = ext[0]
+    f1, x1, y1 = ext[1]
+    ext.insert(0, (2 * f0 - f1, 2 * x0 - x1, 2 * y0 - y1))
+    fn, xn, yn = ext[-1]
+    fm, xm, ym = ext[-2]
+    ext.append((2 * fn - fm, 2 * xn - xm, 2 * yn - ym))
+
+    out: dict[int, tuple[int, int]] = {}
+    for i in range(1, len(ext) - 2):
+        p0 = ext[i - 1]
+        p1 = ext[i]
+        p2 = ext[i + 1]
+        p3 = ext[i + 2]
+        f_start = int(p1[0])
+        f_end = int(p2[0])
+        if f_end <= f_start:
+            continue
+        span = float(f_end - f_start)
+        for f in range(f_start, f_end + 1):
+            t = (f - f_start) / span
+            t2 = t * t
+            t3 = t2 * t
+            b0 = -0.5 * t3 + t2 - 0.5 * t
+            b1 = 1.5 * t3 - 2.5 * t2 + 1.0
+            b2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t
+            b3 = 0.5 * t3 - 0.5 * t2
+            x = b0 * p0[1] + b1 * p1[1] + b2 * p2[1] + b3 * p3[1]
+            y = b0 * p0[2] + b1 * p1[2] + b2 * p2[2] + b3 * p3[2]
+            out[f] = (int(round(x)), int(round(y)))
+    return out
+
+
 def _draw_dashed_tracer(
     img,
     points: list[tuple[int, int]],
@@ -2667,70 +2728,73 @@ def render_tracer_video(
         x_coef, y_coef, rejected_indices = fit
         rejected_frames = {anchors[i][0] for i in rejected_indices}
         kept = [a for i, a in enumerate(anchors) if i not in rejected_indices]
-        if kept:
-            first_frame = kept[0][0]
-            last_kept_frame = kept[-1][0]
-            # Truncate the rendered line at the parabola's apex when
-            # apex falls within the kept-anchor range. In image coords
-            # y grows downward, so the ball's HIGHEST visual point is
-            # the parabola's MINIMUM (positive a, vertex at -b/2a).
-            # Past that minimum the smoothed line would curve back
-            # down — bad visual when the ball was clearly still
-            # rising on the last detected frames. Stopping at apex
-            # produces a clean upward arc that ends at its peak.
-            a_y = float(y_coef[0])
-            b_y = float(y_coef[1])
+        # De-dupe by frame so the same index can't be a control point
+        # twice (defensive — manual edits override AI in the merge
+        # upstream, but if a stale duplicate sneaks through it would
+        # give the spline a zero-length segment).
+        by_frame_kept: dict[int, tuple[int, int, int]] = {}
+        for a in kept:
+            by_frame_kept[int(a[0])] = (int(a[0]), int(a[1]), int(a[2]))
+        sorted_anchors = sorted(by_frame_kept.values(), key=lambda t: t[0])
+        if sorted_anchors:
+            first_frame = sorted_anchors[0][0]
+            last_kept_frame = sorted_anchors[-1][0]
+            # Render the curve via Catmull-Rom interpolation through
+            # the kept anchors. The global parabola is still used for
+            # outlier rejection (`_robust_quadratic_fit` above) and
+            # to inform apex truncation in auto mode — but the
+            # rendered geometry now comes from a local-tangent spline
+            # so sparse manual marks past the AI's last detection
+            # can't pull the line through an apex the operator
+            # didn't mark.
+            spline = _catmull_rom_interpolate(sorted_anchors)
+            # Apex truncation (auto-only): walk the spline output to
+            # find the visual peak (min y) and stop there. Disabled
+            # when the operator drove the marks (extend_to_last_anchor
+            # = True from the wizard re-render endpoint) so manually
+            # confirmed descent points are honored.
             render_end = last_kept_frame
-            if a_y > 1e-6 and not extend_to_last_anchor:
-                apex_frame_f = -b_y / (2.0 * a_y)
-                if first_frame < apex_frame_f < last_kept_frame:
-                    render_end = int(round(apex_frame_f))
+            if not extend_to_last_anchor:
+                apex_f: int | None = None
+                apex_y: int | None = None
+                for f in range(first_frame, last_kept_frame + 1):
+                    xy = spline.get(f)
+                    if xy is None:
+                        continue
+                    if apex_y is None or xy[1] < apex_y:
+                        apex_y = xy[1]
+                        apex_f = f
+                if apex_f is not None and apex_f < last_kept_frame:
+                    render_end = apex_f
             last_kept_frame_global = render_end
-            # Anchors the operator vouched for (the manual marks) and
-            # the rest position itself are rendered at their EXACT
-            # marked pixel. The parabola fit is still used for every
-            # unmarked frame, so the line still curves smoothly between
-            # marks — but the line literally passes through each ring
-            # the operator placed, instead of through the slightly-off
-            # best-fit curve that weights+pinning alone produces.
-            pinned_by_frame: dict[int, tuple[int, int]] = {}
-            if rest_is_anchor_zero:
-                pinned_by_frame[int(anchors[0][0])] = (
-                    int(anchors[0][1]), int(anchors[0][2]),
-                )
-            for idx in manual_anchor_idxs:
-                pinned_by_frame[int(anchors[idx][0])] = (
-                    int(anchors[idx][1]), int(anchors[idx][2]),
-                )
             for f in range(first_frame, render_end + 1):
-                if f in pinned_by_frame:
-                    x, y = pinned_by_frame[f]
-                else:
-                    x = int(round(float(np.polyval(x_coef, f))))
-                    y = int(round(float(np.polyval(y_coef, f))))
+                xy = spline.get(f)
+                if xy is None:
+                    continue
+                x, y = xy
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
-            # Fade-tail: extend along the TANGENT of the parabola at
-            # `render_end` (which equals apex when truncated, otherwise
-            # last_kept_frame) for one frame's worth of motion. The
-            # tangent at apex has vy = 0 so the fade goes horizontally
-            # — never loops down. On non-truncated lines it picks up
-            # the local velocity and continues straight from there.
-            base_x = float(np.polyval(x_coef, render_end))
-            base_y = float(np.polyval(y_coef, render_end))
-            vx = float(np.polyval(np.polyder(x_coef), render_end))
-            vy = float(np.polyval(np.polyder(y_coef), render_end))
-            for i in range(1, TRACER_FADE_SEGMENTS + 1):
-                t = i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
-                fx = int(round(base_x + vx * t))
-                fy = int(round(base_y + vy * t))
-                if not (0 <= fx < width and 0 <= fy < height):
-                    break
-                fade_tail_points.append((fx, fy))
+            # Fade-tail: extend along the spline's last-segment
+            # direction for one frame's worth of motion. At apex the
+            # tangent flattens out so the fade goes nearly horizontal
+            # — never loops back down — and on non-truncated lines it
+            # picks up the local velocity from the spline.
+            if len(smoothed_points) >= 2:
+                base_x = float(smoothed_points[-1][1])
+                base_y = float(smoothed_points[-1][2])
+                vx = float(smoothed_points[-1][1] - smoothed_points[-2][1])
+                vy = float(smoothed_points[-1][2] - smoothed_points[-2][2])
+                for i in range(1, TRACER_FADE_SEGMENTS + 1):
+                    t = i * TRACER_FADE_FRAME_LENGTH / TRACER_FADE_SEGMENTS
+                    fx = int(round(base_x + vx * t))
+                    fy = int(round(base_y + vy * t))
+                    if not (0 <= fx < width and 0 <= fy < height):
+                        break
+                    fade_tail_points.append((fx, fy))
         log.info(
             "ai_tracer: tracer fit — %d anchors, %d rejected as outliers, "
-            "%d smoothed render points, %d fade-tail segments",
+            "%d smoothed render points (Catmull-Rom), %d fade-tail segments",
             len(anchors), len(rejected_indices), len(smoothed_points),
             len(fade_tail_points),
         )
