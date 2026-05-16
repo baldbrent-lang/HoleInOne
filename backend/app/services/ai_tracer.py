@@ -2319,7 +2319,13 @@ def track_ball_after_impact(
 # home next to each other.
 TRACER_LINE_COLOR = (0, 140, 255)        # bright orange (BGR)
 TRACER_LINE_HALO = (40, 90, 200)         # darker orange halo behind
-TRACER_LINE_THICKNESS = 5
+# Tapered thickness: thicker at the resting-ball end of the line,
+# narrower toward the apex / end-of-flight, so the line visually
+# narrows as the ball flies away from the camera (broadcast tracer
+# convention).
+TRACER_LINE_THICKNESS_START = 6
+TRACER_LINE_THICKNESS_END = 2
+TRACER_LINE_THICKNESS = TRACER_LINE_THICKNESS_START  # legacy alias
 TRACER_DASH_LEN = 14
 TRACER_GAP_LEN = 10
 TRACER_BALL_RING = (0, 230, 255)         # yellow — ball at current frame
@@ -2425,18 +2431,57 @@ def _robust_quadratic_fit(
     return last_coefs[0], last_coefs[1], rejected
 
 
-def _draw_dashed_tracer(img, points: list[tuple[int, int]]) -> None:
+def _draw_dashed_tracer(
+    img,
+    points: list[tuple[int, int]],
+    *,
+    total_points: int | None = None,
+    start_thickness: int = TRACER_LINE_THICKNESS_START,
+    end_thickness: int = TRACER_LINE_THICKNESS_END,
+) -> None:
     """Draw a dashed polyline through `points` with a halo behind it.
     No-op when fewer than 2 points are provided. Style matches the
-    classical tracer so the visual language is consistent."""
+    classical tracer so the visual language is consistent.
+
+    Thickness linearly tapers from `start_thickness` at the first
+    point (the resting ball) to `end_thickness` at the last point
+    (apex / end of flight). `total_points` is the FULL final length
+    of the polyline — passing it keeps the per-frame growth of the
+    line tapered against the same reference span, so early frames
+    don't briefly look thin when only a few points are visible yet.
+    Defaults to `len(points)` when not provided (no taper context).
+    """
     if len(points) < 2:
         return
-    if HAS_NP:
+    full_n = total_points if (total_points and total_points > 1) else len(points)
+    tapered = start_thickness != end_thickness
+
+    def _thickness_at(i: int) -> int:
+        """Thickness for the segment whose head is the i-th point."""
+        if not tapered:
+            return start_thickness
+        frac = max(0.0, min(1.0, i / float(full_n - 1)))
+        return max(1, int(round(
+            start_thickness + (end_thickness - start_thickness) * frac
+        )))
+
+    # Halo behind the dashes. With taper we draw it as per-segment
+    # lines so each segment's halo matches its dash thickness; without
+    # taper we keep the existing single-polyline fast path.
+    if not tapered and HAS_NP:
         cv2.polylines(
             img, [np.array(points, dtype=np.int32)],
             False, TRACER_LINE_HALO,
-            TRACER_LINE_THICKNESS + 4, cv2.LINE_AA,
+            start_thickness + 4, cv2.LINE_AA,
         )
+    else:
+        for i in range(1, len(points)):
+            t = _thickness_at(i)
+            cv2.line(
+                img, points[i - 1], points[i],
+                TRACER_LINE_HALO, t + 4, cv2.LINE_AA,
+            )
+
     accumulated = 0.0
     drawing = True
     for i in range(1, len(points)):
@@ -2452,6 +2497,7 @@ def _draw_dashed_tracer(img, points: list[tuple[int, int]]) -> None:
         traveled = 0.0
         cur_x = float(x0)
         cur_y = float(y0)
+        seg_thickness = _thickness_at(i)
         while traveled < seg_len:
             target_seg = TRACER_DASH_LEN if drawing else TRACER_GAP_LEN
             remaining = target_seg - accumulated
@@ -2462,7 +2508,7 @@ def _draw_dashed_tracer(img, points: list[tuple[int, int]]) -> None:
                 cv2.line(
                     img,
                     (int(cur_x), int(cur_y)), (int(nx), int(ny)),
-                    TRACER_LINE_COLOR, TRACER_LINE_THICKNESS, cv2.LINE_AA,
+                    TRACER_LINE_COLOR, seg_thickness, cv2.LINE_AA,
                 )
             cur_x = nx
             cur_y = ny
@@ -2640,9 +2686,28 @@ def render_tracer_video(
                 if first_frame < apex_frame_f < last_kept_frame:
                     render_end = int(round(apex_frame_f))
             last_kept_frame_global = render_end
+            # Anchors the operator vouched for (the manual marks) and
+            # the rest position itself are rendered at their EXACT
+            # marked pixel. The parabola fit is still used for every
+            # unmarked frame, so the line still curves smoothly between
+            # marks — but the line literally passes through each ring
+            # the operator placed, instead of through the slightly-off
+            # best-fit curve that weights+pinning alone produces.
+            pinned_by_frame: dict[int, tuple[int, int]] = {}
+            if rest_is_anchor_zero:
+                pinned_by_frame[int(anchors[0][0])] = (
+                    int(anchors[0][1]), int(anchors[0][2]),
+                )
+            for idx in manual_anchor_idxs:
+                pinned_by_frame[int(anchors[idx][0])] = (
+                    int(anchors[idx][1]), int(anchors[idx][2]),
+                )
             for f in range(first_frame, render_end + 1):
-                x = int(round(float(np.polyval(x_coef, f))))
-                y = int(round(float(np.polyval(y_coef, f))))
+                if f in pinned_by_frame:
+                    x, y = pinned_by_frame[f]
+                else:
+                    x = int(round(float(np.polyval(x_coef, f))))
+                    y = int(round(float(np.polyval(y_coef, f))))
                 if x < 0 or x >= width or y < 0 or y >= height:
                     break
                 smoothed_points.append((f, x, y))
@@ -2708,12 +2773,21 @@ def render_tracer_video(
                     (x, y) for f, x, y in smoothed_points if f <= frame_idx
                 ]
                 if len(visible) >= 2:
-                    _draw_dashed_tracer(frame, visible)
+                    # Pass the full final point count so the taper rate
+                    # stays consistent as the line builds frame-by-frame
+                    # (otherwise early frames briefly look like a thin
+                    # stub before the full taper develops).
+                    _draw_dashed_tracer(
+                        frame, visible,
+                        total_points=len(smoothed_points),
+                    )
                 # Fade-away tail. Renders only once the main line has
                 # reached its end (i.e. we're at or past the last
                 # accepted anchor frame). Each sub-segment is
                 # alpha-blended with linearly decreasing weight so the
                 # line visibly trails off along the parabola tangent.
+                # Thickness uses the END taper value so the fade picks
+                # up where the main tapered line left off.
                 if (
                     fade_tail_points
                     and last_kept_frame_global is not None
@@ -2729,7 +2803,7 @@ def render_tracer_video(
                         overlay = frame.copy()
                         cv2.line(
                             overlay, walk[j], walk[j + 1],
-                            TRACER_LINE_COLOR, TRACER_LINE_THICKNESS,
+                            TRACER_LINE_COLOR, TRACER_LINE_THICKNESS_END,
                             cv2.LINE_AA,
                         )
                         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
