@@ -221,6 +221,53 @@ BALL_TRACK_CONCURRENCY = 8
 BALL_TRACK_CROP_NATIVE_SIZE = 600
 BALL_TRACK_CROP_SEND_W = 1568
 
+# Phase-3 refinement: for every Phase 1/2 hit, do one more pass with
+# a tighter crop centered on the reported position. Catches the
+# "in the vicinity of the ball but not on it" failure mode where
+# Claude found the right region but the click landed a few pixels
+# off the actual speck. Crop is ~2.5× tighter than Phase 2, so the
+# ball occupies a much larger share of the upscaled image — easier
+# to pinpoint the exact pixel.
+BALL_TRACK_REFINE_CROP_NATIVE_SIZE = 250
+BALL_TRACK_REFINE_SEND_W = 1568
+# Cap how far the refined position can move from the original. A
+# big jump usually means Claude latched onto a distractor (cloud
+# fragment, range ball on the ground); we'd rather keep the
+# slightly-off Phase 1 hit than swap it for a confidently-wrong
+# refinement.
+BALL_TRACK_REFINE_MAX_DELTA_PX = 80
+# Toggle: disable to skip Phase 3 entirely if API spend matters
+# more than per-frame pixel precision.
+BALL_TRACK_REFINEMENT_ENABLED = True
+
+BALL_TRACK_REFINE_PROMPT = (
+    "You are looking at a tightly zoomed crop of a single frame from "
+    "a golf swing video. An earlier pass located what appears to be "
+    "the airborne golf ball within this region. Your job: find the "
+    "EXACT pixel position of the ball. The earlier identification "
+    "may have been a few pixels off — your job is to refine it.\n\n"
+    "Cues:\n"
+    "- A small bright white spot OR (against bright sky) a small "
+    "darker silhouette.\n"
+    "- 5-15 pixels across after the crop's upscale.\n"
+    "- May have slight motion blur in the direction of flight.\n"
+    "- The ball is usually near the center of this crop (the earlier "
+    "pass identified it from this region) but may not be exactly "
+    "centered.\n\n"
+    "If you can clearly see the airborne ball, return its exact "
+    "(x, y) pixel coordinates in THIS image's coordinate system "
+    "(top-left = 0,0). If you cannot find a ball in this crop, set "
+    "found=false.\n\n"
+    "Reply with ONE JSON object only:\n"
+    "{\n"
+    '  "found": true | false,\n'
+    '  "x": <int>,\n'
+    '  "y": <int>,\n'
+    '  "confidence": "high" | "medium" | "low",\n'
+    '  "notes": "<≤15 word description>"\n'
+    "}"
+)
+
 
 BALL_TRACK_PROMPT = (
     "You are looking at a single still frame from a golf swing video. "
@@ -1601,6 +1648,116 @@ def refine_impact_frame(
     return info
 
 
+def _refine_crop_call(
+    idx: int,
+    current_pos_native: tuple[int, int],
+    native_frame,
+    crop_size: int,
+    client,
+    model: str,
+) -> tuple[int, dict]:
+    """Phase-3 refinement: send a tight crop centered on the current
+    ball position back to Claude for pixel-accurate refinement.
+
+    `current_pos_native` is the (x, y) Claude returned from Phase 1
+    or Phase 2, already in native-frame coords. The crop is
+    `crop_size` native pixels wide/tall, centered on that point and
+    clamped to the frame. Result is upscaled to BALL_TRACK_REFINE_SEND_W
+    so the ball — typically ~5 px at native — covers ~30 px in the
+    image Claude sees.
+
+    Returns (idx, parsed_dict). On success the returned dict carries
+    the refined coords already translated back to native-frame space
+    (top-left origin); on failure it has an `_error` key.
+    """
+    nh, nw = native_frame.shape[:2]
+    cx = int(current_pos_native[0])
+    cy = int(current_pos_native[1])
+    half = crop_size // 2
+    x0 = max(0, cx - half)
+    y0 = max(0, cy - half)
+    x1 = min(nw, cx + half)
+    y1 = min(nh, cy + half)
+    if x1 <= x0 or y1 <= y0:
+        return idx, {"_error": "empty crop"}
+    crop = native_frame[y0:y1, x0:x1]
+    crop, _ = _maybe_apply_clahe(crop)
+    crop_h, crop_w = crop.shape[:2]
+    send_target_w = BALL_TRACK_REFINE_SEND_W
+    if crop_w > 0 and crop_w < send_target_w:
+        scale_up = send_target_w / float(crop_w)
+        send_w = send_target_w
+        send_h = int(round(crop_h * scale_up))
+        send_crop = cv2.resize(
+            crop, (send_w, send_h), interpolation=cv2.INTER_CUBIC,
+        )
+    else:
+        send_crop = crop
+        send_w = crop_w
+        send_h = crop_h
+    ok, buf = cv2.imencode(".jpg", send_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    if not ok:
+        return idx, {"_error": "encode failed"}
+    b64 = base64.standard_b64encode(bytes(buf)).decode("ascii")
+    user_text = (
+        f"Frame {idx} — REFINEMENT CROP. {send_w}x{send_h} px image "
+        f"(a {crop_w}x{crop_h} px native region centered on the ball's "
+        f"previously-identified position, upscaled for clarity). The "
+        f"ball should be near the center but may not be exactly centered. "
+        f"Return (x, y) in THIS image's coordinate system "
+        f"(top-left = 0,0, width {send_w}, height {send_h}). JSON only."
+    )
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=200,
+            system=[{
+                "type": "text",
+                "text": BALL_TRACK_REFINE_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": b64,
+                        },
+                    },
+                    {"type": "text", "text": user_text},
+                ],
+            }],
+        )
+    except Exception as exc:
+        return idx, {"_error": str(exc)}
+    text_chunks = [
+        b.text for b in resp.content
+        if getattr(b, "type", None) == "text" and getattr(b, "text", None)
+    ]
+    parsed = _extract_json("\n".join(text_chunks)) or {
+        "_error": "no_json_in_response",
+    }
+    if (
+        "_error" not in parsed and parsed.get("found")
+        and parsed.get("x") is not None and parsed.get("y") is not None
+    ):
+        try:
+            send_x = float(parsed["x"])
+            send_y = float(parsed["y"])
+        except (TypeError, ValueError):
+            pass
+        else:
+            crop_x = send_x * (crop_w / float(send_w)) if send_w > 0 else send_x
+            crop_y = send_y * (crop_h / float(send_h)) if send_h > 0 else send_y
+            parsed["x"] = int(round(crop_x + x0))
+            parsed["y"] = int(round(crop_y + y0))
+            parsed["_native_coords"] = True
+    return idx, parsed
+
+
 def track_ball_after_impact(
     input_path: Path,
     impact_frame_idx: int,
@@ -2313,6 +2470,77 @@ def track_ball_after_impact(
         "ai_tracer: ball_track — found ball in %d/%d frames; first_lost_run_start=%s",
         n_found, len(frame_indices), first_lost_run_start,
     )
+
+    # --- Phase 3: precision refinement on found frames ---
+    # Phase 1/2 already located the ball "near" its true position, but
+    # at 1568×N a 5-pixel ball is easy to land "in the vicinity" rather
+    # than ON. Re-query each found frame with a 250-px native crop
+    # centered on the reported position so the ball occupies a much
+    # larger share of the image — Claude can then pinpoint exact
+    # pixels. Refined position is only accepted when it lands within
+    # BALL_TRACK_REFINE_MAX_DELTA_PX of the original; bigger jumps
+    # usually mean Claude latched onto a distractor in the crop.
+    if BALL_TRACK_REFINEMENT_ENABLED and client is not None:
+        refine_targets: list[tuple[int, tuple[int, int]]] = []
+        for rec in info["frames"]:
+            if not rec.get("found"):
+                continue
+            idx = rec["frame"]
+            if idx not in frames_data:
+                continue
+            x = rec.get("x")
+            y = rec.get("y")
+            if x is None or y is None:
+                continue
+            refine_targets.append((int(idx), (int(x), int(y))))
+        if refine_targets:
+            refine_results: dict[int, dict] = {}
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futures = []
+                for idx, pos in refine_targets:
+                    _jb, _sw, _sh, native_frame = frames_data[idx]
+                    futures.append(ex.submit(
+                        _refine_crop_call, idx, pos, native_frame,
+                        BALL_TRACK_REFINE_CROP_NATIVE_SIZE, client, model,
+                    ))
+                for fut in as_completed(futures):
+                    try:
+                        idx, parsed = fut.result()
+                        refine_results[idx] = parsed
+                    except Exception as exc:
+                        log.warning("ai_tracer: ball_track phase-3 exception: %s", exc)
+            n_refined = 0
+            n_refused = 0
+            for rec in info["frames"]:
+                idx = rec["frame"]
+                refined = refine_results.get(idx)
+                if not refined or "_error" in refined or not refined.get("found"):
+                    continue
+                new_x = refined.get("x")
+                new_y = refined.get("y")
+                if new_x is None or new_y is None:
+                    continue
+                try:
+                    new_x = int(new_x); new_y = int(new_y)
+                except (TypeError, ValueError):
+                    continue
+                dx = abs(new_x - rec["x"])
+                dy = abs(new_y - rec["y"])
+                if dx > BALL_TRACK_REFINE_MAX_DELTA_PX or dy > BALL_TRACK_REFINE_MAX_DELTA_PX:
+                    n_refused += 1
+                    continue
+                rec["x"] = new_x
+                rec["y"] = new_y
+                rec["refined"] = True
+                n_refined += 1
+            info["n_frames_refined"] = n_refined
+            info["n_frames_refine_refused"] = n_refused
+            log.info(
+                "ai_tracer: ball_track phase-3 — refined %d / refused %d "
+                "of %d found frames",
+                n_refined, n_refused, len(refine_targets),
+            )
+
     return info
 
 
