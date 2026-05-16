@@ -2317,8 +2317,8 @@ def track_ball_after_impact(
 # Visual style for the final tracer-overlay render. Mirrors the
 # classical tracer in services/tracer.py so the two outputs look at
 # home next to each other.
-TRACER_LINE_COLOR = (0, 140, 255)        # bright orange (BGR)
-TRACER_LINE_HALO = (40, 90, 200)         # darker orange halo behind
+TRACER_LINE_COLOR = (35, 35, 175)        # dark red (BGR)
+TRACER_LINE_HALO = (15, 15, 80)          # deep maroon halo behind
 # Tapered thickness: thicker at the resting-ball end of the line,
 # narrower toward the apex / end-of-flight, so the line visually
 # narrows as the ball flies away from the camera (broadcast tracer

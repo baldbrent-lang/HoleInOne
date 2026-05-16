@@ -297,8 +297,8 @@ CLUB_LOWER_NEAR_BODY_PX_BELOW = 100  # tolerated below body bottom
 # off-axis false positives.
 MAX_BALL_TO_CLUBHEAD_PX = 80
 
-TRACER_COLOR = (0, 140, 255)        # bright orange (BGR)
-TRACER_HALO_COLOR = (40, 90, 200)   # dimmer orange behind the dashes
+TRACER_COLOR = (35, 35, 175)        # dark red (BGR)
+TRACER_HALO_COLOR = (15, 15, 80)    # deep maroon halo behind the dashes
 TRACER_THICKNESS = 5
 DASH_LENGTH = 14
 GAP_LENGTH = 10
