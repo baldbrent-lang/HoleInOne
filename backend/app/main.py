@@ -190,13 +190,6 @@ def _seed_default_courses() -> None:
             "hole_yardages": {"5": 195, "7": 106, "12": 202, "17": 178},
             "minutes_per_hole": 14,
         },
-        {
-            "name": "Kiawah Island",
-            "location": "Kiawah Island, SC",
-            "par3_holes": [5, 8, 14, 17],
-            "hole_yardages": {"5": 207, "8": 197, "14": 194, "17": 221},
-            "minutes_per_hole": 14,
-        },
     ]
     db = SessionLocal()
     try:
