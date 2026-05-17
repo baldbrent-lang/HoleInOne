@@ -149,8 +149,41 @@ def _migrate() -> None:
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate()
+    _remove_retired_courses()
     _seed_default_courses()
     _seed_showcase_slots()
+
+
+# Demo courses previously seeded into the DB that we no longer want shown
+# anywhere. Safe to leave indefinitely — the deletion silently skips any
+# course that still has dependent rows (bookings, cameras, etc).
+_RETIRED_COURSE_NAMES = ("Kiawah Island",)
+
+
+def _remove_retired_courses() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from .database import SessionLocal
+    from .models import Course
+
+    db = SessionLocal()
+    try:
+        for name in _RETIRED_COURSE_NAMES:
+            row = db.query(Course).filter(Course.name == name).first()
+            if not row:
+                continue
+            try:
+                db.delete(row)
+                db.commit()
+                _glog.info("removed retired course %r", name)
+            except IntegrityError:
+                db.rollback()
+                _glog.warning(
+                    "skipped removing retired course %r: dependent rows exist",
+                    name,
+                )
+    finally:
+        db.close()
 
 
 def _seed_showcase_slots() -> None:
