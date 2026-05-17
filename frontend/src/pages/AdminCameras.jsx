@@ -14,7 +14,13 @@ const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
 
 function tsRel(iso) {
   if (!iso) return "—";
-  const d = new Date(iso);
+  // Backend serializes timestamps as naive UTC (no Z suffix). Without
+  // a timezone marker, the browser parses them as local time, and
+  // the diff against Date.now() comes out off by the user's UTC
+  // offset (e.g. -5 hours in Central time = "-17985s ago"). Force
+  // UTC interpretation by appending Z when no offset is present.
+  const utcIso = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+  const d = new Date(utcIso);
   const sec = Math.round((Date.now() - d.getTime()) / 1000);
   if (sec < 60) return `${sec}s ago`;
   if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
