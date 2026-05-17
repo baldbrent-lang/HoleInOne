@@ -74,8 +74,9 @@ def concat_two_clips(
     second_start_sec: float,
     second_end_sec: float,
     output_path: Path,
-    target_height: int = 720,
-    target_fps: int = 30,
+    target_height: int = 1080,
+    target_fps: int = 60,
+    crf: int = 19,
 ) -> bool:
     """Stitch a window of one MP4 onto a window of another.
 
@@ -94,13 +95,20 @@ def concat_two_clips(
     if first_end_sec <= first_start_sec or second_end_sec <= second_start_sec:
         log.warning("concat: window has non-positive duration")
         return False
+    # Scale each side to `target_height` only if its source is taller —
+    # never upscale (waste of bytes, no real detail gained). Lanczos for
+    # the downscale keeps the small ball against bright sky sharp instead
+    # of smudging into the clouds, which is the failure mode the operator
+    # noticed on the green-side feed.
     filter_complex = (
         f"[0:v]trim=start={first_start_sec:.3f}:end={first_end_sec:.3f},"
         f"setpts=PTS-STARTPTS,"
-        f"scale=-2:{target_height},fps={target_fps},setsar=1[a];"
+        f"scale=-2:'min({target_height},ih)':flags=lanczos,"
+        f"fps={target_fps},setsar=1[a];"
         f"[1:v]trim=start={second_start_sec:.3f}:end={second_end_sec:.3f},"
         f"setpts=PTS-STARTPTS,"
-        f"scale=-2:{target_height},fps={target_fps},setsar=1[b];"
+        f"scale=-2:'min({target_height},ih)':flags=lanczos,"
+        f"fps={target_fps},setsar=1[b];"
         f"[a][b]concat=n=2:v=1:a=0[out]"
     )
     try:
@@ -111,7 +119,8 @@ def concat_two_clips(
                 "-i", str(second_path),
                 "-filter_complex", filter_complex,
                 "-map", "[out]",
-                "-c:v", "libx264", "-preset", "veryfast",
+                "-c:v", "libx264", "-preset", "medium",
+                "-crf", str(crf),
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",
                 str(output_path),
@@ -126,6 +135,50 @@ def concat_two_clips(
     if not output_path.exists() or output_path.stat().st_size == 0:
         output_path.unlink(missing_ok=True)
         return False
+    return True
+
+
+def transcode_h264_preserve(input_path: Path, crf: int = 20) -> bool:
+    """Re-encode input_path in place as H.264 + faststart, preserving
+    resolution and framerate. CRF mode (visually-lossless at 20) instead
+    of a fixed bitrate target so detail in the bright-sky region — where
+    the green-side tracer lives — survives the encode.
+
+    Used as the post-tracer step for clips that will be composited
+    rather than emailed as-is; the final composite gets its own
+    `compress_for_email` pass downstream.
+
+    Returns True on success, False if ffmpeg is missing or fails (in
+    which case the original file is preserved).
+    """
+    if not have_ffmpeg():
+        log.warning("ffmpeg not on PATH; skipping HQ transcode for %s", input_path)
+        return False
+    tmp_out = input_path.with_suffix(input_path.suffix + ".tmp.mp4")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(input_path),
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", str(crf),
+                "-pix_fmt", "yuv420p",
+                "-an",
+                "-movflags", "+faststart",
+                str(tmp_out),
+            ],
+            check=True,
+            timeout=600,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("HQ transcode failed for %s: %s", input_path, exc)
+        tmp_out.unlink(missing_ok=True)
+        return False
+    if not tmp_out.exists() or tmp_out.stat().st_size == 0:
+        tmp_out.unlink(missing_ok=True)
+        return False
+    tmp_out.replace(input_path)
     return True
 
 

@@ -36,7 +36,13 @@ from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
 from ..services.stripe_service import refund_payment_intent
 from ..services.tracer import have_tracer, render_tracer
-from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail
+from ..services.video import (
+    compress_for_email,
+    concat_two_clips,
+    cut_segment,
+    extract_thumbnail,
+    transcode_h264_preserve,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -673,13 +679,21 @@ def _optional_int(v):
         return None
 
 
-def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, str | None]:
+def _run_tracer(
+    clip_path: Path,
+    email_compress: bool = True,
+) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
     Returns (tracer_url, info, traced_path, debug_url). Best-effort: any
     failure here still returns a debug image URL so the operator can see
     what the detector is staring at (candidates circled in red, or a
     "0 candidates" overlay if the HSV/motion gates filtered everything).
+
+    `email_compress=True` (single-camera path) shrinks the traced clip
+    to the email-attachment target. Dual-camera mode passes False so the
+    per-side traced file stays visually-lossless H.264 — the composite
+    is the deliverable that gets the email-size pass.
     """
     if not have_tracer():
         return None, {"ok": False, "error": "opencv not installed"}, None, None
@@ -697,7 +711,10 @@ def _run_tracer(clip_path: Path) -> tuple[str | None, dict | None, Path | None, 
         traced_path.unlink(missing_ok=True)
         return None, info, None, debug_url
     # OpenCV writes mp4v; re-encode to H.264 + faststart for browser playback.
-    compress_for_email(traced_path)
+    if email_compress:
+        compress_for_email(traced_path)
+    else:
+        transcode_h264_preserve(traced_path)
     if not traced_path.exists() or traced_path.stat().st_size == 0:
         return None, {"ok": False, "error": "post-encode produced empty file"}, None, debug_url
     return f"{settings.app_base_url}/uploads/clips/{traced_name}", info, traced_path, debug_url
@@ -756,10 +773,16 @@ async def upload_clip(
     fpath = CLIPS_DIR / fname
     fpath.write_bytes(data)
 
-    # Transcode for email delivery. Replaces the file in place, leaving
-    # the same source_url valid. Falls back to the original on ffmpeg
-    # failure so the gallery still works.
-    compress_for_email(fpath)
+    # In dual-camera mode the composite is the deliverable, so the raw
+    # tee + green stay at source quality through tracing — only the
+    # final composite gets the email-attachment shrink. In single-cam
+    # mode the tee clip itself is delivered, so compress it now.
+    dual_camera = video_green is not None and not already_traced
+    if not dual_camera:
+        # Transcode for email delivery. Replaces the file in place, leaving
+        # the same source_url valid. Falls back to the original on ffmpeg
+        # failure so the gallery still works.
+        compress_for_email(fpath)
 
     # Extract a JPG of the first frame so the video player has a poster
     # that matches the clip's opening — no black box before pressing play.
@@ -783,7 +806,9 @@ async def upload_clip(
         # admin uploads are already a long-running request and the operator
         # wants to see the result. If detection fails, tracer_url stays null
         # and the original clip is still saved + delivered.
-        tracer_url, tracer_info, tee_traced_path, tracer_debug_url = _run_tracer(fpath)
+        tracer_url, tracer_info, tee_traced_path, tracer_debug_url = _run_tracer(
+            fpath, email_compress=not dual_camera,
+        )
 
     # Dual-camera path: when a green-side clip is also uploaded, both
     # cameras are assumed to have started at the same moment. We run the
@@ -797,7 +822,8 @@ async def upload_clip(
     green_debug_url = None
     composite_url = None
     composite_info: dict | None = None
-    if video_green is not None and not already_traced:
+    composite_path: Path | None = None
+    if dual_camera:
         green_data = await video_green.read()
         if green_data:
             if len(green_data) > 500 * 1024 * 1024:
@@ -808,10 +834,11 @@ async def upload_clip(
             green_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}_green.{g_ext}"
             green_path = CLIPS_DIR / green_name
             green_path.write_bytes(green_data)
-            compress_for_email(green_path)
             green_url = f"{settings.app_base_url}/uploads/clips/{green_name}"
 
-            green_tracer_url, green_tracer_info, green_traced_path, green_debug_url = _run_tracer(green_path)
+            green_tracer_url, green_tracer_info, green_traced_path, green_debug_url = _run_tracer(
+                green_path, email_compress=False,
+            )
 
             if (
                 tracer_info and tracer_info.get("ok")
@@ -833,6 +860,11 @@ async def upload_clip(
                         green_traced_path, switch_sec, end_sec_in_green,
                         composite_path,
                     ):
+                        # Shrink the composite to email-attachment size
+                        # (replaces in place). The HD frames already
+                        # went through Lanczos in concat_two_clips, so
+                        # what reaches the encoder is sharp.
+                        compress_for_email(composite_path)
                         composite_url = f"{settings.app_base_url}/uploads/clips/{composite_name}"
                         composite_info = {
                             "switch_sec": round(switch_sec, 2),
@@ -840,6 +872,14 @@ async def upload_clip(
                             "tee_fps": round(tee_fps, 2),
                             "green_fps": round(green_fps, 2),
                         }
+                    else:
+                        composite_path = None
+
+    # If we entered dual-camera mode but didn't end up with a composite
+    # (e.g. tracer failed on one side, or concat failed), the tee clip
+    # IS the deliverable after all — compress it now for email.
+    if dual_camera and composite_url is None:
+        compress_for_email(fpath)
 
     try:
         captured_dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
