@@ -161,10 +161,29 @@ _RETIRED_COURSE_NAMES = ("Kiawah Island",)
 
 
 def _remove_retired_courses() -> None:
-    from sqlalchemy.exc import IntegrityError
-
     from .database import SessionLocal
     from .models import Course
+
+    # Leaves first, course last. Each statement is a no-op if there's
+    # nothing to delete, so the whole block is idempotent.
+    cascade_sql = [
+        "DELETE FROM broadcast_views WHERE course_id = :c "
+        "OR clip_id IN (SELECT id FROM video_clips WHERE course_id = :c)",
+        "DELETE FROM camera_events WHERE course_id = :c",
+        "DELETE FROM hole_in_one_events WHERE "
+        "participant_id IN (SELECT p.id FROM participants p "
+        "JOIN tee_times t ON p.tee_time_id = t.id WHERE t.course_id = :c) "
+        "OR tee_clip_id  IN (SELECT id FROM video_clips WHERE course_id = :c) "
+        "OR wide_clip_id IN (SELECT id FROM video_clips WHERE course_id = :c) "
+        "OR hole_clip_id IN (SELECT id FROM video_clips WHERE course_id = :c)",
+        "DELETE FROM video_clips WHERE course_id = :c",
+        "DELETE FROM cameras WHERE course_id = :c",
+        "DELETE FROM long_video_uploads WHERE course_id = :c",
+        "DELETE FROM participants WHERE tee_time_id IN "
+        "(SELECT id FROM tee_times WHERE course_id = :c)",
+        "DELETE FROM tee_times WHERE course_id = :c",
+        "DELETE FROM courses WHERE id = :c",
+    ]
 
     db = SessionLocal()
     try:
@@ -172,16 +191,15 @@ def _remove_retired_courses() -> None:
             row = db.query(Course).filter(Course.name == name).first()
             if not row:
                 continue
+            cid = row.id
             try:
-                db.delete(row)
+                for stmt in cascade_sql:
+                    db.execute(text(stmt), {"c": cid})
                 db.commit()
-                _glog.info("removed retired course %r", name)
-            except IntegrityError:
+                _glog.info("removed retired course %r (id=%s) and dependents", name, cid)
+            except Exception as exc:
                 db.rollback()
-                _glog.warning(
-                    "skipped removing retired course %r: dependent rows exist",
-                    name,
-                )
+                _glog.warning("failed to remove retired course %r: %s", name, exc)
     finally:
         db.close()
 
