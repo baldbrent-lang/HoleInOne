@@ -34,10 +34,19 @@ import asyncio
 import logging
 import secrets
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -48,6 +57,14 @@ from ..services.video import probe_video_info
 log = logging.getLogger("golfreelz.cameras")
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
+
+# In-memory live-stream state. Single uvicorn worker assumed.
+# Swap for Redis if you scale to multiple workers.
+_LIVE_FRAMES: dict[int, tuple[bytes, datetime]] = {}
+_WATCHERS: dict[int, datetime] = {}
+_LIVE_LOCK = threading.Lock()
+WATCH_TTL = timedelta(seconds=10)
+FRAME_TTL = timedelta(seconds=5)
 
 # Where uploaded MP4s land. Same directory the rest of the pipeline
 # reads from / writes to. Resolved relative to the backend package
@@ -68,6 +85,7 @@ MAX_EVENT_CLIP_BYTES = 100 * 1024 * 1024
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+
 
 def _utcnow_naive() -> datetime:
     """Match the timezone-naive convention the rest of the schema uses."""
@@ -110,7 +128,10 @@ def _drain_queue(q: asyncio.Queue) -> None:
 
 
 def _save_event_clip(
-    data: bytes, event_id: int, role: str, original_filename: str | None,
+    data: bytes,
+    event_id: int,
+    role: str,
+    original_filename: str | None,
 ) -> str:
     """Write the uploaded MP4 to disk under a recognizable name.
     Returns the bare filename (so it can be stored in
@@ -129,6 +150,7 @@ def _save_event_clip(
 # ---------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------
+
 
 @router.post("/{token}/heartbeat")
 def heartbeat(
@@ -153,6 +175,34 @@ def heartbeat(
         "paired_with_camera_id": cam.paired_with_camera_id,
         "server_time": _utcnow_naive().isoformat(),
     }
+
+
+@router.get("/{token}/watch-status")
+def watch_status(token: str, db: Session = Depends(get_db)):
+    """Pi polls this. If watching=true, Pi should push live frames."""
+    cam = _get_camera_by_token(token, db)
+    with _LIVE_LOCK:
+        last = _WATCHERS.get(cam.id)
+        watching = bool(last and _utcnow_naive() - last < WATCH_TTL)
+    return {"watching": watching}
+
+
+@router.post("/{token}/live-frame")
+async def post_live_frame(
+    token: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Pi POSTs JPEG bytes as the request body."""
+    cam = _get_camera_by_token(token, db)
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "empty frame")
+    if len(body) > 500_000:
+        raise HTTPException(413, "frame too large (max 500KB)")
+    with _LIVE_LOCK:
+        _LIVE_FRAMES[cam.id] = (body, _utcnow_naive())
+    return {"ok": True}
 
 
 @router.post("/{token}/event-trigger")
@@ -210,22 +260,31 @@ async def event_trigger(
         q = _queue_for(partner_id)
         _drain_queue(q)
         try:
-            q.put_nowait({
-                "session_id": sid,
-                "event_id": event.id,
-                "triggered_at": event.triggered_at.isoformat() if event.triggered_at else None,
-                "tee_camera_id": cam.id,
-                "hole_number": cam.assigned_hole,
-            })
+            q.put_nowait(
+                {
+                    "session_id": sid,
+                    "event_id": event.id,
+                    "triggered_at": event.triggered_at.isoformat()
+                    if event.triggered_at
+                    else None,
+                    "tee_camera_id": cam.id,
+                    "hole_number": cam.assigned_hole,
+                }
+            )
         except asyncio.QueueFull:
             log.warning(
                 "cameras: trigger queue full for camera %s, dropping; green "
-                "Pi probably offline", partner_id,
+                "Pi probably offline",
+                partner_id,
             )
 
     log.info(
         "cameras: event-trigger upload=%s session=%s hole=%d tee=%s green=%s",
-        event.id, sid, cam.assigned_hole, cam.id, partner_id,
+        event.id,
+        sid,
+        cam.assigned_hole,
+        cam.id,
+        partner_id,
     )
     return {
         "ok": True,
@@ -300,7 +359,9 @@ async def upload_event(
     if not data:
         raise HTTPException(400, "empty upload")
     if len(data) > MAX_EVENT_CLIP_BYTES:
-        raise HTTPException(413, f"clip exceeds {MAX_EVENT_CLIP_BYTES // (1024*1024)} MB cap")
+        raise HTTPException(
+            413, f"clip exceeds {MAX_EVENT_CLIP_BYTES // (1024 * 1024)} MB cap"
+        )
 
     fname = _save_event_clip(data, event.id, role, video.filename)
     if role == "tee":
@@ -326,7 +387,10 @@ async def upload_event(
 
     log.info(
         "cameras: upload-event event=%s role=%s file=%s status=%s",
-        event.id, role, fname, event.status,
+        event.id,
+        role,
+        fname,
+        event.status,
     )
 
     if ready_to_process:
@@ -351,6 +415,7 @@ async def upload_event(
 # Background processing
 # ---------------------------------------------------------------------
 
+
 def _process_camera_event_job(event_id: int) -> None:
     """Run the existing per-segment pipeline on a fully-uploaded
     CameraEvent. The whole uploaded clip is treated as one swing —
@@ -373,12 +438,10 @@ def _process_camera_event_job(event_id: int) -> None:
             return
 
         tee_path = (
-            CLIPS_DIR / event.tee_clip_filename
-            if event.tee_clip_filename else None
+            CLIPS_DIR / event.tee_clip_filename if event.tee_clip_filename else None
         )
         green_path = (
-            CLIPS_DIR / event.green_clip_filename
-            if event.green_clip_filename else None
+            CLIPS_DIR / event.green_clip_filename if event.green_clip_filename else None
         )
         if tee_path is None or not tee_path.exists():
             event.status = "failed"
@@ -400,11 +463,13 @@ def _process_camera_event_job(event_id: int) -> None:
 
         # Single segment covering the whole uploaded clip. start=0
         # because the Pi already trimmed to the swing window.
-        seg_list = [{
-            "hole_number": int(event.hole_number),
-            "start_sec": 0.0,
-            "end_sec": float(duration),
-        }]
+        seg_list = [
+            {
+                "hole_number": int(event.hole_number),
+                "start_sec": 0.0,
+                "end_sec": float(duration),
+            }
+        ]
 
         # captured_at = the trigger moment. Approximate — the actual
         # impact is ~2 s into the clip — but good enough for the
@@ -423,7 +488,9 @@ def _process_camera_event_job(event_id: int) -> None:
             ai_tracer_model=None,
         )
 
-        event = db.get(CameraEvent, event_id)  # re-fetch in case session was rolled back
+        event = db.get(
+            CameraEvent, event_id
+        )  # re-fetch in case session was rolled back
         if event is None:
             return
         if results and results[0].get("ok") and results[0].get("clip_id"):
@@ -439,7 +506,9 @@ def _process_camera_event_job(event_id: int) -> None:
         db.commit()
         log.info(
             "cameras: event %s processed — status=%s clip=%s",
-            event.id, event.status, event.produced_clip_id,
+            event.id,
+            event.status,
+            event.produced_clip_id,
         )
     except Exception as exc:  # pragma: no cover
         log.exception("cameras: event %s processing crashed: %s", event_id, exc)

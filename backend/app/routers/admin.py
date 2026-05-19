@@ -10,13 +10,23 @@ from pathlib import Path
 
 log = logging.getLogger("golfreelz.admin")
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+)
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import require_admin
+from .cameras import _LIVE_FRAMES, _WATCHERS, _LIVE_LOCK, WATCH_TTL, FRAME_TTL
 from ..models import (
     AuditLog,
     Camera,
@@ -58,10 +68,20 @@ from ..services.ai_tracer import (
     detect_swings_from_motion,
     detect_swings_combined,
 )
-from ..services.video import compress_for_email, concat_two_clips, cut_segment, extract_thumbnail, probe_fps, probe_source_device, probe_video_info
+from ..services.video import (
+    compress_for_email,
+    concat_two_clips,
+    cut_segment,
+    extract_thumbnail,
+    probe_fps,
+    probe_source_device,
+    probe_video_info,
+)
 from ..services.intro_overlay import apply_intro_overlay_inplace
 
-router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
+)
 
 
 @router.get("/courses", response_model=list[CourseOut])
@@ -159,7 +179,9 @@ def stats(db: Session = Depends(get_db)):
         },
         "revenue_cents": revenue_cents,
         "clips_by_status": dict(
-            db.query(VideoClip.processing_status, func.count()).group_by(VideoClip.processing_status).all()
+            db.query(VideoClip.processing_status, func.count())
+            .group_by(VideoClip.processing_status)
+            .all()
         ),
         "by_course": [{"course": c, "participants": n} for c, n in by_course],
     }
@@ -201,7 +223,11 @@ def list_participants(
             | (Participant.email.ilike(needle))
         )
 
-    rows = query.order_by(TeeTime.starts_at.desc(), Participant.id.desc()).limit(limit).all()
+    rows = (
+        query.order_by(TeeTime.starts_at.desc(), Participant.id.desc())
+        .limit(limit)
+        .all()
+    )
 
     # Pre-fetch clip counts
     ids = [p.id for (p, _tt, _c) in rows]
@@ -209,7 +235,11 @@ def list_participants(
     if ids:
         assigned_status = ClipProcessingStatus.assigned.value
         counts = (
-            db.query(VideoClip.participant_id, VideoClip.processing_status, func.count(VideoClip.id))
+            db.query(
+                VideoClip.participant_id,
+                VideoClip.processing_status,
+                func.count(VideoClip.id),
+            )
             .filter(VideoClip.participant_id.in_(ids))
             .group_by(VideoClip.participant_id, VideoClip.processing_status)
             .all()
@@ -231,7 +261,11 @@ def list_participants(
             "selfie_url": f"/uploads/{p.selfie_path}" if p.selfie_path else None,
             "gallery_token": p.gallery_token,
             "gallery_url": f"{settings.app_base_url}/g/{p.gallery_token}",
-            "course": {"id": course.id, "name": course.name, "location": course.location},
+            "course": {
+                "id": course.id,
+                "name": course.name,
+                "location": course.location,
+            },
             "tee_time": {"id": tt.id, "starts_at": tt.starts_at},
             "clips": clip_counts.get(p.id, {"total": 0, "assigned": 0}),
             "created_at": p.created_at,
@@ -314,8 +348,10 @@ def send_test_email(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, "provide 'to' or 'participant_id' (with email)")
 
     provider = (
-        "smtp" if (settings.smtp_host and settings.smtp_user and settings.smtp_password)
-        else "sendgrid" if settings.sendgrid_api_key
+        "smtp"
+        if (settings.smtp_host and settings.smtp_user and settings.smtp_password)
+        else "sendgrid"
+        if settings.sendgrid_api_key
         else "mock"
     )
 
@@ -332,7 +368,9 @@ def send_test_email(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/participants/{participant_id}/send-summary")
-def send_round_summary(participant_id: int, force: bool = False, db: Session = Depends(get_db)):
+def send_round_summary(
+    participant_id: int, force: bool = False, db: Session = Depends(get_db)
+):
     """Manually fire the round-summary email for a participant.
 
     Use force=true to resend even if summary_sent_at is already set.
@@ -370,13 +408,20 @@ def refund_participant(participant_id: int, db: Session = Depends(get_db)):
 
     p.refunded_at = datetime.utcnow()
     p.paid = False
-    db.add(AuditLog(
-        actor="admin", action="refund",
-        target=f"participant:{p.id}",
-        detail=f"mode={result.get('mode')} refund_id={result.get('refund_id')}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="refund",
+            target=f"participant:{p.id}",
+            detail=f"mode={result.get('mode')} refund_id={result.get('refund_id')}",
+        )
+    )
     db.commit()
-    return {"ok": True, "mode": result.get("mode"), "refund_id": result.get("refund_id")}
+    return {
+        "ok": True,
+        "mode": result.get("mode"),
+        "refund_id": result.get("refund_id"),
+    }
 
 
 @router.post("/participants/{participant_id}/resend-gallery")
@@ -386,7 +431,9 @@ def resend_gallery(participant_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "participant not found")
     gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
     notifications.notify_gallery_ready(p.name, p.mobile, p.email, gallery_url)
-    db.add(AuditLog(actor="admin", action="resend_gallery", target=f"participant:{p.id}"))
+    db.add(
+        AuditLog(actor="admin", action="resend_gallery", target=f"participant:{p.id}")
+    )
     db.commit()
     return {"ok": True, "gallery_url": gallery_url}
 
@@ -395,10 +442,14 @@ def resend_gallery(participant_id: int, db: Session = Depends(get_db)):
 def flagged_clips(db: Session = Depends(get_db)):
     clips = (
         db.query(VideoClip)
-        .filter(VideoClip.processing_status.in_([
-            ClipProcessingStatus.flagged.value,
-            ClipProcessingStatus.unassigned.value,
-        ]))
+        .filter(
+            VideoClip.processing_status.in_(
+                [
+                    ClipProcessingStatus.flagged.value,
+                    ClipProcessingStatus.unassigned.value,
+                ]
+            )
+        )
         .order_by(VideoClip.captured_at.desc())
         .all()
     )
@@ -409,12 +460,14 @@ def flagged_clips(db: Session = Depends(get_db)):
         candidates = []
         if c.course_id:
             from datetime import timedelta
+
             course = db.get(Course, c.course_id)
             if course:
                 mph = course.minutes_per_hole or 14
                 lo = c.captured_at - timedelta(minutes=mph * 19)
                 hi = c.captured_at
                 from ..models import TeeTime as _TT
+
                 tts = (
                     db.query(_TT)
                     .filter(
@@ -430,7 +483,9 @@ def flagged_clips(db: Session = Depends(get_db)):
                             {
                                 "id": p.id,
                                 "name": p.name,
-                                "selfie_url": f"/uploads/{p.selfie_path}" if p.selfie_path else None,
+                                "selfie_url": f"/uploads/{p.selfie_path}"
+                                if p.selfie_path
+                                else None,
                             }
                         )
         out.append(
@@ -452,7 +507,9 @@ def flagged_clips(db: Session = Depends(get_db)):
 
 
 @router.post("/clips/{clip_id}/assign")
-def manually_assign_clip(clip_id: int, participant_id: int, db: Session = Depends(get_db)):
+def manually_assign_clip(
+    clip_id: int, participant_id: int, db: Session = Depends(get_db)
+):
     clip = db.get(VideoClip, clip_id)
     participant = db.get(Participant, participant_id)
     if not clip or not participant:
@@ -460,7 +517,13 @@ def manually_assign_clip(clip_id: int, participant_id: int, db: Session = Depend
     clip.participant_id = participant.id
     clip.processing_status = ClipProcessingStatus.assigned.value
     clip.issue_note = None
-    db.add(AuditLog(actor="admin", action="assign_clip", target=f"clip:{clip.id}->p:{participant.id}"))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="assign_clip",
+            target=f"clip:{clip.id}->p:{participant.id}",
+        )
+    )
 
     course = db.get(Course, clip.course_id)
     notifications.maybe_send_round_summary(db, participant, course)
@@ -490,10 +553,20 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
     )
     course_ids = {c.course_id for c in clips}
     participant_ids = {c.participant_id for c in clips if c.participant_id}
-    courses = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
+    courses = (
+        {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
+        if course_ids
+        else {}
+    )
     participants = (
-        {p.id: p for p in db.query(Participant).filter(Participant.id.in_(participant_ids)).all()}
-        if participant_ids else {}
+        {
+            p.id: p
+            for p in db.query(Participant)
+            .filter(Participant.id.in_(participant_ids))
+            .all()
+        }
+        if participant_ids
+        else {}
     )
     out = []
     for c in clips:
@@ -511,26 +584,28 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
                 if source_path.exists():
                     fps_val = probe_fps(source_path)
                     source_device = probe_source_device(source_path)
-        out.append({
-            "id": c.id,
-            "course_id": c.course_id,
-            "course_name": course.name if course else None,
-            "hole_number": c.hole_number,
-            "camera_type": c.camera_type,
-            "captured_at": c.captured_at.isoformat() if c.captured_at else None,
-            "created_at": c.created_at.isoformat() if c.created_at else None,
-            "source_url": c.source_url,
-            "tracer_url": c.tracer_url,
-            "tee_clip_url": c.tee_clip_url,
-            "thumbnail_url": c.thumbnail_url,
-            "ball_in_cup": bool(c.ball_in_cup),
-            "is_highlight": bool(c.is_highlight),
-            "processing_status": c.processing_status,
-            "participant_id": c.participant_id,
-            "participant_name": participant.name if participant else None,
-            "fps": round(fps_val, 1) if fps_val is not None else None,
-            "source_device": source_device,
-        })
+        out.append(
+            {
+                "id": c.id,
+                "course_id": c.course_id,
+                "course_name": course.name if course else None,
+                "hole_number": c.hole_number,
+                "camera_type": c.camera_type,
+                "captured_at": c.captured_at.isoformat() if c.captured_at else None,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "source_url": c.source_url,
+                "tracer_url": c.tracer_url,
+                "tee_clip_url": c.tee_clip_url,
+                "thumbnail_url": c.thumbnail_url,
+                "ball_in_cup": bool(c.ball_in_cup),
+                "is_highlight": bool(c.is_highlight),
+                "processing_status": c.processing_status,
+                "participant_id": c.participant_id,
+                "participant_name": participant.name if participant else None,
+                "fps": round(fps_val, 1) if fps_val is not None else None,
+                "source_device": source_device,
+            }
+        )
     return out
 
 
@@ -552,11 +627,14 @@ def toggle_clip_broadcast(
     else:
         clip.is_highlight = not bool(clip.is_highlight)
     db.add(clip)
-    db.add(AuditLog(
-        actor="admin", action="toggle_clip_broadcast",
-        target=f"clip:{clip.id}",
-        detail=f"is_highlight={bool(clip.is_highlight)}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="toggle_clip_broadcast",
+            target=f"clip:{clip.id}",
+            detail=f"is_highlight={bool(clip.is_highlight)}",
+        )
+    )
     db.commit()
     db.refresh(clip)
     return {"clip_id": clip.id, "is_highlight": bool(clip.is_highlight)}
@@ -572,23 +650,36 @@ def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
     source-device header line works without modification.
     """
     from sqlalchemy import or_  # local import — keeps the module
-                                # header lean
+
+    # header lean
     clips = (
         db.query(VideoClip)
-        .filter(or_(
-            VideoClip.is_highlight.is_(True),
-            VideoClip.source_url.like("%_composite%"),
-        ))
+        .filter(
+            or_(
+                VideoClip.is_highlight.is_(True),
+                VideoClip.source_url.like("%_composite%"),
+            )
+        )
         .order_by(VideoClip.created_at.desc())
         .limit(max(1, min(500, limit)))
         .all()
     )
     course_ids = {c.course_id for c in clips}
     participant_ids = {c.participant_id for c in clips if c.participant_id}
-    courses = {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()} if course_ids else {}
+    courses = (
+        {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
+        if course_ids
+        else {}
+    )
     participants = (
-        {p.id: p for p in db.query(Participant).filter(Participant.id.in_(participant_ids)).all()}
-        if participant_ids else {}
+        {
+            p.id: p
+            for p in db.query(Participant)
+            .filter(Participant.id.in_(participant_ids))
+            .all()
+        }
+        if participant_ids
+        else {}
     )
     out = []
     for c in clips:
@@ -603,25 +694,27 @@ def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
                 if source_path.exists():
                     fps_val = probe_fps(source_path)
                     source_device = probe_source_device(source_path)
-        out.append({
-            "id": c.id,
-            "course_id": c.course_id,
-            "course_name": course.name if course else None,
-            "hole_number": c.hole_number,
-            "camera_type": c.camera_type,
-            "captured_at": c.captured_at.isoformat() if c.captured_at else None,
-            "created_at": c.created_at.isoformat() if c.created_at else None,
-            "source_url": c.source_url,
-            "tracer_url": c.tracer_url,
-            "thumbnail_url": c.thumbnail_url,
-            "ball_in_cup": bool(c.ball_in_cup),
-            "is_highlight": bool(c.is_highlight),
-            "processing_status": c.processing_status,
-            "participant_id": c.participant_id,
-            "participant_name": participant.name if participant else None,
-            "fps": round(fps_val, 1) if fps_val is not None else None,
-            "source_device": source_device,
-        })
+        out.append(
+            {
+                "id": c.id,
+                "course_id": c.course_id,
+                "course_name": course.name if course else None,
+                "hole_number": c.hole_number,
+                "camera_type": c.camera_type,
+                "captured_at": c.captured_at.isoformat() if c.captured_at else None,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "source_url": c.source_url,
+                "tracer_url": c.tracer_url,
+                "thumbnail_url": c.thumbnail_url,
+                "ball_in_cup": bool(c.ball_in_cup),
+                "is_highlight": bool(c.is_highlight),
+                "processing_status": c.processing_status,
+                "participant_id": c.participant_id,
+                "participant_name": participant.name if participant else None,
+                "fps": round(fps_val, 1) if fps_val is not None else None,
+                "source_device": source_device,
+            }
+        )
     return out
 
 
@@ -665,10 +758,18 @@ def retry_tracer(
     fpath = CLIPS_DIR / fname
     if not fpath.exists():
         raise HTTPException(404, f"source file missing on disk: {fname}")
-    tracer_url, tracer_info, _, tracer_debug_url = _run_tracer(fpath, sensitivity=float(sensitivity))
+    tracer_url, tracer_info, _, tracer_debug_url = _run_tracer(
+        fpath, sensitivity=float(sensitivity)
+    )
     clip.tracer_url = tracer_url
-    db.add(AuditLog(actor="admin", action="retry_tracer", target=f"clip:{clip.id}",
-                    detail=str(tracer_info)))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="retry_tracer",
+            target=f"clip:{clip.id}",
+            detail=str(tracer_info),
+        )
+    )
     db.commit()
     return {
         "clip_id": clip.id,
@@ -695,7 +796,7 @@ def audio_impact_frame(
     """
     try:
         import cv2  # local import: keeps admin.py importable even on
-                   # boxes where opencv-python isn't installed.
+        # boxes where opencv-python isn't installed.
     except ImportError:
         raise HTTPException(500, "opencv required for frame grab")
 
@@ -760,9 +861,13 @@ def audio_impact_frame(
     if ok_address and address_frame is not None:
         address_name = f"{fpath.stem}_audio_address.jpg"
         address_out = CLIPS_DIR / address_name
-        cv2.imwrite(str(address_out), address_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        cv2.imwrite(
+            str(address_out), address_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92]
+        )
         address_mtime = int(address_out.stat().st_mtime)
-        address_url = f"{settings.app_base_url}/uploads/clips/{address_name}?v={address_mtime}"
+        address_url = (
+            f"{settings.app_base_url}/uploads/clips/{address_name}?v={address_mtime}"
+        )
 
     return {
         "ok": True,
@@ -851,11 +956,13 @@ def ai_trace(
             if not isinstance(entry, dict):
                 raise HTTPException(400, "each manual position entry must be an object")
             try:
-                manual_positions.append({
-                    "frame": int(entry["frame"]),
-                    "x": int(entry["x"]),
-                    "y": int(entry["y"]),
-                })
+                manual_positions.append(
+                    {
+                        "frame": int(entry["frame"]),
+                        "x": int(entry["x"]),
+                        "y": int(entry["y"]),
+                    }
+                )
             except (KeyError, TypeError, ValueError):
                 raise HTTPException(
                     400,
@@ -878,9 +985,16 @@ def ai_trace(
             )
 
     pipe = run_full_ai_tracer_pipeline(
-        fpath, output_dir=CLIPS_DIR, output_prefix=fpath.stem, model=model,
-        impact_frame_override=int(impact_frame_override) if impact_frame_override is not None else None,
-        ball_track_max_frames_override=int(ball_track_max_frames) if ball_track_max_frames is not None else None,
+        fpath,
+        output_dir=CLIPS_DIR,
+        output_prefix=fpath.stem,
+        model=model,
+        impact_frame_override=int(impact_frame_override)
+        if impact_frame_override is not None
+        else None,
+        ball_track_max_frames_override=int(ball_track_max_frames)
+        if ball_track_max_frames is not None
+        else None,
         ball_at_rest_override=ball_at_rest_override,
         manual_ball_positions=manual_positions,
         handedness_override=handedness_clean,
@@ -907,7 +1021,8 @@ def ai_trace(
         if not compressed:
             log.warning(
                 "ai_tracer: compress_for_email returned False for %s — "
-                "browser playback may fail", tracer_path.name,
+                "browser playback may fail",
+                tracer_path.name,
             )
         if tracer_path.exists() and tracer_path.stat().st_size > 0:
             tracer_video_url = _public_url(tracer_path)
@@ -928,39 +1043,45 @@ def ai_trace(
             if fp.exists():
                 mtime = int(fp.stat().st_mtime)
                 url = f"{settings.app_base_url}/uploads/clips/{filename}?v={mtime}"
-        ball_track_frames_out.append({
-            "frame": rec.get("frame"),
-            "found": rec.get("found"),
-            "x": rec.get("x"),
-            "y": rec.get("y"),
-            "confidence": rec.get("confidence"),
-            "notes": rec.get("notes"),
-            "retry": rec.get("retry", False),
-            "image_url": url,
-        })
+        ball_track_frames_out.append(
+            {
+                "frame": rec.get("frame"),
+                "found": rec.get("found"),
+                "x": rec.get("x"),
+                "y": rec.get("y"),
+                "confidence": rec.get("confidence"),
+                "notes": rec.get("notes"),
+                "retry": rec.get("retry", False),
+                "image_url": url,
+            }
+        )
 
     ball_track_info = pipe.get("ball_track")
     ball_track_summary = None
     if ball_track_info is not None:
-        ball_track_summary = {
-            k: v for k, v in ball_track_info.items() if k != "frames"
-        }
+        ball_track_summary = {k: v for k, v in ball_track_info.items() if k != "frames"}
 
-    db.add(AuditLog(
-        actor="admin", action="ai_trace_address", target=f"clip:{clip.id}",
-        detail=str({
-            "address": pipe.get("address"),
-            "handedness": pipe.get("handedness"),
-            "impact": pipe.get("impact"),
-            "impact_refined": pipe.get("impact_refined"),
-            "ball_track": ball_track_summary,
-            "n_track_frames_with_image": sum(
-                1 for r in ball_track_frames_out if r.get("image_url")
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="ai_trace_address",
+            target=f"clip:{clip.id}",
+            detail=str(
+                {
+                    "address": pipe.get("address"),
+                    "handedness": pipe.get("handedness"),
+                    "impact": pipe.get("impact"),
+                    "impact_refined": pipe.get("impact_refined"),
+                    "ball_track": ball_track_summary,
+                    "n_track_frames_with_image": sum(
+                        1 for r in ball_track_frames_out if r.get("image_url")
+                    ),
+                    "tracer_video": tracer_video_info,
+                    "cutover_time_sec": pipe.get("cutover_time_sec"),
+                }
             ),
-            "tracer_video": tracer_video_info,
-            "cutover_time_sec": pipe.get("cutover_time_sec"),
-        }),
-    ))
+        )
+    )
     db.commit()
 
     return {
@@ -1047,11 +1168,13 @@ def _run_long_upload_job(
                     pair_window_sec=float(combined_pair_window_sec),
                 )
                 for i, d in enumerate(detected):
-                    segs.append({
-                        "hole_number": starting_hole + i,
-                        "start_sec": d["start_sec"],
-                        "end_sec": d["end_sec"],
-                    })
+                    segs.append(
+                        {
+                            "hole_number": starting_hole + i,
+                            "start_sec": d["start_sec"],
+                            "end_sec": d["end_sec"],
+                        }
+                    )
                 if not segs:
                     raise RuntimeError(
                         "no swings detected (combined audio+motion found "
@@ -1061,7 +1184,9 @@ def _run_long_upload_job(
             durations = [s["end_sec"] - s["start_sec"] for s in segs]
             log.info(
                 "long-upload worker: upload=%s segs=%d source=%s durations=%s",
-                upload_id, len(segs), "auto-combined" if auto_used else "manual",
+                upload_id,
+                len(segs),
+                "auto-combined" if auto_used else "manual",
                 ", ".join(f"{d:.1f}s" for d in durations[:30]),
             )
 
@@ -1075,7 +1200,9 @@ def _run_long_upload_job(
             # the wizard expects: idx + frame indices + fps.
             saved_em = dict(row.edit_metrics or {})
             existing_swings = saved_em.get("swings") or []
-            by_idx = {int(s.get("idx", -1)): s for s in existing_swings if isinstance(s, dict)}
+            by_idx = {
+                int(s.get("idx", -1)): s for s in existing_swings if isinstance(s, dict)
+            }
             for i, seg in enumerate(segs):
                 if i in by_idx:
                     continue
@@ -1161,6 +1288,7 @@ def _process_long_upload_segments(
     row's `last_n_succeeded` is bumped after every segment commit so a
     polling UI sees "X/Y processed" in near-real-time.
     """
+
     def _bump_progress(done_so_far: int) -> None:
         if progress_upload_id is None:
             return
@@ -1173,7 +1301,9 @@ def _process_long_upload_segments(
     # course.name / par3_holes / hole_yardages for every segment.
     _course_for_intro: Course | None = db.get(Course, course_id)
 
-    def _intro_overlay_for_clip(clip: VideoClip, participant: Participant | None) -> None:
+    def _intro_overlay_for_clip(
+        clip: VideoClip, participant: Participant | None
+    ) -> None:
         """Best-effort: re-encode the clip's deliverable file in-place
         with the slide-in/out intro panels overlaid on the first ~3.5s.
         Any failure (PIL missing, ffmpeg fails, file gone) logs and
@@ -1224,27 +1354,47 @@ def _process_long_upload_segments(
             start_sec = float(seg["start_sec"])
             end_sec = float(seg["end_sec"])
         except (KeyError, TypeError, ValueError):
-            results.append({"index": idx, "ok": False, "error": "missing or invalid hole_number / start_sec / end_sec"})
+            results.append(
+                {
+                    "index": idx,
+                    "ok": False,
+                    "error": "missing or invalid hole_number / start_sec / end_sec",
+                }
+            )
             continue
         if end_sec <= start_sec:
-            results.append({"index": idx, "ok": False, "error": "end_sec must be > start_sec"})
+            results.append(
+                {"index": idx, "ok": False, "error": "end_sec must be > start_sec"}
+            )
             continue
 
         seg_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.mp4"
         seg_path = CLIPS_DIR / seg_name
         ok = cut_segment(src_path, seg_path, start_sec, end_sec)
         if not ok:
-            results.append({"index": idx, "ok": False, "error": "ffmpeg cut failed (or ffmpeg not installed)"})
+            results.append(
+                {
+                    "index": idx,
+                    "ok": False,
+                    "error": "ffmpeg cut failed (or ffmpeg not installed)",
+                }
+            )
             continue
 
         # --- Dual-camera branch -----------------------------------
         if dual_camera and green_src_path is not None:
-            green_seg_name = f"{course_id}-h{hole_number}-green-{secrets.token_hex(6)}.mp4"
+            green_seg_name = (
+                f"{course_id}-h{hole_number}-green-{secrets.token_hex(6)}.mp4"
+            )
             green_seg_path = CLIPS_DIR / green_seg_name
-            green_cut_ok = cut_segment(green_src_path, green_seg_path, start_sec, end_sec)
+            green_cut_ok = cut_segment(
+                green_src_path, green_seg_path, start_sec, end_sec
+            )
             if not green_cut_ok:
                 seg_path.unlink(missing_ok=True)
-                results.append({"index": idx, "ok": False, "error": "green ffmpeg cut failed"})
+                results.append(
+                    {"index": idx, "ok": False, "error": "green ffmpeg cut failed"}
+                )
                 continue
 
             pipe = run_full_ai_tracer_pipeline(
@@ -1260,8 +1410,10 @@ def _process_long_upload_segments(
             cutover = pipe.get("cutover_time_sec")
             tracer_path = pipe.get("tracer_video_path")
             if (
-                pipe.get("ok") and tracer_path is not None
-                and cutover is not None and cutover > 0
+                pipe.get("ok")
+                and tracer_path is not None
+                and cutover is not None
+                and cutover > 0
                 and tracer_path.exists()
             ):
                 tee_info = probe_video_info(tracer_path)
@@ -1269,30 +1421,43 @@ def _process_long_upload_segments(
                 tee_duration = float(tee_info.get("duration") or 0.0)
                 green_duration = float(green_info.get("duration") or 0.0)
                 switch_sec = max(0.0, min(cutover, tee_duration or cutover))
-                end_green_sec = max(switch_sec + 0.1, green_duration or (end_sec - start_sec))
+                end_green_sec = max(
+                    switch_sec + 0.1, green_duration or (end_sec - start_sec)
+                )
                 composite_name = f"{seg_path.stem}_composite.mp4"
                 composite_path = CLIPS_DIR / composite_name
                 if concat_two_clips(
-                    tracer_path, 0.0, switch_sec,
-                    green_seg_path, switch_sec, end_green_sec,
+                    tracer_path,
+                    0.0,
+                    switch_sec,
+                    green_seg_path,
+                    switch_sec,
+                    end_green_sec,
                     composite_path,
                 ):
                     compress_for_email(composite_path)
                     if composite_path.exists() and composite_path.stat().st_size > 0:
-                        composite_url = f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                        composite_url = (
+                            f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                        )
                         composite_info = {
                             "switch_sec": round(switch_sec, 2),
                             "end_sec": round(end_green_sec, 2),
                             "fps": pipe.get("fps"),
-                            "tracer_frame_range": (pipe.get("tracer_video_info") or {}).get("frame_range"),
+                            "tracer_frame_range": (
+                                pipe.get("tracer_video_info") or {}
+                            ).get("frame_range"),
                             "method": (pipe.get("impact") or {}).get("method"),
                         }
 
-            thumb_source = tracer_path if (tracer_path and tracer_path.exists()) else seg_path
+            thumb_source = (
+                tracer_path if (tracer_path and tracer_path.exists()) else seg_path
+            )
             thumb_path = extract_thumbnail(thumb_source)
             thumb_url = (
                 f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
-                if thumb_path else None
+                if thumb_path
+                else None
             )
 
             tee_clip_public_url: str | None = None
@@ -1310,7 +1475,9 @@ def _process_long_upload_segments(
                         f"{settings.app_base_url}/uploads/clips/{seg_name}"
                     )
             elif tracer_path and tracer_path.exists():
-                public_source = f"{settings.app_base_url}/uploads/clips/{tracer_path.name}"
+                public_source = (
+                    f"{settings.app_base_url}/uploads/clips/{tracer_path.name}"
+                )
                 public_tracer = public_source
             else:
                 compress_for_email(seg_path)
@@ -1339,27 +1506,31 @@ def _process_long_upload_segments(
             db.flush()
             participant = match_clip(db, clip)
             if participant and clip.ball_in_cup:
-                notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+                notifications.notify_hio_under_review(
+                    participant.name, participant.mobile, participant.email
+                )
             _intro_overlay_for_clip(clip, participant)
             db.commit()
 
-            results.append({
-                "index": idx,
-                "ok": True,
-                "clip_id": clip.id,
-                "hole_number": hole_number,
-                "captured_at": captured_dt.isoformat(),
-                "status": clip.processing_status,
-                "participant_id": clip.participant_id,
-                "participant_name": participant.name if participant else None,
-                "source_url": clip.source_url,
-                "tracer_url": clip.tracer_url,
-                "thumbnail_url": clip.thumbnail_url,
-                "issue_note": clip.issue_note,
-                "dual_camera": True,
-                "composite": composite_info,
-                "ai_tracer_error": pipe.get("error"),
-            })
+            results.append(
+                {
+                    "index": idx,
+                    "ok": True,
+                    "clip_id": clip.id,
+                    "hole_number": hole_number,
+                    "captured_at": captured_dt.isoformat(),
+                    "status": clip.processing_status,
+                    "participant_id": clip.participant_id,
+                    "participant_name": participant.name if participant else None,
+                    "source_url": clip.source_url,
+                    "tracer_url": clip.tracer_url,
+                    "thumbnail_url": clip.thumbnail_url,
+                    "issue_note": clip.issue_note,
+                    "dual_camera": True,
+                    "composite": composite_info,
+                    "ai_tracer_error": pipe.get("error"),
+                }
+            )
             n_done += 1
             _bump_progress(n_done)
             continue
@@ -1369,7 +1540,8 @@ def _process_long_upload_segments(
         thumb_path = extract_thumbnail(seg_path)
         thumb_url = (
             f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
-            if thumb_path else None
+            if thumb_path
+            else None
         )
         tracer_url, _, _, _ = _run_tracer(seg_path)
 
@@ -1395,23 +1567,27 @@ def _process_long_upload_segments(
 
         participant = match_clip(db, clip)
         if participant and clip.ball_in_cup:
-            notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+            notifications.notify_hio_under_review(
+                participant.name, participant.mobile, participant.email
+            )
         _intro_overlay_for_clip(clip, participant)
         db.commit()
 
-        results.append({
-            "index": idx,
-            "ok": True,
-            "clip_id": clip.id,
-            "hole_number": hole_number,
-            "captured_at": captured_dt.isoformat(),
-            "status": clip.processing_status,
-            "participant_id": clip.participant_id,
-            "participant_name": participant.name if participant else None,
-            "source_url": clip.source_url,
-            "tracer_url": clip.tracer_url,
-            "issue_note": clip.issue_note,
-        })
+        results.append(
+            {
+                "index": idx,
+                "ok": True,
+                "clip_id": clip.id,
+                "hole_number": hole_number,
+                "captured_at": captured_dt.isoformat(),
+                "status": clip.processing_status,
+                "participant_id": clip.participant_id,
+                "participant_name": participant.name if participant else None,
+                "source_url": clip.source_url,
+                "tracer_url": clip.tracer_url,
+                "issue_note": clip.issue_note,
+            }
+        )
         n_done += 1
         _bump_progress(n_done)
     return results
@@ -1463,7 +1639,11 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
             if not fp.is_file():
                 continue
             for stem in stems:
-                if fp.name == stem or fp.name.startswith(stem + ".") or fp.name.startswith(stem + "_"):
+                if (
+                    fp.name == stem
+                    or fp.name.startswith(stem + ".")
+                    or fp.name.startswith(stem + "_")
+                ):
                     candidate_names.add(fp.name)
                     break
 
@@ -1477,10 +1657,14 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
         except Exception as exc:
             log.warning("clip delete: failed to unlink %s: %s", fp, exc)
 
-    db.add(AuditLog(
-        actor="admin", action="delete_clip", target=f"clip:{clip.id}",
-        detail=f"deleted {len(deleted_files)} files, freed {freed} bytes",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="delete_clip",
+            target=f"clip:{clip.id}",
+            detail=f"deleted {len(deleted_files)} files, freed {freed} bytes",
+        )
+    )
     db.delete(clip)
     db.commit()
     return {
@@ -1537,7 +1721,11 @@ async def quick_upload_videos(
         raise HTTPException(400, "empty tee video upload")
     if len(data) > 1024 * 1024 * 1024:
         raise HTTPException(413, "tee video too large (max 1GB)")
-    src_ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    src_ext = (
+        (video.filename or "").rsplit(".", 1)[-1].lower()
+        if "." in (video.filename or "")
+        else "mp4"
+    )
     if src_ext not in ("mp4", "mov", "webm", "m4v"):
         src_ext = "mp4"
     src_name = f"long-{course_id}-{secrets.token_hex(6)}.{src_ext}"
@@ -1555,7 +1743,11 @@ async def quick_upload_videos(
         if len(green_data) > 1024 * 1024 * 1024:
             src_path.unlink(missing_ok=True)
             raise HTTPException(413, "green video too large (max 1GB)")
-        g_ext = (video_green.filename or "").rsplit(".", 1)[-1].lower() if "." in (video_green.filename or "") else "mp4"
+        g_ext = (
+            (video_green.filename or "").rsplit(".", 1)[-1].lower()
+            if "." in (video_green.filename or "")
+            else "mp4"
+        )
         if g_ext not in ("mp4", "mov", "webm", "m4v"):
             g_ext = "mp4"
         green_src_name = f"long-{course_id}-green-{secrets.token_hex(6)}.{g_ext}"
@@ -1591,19 +1783,26 @@ async def quick_upload_videos(
     except Exception as exc:  # pragma: no cover
         log.warning("quick-upload: thumbnail extraction failed: %s", exc)
 
-    db.add(AuditLog(
-        actor="admin", action="quick_upload_videos",
-        target=f"long_upload:{upload_row.id}",
-        detail=(
-            f"course={course_id} tee={src_name} swing_count={swing_count_norm}"
-            + (f" green={green_src_name}" if green_src_name else "")
-        ),
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="quick_upload_videos",
+            target=f"long_upload:{upload_row.id}",
+            detail=(
+                f"course={course_id} tee={src_name} swing_count={swing_count_norm}"
+                + (f" green={green_src_name}" if green_src_name else "")
+            ),
+        )
+    )
     db.commit()
 
     log.info(
         "quick-upload: upload=%s course=%s tee=%s green=%s swing_count=%s",
-        upload_row.id, course_id, src_name, green_src_name, swing_count_norm,
+        upload_row.id,
+        course_id,
+        src_name,
+        green_src_name,
+        swing_count_norm,
     )
 
     # 'multiple' swing-count kicks off the cut / AI-tracer / composite
@@ -1728,7 +1927,11 @@ async def upload_long_video(
     if len(data) > 1024 * 1024 * 1024:  # 1GB cap on the long source
         raise HTTPException(413, "video too large (max 1GB)")
 
-    src_ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    src_ext = (
+        (video.filename or "").rsplit(".", 1)[-1].lower()
+        if "." in (video.filename or "")
+        else "mp4"
+    )
     if src_ext not in ("mp4", "mov", "webm", "m4v"):
         src_ext = "mp4"
     src_name = f"long-{course_id}-{secrets.token_hex(6)}.{src_ext}"
@@ -1744,7 +1947,11 @@ async def upload_long_video(
         if len(green_data) > 1024 * 1024 * 1024:
             src_path.unlink(missing_ok=True)
             raise HTTPException(413, "green video too large (max 1GB)")
-        g_ext = (video_green.filename or "").rsplit(".", 1)[-1].lower() if "." in (video_green.filename or "") else "mp4"
+        g_ext = (
+            (video_green.filename or "").rsplit(".", 1)[-1].lower()
+            if "." in (video_green.filename or "")
+            else "mp4"
+        )
         if g_ext not in ("mp4", "mov", "webm", "m4v"):
             g_ext = "mp4"
         green_src_name = f"long-{course_id}-green-{secrets.token_hex(6)}.{g_ext}"
@@ -1762,7 +1969,9 @@ async def upload_long_video(
         tee_filename=src_path.name,
         green_filename=(green_src_path.name if green_src_path is not None else None),
         tee_original_filename=(video.filename or None),
-        green_original_filename=(video_green.filename if video_green is not None else None),
+        green_original_filename=(
+            video_green.filename if video_green is not None else None
+        ),
         processing_status="pending",
     )
     db.add(upload_row)
@@ -1808,8 +2017,10 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
     course_ids = {r.course_id for r in rows}
     courses = (
         {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
-        if course_ids else {}
+        if course_ids
+        else {}
     )
+
     def _quality_label(height: int | None) -> str | None:
         """Friendly resolution tier so the UI can show 'Quality: 720p HD'
         without re-deriving the mapping client-side."""
@@ -1831,19 +2042,29 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
         """Bundle probe + thumbnail lookup for one source video. Skipping the
         probe entirely when the file is missing keeps list responses fast."""
         if not (path and exists):
-            return {"size_mb": None, "duration_sec": None, "fps": None,
-                    "nb_frames": None, "thumbnail_url": None,
-                    "width": None, "height": None, "quality_label": None}
+            return {
+                "size_mb": None,
+                "duration_sec": None,
+                "fps": None,
+                "nb_frames": None,
+                "thumbnail_url": None,
+                "width": None,
+                "height": None,
+                "quality_label": None,
+            }
         size = path.stat().st_size
         info = probe_video_info(path)
         thumb = path.with_suffix(".jpg")
         thumb_url = (
             f"{settings.app_base_url}/uploads/clips/{thumb.name}"
-            if thumb.exists() else None
+            if thumb.exists()
+            else None
         )
         return {
             "size_mb": round(size / 1024 / 1024, 1) if size else None,
-            "duration_sec": round(info["duration"], 1) if info.get("duration") else None,
+            "duration_sec": round(info["duration"], 1)
+            if info.get("duration")
+            else None,
             "fps": round(info["fps"], 2) if info.get("fps") else None,
             "nb_frames": info.get("nb_frames"),
             "thumbnail_url": thumb_url,
@@ -1874,15 +2095,17 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
             # final on-air output. Fallback to source_url so single-cam
             # clips still play before the tracer ships.
             play_url = c.tracer_url or c.source_url
-            out.append({
-                "id": c.id,
-                "hole_number": c.hole_number,
-                "captured_at": c.captured_at.isoformat() if c.captured_at else None,
-                "video_url": play_url,
-                "thumbnail_url": c.thumbnail_url,
-                "ball_in_cup": bool(c.ball_in_cup),
-                "is_highlight": bool(c.is_highlight),
-            })
+            out.append(
+                {
+                    "id": c.id,
+                    "hole_number": c.hole_number,
+                    "captured_at": c.captured_at.isoformat() if c.captured_at else None,
+                    "video_url": play_url,
+                    "thumbnail_url": c.thumbnail_url,
+                    "ball_in_cup": bool(c.ball_in_cup),
+                    "is_highlight": bool(c.is_highlight),
+                }
+            )
         return out
 
     out = []
@@ -1895,61 +2118,69 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
         green_meta = _meta(green_path, green_exists)
         course = courses.get(r.course_id)
         produced = _produced(r.id)
-        out.append({
-            "id": r.id,
-            "course_id": r.course_id,
-            "course_name": course.name if course else None,
-            "course_hole_yardages": (course.hole_yardages or {}) if course else {},
-            "camera_type": r.camera_type,
-            "base_captured_at": r.base_captured_at.isoformat() if r.base_captured_at else None,
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-            "swing_count": r.swing_count or "multiple",
-            "tee_filename": r.tee_filename,
-            "tee_original_filename": r.tee_original_filename,
-            "tee_url": (
-                f"{settings.app_base_url}/uploads/clips/{r.tee_filename}"
-                if tee_exists else None
-            ),
-            "tee_thumbnail_url": tee_meta["thumbnail_url"],
-            "tee_size_mb": tee_meta["size_mb"],
-            "tee_duration_sec": tee_meta["duration_sec"],
-            "tee_fps": tee_meta["fps"],
-            "tee_nb_frames": tee_meta["nb_frames"],
-            "tee_width": tee_meta["width"],
-            "tee_height": tee_meta["height"],
-            "tee_quality_label": tee_meta["quality_label"],
-            "tee_missing": (r.tee_filename is not None and not tee_exists),
-            "green_filename": r.green_filename,
-            "green_original_filename": r.green_original_filename,
-            "green_url": (
-                f"{settings.app_base_url}/uploads/clips/{r.green_filename}"
-                if green_exists else None
-            ),
-            "green_thumbnail_url": green_meta["thumbnail_url"],
-            "green_size_mb": green_meta["size_mb"],
-            "green_duration_sec": green_meta["duration_sec"],
-            "green_fps": green_meta["fps"],
-            "green_nb_frames": green_meta["nb_frames"],
-            "green_width": green_meta["width"],
-            "green_height": green_meta["height"],
-            "green_quality_label": green_meta["quality_label"],
-            "green_missing": (r.green_filename is not None and not green_exists),
-            "dual_camera": r.green_filename is not None,
-            "produced_clips": produced,
-            "edit_metrics": r.edit_metrics,
-            "last_n_segments": r.last_n_segments,
-            "last_n_succeeded": r.last_n_succeeded,
-            "processing_status": r.processing_status,
-            "processing_started_at": (
-                r.processing_started_at.isoformat()
-                if r.processing_started_at else None
-            ),
-            "processing_completed_at": (
-                r.processing_completed_at.isoformat()
-                if r.processing_completed_at else None
-            ),
-            "last_error": r.last_error,
-        })
+        out.append(
+            {
+                "id": r.id,
+                "course_id": r.course_id,
+                "course_name": course.name if course else None,
+                "course_hole_yardages": (course.hole_yardages or {}) if course else {},
+                "camera_type": r.camera_type,
+                "base_captured_at": r.base_captured_at.isoformat()
+                if r.base_captured_at
+                else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "swing_count": r.swing_count or "multiple",
+                "tee_filename": r.tee_filename,
+                "tee_original_filename": r.tee_original_filename,
+                "tee_url": (
+                    f"{settings.app_base_url}/uploads/clips/{r.tee_filename}"
+                    if tee_exists
+                    else None
+                ),
+                "tee_thumbnail_url": tee_meta["thumbnail_url"],
+                "tee_size_mb": tee_meta["size_mb"],
+                "tee_duration_sec": tee_meta["duration_sec"],
+                "tee_fps": tee_meta["fps"],
+                "tee_nb_frames": tee_meta["nb_frames"],
+                "tee_width": tee_meta["width"],
+                "tee_height": tee_meta["height"],
+                "tee_quality_label": tee_meta["quality_label"],
+                "tee_missing": (r.tee_filename is not None and not tee_exists),
+                "green_filename": r.green_filename,
+                "green_original_filename": r.green_original_filename,
+                "green_url": (
+                    f"{settings.app_base_url}/uploads/clips/{r.green_filename}"
+                    if green_exists
+                    else None
+                ),
+                "green_thumbnail_url": green_meta["thumbnail_url"],
+                "green_size_mb": green_meta["size_mb"],
+                "green_duration_sec": green_meta["duration_sec"],
+                "green_fps": green_meta["fps"],
+                "green_nb_frames": green_meta["nb_frames"],
+                "green_width": green_meta["width"],
+                "green_height": green_meta["height"],
+                "green_quality_label": green_meta["quality_label"],
+                "green_missing": (r.green_filename is not None and not green_exists),
+                "dual_camera": r.green_filename is not None,
+                "produced_clips": produced,
+                "edit_metrics": r.edit_metrics,
+                "last_n_segments": r.last_n_segments,
+                "last_n_succeeded": r.last_n_succeeded,
+                "processing_status": r.processing_status,
+                "processing_started_at": (
+                    r.processing_started_at.isoformat()
+                    if r.processing_started_at
+                    else None
+                ),
+                "processing_completed_at": (
+                    r.processing_completed_at.isoformat()
+                    if r.processing_completed_at
+                    else None
+                ),
+                "last_error": r.last_error,
+            }
+        )
     return out
 
 
@@ -2072,14 +2303,16 @@ def detect_swings_for_upload(
         end_frame = int(round(end_sec * fps_val))
         impact_frame = int(round(peak_sec * fps_val))
         address_frame = max(start_frame, impact_frame - int(round(1.5 * fps_val)))
-        swings.append({
-            "idx": i,
-            "start_frame": start_frame,
-            "end_frame": end_frame,
-            "address_frame": address_frame,
-            "impact_frame": impact_frame,
-            "fps": round(fps_val, 2) if fps_val else None,
-        })
+        swings.append(
+            {
+                "idx": i,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "address_frame": address_frame,
+                "impact_frame": impact_frame,
+                "fps": round(fps_val, 2) if fps_val else None,
+            }
+        )
 
     saved = dict(row.edit_metrics or {})
     # Merge — don't blow away per-swing edits the operator already
@@ -2093,11 +2326,14 @@ def detect_swings_for_upload(
     saved["swings"] = merged
     row.edit_metrics = saved
     db.add(row)
-    db.add(AuditLog(
-        actor="admin", action="detect_swings",
-        target=f"long_upload:{upload_id}",
-        detail=f"n_swings={len(swings)} fps={fps_val:.2f}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="detect_swings",
+            target=f"long_upload:{upload_id}",
+            detail=f"n_swings={len(swings)} fps={fps_val:.2f}",
+        )
+    )
     db.commit()
     db.refresh(row)
     return {
@@ -2121,6 +2357,7 @@ def _run_auto_detect_seed(upload_id: int) -> dict | None:
     error. Never raises.
     """
     from ..database import SessionLocal  # local — avoids router-load cycle
+
     sess: Session = SessionLocal()
     try:
         try:
@@ -2170,12 +2407,15 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
         address_frame_idx = max(0, int(impact_frame) - int(round(1.5 * fps_val)))
         try:
             import cv2  # type: ignore
+
             cap = cv2.VideoCapture(str(src_path))
             cap.set(cv2.CAP_PROP_POS_FRAMES, address_frame_idx)
             ok_read, frame = cap.read()
             cap.release()
             if ok_read and frame is not None:
-                cv2.imwrite(str(address_image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                cv2.imwrite(
+                    str(address_image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92]
+                )
         except Exception as exc:  # pragma: no cover
             log.warning("auto-detect: address-frame grab failed: %s", exc)
     else:
@@ -2194,7 +2434,9 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     def _public_url(p: Path | None) -> str | None:
         if not p or not p.exists():
             return None
-        return f"{settings.app_base_url}/uploads/clips/{p.name}?v={int(p.stat().st_mtime)}"
+        return (
+            f"{settings.app_base_url}/uploads/clips/{p.name}?v={int(p.stat().st_mtime)}"
+        )
 
     handedness = handedness_info.get("handedness") if handedness_info else None
     # Claude saw the address frame downscaled to image_width × image_height.
@@ -2206,6 +2448,7 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     sent_h = handedness_info.get("image_height") if handedness_info else None
     try:
         import cv2  # type: ignore
+
         _cap = cv2.VideoCapture(str(src_path))
         try:
             native_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
@@ -2222,8 +2465,12 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     ball_y_raw = handedness_info.get("ball_y") if handedness_info else None
     ball_x = ball_y = None
     if (
-        ball_x_raw is not None and ball_y_raw is not None
-        and sent_w and sent_h and frame_w and frame_h
+        ball_x_raw is not None
+        and ball_y_raw is not None
+        and sent_w
+        and sent_h
+        and frame_w
+        and frame_h
     ):
         ball_x = int(round(float(ball_x_raw) * frame_w / sent_w))
         ball_y = int(round(float(ball_y_raw) * frame_h / sent_h))
@@ -2232,8 +2479,7 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     # Square bbox centred on the ball-at-rest position, ~12% of frame
     # height on a side. Operator can resize/drag during the wizard.
     detection_area = None
-    if (ball_x is not None and ball_y is not None
-            and frame_w and frame_h):
+    if ball_x is not None and ball_y is not None and frame_w and frame_h:
         half = max(40, int(round(frame_h * 0.06)))
         detection_area = {
             "x": max(0, int(ball_x) - half),
@@ -2262,34 +2508,44 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     # adjustments via the per-field Apply buttons land here too).
     address_image_url = _public_url(address_image_path)
     saved = dict(row.edit_metrics or {})
-    saved.update({
-        "handedness": handedness or saved.get("handedness") or "right",
-        "address_frame": address_frame_idx if address_frame_idx is not None else saved.get("address_frame", 0),
-        "address_image_url": address_image_url or saved.get("address_image_url"),
-        "impact_frame": int(impact_frame) if impact_frame is not None else saved.get("impact_frame", 0),
-        "ball": (
-            {"x": int(ball_x), "y": int(ball_y)}
-            if ball_x is not None and ball_y is not None
-            else saved.get("ball")
-        ),
-        "roi": detection_area if detection_area is not None else saved.get("roi"),
-        "target": (
-            {"x": int(target["x"]), "y": int(target["y"])}
-            if target else saved.get("target")
-        ),
-        "frame_width": frame_w or saved.get("frame_width"),
-        "frame_height": frame_h or saved.get("frame_height"),
-    })
+    saved.update(
+        {
+            "handedness": handedness or saved.get("handedness") or "right",
+            "address_frame": address_frame_idx
+            if address_frame_idx is not None
+            else saved.get("address_frame", 0),
+            "address_image_url": address_image_url or saved.get("address_image_url"),
+            "impact_frame": int(impact_frame)
+            if impact_frame is not None
+            else saved.get("impact_frame", 0),
+            "ball": (
+                {"x": int(ball_x), "y": int(ball_y)}
+                if ball_x is not None and ball_y is not None
+                else saved.get("ball")
+            ),
+            "roi": detection_area if detection_area is not None else saved.get("roi"),
+            "target": (
+                {"x": int(target["x"]), "y": int(target["y"])}
+                if target
+                else saved.get("target")
+            ),
+            "frame_width": frame_w or saved.get("frame_width"),
+            "frame_height": frame_h or saved.get("frame_height"),
+        }
+    )
     row.edit_metrics = saved
     db.add(row)
-    db.add(AuditLog(
-        actor="admin", action="auto_detect_long_upload",
-        target=f"long_upload:{upload_id}",
-        detail=(
-            f"handedness={handedness} address_frame={address_frame_idx} "
-            f"impact_frame={impact_frame} ball=({ball_x},{ball_y})"
-        ),
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="auto_detect_long_upload",
+            target=f"long_upload:{upload_id}",
+            detail=(
+                f"handedness={handedness} address_frame={address_frame_idx} "
+                f"impact_frame={impact_frame} ball=({ball_x},{ball_y})"
+            ),
+        )
+    )
     db.commit()
 
     return {
@@ -2297,13 +2553,16 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
         "fps": round(fps_val, 2) if fps_val else None,
         "tee_url": (
             f"{settings.app_base_url}/uploads/clips/{row.tee_filename}"
-            if row.tee_filename else None
+            if row.tee_filename
+            else None
         ),
         "frame_width": frame_w,
         "frame_height": frame_h,
         "handedness": {
             "value": handedness,
-            "confidence": handedness_info.get("confidence") if handedness_info else None,
+            "confidence": handedness_info.get("confidence")
+            if handedness_info
+            else None,
             "notes": handedness_info.get("notes") if handedness_info else None,
         },
         "address": {
@@ -2317,7 +2576,8 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
         },
         "ball_at_rest": (
             {"x": int(ball_x), "y": int(ball_y)}
-            if ball_x is not None and ball_y is not None else None
+            if ball_x is not None and ball_y is not None
+            else None
         ),
         "ball_detection_area": detection_area,
         "target": target,
@@ -2326,7 +2586,9 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
 
 @router.get("/long-uploads/{upload_id}/frame")
 def long_upload_frame(
-    upload_id: int, frame: int = 0, db: Session = Depends(get_db),
+    upload_id: int,
+    frame: int = 0,
+    db: Session = Depends(get_db),
 ):
     """Grab a single frame from this upload's tee video as a JPG and
     return its public URL. The wizard pages through frames (±1, ±10)
@@ -2402,11 +2664,14 @@ def save_edit_metrics(
         existing[k] = v
     row.edit_metrics = existing
     db.add(row)
-    db.add(AuditLog(
-        actor="admin", action="save_edit_metrics",
-        target=f"long_upload:{upload_id}",
-        detail=str({k: (existing.get(k)) for k in payload.keys()}),
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="save_edit_metrics",
+            target=f"long_upload:{upload_id}",
+            detail=str({k: (existing.get(k)) for k in payload.keys()}),
+        )
+    )
     db.commit()
     db.refresh(row)
     return {"upload_id": upload_id, "edit_metrics": row.edit_metrics}
@@ -2465,7 +2730,9 @@ def render_wizard_tracer(
         src_path,
         output_dir=CLIPS_DIR,
         output_prefix=f"wizard-{upload_id}",
-        impact_frame_override=int(impact_override) if impact_override is not None else None,
+        impact_frame_override=int(impact_override)
+        if impact_override is not None
+        else None,
         ball_at_rest_override=ball_at_rest_override,
         manual_ball_positions=manual_positions or None,
         handedness_override=handedness,
@@ -2495,42 +2762,58 @@ def render_wizard_tracer(
             fp = CLIPS_DIR / filename
             if fp.exists():
                 url = f"{settings.app_base_url}/uploads/clips/{filename}?v={int(fp.stat().st_mtime)}"
-        ball_track_frames_out.append({
-            "frame": rec.get("frame"),
-            "found": rec.get("found"),
-            "x": rec.get("x"),
-            "y": rec.get("y"),
-            "confidence": rec.get("confidence"),
-            "manual": rec.get("manual", False),
-            "image_url": url,
-        })
+        ball_track_frames_out.append(
+            {
+                "frame": rec.get("frame"),
+                "found": rec.get("found"),
+                "x": rec.get("x"),
+                "y": rec.get("y"),
+                "confidence": rec.get("confidence"),
+                "manual": rec.get("manual", False),
+                "image_url": url,
+            }
+        )
 
-    saved.update({
-        "handedness": pipe.get("handedness", {}).get("handedness") if pipe.get("handedness") else handedness,
-        "address_frame": (pipe.get("address") or {}).get("address_frame"),
-        "address_image_url": _public_url((pipe.get("address_image_path") or None)),
-        "impact_frame": (pipe.get("impact_refined") or pipe.get("impact") or {}).get("impact_frame"),
-        "impact_image_url": _public_url((pipe.get("impact_image_path") or None)),
-        "ball": (
-            {"x": int((pipe.get("handedness") or {}).get("ball_x") or 0),
-             "y": int((pipe.get("handedness") or {}).get("ball_y") or 0)}
-            if (pipe.get("handedness") or {}).get("ball_x") is not None else saved.get("ball")
-        ),
-        "tracer_url": tracer_url,
-        "tracer_info": tracer_info,
-        "ball_track_frames": ball_track_frames_out,
-    })
+    saved.update(
+        {
+            "handedness": pipe.get("handedness", {}).get("handedness")
+            if pipe.get("handedness")
+            else handedness,
+            "address_frame": (pipe.get("address") or {}).get("address_frame"),
+            "address_image_url": _public_url((pipe.get("address_image_path") or None)),
+            "impact_frame": (
+                pipe.get("impact_refined") or pipe.get("impact") or {}
+            ).get("impact_frame"),
+            "impact_image_url": _public_url((pipe.get("impact_image_path") or None)),
+            "ball": (
+                {
+                    "x": int((pipe.get("handedness") or {}).get("ball_x") or 0),
+                    "y": int((pipe.get("handedness") or {}).get("ball_y") or 0),
+                }
+                if (pipe.get("handedness") or {}).get("ball_x") is not None
+                else saved.get("ball")
+            ),
+            "tracer_url": tracer_url,
+            "tracer_info": tracer_info,
+            "ball_track_frames": ball_track_frames_out,
+        }
+    )
     row.edit_metrics = saved
     db.add(row)
-    db.add(AuditLog(
-        actor="admin", action="render_wizard_tracer",
-        target=f"long_upload:{upload_id}",
-        detail=str({
-            "tracer_ok": bool(tracer_url),
-            "n_frames": len(ball_track_frames_out),
-            "overrides": list(payload.keys()),
-        }),
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="render_wizard_tracer",
+            target=f"long_upload:{upload_id}",
+            detail=str(
+                {
+                    "tracer_ok": bool(tracer_url),
+                    "n_frames": len(ball_track_frames_out),
+                    "overrides": list(payload.keys()),
+                }
+            ),
+        )
+    )
     db.commit()
     db.refresh(row)
 
@@ -2611,7 +2894,9 @@ def render_tracer_fast(
         }
     for mp in manual_positions:
         try:
-            f = int(mp["frame"]); x = int(mp["x"]); y = int(mp["y"])
+            f = int(mp["frame"])
+            x = int(mp["x"])
+            y = int(mp["y"])
         except (KeyError, TypeError, ValueError):
             continue
         # A re-mark on a previously-cleared frame is the operator
@@ -2656,15 +2941,19 @@ def render_tracer_fast(
         # outvoted by the AI's earlier points.
         track_frames=[
             {
-                "frame": e["frame"], "found": e["found"],
-                "x": e["x"], "y": e["y"],
+                "frame": e["frame"],
+                "found": e["found"],
+                "x": e["x"],
+                "y": e["y"],
                 "manual": e.get("manual", False),
             }
             for e in merged
         ],
     )
     if not info.get("ok"):
-        raise HTTPException(500, f"tracer render failed: {info.get('error') or 'unknown'}")
+        raise HTTPException(
+            500, f"tracer render failed: {info.get('error') or 'unknown'}"
+        )
 
     compress_for_email(output_path)
     tracer_url = (
@@ -2680,14 +2969,17 @@ def render_tracer_fast(
     saved.pop("finalized_video_url", None)
     row.edit_metrics = saved
     db.add(row)
-    db.add(AuditLog(
-        actor="admin", action="render_tracer_fast",
-        target=f"long_upload:{upload_id}",
-        detail=(
-            f"merged_frames={len(merged)} manual={len(manual_positions)} "
-            f"cleared={len(cleared_frames)}"
-        ),
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="render_tracer_fast",
+            target=f"long_upload:{upload_id}",
+            detail=(
+                f"merged_frames={len(merged)} manual={len(manual_positions)} "
+                f"cleared={len(cleared_frames)}"
+            ),
+        )
+    )
     db.commit()
     db.refresh(row)
     return {
@@ -2720,8 +3012,7 @@ def finalize_wizard_video(
     saved = dict(row.edit_metrics or {})
     tracer_url = saved.get("tracer_url")
     if not tracer_url:
-        raise HTTPException(
-            400, "no rendered tracer yet — finish Step 2 first")
+        raise HTTPException(400, "no rendered tracer yet — finish Step 2 first")
     fname = tracer_url.rstrip("/").split("?")[0].rsplit("/", 1)[-1]
     tracer_path = CLIPS_DIR / fname
     if not tracer_path.exists():
@@ -2732,6 +3023,7 @@ def finalize_wizard_video(
     # copy. Keeps the bare tracer available for re-finalize / debug.
     try:
         import shutil
+
         shutil.copyfile(tracer_path, final_path)
     except Exception as exc:
         raise HTTPException(500, f"copy failed: {exc}")
@@ -2788,10 +3080,15 @@ def finalize_wizard_video(
         if not (src_w_native and src_h_native):
             try:
                 import cv2  # type: ignore
+
                 _cap_src = cv2.VideoCapture(str(src_path))
                 try:
-                    src_w_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
-                    src_h_native = int(_cap_src.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+                    src_w_native = (
+                        int(_cap_src.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
+                    )
+                    src_h_native = (
+                        int(_cap_src.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or None
+                    )
                 finally:
                     _cap_src.release()
             except Exception:  # pragma: no cover
@@ -2801,13 +3098,21 @@ def finalize_wizard_video(
         final_w = final_info.get("width")
         final_h = final_info.get("height")
         log.info(
-            "finalize: target_xy=%s src(cv2)=%sx%s final(ffprobe)=%sx%s "
-            "saved=%s",
-            original_target, src_w_native, src_h_native,
-            final_w, final_h, target_saved,
+            "finalize: target_xy=%s src(cv2)=%sx%s final(ffprobe)=%sx%s saved=%s",
+            original_target,
+            src_w_native,
+            src_h_native,
+            final_w,
+            final_h,
+            target_saved,
         )
-        if (src_w_native and src_h_native and final_w and final_h
-                and (src_w_native != final_w or src_h_native != final_h)):
+        if (
+            src_w_native
+            and src_h_native
+            and final_w
+            and final_h
+            and (src_w_native != final_w or src_h_native != final_h)
+        ):
             sx = float(final_w) / float(src_w_native)
             sy = float(final_h) / float(src_h_native)
             target_xy = (
@@ -2816,7 +3121,10 @@ def finalize_wizard_video(
             )
             log.info(
                 "finalize: scaled target_xy %s → %s (factor %.3f, %.3f)",
-                original_target, target_xy, sx, sy,
+                original_target,
+                target_xy,
+                sx,
+                sy,
             )
         # Final safety net: if the resulting target lies outside the
         # actual canvas, the saved coords were almost certainly in a
@@ -2825,8 +3133,7 @@ def finalize_wizard_video(
         # ~1024px). Re-scale assuming the *largest* of (frame-w, x,
         # original-x) is the actual ref width — gives a sensible
         # fallback instead of off-screen placement.
-        if (final_w and final_h
-                and (target_xy[0] >= final_w or target_xy[1] >= final_h)):
+        if final_w and final_h and (target_xy[0] >= final_w or target_xy[1] >= final_h):
             ref_w = max(final_w, target_xy[0] + 1, original_target[0] + 1)
             ref_h = max(final_h, target_xy[1] + 1, original_target[1] + 1)
             sx = float(final_w) / float(ref_w)
@@ -2836,9 +3143,10 @@ def finalize_wizard_video(
                 int(round(original_target[1] * sy)),
             )
             log.warning(
-                "finalize: target was off-canvas; rescaled assuming ref %sx%s "
-                "→ %s",
-                ref_w, ref_h, target_xy,
+                "finalize: target was off-canvas; rescaled assuming ref %sx%s → %s",
+                ref_w,
+                ref_h,
+                target_xy,
             )
 
     try:
@@ -2852,8 +3160,7 @@ def finalize_wizard_video(
             target_xy=target_xy,
         )
     except Exception as exc:  # pragma: no cover
-        log.warning("finalize: intro overlay failed for upload %s: %s",
-                    upload_id, exc)
+        log.warning("finalize: intro overlay failed for upload %s: %s", upload_id, exc)
 
     compress_for_email(final_path)
     final_url = (
@@ -2867,11 +3174,14 @@ def finalize_wizard_video(
     saved["finalized_yardage"] = yardage
     row.edit_metrics = saved
     db.add(row)
-    db.add(AuditLog(
-        actor="admin", action="finalize_wizard_video",
-        target=f"long_upload:{upload_id}",
-        detail=f"final={final_path.name} hole={hole_number} player={player_name}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="finalize_wizard_video",
+            target=f"long_upload:{upload_id}",
+            detail=f"final={final_path.name} hole={hole_number} player={player_name}",
+        )
+    )
     db.commit()
     db.refresh(row)
     return {
@@ -2965,11 +3275,14 @@ def commit_wizard_clip(
     db.add(row)
     db.flush()
 
-    db.add(AuditLog(
-        actor="admin", action="commit_wizard_clip",
-        target=f"long_upload:{upload_id}",
-        detail=f"clip={clip.id} hole={hole_number}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="commit_wizard_clip",
+            target=f"long_upload:{upload_id}",
+            detail=f"clip={clip.id} hole={hole_number}",
+        )
+    )
     db.commit()
     db.refresh(clip)
     return {
@@ -3093,7 +3406,8 @@ def test_cut_long_upload(
         end_sec = float(w["end_sec"])
         peak_time_sec = (
             float(w.get("peak_time_sec"))
-            if w.get("peak_time_sec") is not None else None
+            if w.get("peak_time_sec") is not None
+            else None
         )
         cut_entry: dict = {
             "index": idx,
@@ -3108,13 +3422,15 @@ def test_cut_long_upload(
         if not cut_clips:
             # Detection-only mode: no ffmpeg, no files. Operator just
             # wants to see the peak times to debug the detector.
-            cut_entry.update({
-                "ok": None,
-                "url": None,
-                "green_url": None,
-                "green_ok": None,
-                "skipped": True,
-            })
+            cut_entry.update(
+                {
+                    "ok": None,
+                    "url": None,
+                    "green_url": None,
+                    "green_ok": None,
+                    "skipped": True,
+                }
+            )
             cuts.append(cut_entry)
             continue
 
@@ -3139,26 +3455,36 @@ def test_cut_long_upload(
 
         log.info(
             "long-upload test-cut: upload=%s cut %d/%d [%.1f-%.1fs] tee=%s green=%s in %.1fs",
-            upload_id, idx + 1, n_windows_total, start_sec, end_sec,
+            upload_id,
+            idx + 1,
+            n_windows_total,
+            start_sec,
+            end_sec,
             "ok" if tee_ok else "fail",
             "ok" if green_ok else ("fail" if green_ok is False else "—"),
             time.monotonic() - t_cut_start,
         )
 
-        cut_entry.update({
-            "ok": bool(tee_ok),
-            "url": (
-                f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{tee_name}"
-                if tee_ok else None
-            ),
-            "green_url": green_url,
-            "green_ok": green_ok,
-        })
+        cut_entry.update(
+            {
+                "ok": bool(tee_ok),
+                "url": (
+                    f"{settings.app_base_url}/uploads/clips/{TESTCUTS_SUBDIR}/{tee_name}"
+                    if tee_ok
+                    else None
+                ),
+                "green_url": green_url,
+                "green_ok": green_ok,
+            }
+        )
         cuts.append(cut_entry)
 
     log.info(
         "long-upload test-cut: upload=%s detector=%s windows=%d cut_clips=%s cuts_ok=%d total=%.1fs",
-        upload_id, detector, len(windows), cut_clips,
+        upload_id,
+        detector,
+        len(windows),
+        cut_clips,
         sum(1 for c in cuts if c.get("ok")),
         time.monotonic() - t_loop_start,
     )
@@ -3212,11 +3538,13 @@ def process_long_upload_segment(
     if end_sec <= start_sec:
         raise HTTPException(400, "end_sec must be > start_sec")
 
-    seg_list = [{
-        "hole_number": int(hole_number),
-        "start_sec": float(start_sec),
-        "end_sec": float(end_sec),
-    }]
+    seg_list = [
+        {
+            "hole_number": int(hole_number),
+            "start_sec": float(start_sec),
+            "end_sec": float(end_sec),
+        }
+    ]
     results = _process_long_upload_segments(
         db,
         course_id=row.course_id,
@@ -3283,7 +3611,9 @@ def _run_tracer(
     )
 
     info = render_tracer(
-        clip_path, traced_path, debug_path,
+        clip_path,
+        traced_path,
+        debug_path,
         impact_frame_hint=impact_hint,
         sensitivity=float(sensitivity),
     )
@@ -3291,7 +3621,8 @@ def _run_tracer(
     info["sensitivity"] = float(sensitivity)
     debug_url = (
         f"{settings.app_base_url}/uploads/clips/{debug_name}"
-        if debug_path.exists() else None
+        if debug_path.exists()
+        else None
     )
     if not info.get("ok"):
         traced_path.unlink(missing_ok=True)
@@ -3304,14 +3635,22 @@ def _run_tracer(
             traced_path.name,
         )
     if not traced_path.exists() or traced_path.stat().st_size == 0:
-        return None, {"ok": False, "error": "post-encode produced empty file"}, None, debug_url
+        return (
+            None,
+            {"ok": False, "error": "post-encode produced empty file"},
+            None,
+            debug_url,
+        )
     # Probe the final file so we can spot mp4v-leftover or VFR-timestamp
     # bugs in the logs (symptoms: "still photo with claimed duration").
     probe = probe_video_info(traced_path)
     log.info(
         "tracer: traced output %s  codec=%s  fps=%s  nb_frames=%s  duration=%ss  size=%dB",
-        traced_path.name, probe.get("codec"), probe.get("fps"),
-        probe.get("nb_frames"), probe.get("duration"),
+        traced_path.name,
+        probe.get("codec"),
+        probe.get("fps"),
+        probe.get("nb_frames"),
+        probe.get("duration"),
         traced_path.stat().st_size,
     )
     # Cache-bust the served URLs with the file mtime. Each retry rewrites
@@ -3320,10 +3659,13 @@ def _run_tracer(
     # state and the new bytes never get rendered. Appending a version
     # query string forces the element to treat it as a new resource.
     traced_mtime = int(traced_path.stat().st_mtime)
-    debug_mtime = int(debug_path.stat().st_mtime) if debug_path.exists() else traced_mtime
+    debug_mtime = (
+        int(debug_path.stat().st_mtime) if debug_path.exists() else traced_mtime
+    )
     debug_url = (
         f"{settings.app_base_url}/uploads/clips/{debug_name}?v={debug_mtime}"
-        if debug_path.exists() else None
+        if debug_path.exists()
+        else None
     )
     return (
         f"{settings.app_base_url}/uploads/clips/{traced_name}?v={traced_mtime}",
@@ -3379,7 +3721,11 @@ async def upload_clip(
     if len(data) > 500 * 1024 * 1024:
         raise HTTPException(413, "video too large (max 500MB)")
 
-    ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    ext = (
+        (video.filename or "").rsplit(".", 1)[-1].lower()
+        if "." in (video.filename or "")
+        else "mp4"
+    )
     if ext not in ("mp4", "mov", "webm", "m4v"):
         ext = "mp4"
     fname = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.{ext}"
@@ -3396,7 +3742,8 @@ async def upload_clip(
     thumb_path = extract_thumbnail(fpath)
     thumb_url = (
         f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
-        if thumb_path else None
+        if thumb_path
+        else None
     )
 
     # When the operator says the clip is already traced (e.g. rendered
@@ -3405,7 +3752,11 @@ async def upload_clip(
     # deliverable — point both source_url and tracer_url at it.
     if already_traced:
         tracer_url = f"{settings.app_base_url}/uploads/clips/{fname}"
-        tracer_info = {"ok": True, "source": "external", "note": "already_traced upload"}
+        tracer_info = {
+            "ok": True,
+            "source": "external",
+            "note": "already_traced upload",
+        }
         tee_traced_path = None
         tracer_debug_url = None
     else:
@@ -3432,21 +3783,32 @@ async def upload_clip(
         if green_data:
             if len(green_data) > 500 * 1024 * 1024:
                 raise HTTPException(413, "green video too large (max 500MB)")
-            g_ext = (video_green.filename or "").rsplit(".", 1)[-1].lower() if "." in (video_green.filename or "") else "mp4"
+            g_ext = (
+                (video_green.filename or "").rsplit(".", 1)[-1].lower()
+                if "." in (video_green.filename or "")
+                else "mp4"
+            )
             if g_ext not in ("mp4", "mov", "webm", "m4v"):
                 g_ext = "mp4"
-            green_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}_green.{g_ext}"
+            green_name = (
+                f"{course_id}-h{hole_number}-{secrets.token_hex(6)}_green.{g_ext}"
+            )
             green_path = CLIPS_DIR / green_name
             green_path.write_bytes(green_data)
             compress_for_email(green_path)
             green_url = f"{settings.app_base_url}/uploads/clips/{green_name}"
 
-            green_tracer_url, green_tracer_info, green_traced_path, green_debug_url = _run_tracer(green_path)
+            green_tracer_url, green_tracer_info, green_traced_path, green_debug_url = (
+                _run_tracer(green_path)
+            )
 
             if (
-                tracer_info and tracer_info.get("ok")
-                and green_tracer_info and green_tracer_info.get("ok")
-                and tee_traced_path is not None and green_traced_path is not None
+                tracer_info
+                and tracer_info.get("ok")
+                and green_tracer_info
+                and green_tracer_info.get("ok")
+                and tee_traced_path is not None
+                and green_traced_path is not None
             ):
                 tee_fps = float(tracer_info.get("fps") or 30.0) or 30.0
                 green_fps = float(green_tracer_info.get("fps") or 30.0) or 30.0
@@ -3459,11 +3821,17 @@ async def upload_clip(
                     composite_name = f"{fpath.stem}_composite.mp4"
                     composite_path = CLIPS_DIR / composite_name
                     if concat_two_clips(
-                        tee_traced_path, 0.0, switch_sec,
-                        green_traced_path, switch_sec, end_sec_in_green,
+                        tee_traced_path,
+                        0.0,
+                        switch_sec,
+                        green_traced_path,
+                        switch_sec,
+                        end_sec_in_green,
                         composite_path,
                     ):
-                        composite_url = f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                        composite_url = (
+                            f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                        )
                         composite_info = {
                             "switch_sec": round(switch_sec, 2),
                             "end_sec": round(end_sec_in_green, 2),
@@ -3504,12 +3872,17 @@ async def upload_clip(
 
     participant = match_clip(db, clip)
     if participant and ball_in_cup:
-        notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+        notifications.notify_hio_under_review(
+            participant.name, participant.mobile, participant.email
+        )
 
     db.commit()
 
     # Fire gallery-ready notification on first assigned clip
-    if clip.participant_id and clip.processing_status == ClipProcessingStatus.assigned.value:
+    if (
+        clip.participant_id
+        and clip.processing_status == ClipProcessingStatus.assigned.value
+    ):
         p = db.get(Participant, clip.participant_id)
         if p and not p.gallery_ready_sent:
             p.gallery_ready_sent = True
@@ -3592,7 +3965,11 @@ async def upload_showcase(
     if len(data) > 500 * 1024 * 1024:
         raise HTTPException(413, "video too large (max 500MB)")
 
-    ext = (video.filename or "").rsplit(".", 1)[-1].lower() if "." in (video.filename or "") else "mp4"
+    ext = (
+        (video.filename or "").rsplit(".", 1)[-1].lower()
+        if "." in (video.filename or "")
+        else "mp4"
+    )
     if ext not in ("mp4", "mov", "webm", "m4v"):
         ext = "mp4"
     fname = f"slot{position}-{secrets.token_hex(6)}.{ext}"
@@ -3638,6 +4015,7 @@ def clear_showcase(position: int, db: Session = Depends(get_db)):
 
 # --- Hole-in-one review queue ------------------------------------------------
 
+
 @router.get("/hio", response_model=list[HIOEventOut])
 def list_hio_events(db: Session = Depends(get_db), status: str | None = None):
     q = db.query(HoleInOneEvent)
@@ -3652,8 +4030,12 @@ def hio_event_detail(event_id: int, db: Session = Depends(get_db)):
     if not evt:
         raise HTTPException(404, "event not found")
     participant = db.get(Participant, evt.participant_id)
-    clip_ids = [cid for cid in (evt.tee_clip_id, evt.wide_clip_id, evt.hole_clip_id) if cid]
-    hole_clips = db.query(VideoClip).filter(VideoClip.id.in_(clip_ids)).all() if clip_ids else []
+    clip_ids = [
+        cid for cid in (evt.tee_clip_id, evt.wide_clip_id, evt.hole_clip_id) if cid
+    ]
+    hole_clips = (
+        db.query(VideoClip).filter(VideoClip.id.in_(clip_ids)).all() if clip_ids else []
+    )
     context_clips = (
         db.query(VideoClip)
         .filter(
@@ -3757,7 +4139,8 @@ def _camera_to_dict(c: Camera, last_event: CameraEvent | None = None) -> dict:
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "last_event_at": (
             last_event.triggered_at.isoformat()
-            if last_event and last_event.triggered_at else None
+            if last_event and last_event.triggered_at
+            else None
         ),
         "last_event_status": last_event.status if last_event else None,
     }
@@ -3782,6 +4165,45 @@ def list_cameras(db: Session = Depends(get_db)):
         )
         out.append(_camera_to_dict(c, last_evt))
     return out
+
+
+@router.post("/cameras/{camera_id}/watch")
+def start_watch_camera(camera_id: int, db: Session = Depends(get_db)):
+    """Admin clicked Watch. Mark this camera as actively watched."""
+    if not db.get(Camera, camera_id):
+        raise HTTPException(404, "camera not found")
+    with _LIVE_LOCK:
+        _WATCHERS[camera_id] = datetime.utcnow()
+    return {"ok": True}
+
+
+@router.delete("/cameras/{camera_id}/watch")
+def stop_watch_camera(camera_id: int):
+    """Admin closed the live view. Clear watcher + cached frame."""
+    with _LIVE_LOCK:
+        _WATCHERS.pop(camera_id, None)
+        _LIVE_FRAMES.pop(camera_id, None)
+    return {"ok": True}
+
+
+@router.get("/cameras/{camera_id}/live-frame")
+def get_camera_live_frame(camera_id: int, db: Session = Depends(get_db)):
+    """Admin pulls latest JPEG. Each pull renews the 10s watch TTL."""
+    if not db.get(Camera, camera_id):
+        raise HTTPException(404, "camera not found")
+    with _LIVE_LOCK:
+        _WATCHERS[camera_id] = datetime.utcnow()
+        slot = _LIVE_FRAMES.get(camera_id)
+    if not slot:
+        return Response(status_code=204)
+    frame_bytes, ts = slot
+    if datetime.utcnow() - ts > FRAME_TTL:
+        return Response(status_code=204)
+    return Response(
+        content=frame_bytes,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post("/cameras")
@@ -3812,10 +4234,14 @@ def create_camera(
     )
     db.add(cam)
     db.flush()
-    db.add(AuditLog(
-        actor="admin", action="create_camera", target=f"camera:{cam.id}",
-        detail=f"course={course.id} hole={hole} role={role}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="create_camera",
+            target=f"camera:{cam.id}",
+            detail=f"course={course.id} hole={hole} role={role}",
+        )
+    )
     db.commit()
     db.refresh(cam)
     return _camera_to_dict(cam)
@@ -3844,10 +4270,14 @@ def pair_camera(
     # Mirror the link on both sides.
     cam.paired_with_camera_id = partner.id
     partner.paired_with_camera_id = cam.id
-    db.add(AuditLog(
-        actor="admin", action="pair_cameras",
-        target=f"camera:{cam.id}", detail=f"partner={partner.id}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="pair_cameras",
+            target=f"camera:{cam.id}",
+            detail=f"partner={partner.id}",
+        )
+    )
     db.commit()
     return {"ok": True, "cameras": [_camera_to_dict(cam), _camera_to_dict(partner)]}
 
@@ -3859,8 +4289,7 @@ def unpair_camera(camera_id: int, db: Session = Depends(get_db)):
     if not cam:
         raise HTTPException(404, "camera not found")
     partner = (
-        db.get(Camera, cam.paired_with_camera_id)
-        if cam.paired_with_camera_id else None
+        db.get(Camera, cam.paired_with_camera_id) if cam.paired_with_camera_id else None
     )
     cam.paired_with_camera_id = None
     if partner is not None:
@@ -3880,11 +4309,16 @@ def rotate_camera_token(camera_id: int, db: Session = Depends(get_db)):
     # Import locally so the module's lazy enough that test bench scripts
     # can import admin without pulling models' _token helper exposure.
     from ..models import _token as _make_token
+
     cam.auth_token = _make_token("cam_", 24)
-    db.add(AuditLog(
-        actor="admin", action="rotate_camera_token", target=f"camera:{cam.id}",
-        detail="",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="rotate_camera_token",
+            target=f"camera:{cam.id}",
+            detail="",
+        )
+    )
     db.commit()
     db.refresh(cam)
     return {"ok": True, "auth_token": cam.auth_token}
@@ -3972,14 +4406,18 @@ def update_camera(
                 auto_unpaired = True
 
     if placement_changed:
-        db.add(AuditLog(
-            actor="admin", action="move_camera", target=f"camera:{cam.id}",
-            detail=(
-                f"course={cam.course_id} hole={cam.assigned_hole} "
-                f"role={cam.assigned_role}"
-                + (" (auto-unpaired)" if auto_unpaired else "")
-            ),
-        ))
+        db.add(
+            AuditLog(
+                actor="admin",
+                action="move_camera",
+                target=f"camera:{cam.id}",
+                detail=(
+                    f"course={cam.course_id} hole={cam.assigned_hole} "
+                    f"role={cam.assigned_role}"
+                    + (" (auto-unpaired)" if auto_unpaired else "")
+                ),
+            )
+        )
     db.commit()
     db.refresh(cam)
     result = _camera_to_dict(cam)
@@ -4001,10 +4439,14 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)):
         partner = db.get(Camera, cam.paired_with_camera_id)
         if partner is not None:
             partner.paired_with_camera_id = None
-    db.add(AuditLog(
-        actor="admin", action="delete_camera", target=f"camera:{cam.id}",
-        detail=f"course={cam.course_id} hole={cam.assigned_hole} role={cam.assigned_role}",
-    ))
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="delete_camera",
+            target=f"camera:{cam.id}",
+            detail=f"course={cam.course_id} hole={cam.assigned_hole} role={cam.assigned_role}",
+        )
+    )
     db.delete(cam)
     db.commit()
     return {"deleted": True, "camera_id": camera_id}
