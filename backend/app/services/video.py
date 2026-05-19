@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -89,6 +90,55 @@ def cut_segment(
 
 def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+def transcode_for_web(path: Path) -> bool:
+    """Re-encode an MP4 in-place to H.264 + faststart for browser
+    playback. The Pi-agent writes its captures with the mp4v fourcc
+    (MPEG-4 Part 2), which most modern browsers refuse to play in
+    a <video> tag — this forces the file into the universally-
+    supported H.264 mp4 form with the moov atom up front (so the
+    browser can start playing before the whole file streams).
+
+    No-ops when the file is already H.264 (idempotent on re-runs,
+    so callers don't have to worry about generation-loss from
+    repeated re-encodes). Returns True if the file is in a
+    browser-friendly state after the call.
+    """
+    if not have_ffmpeg():
+        return False
+    # Probe first — re-encoding an already-H.264 file is wasteful and
+    # introduces generation loss every time someone hits Re-Produce.
+    info = probe_video_info(path)
+    codec = (info.get("codec") or "").lower()
+    if codec in ("h264", "avc1", "x264"):
+        return True
+    tmp = path.with_suffix(".reencode.mp4")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(path),
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-an",  # Pi captures have no audio; strip the silent track.
+                str(tmp),
+            ],
+            check=True,
+            timeout=180,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("transcode_for_web failed for %s: %s", path.name, exc)
+        tmp.unlink(missing_ok=True)
+        return False
+    if not (tmp.exists() and tmp.stat().st_size > 0):
+        tmp.unlink(missing_ok=True)
+        return False
+    os.replace(tmp, path)
+    return True
 
 
 def mux_audio_into_video(video_path: Path, audio_source: Path) -> bool:

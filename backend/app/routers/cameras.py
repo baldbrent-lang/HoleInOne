@@ -127,6 +127,27 @@ def _drain_queue(q: asyncio.Queue) -> None:
             return
 
 
+def _post_process_raw_clip(filename: str) -> None:
+    """Re-encode a Pi-uploaded raw clip to browser-friendly H.264 +
+    faststart and generate a poster JPG sibling for the production
+    preview tile. Both ops are best-effort: failures log a warning
+    and leave the original file intact (production reads via cv2,
+    which handles mp4v fine, so capture itself is unaffected).
+
+    Designed to be called from a daemon thread so the Pi's
+    upload-event HTTP response isn't blocked on a multi-second
+    re-encode.
+    """
+    from ..services.video import extract_thumbnail, transcode_for_web
+
+    src = CLIPS_DIR / filename
+    if not src.exists():
+        log.warning("post-process: %s vanished before processing", filename)
+        return
+    transcode_for_web(src)
+    extract_thumbnail(src)
+
+
 def _save_event_clip(
     data: bytes,
     event_id: int,
@@ -393,6 +414,18 @@ async def upload_event(
         event.status,
     )
 
+    # Re-encode + thumbnail in the background so the admin preview
+    # works. Doesn't block the Pi's HTTP response. Runs in parallel
+    # with the production job for paired events; both touch the file
+    # via os-atomic rename, so cv2 reading from one inode while
+    # ffmpeg writes a new one is fine.
+    threading.Thread(
+        target=_post_process_raw_clip,
+        args=(fname,),
+        daemon=True,
+        name=f"post-process-{event.id}-{role}",
+    ).start()
+
     if ready_to_process:
         threading.Thread(
             target=_process_camera_event_job,
@@ -448,6 +481,17 @@ def _process_camera_event_job(event_id: int) -> None:
             event.last_error = "tee clip missing on disk"
             db.commit()
             return
+
+        # Re-process raws idempotently — fixes legacy events whose
+        # raws were uploaded before the post-process hook existed,
+        # and is a cheap no-op for the JPG sibling on events that
+        # already have it (transcode is the only real cost). Stays
+        # in the same thread as production so we don't race on the
+        # files cv2 is about to open.
+        if event.tee_clip_filename:
+            _post_process_raw_clip(event.tee_clip_filename)
+        if event.green_clip_filename:
+            _post_process_raw_clip(event.green_clip_filename)
 
         course = db.get(Course, event.course_id)
         if course is None:
