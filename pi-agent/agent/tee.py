@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from .common import BackendClient, FrameBuffer, HeartbeatThread, open_camera
+from .livestream import LiveStreamer
 
 log = logging.getLogger("golfreelz_agent.tee")
 FIRMWARE = "tee-0.1.0"
@@ -167,6 +168,9 @@ class TeeAgent:
         hb = HeartbeatThread(self.client, self.heartbeat_seconds, FIRMWARE)
         hb.start()
 
+        streamer = LiveStreamer(self.client)
+        streamer.start()
+
         person_first_seen: Optional[float] = None
         frame_idx = 0
         log.info(
@@ -181,6 +185,7 @@ class TeeAgent:
                     continue
                 ts = time.time()
                 buffer.push(ts, frame.copy())
+                streamer.update_frame(frame)
 
                 if frame_idx % det_interval == 0:
                     centroid = detector.detect(frame)
@@ -216,6 +221,7 @@ class TeeAgent:
             cap.release()
             detector.close()
             hb.stop()
+            streamer.stop()
 
     # -----------------------------------------------------------------
 

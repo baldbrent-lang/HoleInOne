@@ -17,6 +17,7 @@ from typing import Optional
 import cv2
 
 from .common import BackendClient, FrameBuffer, HeartbeatThread, open_camera
+from .livestream import LiveStreamer
 
 log = logging.getLogger("golfreelz_agent.green")
 FIRMWARE = "green-0.1.0"
@@ -44,6 +45,12 @@ class GreenAgent:
     def run(self) -> None:
         cap = open_camera(self.cam_cfg)
         self.buffer = FrameBuffer(self.buffer_seconds, self.fps)
+
+        # Start the livestream helper before the capture thread so the
+        # very first frame can be forwarded if an admin happens to be
+        # watching.
+        self.streamer = LiveStreamer(self.client)
+        self.streamer.start()
 
         # Background thread continuously drains the camera into the
         # ring buffer; the main thread does long-polling + recording
@@ -86,6 +93,7 @@ class GreenAgent:
             capture_thread.join(timeout=2)
             cap.release()
             hb.stop()
+            self.streamer.stop()
 
     # -----------------------------------------------------------------
 
@@ -100,6 +108,7 @@ class GreenAgent:
             if self.frame_shape is None:
                 self.frame_shape = (frame.shape[0], frame.shape[1])
             self.buffer.push(time.time(), frame.copy())
+            self.streamer.update_frame(frame)
 
     def _record_and_upload(self, session_id: str) -> None:
         """Commit the current ring buffer to an MP4 and keep writing

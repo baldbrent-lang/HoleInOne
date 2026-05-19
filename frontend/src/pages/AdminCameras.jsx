@@ -4,7 +4,7 @@
  * integration; the event-trigger + upload-event endpoints the Pis
  * actually talk to land in phase 2.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
@@ -42,6 +42,15 @@ export default function AdminCameras() {
   const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
   const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "" });
 
+  // Live-watch state: one camera at a time. `frameTick` increments every
+  // ~100ms while watching, busting the <img> cache so we get the latest
+  // JPEG. `frameAvailable` flips true once the Pi has uploaded its
+  // first frame so we can hide the "Waiting…" placeholder.
+  const [watchingCamId, setWatchingCamId] = useState(null);
+  const [frameTick, setFrameTick] = useState(0);
+  const [frameAvailable, setFrameAvailable] = useState(false);
+  const watchingCamIdRef = useRef(null);
+
   // New-camera form state
   const [newCourseId, setNewCourseId] = useState("");
   const [newHole, setNewHole] = useState("");
@@ -64,6 +73,60 @@ export default function AdminCameras() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminPassword]);
+
+  // Tick the live-frame URL while watching so the <img> refetches.
+  useEffect(() => {
+    if (watchingCamId == null) return;
+    const t = setInterval(() => setFrameTick((x) => x + 1), 100);
+    return () => clearInterval(t);
+  }, [watchingCamId]);
+
+  // Best-effort: tell the backend to stop watching when the page is
+  // unmounted (otherwise it'd hold the 10s TTL until it naturally
+  // expires, which is fine but wastes Pi cycles).
+  useEffect(() => {
+    watchingCamIdRef.current = watchingCamId;
+  }, [watchingCamId]);
+  useEffect(() => {
+    return () => {
+      const id = watchingCamIdRef.current;
+      if (id != null) api.stopWatchingCamera(adminPassword, id).catch(() => {});
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function startWatch(cam) {
+    if (watchingCamId === cam.id) return;
+    // If we were watching another camera, ask the backend to release
+    // it before claiming a new one (fire-and-forget — don't block).
+    if (watchingCamId != null) {
+      api.stopWatchingCamera(adminPassword, watchingCamId).catch(() => {});
+    }
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    setFrameAvailable(false);
+    setFrameTick(0);
+    try {
+      await api.startWatchingCamera(adminPassword, cam.id);
+      setWatchingCamId(cam.id);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  async function stopWatch() {
+    const id = watchingCamId;
+    setWatchingCamId(null);
+    setFrameAvailable(false);
+    if (id != null) {
+      try {
+        await api.stopWatchingCamera(adminPassword, id);
+      } catch (e) {
+        setError(e.message);
+      }
+    }
+  }
 
   async function createCamera(e) {
     e.preventDefault();
@@ -407,6 +470,15 @@ export default function AdminCameras() {
                     <span className="tiny muted">no eligible partner</span>
                   )}
                   <button
+                    type="button"
+                    className={watchingCamId === cam.id ? "small" : "secondary small"}
+                    onClick={() => (watchingCamId === cam.id ? stopWatch() : startWatch(cam))}
+                    disabled={isBusy}
+                    title="Open a live JPEG view from this camera (~10 fps)"
+                  >
+                    {watchingCamId === cam.id ? "Stop watching" : "Watch"}
+                  </button>
+                  <button
                     type="button" className="secondary small"
                     onClick={() => toggleEnabled(cam)} disabled={isBusy}
                   >
@@ -434,6 +506,63 @@ export default function AdminCameras() {
                   </button>
                 </div>
               </div>
+
+              {watchingCamId === cam.id && (
+                <div
+                  className="card tight"
+                  style={{ margin: "10px 0 0", padding: 10, background: "#000" }}
+                >
+                  <div
+                    className="inline"
+                    style={{ justifyContent: "space-between", marginBottom: 6 }}
+                  >
+                    <div className="small" style={{ color: "#bbb" }}>
+                      Live · #{cam.id}
+                      {cam.name && <> — {cam.name}</>}
+                      {" · "}hole {cam.assigned_hole} {cam.assigned_role}
+                    </div>
+                    <button type="button" className="ghost small" onClick={stopWatch}>
+                      Close
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      position: "relative",
+                      background: "#000",
+                      minHeight: 240,
+                    }}
+                  >
+                    <img
+                      src={`${api.cameraLiveFrameUrl(cam.id)}?t=${frameTick}`}
+                      alt=""
+                      onLoad={(e) => {
+                        if (e.target.naturalWidth > 0) setFrameAvailable(true);
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        height: "auto",
+                        visibility: frameAvailable ? "visible" : "hidden",
+                      }}
+                    />
+                    {!frameAvailable && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: "#bbb",
+                          fontSize: 13,
+                        }}
+                      >
+                        Waiting for live frame from Pi…
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {movingCam === cam.id && (
                 <div
