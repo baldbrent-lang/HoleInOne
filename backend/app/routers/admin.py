@@ -2184,6 +2184,234 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
     return out
 
 
+@router.get("/camera-events")
+def list_camera_events(limit: int = 100, db: Session = Depends(get_db)):
+    """List recent CameraEvents for the production queue. Each row
+    bundles the raw tee/green clips the Pis uploaded plus the
+    produced VideoClip (if any), so the operator can review what was
+    captured and re-run or delete it without leaving the page.
+
+    Same shape conventions as /long-uploads so the production page
+    can render both kinds of rows with the same building blocks."""
+    rows = (
+        db.query(CameraEvent)
+        .order_by(CameraEvent.triggered_at.desc())
+        .limit(max(1, min(500, limit)))
+        .all()
+    )
+    if not rows:
+        return []
+
+    course_ids = {r.course_id for r in rows}
+    courses = {
+        c.id: c
+        for c in db.query(Course).filter(Course.id.in_(course_ids)).all()
+    }
+    camera_ids = {r.tee_camera_id for r in rows} | {
+        r.green_camera_id for r in rows if r.green_camera_id
+    }
+    cameras_by_id = {
+        c.id: c for c in db.query(Camera).filter(Camera.id.in_(camera_ids)).all()
+    }
+    clip_ids = {r.produced_clip_id for r in rows if r.produced_clip_id}
+    clips_by_id = (
+        {
+            c.id: c
+            for c in db.query(VideoClip).filter(VideoClip.id.in_(clip_ids)).all()
+        }
+        if clip_ids
+        else {}
+    )
+
+    def _meta(fname: str | None) -> dict:
+        """Probe one raw clip on disk for the production card. None
+        fname means the Pi never uploaded; missing-on-disk means it
+        uploaded once but the file was removed since."""
+        if not fname:
+            return {
+                "url": None,
+                "thumbnail_url": None,
+                "size_mb": None,
+                "duration_sec": None,
+                "fps": None,
+                "nb_frames": None,
+                "width": None,
+                "height": None,
+                "missing": False,
+            }
+        path = CLIPS_DIR / fname
+        if not path.exists():
+            return {
+                "url": None,
+                "thumbnail_url": None,
+                "size_mb": None,
+                "duration_sec": None,
+                "fps": None,
+                "nb_frames": None,
+                "width": None,
+                "height": None,
+                "missing": True,
+            }
+        size = path.stat().st_size
+        info = probe_video_info(path) or {}
+        thumb = path.with_suffix(".jpg")
+        thumb_url = (
+            f"{settings.app_base_url}/uploads/clips/{thumb.name}"
+            if thumb.exists()
+            else None
+        )
+        return {
+            "url": f"{settings.app_base_url}/uploads/clips/{fname}",
+            "thumbnail_url": thumb_url,
+            "size_mb": round(size / 1024 / 1024, 1) if size else None,
+            "duration_sec": (
+                round(info["duration"], 1) if info.get("duration") else None
+            ),
+            "fps": round(info["fps"], 2) if info.get("fps") else None,
+            "nb_frames": info.get("nb_frames"),
+            "width": info.get("width"),
+            "height": info.get("height"),
+            "missing": False,
+        }
+
+    out = []
+    for r in rows:
+        tee_meta = _meta(r.tee_clip_filename)
+        green_meta = _meta(r.green_clip_filename)
+        course = courses.get(r.course_id)
+        tee_cam = cameras_by_id.get(r.tee_camera_id)
+        green_cam = (
+            cameras_by_id.get(r.green_camera_id) if r.green_camera_id else None
+        )
+        clip = clips_by_id.get(r.produced_clip_id) if r.produced_clip_id else None
+        produced = None
+        if clip is not None:
+            produced = {
+                "id": clip.id,
+                "hole_number": clip.hole_number,
+                "captured_at": (
+                    clip.captured_at.isoformat() if clip.captured_at else None
+                ),
+                "video_url": clip.tracer_url or clip.source_url,
+                "thumbnail_url": clip.thumbnail_url,
+                "ball_in_cup": bool(clip.ball_in_cup),
+                "is_highlight": bool(clip.is_highlight),
+            }
+
+        out.append(
+            {
+                "id": r.id,
+                "session_id": r.session_id,
+                "course_id": r.course_id,
+                "course_name": course.name if course else None,
+                "hole_number": r.hole_number,
+                "triggered_at": (
+                    r.triggered_at.isoformat() if r.triggered_at else None
+                ),
+                "status": r.status,
+                "last_error": r.last_error,
+                "tee_camera_id": r.tee_camera_id,
+                "tee_camera_name": tee_cam.name if tee_cam else None,
+                "green_camera_id": r.green_camera_id,
+                "green_camera_name": green_cam.name if green_cam else None,
+                "dual_camera": r.green_camera_id is not None,
+                "tee_clip_filename": r.tee_clip_filename,
+                "tee_url": tee_meta["url"],
+                "tee_thumbnail_url": tee_meta["thumbnail_url"],
+                "tee_size_mb": tee_meta["size_mb"],
+                "tee_duration_sec": tee_meta["duration_sec"],
+                "tee_fps": tee_meta["fps"],
+                "tee_nb_frames": tee_meta["nb_frames"],
+                "tee_width": tee_meta["width"],
+                "tee_height": tee_meta["height"],
+                "tee_missing": tee_meta["missing"],
+                "green_clip_filename": r.green_clip_filename,
+                "green_url": green_meta["url"],
+                "green_thumbnail_url": green_meta["thumbnail_url"],
+                "green_size_mb": green_meta["size_mb"],
+                "green_duration_sec": green_meta["duration_sec"],
+                "green_fps": green_meta["fps"],
+                "green_nb_frames": green_meta["nb_frames"],
+                "green_width": green_meta["width"],
+                "green_height": green_meta["height"],
+                "green_missing": green_meta["missing"],
+                "produced_clip": produced,
+            }
+        )
+    return out
+
+
+@router.post("/camera-events/{event_id}/reprocess")
+def reprocess_camera_event(event_id: int, db: Session = Depends(get_db)):
+    """Re-run the production pipeline for a previously-uploaded
+    camera event. Useful when an upstream change (tracer tweaks,
+    overlay updates) means we want to regenerate the produced clip
+    from the same raw inputs."""
+    # Imported here to dodge the cameras.py ↔ admin.py circular.
+    from .cameras import _process_camera_event_job
+
+    event = db.get(CameraEvent, event_id)
+    if event is None:
+        raise HTTPException(404, "camera event not found")
+    if not event.tee_clip_filename:
+        raise HTTPException(409, "no tee clip on file to re-process")
+    tee_path = CLIPS_DIR / event.tee_clip_filename
+    if not tee_path.exists():
+        raise HTTPException(
+            404, f"tee clip missing on disk: {event.tee_clip_filename}",
+        )
+
+    # Reset status so the UI shows the run is restarting and any
+    # stale last_error gets cleared.
+    event.status = "paired_uploaded" if event.green_clip_filename else "tee_uploaded"
+    event.last_error = None
+    db.commit()
+
+    threading.Thread(
+        target=_process_camera_event_job,
+        args=(event.id,),
+        daemon=True,
+        name=f"camera-event-reprocess-{event.id}",
+    ).start()
+
+    return {"event_id": event.id, "status": event.status, "queued": True}
+
+
+@router.delete("/camera-events/{event_id}")
+def delete_camera_event(event_id: int, db: Session = Depends(get_db)):
+    """Permanently remove a camera event: deletes the raw tee/green
+    MP4s from disk, the produced VideoClip (if any), and the
+    CameraEvent row itself. Use when a swing was a misfire (people
+    walking past the tee box, false trigger, etc.) and you don't
+    want it cluttering the queue."""
+    event = db.get(CameraEvent, event_id)
+    if event is None:
+        raise HTTPException(404, "camera event not found")
+
+    for fname in (event.tee_clip_filename, event.green_clip_filename):
+        if not fname:
+            continue
+        path = CLIPS_DIR / fname
+        try:
+            if path.exists():
+                path.unlink()
+            thumb = path.with_suffix(".jpg")
+            if thumb.exists():
+                thumb.unlink()
+        except OSError as exc:
+            log.warning("delete camera event %s: could not unlink %s (%s)",
+                        event_id, fname, exc)
+
+    if event.produced_clip_id:
+        clip = db.get(VideoClip, event.produced_clip_id)
+        if clip is not None:
+            db.delete(clip)
+
+    db.delete(event)
+    db.commit()
+    return {"ok": True, "event_id": event_id}
+
+
 @router.post("/long-uploads/{upload_id}/reprocess")
 def reprocess_long_upload(
     upload_id: int,

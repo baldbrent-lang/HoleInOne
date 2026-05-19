@@ -2583,6 +2583,145 @@ function FinalizeStep({
   );
 }
 
+function eventStatusPill(status) {
+  // Map CameraEvent.status → friendly label + pill class. The five
+  // raw values come straight from the DB column; anything unexpected
+  // renders as neutral so nothing breaks if a new status is added.
+  switch (status) {
+    case "triggered":
+      return { label: "Triggered", className: "warn" };
+    case "tee_uploaded":
+      return { label: "Tee uploaded", className: "warn" };
+    case "paired_uploaded":
+      return { label: "Both uploaded", className: "" };
+    case "processed":
+      return { label: "Processed", className: "ok" };
+    case "failed":
+      return { label: "Failed", className: "err-text" };
+    default:
+      return { label: status || "—", className: "" };
+  }
+}
+
+function CameraEventCard({ ev, busy, onOpenViewer, onReproduce, onDelete }) {
+  // One row in the camera-event production list. Mirrors the visual
+  // language of the long-upload card (tee tile + green tile +
+  // produced tile + action row), but the underlying data model is
+  // simpler — each event is exactly one swing, no edit-metrics, no
+  // swing wizard.
+  const status = eventStatusPill(ev.status);
+  const triggeredAt = ev.triggered_at;
+  const teeStartsAt = triggeredAt;
+  // Green starts ~5s before trigger because of pre-roll; we don't
+  // have the exact wall-clock the green Pi committed, so use the
+  // shared trigger time for both tiles to keep the math honest.
+  const greenStartsAt = triggeredAt;
+  const producedClips = ev.produced_clip ? [ev.produced_clip] : [];
+  return (
+    <div
+      className="card"
+      style={{
+        marginBottom: 12,
+        opacity: busy ? 0.6 : 1,
+        position: "relative",
+      }}
+    >
+      <div
+        className="row"
+        style={{
+          gap: 10, flexWrap: "wrap", alignItems: "baseline", marginBottom: 10,
+        }}
+      >
+        <h4 style={{ margin: 0 }}>
+          Event #{ev.id} ·{" "}
+          {ev.course_name || `course ${ev.course_id}`} · hole {ev.hole_number}
+        </h4>
+        <span className={`pill small ${status.className}`}>{status.label}</span>
+        <span className="small muted">
+          {ev.dual_camera ? "Tee + Green" : "Tee only"}
+        </span>
+        <div style={{ flex: 1 }} />
+        <span className="small muted">{fmtDateTime(triggeredAt)}</span>
+      </div>
+
+      {ev.last_error && (
+        <div className="card err-text small" style={{ marginBottom: 10 }}>
+          {ev.last_error}
+        </div>
+      )}
+
+      <div
+        className="row"
+        style={{ gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}
+      >
+        <VideoTile
+          label={`Tee · ${ev.tee_camera_name || `cam #${ev.tee_camera_id}`}`}
+          thumb={ev.tee_thumbnail_url}
+          durationSec={ev.tee_duration_sec}
+          nbFrames={ev.tee_nb_frames}
+          fps={ev.tee_fps}
+          sizeMb={ev.tee_size_mb}
+          startsAt={teeStartsAt}
+          missing={ev.tee_missing}
+          notUploaded={!ev.tee_clip_filename}
+          qualityLabel={null}
+          width={ev.tee_width}
+          height={ev.tee_height}
+          videoUrl={ev.tee_url}
+          onOpenViewer={onOpenViewer}
+        />
+        <VideoTile
+          label={
+            ev.dual_camera
+              ? `Green · ${ev.green_camera_name || `cam #${ev.green_camera_id}`}`
+              : "Green · n/a"
+          }
+          thumb={ev.green_thumbnail_url}
+          durationSec={ev.green_duration_sec}
+          nbFrames={ev.green_nb_frames}
+          fps={ev.green_fps}
+          sizeMb={ev.green_size_mb}
+          startsAt={greenStartsAt}
+          missing={ev.green_missing}
+          notUploaded={!ev.green_clip_filename}
+          qualityLabel={null}
+          width={ev.green_width}
+          height={ev.green_height}
+          videoUrl={ev.green_url}
+          onOpenViewer={onOpenViewer}
+        />
+        <ProducedTile clips={producedClips} onOpenViewer={onOpenViewer} />
+      </div>
+
+      <div
+        className="row"
+        style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}
+      >
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => onReproduce(ev)}
+          disabled={busy || !ev.tee_url}
+          title={ev.tee_url
+            ? "Re-run the production pipeline on the existing raw clips"
+            : "No raw tee clip on disk — can't re-process"}
+        >
+          {busy ? "…" : "Re-Produce"}
+        </button>
+        <button
+          type="button"
+          className="ghost err-text"
+          onClick={() => onDelete(ev)}
+          disabled={busy}
+          title="Permanently remove this event, its raw clips, and any produced clip"
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function VideoLightbox({ url, title, onClose }) {
   if (!url) return null;
   return (
@@ -2643,8 +2782,10 @@ export default function AdminProduction() {
     "";
 
   const [rows, setRows] = useState(null);
+  const [events, setEvents] = useState(null);
   const [error, setError] = useState(null);
   const [busyId, setBusyId] = useState(null);
+  const [busyEventId, setBusyEventId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title}
   const [editingRow, setEditingRow] = useState(null);
 
@@ -2655,11 +2796,44 @@ export default function AdminProduction() {
 
   async function load() {
     setError(null);
+    // Fetch the long-upload queue and the camera-event queue in
+    // parallel — they're independent endpoints, no point serializing.
     try {
-      const data = await api.listLongUploads(adminPassword);
-      setRows(data);
+      const [uploads, evs] = await Promise.all([
+        api.listLongUploads(adminPassword),
+        api.listCameraEvents(adminPassword),
+      ]);
+      setRows(uploads);
+      setEvents(evs);
     } catch (e) {
       setError(e.message);
+    }
+  }
+
+  async function handleReproduceEvent(ev) {
+    setBusyEventId(ev.id);
+    try {
+      await api.reprocessCameraEvent(adminPassword, ev.id);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyEventId(null);
+    }
+  }
+
+  async function handleDeleteEvent(ev) {
+    if (!confirm(
+      `Delete camera event #${ev.id}? This removes the raw tee/green clips and the produced clip.`,
+    )) return;
+    setBusyEventId(ev.id);
+    try {
+      await api.deleteCameraEvent(adminPassword, ev.id);
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyEventId(null);
     }
   }
 
@@ -2769,16 +2943,58 @@ export default function AdminProduction() {
 
       {error && <div className="card err-text small">{error}</div>}
 
+      {events && events.length > 0 && (
+        <>
+          <div className="card" style={{ marginBottom: 8 }}>
+            <h4 style={{ margin: 0 }}>
+              Camera events{" "}
+              <span className="small muted">({events.length})</span>
+            </h4>
+            <p className="small muted" style={{ marginBottom: 0, marginTop: 4 }}>
+              Auto-captured swings from the on-course Pi cameras. Each event
+              is the 5-second pre-roll plus the trigger window the Pi recorded.
+              Re-Produce regenerates the composite + tracer from the same raw
+              inputs; Delete removes everything (raw + produced).
+            </p>
+          </div>
+          {events.map((ev) => (
+            <CameraEventCard
+              key={ev.id}
+              ev={ev}
+              busy={busyEventId === ev.id}
+              onOpenViewer={openViewer}
+              onReproduce={handleReproduceEvent}
+              onDelete={handleDeleteEvent}
+            />
+          ))}
+        </>
+      )}
+
+      {(rows !== null || events !== null) && (rows?.length || 0) === 0
+        && (events?.length || 0) === 0 && (
+        <div className="card muted center" style={{ padding: 40 }}>
+          Nothing in the production queue yet. Either{" "}
+          <Link to="/admin/upload-videos">upload a video</Link> or wait for
+          the on-course cameras to capture a swing.
+        </div>
+      )}
+
       {rows === null && (
         <div className="card">
           <div className="shimmer" style={{ height: 200 }} />
         </div>
       )}
 
-      {rows?.length === 0 && (
-        <div className="card muted center" style={{ padding: 40 }}>
-          Nothing in the production queue.{" "}
-          <Link to="/admin/upload-videos">Upload a video →</Link>
+      {events && events.length > 0 && rows && rows.length > 0 && (
+        <div className="card" style={{ marginBottom: 8 }}>
+          <h4 style={{ margin: 0 }}>
+            Long uploads{" "}
+            <span className="small muted">({rows.length})</span>
+          </h4>
+          <p className="small muted" style={{ marginBottom: 0, marginTop: 4 }}>
+            Manually-uploaded source videos. Multi-swing rounds auto-produce
+            on upload; one-swing clips wait here until you hit Produce.
+          </p>
         </div>
       )}
 

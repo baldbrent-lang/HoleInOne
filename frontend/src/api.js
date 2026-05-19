@@ -270,6 +270,20 @@ export const api = {
   listLongUploads: (key, limit = 100) =>
     request(`/api/admin/long-uploads?limit=${limit}`, { adminPassword: key }),
 
+  // ---- Camera-event production queue ----
+  listCameraEvents: (key, limit = 100) =>
+    request(`/api/admin/camera-events?limit=${limit}`, { adminPassword: key }),
+  reprocessCameraEvent: (key, eventId) =>
+    request(`/api/admin/camera-events/${eventId}/reprocess`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  deleteCameraEvent: (key, eventId) =>
+    request(`/api/admin/camera-events/${eventId}`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
+
   // ---- Cameras (always-on capture devices) ----
   listCameras: (key) => request(`/api/admin/cameras`, { adminPassword: key }),
   createCamera: (key, { courseId, assignedHole, assignedRole, name }) => {
