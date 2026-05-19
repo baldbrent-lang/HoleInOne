@@ -6,10 +6,11 @@
  * Raw, mid-pipeline, and un-processed clips stay on the legacy
  * /admin/clips iteration page (still reachable by URL).
  */
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
+import { useInfiniteList } from "../hooks/useInfiniteList.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -27,17 +28,30 @@ export default function AdminProducedClips() {
     localStorage.getItem(LEGACY_ADMIN_PW_STORAGE) ||
     "";
 
-  const [clips, setClips] = useState(null);
-  const [error, setError] = useState(null);
+  // The "produced" filter runs client-side after fetch — the backend
+  // /clips endpoint includes mid-pipeline rows too. That means a given
+  // page of 25 raw clips might yield anywhere from 0–25 "produced"
+  // ones, so the list density is a bit variable. Good enough; switching
+  // to a server-side filter would mean a new endpoint.
+  const fetchClips = useCallback(
+    async (limit, offset) => {
+      const list = await api.listAllClips(adminPassword, limit, offset);
+      return (list || []).filter(isProduced);
+    },
+    [adminPassword],
+  );
+  const {
+    items: clips,
+    setItems: setClips,
+    sentinelRef,
+    hasMore,
+    loadingMore,
+    error: listError,
+  } = useInfiniteList(fetchClips, { pageSize: 25, deps: [adminPassword] });
+  const [actionError, setActionError] = useState(null);
+  const error = actionError || listError;
+  const setError = setActionError;
   const [busyId, setBusyId] = useState(null);
-
-  useEffect(() => {
-    if (!adminPassword) return;
-    api
-      .listAllClips(adminPassword)
-      .then((list) => setClips(list.filter(isProduced)))
-      .catch((e) => setError(e.message));
-  }, [adminPassword]);
 
   async function toggleBroadcast(clip) {
     setBusyId(clip.id);
@@ -162,6 +176,20 @@ export default function AdminProducedClips() {
           );
         })}
       </div>
+
+      {clips && clips.length > 0 && (
+        <div
+          ref={sentinelRef}
+          className="muted center small"
+          style={{ padding: 20 }}
+        >
+          {loadingMore
+            ? "Loading more…"
+            : hasMore
+              ? "Scroll for more"
+              : "End of produced clips"}
+        </div>
+      )}
     </div>
   );
 }

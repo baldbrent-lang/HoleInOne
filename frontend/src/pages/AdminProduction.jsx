@@ -15,10 +15,11 @@
  * Action handlers are stubs for now — the user will hand over the
  * functional spec next.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
+import { useInfiniteList } from "../hooks/useInfiniteList.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -2781,9 +2782,31 @@ export default function AdminProduction() {
     localStorage.getItem(LEGACY_ADMIN_PW_STORAGE) ||
     "";
 
-  const [rows, setRows] = useState(null);
-  const [events, setEvents] = useState(null);
-  const [error, setError] = useState(null);
+  const fetchUploads = useCallback(
+    (limit, offset) => api.listLongUploads(adminPassword, limit, offset),
+    [adminPassword],
+  );
+  const fetchEvents = useCallback(
+    (limit, offset) => api.listCameraEvents(adminPassword, limit, offset),
+    [adminPassword],
+  );
+  const uploadsList = useInfiniteList(fetchUploads, {
+    pageSize: 25,
+    deps: [adminPassword],
+  });
+  const eventsList = useInfiniteList(fetchEvents, {
+    pageSize: 25,
+    deps: [adminPassword],
+  });
+  // Alias to keep the existing JSX (which reads `rows` and `events`)
+  // untouched. Both come from the hook so they share the same null →
+  // [...] lifecycle.
+  const rows = uploadsList.items;
+  const events = eventsList.items;
+
+  const [actionError, setActionError] = useState(null);
+  const error = actionError || uploadsList.error || eventsList.error;
+  const setError = setActionError;
   const [busyId, setBusyId] = useState(null);
   const [busyEventId, setBusyEventId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title}
@@ -2794,27 +2817,20 @@ export default function AdminProduction() {
     setViewer({ url, title });
   }
 
-  async function load() {
+  // Re-fetch the currently-loaded range on both lists. Called by the
+  // background poll loop and by every handler that mutates server state,
+  // so a successful action shows its effect without a full reload (which
+  // would yank the user back to page 1).
+  const refreshAll = useCallback(async () => {
     setError(null);
-    // Fetch the long-upload queue and the camera-event queue in
-    // parallel — they're independent endpoints, no point serializing.
-    try {
-      const [uploads, evs] = await Promise.all([
-        api.listLongUploads(adminPassword),
-        api.listCameraEvents(adminPassword),
-      ]);
-      setRows(uploads);
-      setEvents(evs);
-    } catch (e) {
-      setError(e.message);
-    }
-  }
+    await Promise.all([uploadsList.refresh(), eventsList.refresh()]);
+  }, [uploadsList.refresh, eventsList.refresh]);
 
   async function handleReproduceEvent(ev) {
     setBusyEventId(ev.id);
     try {
       await api.reprocessCameraEvent(adminPassword, ev.id);
-      await load();
+      await refreshAll();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -2829,7 +2845,7 @@ export default function AdminProduction() {
     setBusyEventId(ev.id);
     try {
       await api.deleteCameraEvent(adminPassword, ev.id);
-      await load();
+      await refreshAll();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -2839,20 +2855,20 @@ export default function AdminProduction() {
 
   useEffect(() => {
     if (!adminPassword) return;
-    load();
     // Poll while anything is actively producing so the badge clears
-    // automatically when the background worker finishes.
-    const id = setInterval(load, 8000);
+    // automatically when the background worker finishes. The hook
+    // handles the initial page-1 fetch on mount itself; we just need
+    // to keep it warm.
+    const id = setInterval(refreshAll, 8000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adminPassword]);
+  }, [adminPassword, refreshAll]);
 
   async function handleDelete(row) {
     if (!confirm(`Delete upload #${row.id}? This removes the source video(s).`)) return;
     setBusyId(row.id);
     try {
       await api.deleteLongUpload(adminPassword, row.id);
-      await load();
+      await refreshAll();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -2869,7 +2885,7 @@ export default function AdminProduction() {
     setBusyId(row.id);
     try {
       await api.setClipBroadcast(adminPassword, clip.id, !clip.is_highlight);
-      await load();
+      await refreshAll();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -2895,7 +2911,7 @@ export default function AdminProduction() {
       fd.append("auto_detect_swings", "true");
       fd.append("starting_hole", "1");
       await api.reprocessLongUpload(adminPassword, row.id, fd);
-      await load();
+      await refreshAll();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -2967,6 +2983,17 @@ export default function AdminProduction() {
               onDelete={handleDeleteEvent}
             />
           ))}
+          <div
+            ref={eventsList.sentinelRef}
+            className="muted center small"
+            style={{ padding: 16 }}
+          >
+            {eventsList.loadingMore
+              ? "Loading more events…"
+              : eventsList.hasMore
+                ? "Scroll for more events"
+                : "End of camera events"}
+          </div>
         </>
       )}
 
@@ -3203,6 +3230,20 @@ export default function AdminProduction() {
         );
       })}
 
+      {rows && rows.length > 0 && (
+        <div
+          ref={uploadsList.sentinelRef}
+          className="muted center small"
+          style={{ padding: 16 }}
+        >
+          {uploadsList.loadingMore
+            ? "Loading more uploads…"
+            : uploadsList.hasMore
+              ? "Scroll for more uploads"
+              : "End of long uploads"}
+        </div>
+      )}
+
       <VideoLightbox
         url={viewer?.url}
         title={viewer?.title}
@@ -3213,7 +3254,7 @@ export default function AdminProduction() {
         <EditWizard
           row={editingRow}
           adminPassword={adminPassword}
-          onClose={() => { setEditingRow(null); load(); }}
+          onClose={() => { setEditingRow(null); refreshAll(); }}
           onSaved={load}
         />
       )}

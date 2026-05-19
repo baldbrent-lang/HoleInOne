@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import { useInfiniteList } from "../hooks/useInfiniteList.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -16,8 +17,23 @@ export default function AdminBroadcastClips() {
     localStorage.getItem(ADMIN_PW_STORAGE) ||
     localStorage.getItem(LEGACY_ADMIN_PW_STORAGE) ||
     "";
-  const [clips, setClips] = useState(null);
+  const fetchClips = useCallback(
+    (limit, offset) => api.listBroadcastClips(adminPassword, limit, offset),
+    [adminPassword],
+  );
+  const {
+    items: clips,
+    setItems: setClips,
+    sentinelRef,
+    hasMore,
+    loadingMore,
+    error: listError,
+    reload,
+  } = useInfiniteList(fetchClips, { pageSize: 25, deps: [adminPassword] });
   const [error, setError] = useState(null);
+  // Combine the hook's load error with action errors so the UI keeps one
+  // error banner.
+  const displayError = error || listError;
   const [deleting, setDeleting] = useState({}); // {clip_id: true}
   const [copied, setCopied] = useState({});     // {clip_id: true} for ~1.5s
   const [fileSharing, setFileSharing] = useState({}); // {clip_id: true} while we fetch the .mp4 for a file share
@@ -189,15 +205,6 @@ export default function AdminBroadcastClips() {
     }
   }
 
-  async function load() {
-    try {
-      const list = await api.listBroadcastClips(adminPassword);
-      setClips(list);
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
   async function deleteClip(clipId) {
     if (!window.confirm("Delete this composite clip and its source files? This can't be undone (the underlying long upload, if any, is kept).")) {
       return;
@@ -212,11 +219,6 @@ export default function AdminBroadcastClips() {
       setDeleting((d) => ({ ...d, [clipId]: false }));
     }
   }
-
-  useEffect(() => {
-    if (adminPassword) load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   if (!adminPassword) {
     return (
@@ -256,7 +258,9 @@ export default function AdminBroadcastClips() {
         </p>
       </div>
 
-      {error && <div className="card err-text small">{error}</div>}
+      {displayError && (
+        <div className="card err-text small">{displayError}</div>
+      )}
 
       {clips === null && (
         <div className="card">
@@ -442,6 +446,20 @@ export default function AdminBroadcastClips() {
           </div>
         );
       })}
+
+      {clips && clips.length > 0 && (
+        <div
+          ref={sentinelRef}
+          className="muted center small"
+          style={{ padding: 20 }}
+        >
+          {loadingMore
+            ? "Loading more…"
+            : hasMore
+              ? "Scroll for more"
+              : "End of broadcast clips"}
+        </div>
+      )}
     </div>
   );
 }

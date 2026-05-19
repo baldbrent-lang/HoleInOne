@@ -250,12 +250,16 @@ export const api = {
   stats: (key) => request(`/api/admin/stats`, { adminPassword: key }),
   flaggedClips: (key) =>
     request(`/api/admin/flagged-clips`, { adminPassword: key }),
-  listAllClips: (key, limit = 100) =>
-    request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
-  listBroadcastClips: (key, limit = 100) =>
-    request(`/api/admin/broadcast-clips?limit=${limit}`, {
-      adminPassword: key,
-    }),
+  listAllClips: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/clips?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
+  listBroadcastClips: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/broadcast-clips?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
   setClipBroadcast: (key, clipId, broadcast) =>
     request(`/api/admin/clips/${clipId}/broadcast`, {
       method: "POST",
@@ -267,12 +271,18 @@ export const api = {
       method: "DELETE",
       adminPassword: key,
     }),
-  listLongUploads: (key, limit = 100) =>
-    request(`/api/admin/long-uploads?limit=${limit}`, { adminPassword: key }),
+  listLongUploads: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/long-uploads?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
 
   // ---- Camera-event production queue ----
-  listCameraEvents: (key, limit = 100) =>
-    request(`/api/admin/camera-events?limit=${limit}`, { adminPassword: key }),
+  listCameraEvents: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/camera-events?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
   reprocessCameraEvent: (key, eventId) =>
     request(`/api/admin/camera-events/${eventId}/reprocess`, {
       method: "POST",

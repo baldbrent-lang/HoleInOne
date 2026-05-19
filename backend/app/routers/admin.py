@@ -539,7 +539,9 @@ CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.get("/clips")
-def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
+def list_all_clips(
+    limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
+):
     """All clips, newest first. Includes orphans (no participant_id).
 
     Powers the /admin/clips test/iteration page where we can rerun the
@@ -548,6 +550,7 @@ def list_all_clips(limit: int = 100, db: Session = Depends(get_db)):
     clips = (
         db.query(VideoClip)
         .order_by(VideoClip.created_at.desc())
+        .offset(max(0, offset))
         .limit(max(1, min(500, limit)))
         .all()
     )
@@ -641,7 +644,9 @@ def toggle_clip_broadcast(
 
 
 @router.get("/broadcast-clips")
-def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
+def list_broadcast_clips(
+    limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
+):
     """List clips on the Broadcast channel — any clip an operator has
     flagged with is_highlight=True, plus the legacy dual-camera
     composites (source filename contains '_composite') so older
@@ -661,6 +666,7 @@ def list_broadcast_clips(limit: int = 100, db: Session = Depends(get_db)):
             )
         )
         .order_by(VideoClip.created_at.desc())
+        .offset(max(0, offset))
         .limit(max(1, min(500, limit)))
         .all()
     )
@@ -2005,12 +2011,15 @@ async def upload_long_video(
 
 
 @router.get("/long-uploads")
-def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
+def list_long_uploads(
+    limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
+):
     """List previously-uploaded long videos so the operator can re-edit /
     reprocess them without re-uploading. Newest first."""
     rows = (
         db.query(LongVideoUpload)
         .order_by(LongVideoUpload.created_at.desc())
+        .offset(max(0, offset))
         .limit(max(1, min(500, limit)))
         .all()
     )
@@ -2185,7 +2194,9 @@ def list_long_uploads(limit: int = 100, db: Session = Depends(get_db)):
 
 
 @router.get("/camera-events")
-def list_camera_events(limit: int = 100, db: Session = Depends(get_db)):
+def list_camera_events(
+    limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
+):
     """List recent CameraEvents for the production queue. Each row
     bundles the raw tee/green clips the Pis uploaded plus the
     produced VideoClip (if any), so the operator can review what was
@@ -2196,6 +2207,7 @@ def list_camera_events(limit: int = 100, db: Session = Depends(get_db)):
     rows = (
         db.query(CameraEvent)
         .order_by(CameraEvent.triggered_at.desc())
+        .offset(max(0, offset))
         .limit(max(1, min(500, limit)))
         .all()
     )
