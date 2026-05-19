@@ -102,12 +102,30 @@ sudo -u golfreelz ./venv/bin/python3 -c "import cv2; \
 ## Updating the agent code
 
 ```bash
-cd /opt/golfreelz-agent
-sudo systemctl stop golfreelz-agent
-sudo -u golfreelz git pull   # or copy new files in
-sudo -u golfreelz ./venv/bin/pip install -r requirements.txt
-sudo systemctl start golfreelz-agent
+# Default: pull main + restart the service
+sudo /opt/golfreelz-agent/update.sh
+
+# Or pull a specific branch / tag
+sudo /opt/golfreelz-agent/update.sh some-feature-branch
 ```
+
+`update.sh` clones the repo into a tmp dir, stops the service, copies
+the agent files into place, refreshes pip requirements, and restarts.
+It only touches code under `agent/` plus the top-level entry script —
+`config.yaml`, the systemd unit, and any other local edits are left
+alone.
+
+If `update.sh` itself is missing (e.g. on a Pi installed before it
+existed), one-time bootstrap:
+
+```bash
+sudo curl -fsSL -o /opt/golfreelz-agent/update.sh \
+  https://raw.githubusercontent.com/baldbrent-lang/HoleInOne/main/pi-agent/update.sh
+sudo chmod +x /opt/golfreelz-agent/update.sh
+sudo chown golfreelz:golfreelz /opt/golfreelz-agent/update.sh
+```
+
+After that, every future update is just `sudo /opt/golfreelz-agent/update.sh`.
 
 ## Troubleshooting
 
