@@ -54,9 +54,16 @@ install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" \
   "$TMP_DIR/repo/pi-agent/README.md" \
   "$INSTALL_DIR/README.md"
 
-echo "==> pip: applying requirements.txt"
-"$INSTALL_DIR/venv/bin/pip" install --quiet \
-  -r "$TMP_DIR/repo/pi-agent/requirements.txt"
+echo "==> pip: applying requirements.txt (failures non-fatal — see warnings)"
+if ! "$INSTALL_DIR/venv/bin/pip" install --quiet \
+    -r "$TMP_DIR/repo/pi-agent/requirements.txt"; then
+  echo
+  echo "    !! pip reported errors. The most common cause on a Pi is"
+  echo "    !! mediapipe not having a wheel for this Python version —"
+  echo "    !! the agent has a motion-density fallback for that."
+  echo "    !! Continuing with the existing venv contents."
+  echo
+fi
 
 echo "==> starting $SERVICE_NAME"
 systemctl start "$SERVICE_NAME"
