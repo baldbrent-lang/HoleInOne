@@ -42,13 +42,13 @@ export default function AdminCameras() {
   const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
   const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "" });
 
-  // Live-watch state: one camera at a time. `frameTick` increments every
-  // ~100ms while watching, busting the <img> cache so we get the latest
-  // JPEG. `frameAvailable` flips true once the Pi has uploaded its
-  // first frame so we can hide the "Waiting…" placeholder.
+  // Live-watch state: one camera at a time. We poll /live-frame via
+  // fetch (rather than letting <img> do it) because the admin endpoint
+  // requires the X-Admin-Password header, which <img src> can't send.
+  // Each successful 200 turns into an object URL that we hand to <img>;
+  // 204 (Pi hasn't uploaded a frame yet) just keeps the placeholder up.
   const [watchingCamId, setWatchingCamId] = useState(null);
-  const [frameTick, setFrameTick] = useState(0);
-  const [frameAvailable, setFrameAvailable] = useState(false);
+  const [liveFrameSrc, setLiveFrameSrc] = useState(null);
   const watchingCamIdRef = useRef(null);
 
   // New-camera form state
@@ -74,12 +74,52 @@ export default function AdminCameras() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminPassword]);
 
-  // Tick the live-frame URL while watching so the <img> refetches.
+  // Poll the live frame ~10 fps while watching. Uses fetch (not <img>
+  // src) so we can send the X-Admin-Password header and so 204 (no
+  // frame yet) doesn't trigger a broken-image render.
   useEffect(() => {
     if (watchingCamId == null) return;
-    const t = setInterval(() => setFrameTick((x) => x + 1), 100);
-    return () => clearInterval(t);
-  }, [watchingCamId]);
+    let cancelled = false;
+    let timer = null;
+    let prevUrl = null;
+    const url = api.cameraLiveFrameUrl(watchingCamId);
+
+    async function pollOnce() {
+      if (cancelled) return;
+      try {
+        const res = await fetch(url, {
+          headers: { "X-Admin-Password": adminPassword },
+          cache: "no-store",
+        });
+        if (cancelled) return;
+        if (res.status === 200) {
+          const blob = await res.blob();
+          if (cancelled) {
+            return;
+          }
+          const objectUrl = URL.createObjectURL(blob);
+          setLiveFrameSrc((old) => {
+            if (old) URL.revokeObjectURL(old);
+            return objectUrl;
+          });
+          prevUrl = objectUrl;
+        }
+        // 204 (no frame yet) and other non-200s: keep polling, keep
+        // showing whatever was last visible (placeholder or prior frame).
+      } catch {
+        // network error — keep polling
+      }
+      if (!cancelled) timer = setTimeout(pollOnce, 100);
+    }
+    pollOnce();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      setLiveFrameSrc(null);
+    };
+  }, [watchingCamId, adminPassword]);
 
   // Best-effort: tell the backend to stop watching when the page is
   // unmounted (otherwise it'd hold the 10s TTL until it naturally
@@ -103,8 +143,6 @@ export default function AdminCameras() {
       api.stopWatchingCamera(adminPassword, watchingCamId).catch(() => {});
     }
     setBusy((b) => ({ ...b, [cam.id]: true }));
-    setFrameAvailable(false);
-    setFrameTick(0);
     try {
       await api.startWatchingCamera(adminPassword, cam.id);
       setWatchingCamId(cam.id);
@@ -118,7 +156,6 @@ export default function AdminCameras() {
   async function stopWatch() {
     const id = watchingCamId;
     setWatchingCamId(null);
-    setFrameAvailable(false);
     if (id != null) {
       try {
         await api.stopWatchingCamera(adminPassword, id);
@@ -532,20 +569,18 @@ export default function AdminCameras() {
                       minHeight: 240,
                     }}
                   >
-                    <img
-                      src={`${api.cameraLiveFrameUrl(cam.id)}?t=${frameTick}`}
-                      alt=""
-                      onLoad={(e) => {
-                        if (e.target.naturalWidth > 0) setFrameAvailable(true);
-                      }}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        height: "auto",
-                        visibility: frameAvailable ? "visible" : "hidden",
-                      }}
-                    />
-                    {!frameAvailable && (
+                    {liveFrameSrc && (
+                      <img
+                        src={liveFrameSrc}
+                        alt=""
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          height: "auto",
+                        }}
+                      />
+                    )}
+                    {!liveFrameSrc && (
                       <div
                         style={{
                           position: "absolute",
