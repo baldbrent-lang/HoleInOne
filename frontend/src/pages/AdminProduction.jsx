@@ -2584,33 +2584,59 @@ function FinalizeStep({
   );
 }
 
-function eventStatusPill(status) {
-  // Map CameraEvent.status → friendly label + pill class. The five
-  // raw values come straight from the DB column; anything unexpected
-  // renders as neutral so nothing breaks if a new status is added.
+function eventStatusBadge(status) {
+  // Inline-pill styling that mirrors the long-upload card's status
+  // chip (Queued / Production in Progress / Produced) so the two
+  // sections look like one family.
   switch (status) {
-    case "triggered":
-      return { label: "Triggered", className: "warn" };
-    case "tee_uploaded":
-      return { label: "Tee uploaded", className: "warn" };
-    case "paired_uploaded":
-      return { label: "Both uploaded", className: "" };
     case "processed":
-      return { label: "Processed", className: "ok" };
+      return {
+        label: "Processed",
+        bg: "rgba(40, 168, 92, 0.15)",
+        border: "rgba(40, 168, 92, 0.5)",
+      };
     case "failed":
-      return { label: "Failed", className: "err-text" };
+      return {
+        label: "Failed",
+        bg: "rgba(220, 53, 69, 0.15)",
+        border: "rgba(220, 53, 69, 0.5)",
+      };
+    case "paired_uploaded":
+      return {
+        label: "Ready",
+        bg: "rgba(120, 120, 120, 0.15)",
+        border: "rgba(120, 120, 120, 0.5)",
+      };
+    case "tee_uploaded":
+      return {
+        label: "Tee uploaded",
+        bg: "rgba(255, 176, 0, 0.15)",
+        border: "rgba(255, 176, 0, 0.5)",
+      };
+    case "triggered":
+      return {
+        label: "Triggered",
+        bg: "rgba(255, 176, 0, 0.15)",
+        border: "rgba(255, 176, 0, 0.5)",
+      };
     default:
-      return { label: status || "—", className: "" };
+      return {
+        label: status || "—",
+        bg: "rgba(120, 120, 120, 0.15)",
+        border: "rgba(120, 120, 120, 0.5)",
+      };
   }
 }
 
-function CameraEventCard({ ev, busy, onOpenViewer, onReproduce, onDelete }) {
-  // One row in the camera-event production list. Mirrors the visual
-  // language of the long-upload card (tee tile + green tile +
-  // produced tile + action row), but the underlying data model is
-  // simpler — each event is exactly one swing, no edit-metrics, no
-  // swing wizard.
-  const status = eventStatusPill(ev.status);
+function CameraEventCard({
+  ev, busy, onOpenViewer, onReproduce, onBroadcast, onDelete,
+}) {
+  // One row in the camera-event production list. Layout matches the
+  // long-upload card exactly — tee tile / green tile / produced tile
+  // in a flex row on the left, status pill + action buttons stacked
+  // vertically on the right — so the operator sees a consistent
+  // language across both kinds of queue items.
+  const badge = eventStatusBadge(ev.status);
   const triggeredAt = ev.triggered_at;
   const teeStartsAt = triggeredAt;
   // Green starts ~5s before trigger because of pre-roll; we don't
@@ -2618,6 +2644,8 @@ function CameraEventCard({ ev, busy, onOpenViewer, onReproduce, onDelete }) {
   // shared trigger time for both tiles to keep the math honest.
   const greenStartsAt = triggeredAt;
   const producedClips = ev.produced_clip ? [ev.produced_clip] : [];
+  const hasProduced = !!ev.produced_clip;
+  const onBroadcastChannel = !!ev.produced_clip?.is_highlight;
   return (
     <div
       className="card"
@@ -2637,87 +2665,130 @@ function CameraEventCard({ ev, busy, onOpenViewer, onReproduce, onDelete }) {
           Event #{ev.id} ·{" "}
           {ev.course_name || `course ${ev.course_id}`} · hole {ev.hole_number}
         </h4>
-        <span className={`pill small ${status.className}`}>{status.label}</span>
         <span className="small muted">
           {ev.dual_camera ? "Tee + Green" : "Tee only"}
         </span>
         <div style={{ flex: 1 }} />
-        <span className="small muted">{fmtDateTime(triggeredAt)}</span>
+        <span className="small muted">
+          Captured {fmtDateTime(triggeredAt)}
+        </span>
       </div>
 
       {ev.last_error && (
-        <div className="card err-text small" style={{ marginBottom: 10 }}>
+        <div className="err-text small" style={{ marginBottom: 10 }}>
           {ev.last_error}
         </div>
       )}
 
       <div
-        className="row"
-        style={{ gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}
+        style={{
+          display: "flex",
+          gap: 20,
+          alignItems: "flex-start",
+          flexWrap: "wrap",
+        }}
       >
-        <VideoTile
-          label={`Tee · ${ev.tee_camera_name || `cam #${ev.tee_camera_id}`}`}
-          thumb={ev.tee_thumbnail_url}
-          durationSec={ev.tee_duration_sec}
-          nbFrames={ev.tee_nb_frames}
-          fps={ev.tee_fps}
-          sizeMb={ev.tee_size_mb}
-          startsAt={teeStartsAt}
-          missing={ev.tee_missing}
-          notUploaded={!ev.tee_clip_filename}
-          qualityLabel={null}
-          width={ev.tee_width}
-          height={ev.tee_height}
-          videoUrl={ev.tee_url}
-          onOpenViewer={onOpenViewer}
-        />
-        <VideoTile
-          label={
-            ev.dual_camera
-              ? `Green · ${ev.green_camera_name || `cam #${ev.green_camera_id}`}`
-              : "Green · n/a"
-          }
-          thumb={ev.green_thumbnail_url}
-          durationSec={ev.green_duration_sec}
-          nbFrames={ev.green_nb_frames}
-          fps={ev.green_fps}
-          sizeMb={ev.green_size_mb}
-          startsAt={greenStartsAt}
-          missing={ev.green_missing}
-          notUploaded={!ev.green_clip_filename}
-          qualityLabel={null}
-          width={ev.green_width}
-          height={ev.green_height}
-          videoUrl={ev.green_url}
-          onOpenViewer={onOpenViewer}
-        />
-        <ProducedTile clips={producedClips} onOpenViewer={onOpenViewer} />
-      </div>
+        <div
+          style={{
+            flex: "1 1 600px",
+            display: "flex",
+            gap: 16,
+            flexWrap: "wrap",
+            alignItems: "flex-start",
+          }}
+        >
+          <VideoTile
+            label={`Tee · ${ev.tee_camera_name || `cam #${ev.tee_camera_id}`}`}
+            thumb={ev.tee_thumbnail_url}
+            durationSec={ev.tee_duration_sec}
+            nbFrames={ev.tee_nb_frames}
+            fps={ev.tee_fps}
+            sizeMb={ev.tee_size_mb}
+            startsAt={teeStartsAt}
+            missing={ev.tee_missing}
+            notUploaded={!ev.tee_clip_filename}
+            qualityLabel={null}
+            width={ev.tee_width}
+            height={ev.tee_height}
+            videoUrl={ev.tee_url}
+            onOpenViewer={onOpenViewer}
+          />
+          <VideoTile
+            label={
+              ev.dual_camera
+                ? `Green · ${ev.green_camera_name || `cam #${ev.green_camera_id}`}`
+                : "Green · n/a"
+            }
+            thumb={ev.green_thumbnail_url}
+            durationSec={ev.green_duration_sec}
+            nbFrames={ev.green_nb_frames}
+            fps={ev.green_fps}
+            sizeMb={ev.green_size_mb}
+            startsAt={greenStartsAt}
+            missing={ev.green_missing}
+            notUploaded={!ev.green_clip_filename}
+            qualityLabel={null}
+            width={ev.green_width}
+            height={ev.green_height}
+            videoUrl={ev.green_url}
+            onOpenViewer={onOpenViewer}
+          />
+          <ProducedTile clips={producedClips} onOpenViewer={onOpenViewer} />
+        </div>
 
-      <div
-        className="row"
-        style={{ gap: 8, marginTop: 12, flexWrap: "wrap" }}
-      >
-        <button
-          type="button"
-          className="secondary"
-          onClick={() => onReproduce(ev)}
-          disabled={busy || !ev.tee_url}
-          title={ev.tee_url
-            ? "Re-run the production pipeline on the existing raw clips"
-            : "No raw tee clip on disk — can't re-process"}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            alignItems: "stretch",
+            minWidth: 160,
+            flexShrink: 0,
+          }}
         >
-          {busy ? "…" : "Re-Produce"}
-        </button>
-        <button
-          type="button"
-          className="ghost err-text"
-          onClick={() => onDelete(ev)}
-          disabled={busy}
-          title="Permanently remove this event, its raw clips, and any produced clip"
-        >
-          Delete
-        </button>
+          <span
+            className="small"
+            style={{
+              padding: "4px 10px",
+              borderRadius: 999,
+              background: badge.bg,
+              border: `1px solid ${badge.border}`,
+              textAlign: "center",
+            }}
+          >
+            {badge.label}
+          </span>
+          <button
+            className="small"
+            onClick={() => onReproduce(ev)}
+            disabled={busy || !ev.tee_url}
+            title={ev.tee_url
+              ? "Re-run the production pipeline on the existing raw clips"
+              : "No raw tee clip on disk — can't re-process"}
+          >
+            {busy ? "…" : "Re-Produce"}
+          </button>
+          <button
+            className={onBroadcastChannel ? "small" : "small ghost"}
+            onClick={() => onBroadcast(ev)}
+            disabled={busy || !hasProduced}
+            title={hasProduced
+              ? (onBroadcastChannel
+                ? "Remove this clip from the Broadcast channel"
+                : "Send this clip to the Broadcast channel")
+              : "Produce this event first to enable Broadcast"}
+          >
+            {onBroadcastChannel ? "On Broadcast" : "Broadcast"}
+          </button>
+          <button
+            className="small ghost err-text"
+            onClick={() => onDelete(ev)}
+            disabled={busy}
+            title="Permanently remove this event, its raw clips, and any produced clip"
+          >
+            Delete
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -2853,6 +2924,23 @@ export default function AdminProduction() {
     }
   }
 
+  async function handleBroadcastEvent(ev) {
+    // Toggle the produced clip's is_highlight flag — same semantic as
+    // the long-upload Broadcast button, just sourced from the event's
+    // produced_clip relation instead of produced_clips[0].
+    const clip = ev.produced_clip;
+    if (!clip) return;
+    setBusyEventId(ev.id);
+    try {
+      await api.setClipBroadcast(adminPassword, clip.id, !clip.is_highlight);
+      await refreshAll();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyEventId(null);
+    }
+  }
+
   useEffect(() => {
     if (!adminPassword) return;
     // Poll while anything is actively producing so the badge clears
@@ -2980,6 +3068,7 @@ export default function AdminProduction() {
               busy={busyEventId === ev.id}
               onOpenViewer={openViewer}
               onReproduce={handleReproduceEvent}
+              onBroadcast={handleBroadcastEvent}
               onDelete={handleDeleteEvent}
             />
           ))}
