@@ -789,6 +789,7 @@ def detect_handedness_at_address(
     input_path: Path, address_frame_idx: int,
     frame_w: int = HANDEDNESS_FRAME_W,
     model: str | None = None,
+    examples: list | None = None,
 ) -> dict:
     """Single-frame Claude call: given the picked address frame index,
     ask whether the golfer is right- or left-handed. Camera is assumed
@@ -823,6 +824,7 @@ def detect_handedness_at_address(
         "image_width": None,
         "image_height": None,
         "model": model,
+        "examples_used": [],
     }
     if not HAS_CV:
         info["error"] = "opencv not installed"
@@ -884,6 +886,17 @@ def detect_handedness_at_address(
         },
     ]
 
+    # Few-shot prior: prepend operator-verified handedness examples
+    # from this course before the task block above.
+    if examples:
+        from . import tracer_examples as _ex
+        prior_blocks = _ex.example_blocks(examples, _ex.KIND_HANDEDNESS)
+        if prior_blocks:
+            content = prior_blocks + content
+            info["examples_used"] = [
+                {"lvu_id": e.lvu_id, "hole": e.hole_number} for e in examples
+            ]
+
     client = _anthropic_client()
     try:
         resp = client.messages.create(
@@ -938,6 +951,7 @@ def detect_handedness_at_address(
 def find_address_frame(
     input_path: Path, output_image_path: Path | None = None,
     model: str | None = None,
+    examples: list | None = None,
 ) -> dict:
     """Ask Claude which frame in the clip is the golfer at address.
 
@@ -969,6 +983,7 @@ def find_address_frame(
         "model": model,
         "frames_sent": [],
         "saved_image": False,
+        "examples_used": [],
     }
 
     if not HAS_CV:
@@ -1006,14 +1021,23 @@ def find_address_frame(
         len(frames), candidate_frames, total_frames, fps, model,
     )
 
-    content: list[dict] = [{
+    content: list[dict] = []
+    if examples:
+        from . import tracer_examples as _ex
+        prior_blocks = _ex.example_blocks(examples, _ex.KIND_ADDRESS)
+        if prior_blocks:
+            content.extend(prior_blocks)
+            info["examples_used"] = [
+                {"lvu_id": e.lvu_id, "hole": e.hole_number} for e in examples
+            ]
+    content.append({
         "type": "text",
         "text": (
             f"Below are {len(frames)} frames from a {total_frames}-frame "
             f"clip at {fps:.1f} fps, in chronological order. Each image "
             "is preceded by its frame number."
         ),
-    }]
+    })
     for idx, jpeg in frames:
         content.append({"type": "text", "text": f"Frame {idx}:"})
         content.append({
@@ -1108,6 +1132,7 @@ def find_impact_frame_after_address(
     ball_sent_dims: tuple[int, int] | None = None,
     output_image_path: Path | None = None,
     model: str | None = None,
+    examples: list | None = None,
 ) -> dict:
     """Find the impact frame — when the clubhead has returned to the
     ball after the backswing.
@@ -1140,6 +1165,7 @@ def find_impact_frame_after_address(
         "model": model,
         "frames_sent": [],
         "saved_image": False,
+        "examples_used": [],
     }
 
     if not HAS_CV:
@@ -1254,7 +1280,16 @@ def find_impact_frame_after_address(
         address_frame_idx, candidate_indices_actual, ball_xy_native,
     )
 
-    content: list[dict] = [
+    content: list[dict] = []
+    if examples:
+        from . import tracer_examples as _ex
+        prior_blocks = _ex.example_blocks(examples, _ex.KIND_IMPACT)
+        if prior_blocks:
+            content.extend(prior_blocks)
+            info["examples_used"] = [
+                {"lvu_id": e.lvu_id, "hole": e.hole_number} for e in examples
+            ]
+    content.extend([
         {
             "type": "text",
             "text": (
@@ -1282,7 +1317,7 @@ def find_impact_frame_after_address(
                 "clubhead's distance to it across frames."
             ),
         },
-    ]
+    ])
     for idx, jpeg in annotated_jpegs:
         content.append({"type": "text", "text": f"Frame {idx}:"})
         content.append({
@@ -3820,6 +3855,7 @@ def run_full_ai_tracer_pipeline(
     ball_at_rest_override: tuple[float, float] | None = None,
     manual_ball_positions: list[dict] | None = None,
     handedness_override: str | None = None,
+    examples_by_kind: dict | None = None,
 ) -> dict:
     """Run the complete AI tracer pipeline (address → handedness →
     impact → refine → ball-track → tracer render) on a single clip.
@@ -3978,6 +4014,7 @@ def run_full_ai_tracer_pipeline(
     else:
         address_info = find_address_frame(
             input_path, output_image_path=address_image_path, model=model,
+            examples=(examples_by_kind or {}).get("address"),
         )
     result["address"] = address_info
     if address_image_path.exists():
@@ -4025,7 +4062,10 @@ def run_full_ai_tracer_pipeline(
             int(ball_at_rest_override[0]), int(ball_at_rest_override[1]), nw, nh,
         )
     else:
-        handedness_info = detect_handedness_at_address(input_path, addr_idx, model=model)
+        handedness_info = detect_handedness_at_address(
+            input_path, addr_idx, model=model,
+            examples=(examples_by_kind or {}).get("handedness"),
+        )
         # Operator can override just the handedness label without
         # touching the AI's ball-at-rest pick.
         if (
@@ -4117,6 +4157,7 @@ def run_full_ai_tracer_pipeline(
             ball_sent_dims=ball_sent_dims,
             output_image_path=None,
             model=model,
+            examples=(examples_by_kind or {}).get("impact"),
         )
         impact_info["method"] = "ai_vision"
         impact_info["audio"] = audio_impact_info

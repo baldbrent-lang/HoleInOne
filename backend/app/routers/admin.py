@@ -48,7 +48,7 @@ from ..schemas import (
     HIOEventOut,
     HIOReviewAction,
 )
-from ..services import notifications
+from ..services import notifications, tracer_examples
 from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
@@ -990,6 +990,14 @@ def ai_trace(
                 "handedness_override must be 'right', 'left', or 'unknown'",
             )
 
+    # Few-shot from prior broadcast clips on this clip's course/hole;
+    # excluding the clip's source upload prevents self-reference.
+    clip_examples = tracer_examples.fetch_all_kinds(
+        db,
+        course_id=clip.course_id,
+        hole_number=int(clip.hole_number) if clip.hole_number else None,
+        exclude_lvu_ids=({clip.long_upload_id} if clip.long_upload_id else None),
+    )
     pipe = run_full_ai_tracer_pipeline(
         fpath,
         output_dir=CLIPS_DIR,
@@ -1002,6 +1010,7 @@ def ai_trace(
         if ball_track_max_frames is not None
         else None,
         ball_at_rest_override=ball_at_rest_override,
+        examples_by_kind=clip_examples,
         manual_ball_positions=manual_positions,
         handedness_override=handedness_clean,
     )
@@ -1272,6 +1281,39 @@ def _run_long_upload_job(
         db.close()
 
 
+def _build_tracer_diagnostics(pipe: dict, examples_by_kind: dict | None) -> dict:
+    """Collect what the AI tracer produced + which prior examples it
+    was shown for this clip. Stored on VideoClip.tracer_diagnostics so
+    we can measure whether few-shot examples improved picks. Cheap to
+    construct; safe to call even when the pipeline errored out."""
+    addr = (pipe or {}).get("address") or {}
+    hand = (pipe or {}).get("handedness") or {}
+    impact = (pipe or {}).get("impact") or {}
+    examples_summary = {}
+    if examples_by_kind:
+        for kind, exs in examples_by_kind.items():
+            if not exs:
+                continue
+            examples_summary[kind] = [
+                {"lvu_id": e.lvu_id, "hole": e.hole_number} for e in exs
+            ]
+    return {
+        "examples": examples_summary,
+        "ai_picks": {
+            "address_frame": addr.get("address_frame"),
+            "address_method": addr.get("method"),
+            "address_confidence": addr.get("confidence"),
+            "handedness": hand.get("handedness"),
+            "handedness_confidence": hand.get("confidence"),
+            "impact_frame": impact.get("impact_frame"),
+            "impact_method": impact.get("method"),
+            "impact_confidence": impact.get("confidence"),
+        },
+        "model": addr.get("model") or impact.get("model"),
+        "ts": datetime.utcnow().isoformat(),
+    }
+
+
 def _process_long_upload_segments(
     db: Session,
     course_id: int,
@@ -1403,11 +1445,25 @@ def _process_long_upload_segments(
                 )
                 continue
 
+            # Pull operator-verified examples from prior broadcast
+            # clips at this course/hole to few-shot the AI tracer.
+            # Excluding the current upload prevents self-referential
+            # examples when re-processing. Silent no-op when no
+            # examples qualify yet (early days).
+            tracer_examples_by_kind = tracer_examples.fetch_all_kinds(
+                db,
+                course_id=course_id,
+                hole_number=hole_number,
+                exclude_lvu_ids=(
+                    {progress_upload_id} if progress_upload_id else None
+                ),
+            )
             pipe = run_full_ai_tracer_pipeline(
                 seg_path,
                 output_dir=CLIPS_DIR,
                 output_prefix=seg_path.stem,
                 model=ai_tracer_model,
+                examples_by_kind=tracer_examples_by_kind,
             )
 
             composite_url = None
@@ -1507,6 +1563,9 @@ def _process_long_upload_segments(
                 distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
                 ball_in_cup=bool(seg.get("ball_in_cup", False)),
                 processing_status=ClipProcessingStatus.received.value,
+                tracer_diagnostics=_build_tracer_diagnostics(
+                    pipe, tracer_examples_by_kind,
+                ),
             )
             db.add(clip)
             db.flush()
@@ -3037,6 +3096,21 @@ def render_wizard_tracer(
     if isinstance(ball_pt, dict) and ball_pt.get("x") is not None:
         ball_at_rest_override = (float(ball_pt["x"]), float(ball_pt["y"]))
 
+    # Few-shot prior from prior broadcast clips on the same course.
+    # Excluding the upload itself so a re-produce doesn't reference
+    # its own (possibly-stale) prior result.
+    wizard_hole = None
+    try:
+        wizard_hole = int(saved.get("hole_number")) if saved.get("hole_number") else None
+    except (TypeError, ValueError):
+        pass
+    examples_by_kind = tracer_examples.fetch_all_kinds(
+        db,
+        course_id=row.course_id,
+        hole_number=wizard_hole,
+        exclude_lvu_ids={row.id},
+    )
+
     pipe = run_full_ai_tracer_pipeline(
         src_path,
         output_dir=CLIPS_DIR,
@@ -3047,6 +3121,7 @@ def render_wizard_tracer(
         ball_at_rest_override=ball_at_rest_override,
         manual_ball_positions=manual_positions or None,
         handedness_override=handedness,
+        examples_by_kind=examples_by_kind,
     )
 
     def _public_url(p):

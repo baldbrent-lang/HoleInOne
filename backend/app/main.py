@@ -150,6 +150,8 @@ def _migrate() -> None:
             statements.append("ALTER TABLE video_clips ADD COLUMN highlight_tag VARCHAR(60)")
         if "long_upload_id" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN long_upload_id INTEGER")
+        if "tracer_diagnostics" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN tracer_diagnostics JSON")
 
     # CameraEvent additions
     if "camera_events" in inspector.get_table_names():

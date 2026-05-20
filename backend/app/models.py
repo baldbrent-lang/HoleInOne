@@ -163,6 +163,16 @@ class VideoClip(Base):
     # can toggle via the admin UI.
     is_highlight: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     highlight_tag: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    # Per-clip record of what the AI tracer produced and which prior
+    # operator-verified examples were used as few-shot reference. Used
+    # to measure whether the example bank actually improves picks (and
+    # to debug specific runs). Schema:
+    #   {
+    #     "examples": {"address": [{lvu_id, hole}], "impact": [...], ...},
+    #     "ai_picks": {"address_frame": N, "impact_frame": N, "handedness": "right", ...},
+    #     "model": str, "ts": iso8601
+    #   }
+    tracer_diagnostics: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     participant: Mapped[Optional[Participant]] = relationship(back_populates="clips")
