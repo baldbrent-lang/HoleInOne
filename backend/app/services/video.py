@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -112,7 +113,16 @@ def transcode_for_web(path: Path) -> bool:
     marker = path.with_suffix(path.suffix + ".h264-ok")
     if marker.exists():
         return True
-    tmp = path.with_suffix(".reencode.mp4")
+    # Unique tmp name per call. Two concurrent transcodes for the
+    # same source (upload_event background thread vs the sync call
+    # inside _process_camera_event_job) used to share one tmp path
+    # and collide on os.replace, surfacing as "[Errno 2] No such
+    # file or directory" once the faster thread had moved the tmp
+    # to the source. With a per-call random suffix, both threads
+    # finish independently; the later os.replace just overwrites
+    # the earlier one's output, which is fine because the content
+    # is equivalent.
+    tmp = path.with_suffix(f".{secrets.token_hex(4)}.reencode.mp4")
     try:
         # Capture stderr instead of letting it inherit — libav's
         # warnings while reading a Pi-mp4v source are very noisy and
@@ -149,8 +159,19 @@ def transcode_for_web(path: Path) -> bool:
         return False
     if not (tmp.exists() and tmp.stat().st_size > 0):
         tmp.unlink(missing_ok=True)
-        return False
-    os.replace(tmp, path)
+        # If our ffmpeg produced nothing but another concurrent call
+        # already finished and dropped the marker, the source is
+        # already good — report success.
+        return marker.exists()
+    try:
+        os.replace(tmp, path)
+    except FileNotFoundError:
+        # Defense-in-depth: even with unique tmp names a stray
+        # cleanup pass could have removed our tmp between the
+        # exists() check above and the rename. If a marker exists,
+        # someone else completed; we just lost the race harmlessly.
+        tmp.unlink(missing_ok=True)
+        return marker.exists()
     marker.touch()
     return True
 
