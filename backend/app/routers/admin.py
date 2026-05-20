@@ -2096,6 +2096,34 @@ def list_long_uploads(
         for clip in produced_rows:
             produced_by_upload.setdefault(clip.long_upload_id, []).append(clip)
 
+    # Bulk-load camera-source metadata for any rows whose
+    # camera_event_id is set (Pi-sourced uploads). Surfaced as a "From
+    # Camera #N · hole X" badge on the production card.
+    cam_event_ids = {r.camera_event_id for r in rows if r.camera_event_id}
+    cam_events_by_id: dict[int, CameraEvent] = (
+        {
+            ev.id: ev
+            for ev in db.query(CameraEvent)
+            .filter(CameraEvent.id.in_(cam_event_ids))
+            .all()
+        }
+        if cam_event_ids
+        else {}
+    )
+    tee_cam_ids = {
+        ev.tee_camera_id
+        for ev in cam_events_by_id.values()
+        if ev.tee_camera_id
+    }
+    tee_cams_by_id: dict[int, Camera] = (
+        {
+            c.id: c
+            for c in db.query(Camera).filter(Camera.id.in_(tee_cam_ids)).all()
+        }
+        if tee_cam_ids
+        else {}
+    )
+
     def _produced(upload_id: int) -> list[dict]:
         clips = produced_by_upload.get(upload_id, [])
         out = []
@@ -2127,6 +2155,28 @@ def list_long_uploads(
         green_meta = _meta(green_path, green_exists)
         course = courses.get(r.course_id)
         produced = _produced(r.id)
+        cam_event = cam_events_by_id.get(r.camera_event_id) if r.camera_event_id else None
+        tee_cam = (
+            tee_cams_by_id.get(cam_event.tee_camera_id)
+            if cam_event and cam_event.tee_camera_id
+            else None
+        )
+        source = (
+            {
+                "kind": "camera",
+                "camera_event_id": cam_event.id,
+                "camera_id": tee_cam.id if tee_cam else cam_event.tee_camera_id,
+                "camera_name": tee_cam.name if tee_cam else None,
+                "hole_number": cam_event.hole_number,
+                "triggered_at": (
+                    cam_event.triggered_at.isoformat()
+                    if cam_event.triggered_at
+                    else None
+                ),
+            }
+            if cam_event
+            else {"kind": "upload"}
+        )
         out.append(
             {
                 "id": r.id,
@@ -2188,6 +2238,7 @@ def list_long_uploads(
                     else None
                 ),
                 "last_error": r.last_error,
+                "source": source,
             }
         )
     return out
@@ -2392,10 +2443,10 @@ def reprocess_camera_event(event_id: int, db: Session = Depends(get_db)):
 @router.delete("/camera-events/{event_id}")
 def delete_camera_event(event_id: int, db: Session = Depends(get_db)):
     """Permanently remove a camera event: deletes the raw tee/green
-    MP4s from disk, the produced VideoClip (if any), and the
-    CameraEvent row itself. Use when a swing was a misfire (people
-    walking past the tee box, false trigger, etc.) and you don't
-    want it cluttering the queue."""
+    MP4s from disk, the linked LongVideoUpload + every VideoClip
+    produced from it, and the CameraEvent row itself. Use when a
+    swing was a misfire (people walking past the tee box, false
+    trigger, etc.) and you don't want it cluttering the queue."""
     event = db.get(CameraEvent, event_id)
     if event is None:
         raise HTTPException(404, "camera event not found")
@@ -2417,6 +2468,23 @@ def delete_camera_event(event_id: int, db: Session = Depends(get_db)):
             log.warning("delete camera event %s: could not unlink %s (%s)",
                         event_id, fname, exc)
 
+    # Cascade to the linked long-upload (1:1 with the event under the
+    # new production path) and the per-swing VideoClips it produced.
+    lvu = (
+        db.query(LongVideoUpload)
+        .filter(LongVideoUpload.camera_event_id == event.id)
+        .first()
+    )
+    if lvu is not None:
+        for clip in (
+            db.query(VideoClip).filter(VideoClip.long_upload_id == lvu.id).all()
+        ):
+            db.delete(clip)
+        db.delete(lvu)
+
+    # produced_clip_id may still reference a clip that wasn't linked
+    # through long_upload_id (legacy data before the unification);
+    # clean that up too.
     if event.produced_clip_id:
         clip = db.get(VideoClip, event.produced_clip_id)
         if clip is not None:
@@ -3541,7 +3609,12 @@ def delete_long_upload(upload_id: int, db: Session = Depends(get_db)):
     """Delete a stored long upload + its source file(s) from disk.
     Per-swing VideoClips produced from this upload are kept (they have
     their own VideoClip rows). Returns the freed disk bytes for
-    confirmation."""
+    confirmation.
+
+    When this upload is linked to a CameraEvent (Pi-sourced capture),
+    delete the event row too — the raw files belong to the pair and
+    leaving the event around would point at unlinked files.
+    """
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
@@ -3556,6 +3629,10 @@ def delete_long_upload(upload_id: int, db: Session = Depends(get_db)):
                 fp.unlink()
         except Exception as exc:
             log.warning("long-upload delete: failed to unlink %s: %s", fp, exc)
+    if row.camera_event_id is not None:
+        event = db.get(CameraEvent, row.camera_event_id)
+        if event is not None:
+            db.delete(event)
     db.delete(row)
     db.commit()
     return {"deleted": True, "freed_bytes": freed}

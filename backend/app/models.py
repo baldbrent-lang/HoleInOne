@@ -238,6 +238,13 @@ class LongVideoUpload(Base):
     # set, the wizard re-opens with these values instead of re-running
     # auto-detect.
     edit_metrics: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # When this row was created by the Pi camera-event pipeline (instead
+    # of an admin upload), points at the source CameraEvent. Drives the
+    # "From Camera #N · hole X" badge on the production card and lets us
+    # avoid double-listing the same physical capture.
+    camera_event_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("camera_events.id"), nullable=True, index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 

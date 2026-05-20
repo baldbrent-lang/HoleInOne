@@ -533,15 +533,16 @@ async def upload_event(
 
 
 def _process_camera_event_job(event_id: int) -> None:
-    """Run the existing per-segment pipeline on a fully-uploaded
-    CameraEvent. The uploaded clip now covers a whole group's time on
-    the tee box (potentially many swings), so we auto-detect swing
-    windows inside it via the same audio+motion detector the
-    /long-upload flow uses, then emit one VideoClip per swing.
+    """Hand off a fully-uploaded CameraEvent to the long-upload
+    pipeline so it benefits from the existing multi-swing auto-detect
+    + admin edit-wizard. Creates a LongVideoUpload row pointing at the
+    raw files the Pis already saved, links it back via
+    LongVideoUpload.camera_event_id, then kicks off the standard
+    background job. The Production page reads it as a long-upload —
+    same card, same buttons (Edit, Re-Produce, Broadcast, Delete).
 
-    Updates the event's status + produced_clip_id (set to the first
-    produced clip; siblings are reachable via the regular clip
-    listings on the same course/hole).
+    Idempotent: if the event already has a linked LongVideoUpload, we
+    re-use it instead of creating a duplicate.
 
     Owns its own DB session so the HTTP request that kicked us off
     has long since returned. Best-effort: any failure marks the event
@@ -549,9 +550,8 @@ def _process_camera_event_job(event_id: int) -> None:
     """
     # Imported here to dodge a circular import (admin.py imports
     # heavy modules at top level).
-    from .admin import _process_long_upload_segments
-    from ..services.ai_tracer import detect_swings_combined
-    from ..services.video import probe_fps
+    from .admin import _run_long_upload_job
+    from ..models import LongVideoUpload
 
     db = SessionLocal()
     try:
@@ -563,126 +563,106 @@ def _process_camera_event_job(event_id: int) -> None:
         tee_path = (
             CLIPS_DIR / event.tee_clip_filename if event.tee_clip_filename else None
         )
-        green_path = (
-            CLIPS_DIR / event.green_clip_filename if event.green_clip_filename else None
-        )
         if tee_path is None or not tee_path.exists():
             event.status = "failed"
             event.last_error = "tee clip missing on disk"
             db.commit()
             return
 
-        # Re-process raws idempotently — fixes legacy events whose
-        # raws were uploaded before the post-process hook existed,
-        # and is a cheap no-op for the JPG sibling on events that
-        # already have it (transcode is the only real cost). Stays
-        # in the same thread as production so we don't race on the
-        # files cv2 is about to open.
+        # Re-encode the raws to browser-friendly H.264 + extract a
+        # thumbnail in this thread before production opens them. Cheap
+        # no-op when the upload-time hook already did it.
         if event.tee_clip_filename:
             _post_process_raw_clip(event.tee_clip_filename)
         if event.green_clip_filename:
             _post_process_raw_clip(event.green_clip_filename)
 
-        course = db.get(Course, event.course_id)
-        if course is None:
-            event.status = "failed"
-            event.last_error = f"course {event.course_id} not found"
+        green_filename = event.green_clip_filename
+        green_path = CLIPS_DIR / green_filename if green_filename else None
+        has_green = green_path is not None and green_path.exists()
+
+        # Re-use a previously-linked LongVideoUpload row if any (handles
+        # Re-Produce flowing back through this code path).
+        lvu = (
+            db.query(LongVideoUpload)
+            .filter(LongVideoUpload.camera_event_id == event.id)
+            .first()
+        )
+        if lvu is None:
+            lvu = LongVideoUpload(
+                course_id=event.course_id,
+                camera_type="tee",
+                base_captured_at=event.triggered_at or _utcnow_naive(),
+                tee_filename=event.tee_clip_filename,
+                green_filename=green_filename if has_green else None,
+                tee_original_filename=f"camera-event-{event.id}-tee.mp4",
+                green_original_filename=(
+                    f"camera-event-{event.id}-green.mp4" if has_green else None
+                ),
+                swing_count="multiple",
+                camera_event_id=event.id,
+                processing_status="pending",
+            )
+            db.add(lvu)
             db.commit()
-            return
+            db.refresh(lvu)
 
-        info = probe_video_info(tee_path) or {}
-        duration = float(info.get("duration") or 10.0)
-        if duration <= 0.1:
-            duration = 10.0
-
-        tee_fps = probe_fps(tee_path) or 30.0
-        # Auto-detect swing windows. Same detector the long-upload
-        # flow uses (audio impacts gated by a paired motion burst
-        # within ±3 s); the operator can re-run/edit later.
-        try:
-            detected = detect_swings_combined(tee_path, fps=tee_fps)
-        except Exception as exc:
-            log.warning(
-                "cameras: event %s swing-detect crashed (%s); falling back "
-                "to single-segment",
-                event.id, exc,
-            )
-            detected = []
-
-        if detected:
-            seg_list = [
-                {
-                    "hole_number": int(event.hole_number),
-                    "start_sec": float(d["start_sec"]),
-                    "end_sec": float(d["end_sec"]),
-                }
-                for d in detected
-            ]
-            log.info(
-                "cameras: event %s detected %d swing(s) in %.1fs of tee video",
-                event.id, len(seg_list), duration,
-            )
-        else:
-            # No detected swings (silent recording, or detector
-            # couldn't find paired peaks). Fall back to a single
-            # segment so the operator still gets something to look
-            # at and can edit it from the production page.
-            seg_list = [
-                {
-                    "hole_number": int(event.hole_number),
-                    "start_sec": 0.0,
-                    "end_sec": float(duration),
-                }
-            ]
-            log.info(
-                "cameras: event %s no swings auto-detected; falling back to "
-                "single %.1fs segment",
-                event.id, duration,
-            )
-
-        # captured_at = the trigger moment. Approximate but good
-        # enough for the match-clip-to-player window logic; the
-        # per-segment pipeline offsets each clip by start_sec when
-        # the multi-swing detector is used.
-        base_dt = event.triggered_at or _utcnow_naive()
-
-        results = _process_long_upload_segments(
-            db,
-            course_id=event.course_id,
-            camera_type="tee",
-            base_dt=base_dt,
-            src_path=tee_path,
-            green_src_path=green_path if (green_path and green_path.exists()) else None,
-            seg_list=seg_list,
-            dual_camera=(green_path is not None and green_path.exists()),
-            ai_tracer_model=None,
+        log.info(
+            "cameras: event %s -> long-upload %s (auto-detect swings)",
+            event.id, lvu.id,
         )
 
-        event = db.get(
-            CameraEvent, event_id
-        )  # re-fetch in case session was rolled back
-        if event is None:
+        # Status flips to 'processed' (or 'failed') from inside
+        # _run_long_upload_job's LongVideoUpload bookkeeping; mirror
+        # that onto the CameraEvent at the end. We block this thread on
+        # the job so the camera-event row gets its terminal status set
+        # in one pass.
+        try:
+            _run_long_upload_job(
+                upload_id=lvu.id,
+                seg_list=[],
+                auto_detect_swings=True,
+                starting_hole=int(event.hole_number),
+                ai_tracer_model=None,
+            )
+        except Exception as exc:
+            log.exception(
+                "cameras: event %s long-upload job crashed: %s", event.id, exc,
+            )
+
+        # Re-fetch both rows post-job (the long-upload worker uses its
+        # own session, so our `lvu` reference is stale).
+        event = db.get(CameraEvent, event_id)
+        lvu = db.get(LongVideoUpload, lvu.id)
+        if event is None or lvu is None:
             return
-        produced = [r for r in (results or []) if r.get("ok") and r.get("clip_id")]
-        if produced:
+
+        if lvu.processing_status == "completed":
             event.status = "processed"
-            event.produced_clip_id = int(produced[0]["clip_id"])
             event.last_error = None
+            # Pick the first produced clip for the back-compat
+            # produced_clip_id pointer (the listing surfaces the full
+            # set via the linked long-upload).
+            from ..models import VideoClip
+            first_clip = (
+                db.query(VideoClip)
+                .filter(VideoClip.long_upload_id == lvu.id)
+                .order_by(VideoClip.captured_at.asc().nulls_last())
+                .first()
+            )
+            if first_clip is not None:
+                event.produced_clip_id = first_clip.id
         else:
             event.status = "failed"
-            first_err = next(
-                (r.get("error") for r in (results or []) if r.get("error")), None
-            )
-            event.last_error = (first_err or "processing returned no result")[:2000]
+            event.last_error = (lvu.last_error or "long-upload job did not complete")[:2000]
         db.commit()
         log.info(
-            "cameras: event %s processed — status=%s segs=%d produced=%d "
-            "first_clip=%s",
+            "cameras: event %s done — status=%s lvu=%s segs=%s produced=%s",
             event.id,
             event.status,
-            len(seg_list),
-            len(produced),
-            event.produced_clip_id,
+            lvu.id,
+            lvu.last_n_segments,
+            lvu.last_n_succeeded,
         )
     except Exception as exc:  # pragma: no cover
         log.exception("cameras: event %s processing crashed: %s", event_id, exc)

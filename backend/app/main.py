@@ -126,6 +126,10 @@ def _migrate() -> None:
             )
         if "edit_metrics" not in lvu_cols:
             statements.append("ALTER TABLE long_video_uploads ADD COLUMN edit_metrics JSON")
+        if "camera_event_id" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN camera_event_id INTEGER"
+            )
 
     # VideoClip additions
     if "video_clips" in inspector.get_table_names():

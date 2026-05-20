@@ -3047,47 +3047,13 @@ export default function AdminProduction() {
 
       {error && <div className="card err-text small">{error}</div>}
 
-      {events && events.length > 0 && (
-        <>
-          <div className="card" style={{ marginBottom: 8 }}>
-            <h4 style={{ margin: 0 }}>
-              Camera events{" "}
-              <span className="small muted">({events.length})</span>
-            </h4>
-            <p className="small muted" style={{ marginBottom: 0, marginTop: 4 }}>
-              Auto-captured swings from the on-course Pi cameras. Each event
-              is the 5-second pre-roll plus the trigger window the Pi recorded.
-              Re-Produce regenerates the composite + tracer from the same raw
-              inputs; Delete removes everything (raw + produced).
-            </p>
-          </div>
-          {events.map((ev) => (
-            <CameraEventCard
-              key={ev.id}
-              ev={ev}
-              busy={busyEventId === ev.id}
-              onOpenViewer={openViewer}
-              onReproduce={handleReproduceEvent}
-              onBroadcast={handleBroadcastEvent}
-              onDelete={handleDeleteEvent}
-            />
-          ))}
-          <div
-            ref={eventsList.sentinelRef}
-            className="muted center small"
-            style={{ padding: 16 }}
-          >
-            {eventsList.loadingMore
-              ? "Loading more events…"
-              : eventsList.hasMore
-                ? "Scroll for more events"
-                : "End of camera events"}
-          </div>
-        </>
-      )}
+      {/* Camera-event-sourced uploads now flow through the long-upload
+          pipeline (see backend/_process_camera_event_job), so they
+          render in the same list below — no separate CameraEventCard
+          section needed. The "From Camera #N" badge on each card
+          identifies Pi-sourced rows. */}
 
-      {(rows !== null || events !== null) && (rows?.length || 0) === 0
-        && (events?.length || 0) === 0 && (
+      {(rows !== null) && (rows?.length || 0) === 0 && (
         <div className="card muted center" style={{ padding: 40 }}>
           Nothing in the production queue yet. Either{" "}
           <Link to="/admin/upload-videos">upload a video</Link> or wait for
@@ -3098,19 +3064,6 @@ export default function AdminProduction() {
       {rows === null && (
         <div className="card">
           <div className="shimmer" style={{ height: 200 }} />
-        </div>
-      )}
-
-      {events && events.length > 0 && rows && rows.length > 0 && (
-        <div className="card" style={{ marginBottom: 8 }}>
-          <h4 style={{ margin: 0 }}>
-            Long uploads{" "}
-            <span className="small muted">({rows.length})</span>
-          </h4>
-          <p className="small muted" style={{ marginBottom: 0, marginTop: 4 }}>
-            Manually-uploaded source videos. Multi-swing rounds auto-produce
-            on upload; one-swing clips wait here until you hit Produce.
-          </p>
         </div>
       )}
 
@@ -3137,13 +3090,38 @@ export default function AdminProduction() {
             >
               <h4 style={{ margin: 0 }}>
                 #{row.id} · {row.course_name || `course ${row.course_id}`}
+                {row.source?.kind === "camera" && row.source?.hole_number != null
+                  ? ` · hole ${row.source.hole_number}`
+                  : ""}
               </h4>
-              <span className="small muted">
-                {row.swing_count === "single" ? "One swing" : "Multiple swings"}
-              </span>
+              {row.source?.kind === "camera" ? (
+                <span
+                  className="small"
+                  style={{
+                    padding: "2px 8px",
+                    borderRadius: 999,
+                    background: "rgba(56, 132, 255, 0.12)",
+                    border: "1px solid rgba(56, 132, 255, 0.4)",
+                  }}
+                  title={
+                    row.source.triggered_at
+                      ? `Triggered ${fmtDateTime(row.source.triggered_at)}`
+                      : undefined
+                  }
+                >
+                  From {row.source.camera_name
+                    || `Camera #${row.source.camera_id}`}
+                </span>
+              ) : (
+                <span className="small muted">
+                  {row.swing_count === "single" ? "One swing" : "Multiple swings"}
+                </span>
+              )}
               <span className="small muted">·</span>
               <span className="small muted">
-                Uploaded {fmtDateTime(row.created_at)}
+                {row.source?.kind === "camera"
+                  ? `Captured ${fmtDateTime(row.source.triggered_at || row.created_at)}`
+                  : `Uploaded ${fmtDateTime(row.created_at)}`}
               </span>
             </div>
 
