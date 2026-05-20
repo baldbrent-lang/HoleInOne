@@ -2410,6 +2410,9 @@ def delete_camera_event(event_id: int, db: Session = Depends(get_db)):
             thumb = path.with_suffix(".jpg")
             if thumb.exists():
                 thumb.unlink()
+            marker = path.with_suffix(path.suffix + ".h264-ok")
+            if marker.exists():
+                marker.unlink()
         except OSError as exc:
             log.warning("delete camera event %s: could not unlink %s (%s)",
                         event_id, fname, exc)

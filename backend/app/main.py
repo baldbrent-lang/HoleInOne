@@ -5,6 +5,15 @@ import os
 import sys
 from pathlib import Path
 
+# Silence the libav decoder inside cv2 before any service module
+# imports cv2. The Pi's cv2.VideoWriter-with-mp4v output contains
+# minor bitstream quirks that libav's H.264 decoder logs as NAL-unit
+# warnings on every frame. Production still produces the right
+# composite, but the warnings flood uvicorn's stderr at 30 fps × N
+# clips. -8 = AV_LOG_QUIET — caught at first FFmpeg backend init,
+# so this has to land before any cv2.VideoCapture call.
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse

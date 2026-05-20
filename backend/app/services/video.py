@@ -100,21 +100,23 @@ def transcode_for_web(path: Path) -> bool:
     supported H.264 mp4 form with the moov atom up front (so the
     browser can start playing before the whole file streams).
 
-    No-ops when the file is already H.264 (idempotent on re-runs,
-    so callers don't have to worry about generation-loss from
-    repeated re-encodes). Returns True if the file is in a
-    browser-friendly state after the call.
+    Idempotent via a sibling marker file `<name>.h264-ok`. The first
+    call transcodes and writes the marker; later calls find the
+    marker and short-circuit. This is more reliable than probing the
+    codec via ffprobe, which can mis-report cv2-mp4v output as
+    something else and either skip a needed transcode or do a
+    needless one. Marker has zero bytes — its existence is the signal.
     """
     if not have_ffmpeg():
         return False
-    # Probe first — re-encoding an already-H.264 file is wasteful and
-    # introduces generation loss every time someone hits Re-Produce.
-    info = probe_video_info(path)
-    codec = (info.get("codec") or "").lower()
-    if codec in ("h264", "avc1", "x264"):
+    marker = path.with_suffix(path.suffix + ".h264-ok")
+    if marker.exists():
         return True
     tmp = path.with_suffix(".reencode.mp4")
     try:
+        # Capture stderr instead of letting it inherit — libav's
+        # warnings while reading a Pi-mp4v source are very noisy and
+        # would otherwise flood uvicorn's console at 30 fps.
         subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
@@ -129,15 +131,27 @@ def transcode_for_web(path: Path) -> bool:
             ],
             check=True,
             timeout=180,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        log.warning("transcode_for_web failed for %s: %s", path.name, exc)
+    except subprocess.CalledProcessError as exc:
+        log.warning(
+            "transcode_for_web failed for %s (exit %s): %s",
+            path.name,
+            exc.returncode,
+            (exc.stderr or b"").decode(errors="replace")[:400],
+        )
+        tmp.unlink(missing_ok=True)
+        return False
+    except subprocess.TimeoutExpired as exc:
+        log.warning("transcode_for_web timed out for %s: %s", path.name, exc)
         tmp.unlink(missing_ok=True)
         return False
     if not (tmp.exists() and tmp.stat().st_size > 0):
         tmp.unlink(missing_ok=True)
         return False
     os.replace(tmp, path)
+    marker.touch()
     return True
 
 
@@ -300,9 +314,20 @@ def extract_thumbnail(video_path: Path) -> Path | None:
             ],
             check=True,
             timeout=60,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        log.warning("thumbnail extract failed for %s: %s", video_path.name, exc)
+    except subprocess.CalledProcessError as exc:
+        log.warning(
+            "thumbnail extract failed for %s (exit %s): %s",
+            video_path.name,
+            exc.returncode,
+            (exc.stderr or b"").decode(errors="replace")[:400],
+        )
+        out.unlink(missing_ok=True)
+        return None
+    except subprocess.TimeoutExpired as exc:
+        log.warning("thumbnail extract timed out for %s: %s", video_path.name, exc)
         out.unlink(missing_ok=True)
         return None
     if out.exists() and out.stat().st_size > 0:
