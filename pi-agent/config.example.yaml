@@ -86,6 +86,27 @@ max_clip_seconds: 600
 stop_poll_interval_seconds: 1.0
 
 # ---------------------------------------------------------------------
+# Audio (both sides)
+# ---------------------------------------------------------------------
+# Captured in parallel with each recording via `arecord` (alsa-utils)
+# and muxed into the MP4 with ffmpeg before upload. Best-effort: if
+# arecord isn't installed or the device can't be opened, the agent
+# falls back to silent video.
+
+audio:
+  enabled: true
+  # ALSA capture device. Leave unset (or set to null) to auto-detect:
+  # the agent looks in /proc/asound/cards for a GoPro / HERO / UVC /
+  # USB-Audio card and picks the first match. Hardcode if you have
+  # multiple USB audio devices and auto-detect picks the wrong one:
+  #   device: "plughw:CARD=HERO13Black"
+  # List candidates with:
+  #   arecord -L
+  device: null
+  sample_rate: 44100
+  channels: 1   # mono is plenty for swing impact + ambience
+
+# ---------------------------------------------------------------------
 # Network
 # ---------------------------------------------------------------------
 

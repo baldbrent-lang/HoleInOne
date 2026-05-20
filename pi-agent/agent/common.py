@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import shlex
 import socket
+import subprocess
 import threading
 import time
 from collections import deque
@@ -261,3 +264,209 @@ def open_camera(cam_cfg: dict):
         width, height, fps, actual_w, actual_h, actual_fps,
     )
     return cap
+
+
+# ---------------------------------------------------------------------
+# Audio capture (parallel arecord -> WAV -> ffmpeg mux into MP4)
+# ---------------------------------------------------------------------
+
+def _detect_audio_device() -> Optional[str]:
+    """Auto-pick an ALSA capture device for the GoPro / USB-webcam.
+
+    Reads /proc/asound/cards and returns a plughw:CARD=Name string for
+    the first card whose name looks like a GoPro / camera audio
+    interface. Falls back to None — callers can default to 'default'
+    or skip audio entirely."""
+    try:
+        with open("/proc/asound/cards") as f:
+            text = f.read()
+    except OSError:
+        return None
+    preferred = ("hero", "gopro", "uvc", "usb")
+    candidates: list[str] = []
+    # Each card is two lines; first line looks like:
+    #   " 1 [HERO13Black    ]: USB-Audio - HERO13 Black"
+    for m in re.finditer(r"^\s*\d+\s*\[([^\]]+?)\s*\]\s*:.*$", text, re.M):
+        name = m.group(1).strip()
+        if not name:
+            continue
+        candidates.append(name)
+    if not candidates:
+        return None
+    for name in candidates:
+        if any(p in name.lower() for p in preferred):
+            return f"plughw:CARD={name}"
+    # Nothing obvious; return the first non-built-in card we found.
+    return f"plughw:CARD={candidates[0]}"
+
+
+class AudioRecorder:
+    """Capture audio to a WAV file via `arecord` for the duration of a
+    single recording. Designed to bracket the cv2.VideoWriter session
+    in tee.py / green.py: start() at writer open, stop() right before
+    writer.release(), then mux_audio_into_video() to fold the audio
+    into the existing MP4.
+
+    Best-effort: if `arecord` isn't installed, the audio device can't
+    be opened, or ffmpeg muxing fails, all methods log a warning and
+    return None so the video upload still goes through (just silent).
+    """
+
+    def __init__(
+        self,
+        work_dir: Path,
+        device: Optional[str] = None,
+        sample_rate: int = 44100,
+        channels: int = 1,
+        enabled: bool = True,
+    ):
+        self.work_dir = Path(work_dir)
+        self.device = device  # ALSA name, e.g. "plughw:CARD=HERO13Black"
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
+        self.enabled = bool(enabled)
+        self._proc: Optional[subprocess.Popen] = None
+        self._wav_path: Optional[Path] = None
+
+    def start(self, session_id: str) -> Optional[Path]:
+        if not self.enabled:
+            return None
+        # Resolve device if not specified — do this each start so a Pi
+        # that gets the GoPro re-plugged mid-session picks the new card.
+        device = self.device or _detect_audio_device()
+        if not device:
+            log.debug("audio: no ALSA capture device found; skipping")
+            return None
+
+        wav_path = self.work_dir / f"{session_id}.wav"
+        cmd = [
+            "arecord",
+            "-q",                       # quiet
+            "-D", device,
+            "-f", "S16_LE",
+            "-c", str(self.channels),
+            "-r", str(self.sample_rate),
+            "-t", "wav",
+            str(wav_path),
+        ]
+        try:
+            self._proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            log.warning(
+                "audio: arecord not installed — run "
+                "`sudo apt install alsa-utils` to enable audio capture",
+            )
+            return None
+        except Exception as exc:
+            log.warning("audio: failed to launch arecord: %s", exc)
+            return None
+        self._wav_path = wav_path
+        log.info("audio: capturing via %s -> %s", device, wav_path.name)
+        return wav_path
+
+    def stop(self) -> Optional[Path]:
+        proc = self._proc
+        wav = self._wav_path
+        self._proc = None
+        if proc is None:
+            return None
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        except Exception as exc:
+            log.warning("audio: arecord stop failed: %s", exc)
+            return None
+        if wav is None or not wav.exists() or wav.stat().st_size < 1024:
+            log.warning(
+                "audio: WAV missing or too small after stop "
+                "(%s) — uploading video without audio",
+                wav.name if wav else "?",
+            )
+            return None
+        return wav
+
+
+def mux_audio_into_video(video_path: Path, audio_path: Path) -> bool:
+    """Re-encode audio with AAC and stream-copy the existing video into
+    a new MP4, replacing the original on success. Returns True on
+    success, False on any failure (caller can carry on uploading the
+    original silent file).
+
+    `-shortest` matches the end of the shorter stream so a slightly-
+    longer audio recording doesn't pad the video with black frames.
+    """
+    if not (video_path.exists() and audio_path.exists()):
+        return False
+    tmp_out = video_path.with_suffix(".muxed.mp4")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loglevel", "error",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        "-shortest",
+        str(tmp_out),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=60,
+        )
+    except FileNotFoundError:
+        log.warning("audio: ffmpeg not installed — leaving clip silent")
+        return False
+    except subprocess.TimeoutExpired:
+        log.warning("audio: ffmpeg mux timed out — leaving clip silent")
+        try:
+            tmp_out.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    if result.returncode != 0 or not tmp_out.exists():
+        log.warning(
+            "audio: ffmpeg mux failed (rc=%s): %s",
+            result.returncode, (result.stderr or "")[:200],
+        )
+        try:
+            tmp_out.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    try:
+        tmp_out.replace(video_path)
+    except OSError as exc:
+        log.warning("audio: replacing muxed file failed: %s", exc)
+        return False
+    try:
+        audio_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return True
+
+
+def build_audio_recorder(cfg: dict, work_dir: Path) -> AudioRecorder:
+    """Construct an AudioRecorder from the config's `audio:` block.
+    Missing block → enabled with auto-detected device + sensible
+    defaults; explicit `enabled: false` disables it."""
+    a = cfg.get("audio") or {}
+    return AudioRecorder(
+        work_dir=work_dir,
+        device=a.get("device") or None,
+        sample_rate=int(a.get("sample_rate", 44100)),
+        channels=int(a.get("channels", 1)),
+        enabled=bool(a.get("enabled", True)),
+    )

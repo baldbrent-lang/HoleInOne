@@ -23,7 +23,14 @@ from typing import Optional
 
 import cv2
 
-from .common import BackendClient, FrameBuffer, HeartbeatThread, open_camera
+from .common import (
+    BackendClient,
+    FrameBuffer,
+    HeartbeatThread,
+    build_audio_recorder,
+    mux_audio_into_video,
+    open_camera,
+)
 from .livestream import LiveStreamer
 
 log = logging.getLogger("golfreelz_agent.green")
@@ -141,6 +148,11 @@ class GreenAgent:
             log.error("VideoWriter failed for %s", clip_path)
             return
 
+        # Parallel audio capture; folded into the MP4 at release().
+        # Best-effort — see tee.py for the error-handling shape.
+        audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
+        audio_recorder.start(session_id)
+
         # Write the pre-roll first.
         for _ts, f in snapshot:
             writer.write(f)
@@ -185,6 +197,14 @@ class GreenAgent:
                         break
             time.sleep(0.05)
         writer.release()
+
+        # Stop the parallel audio capture and fold the WAV into the MP4.
+        wav_done = audio_recorder.stop()
+        if wav_done is not None:
+            muxed = mux_audio_into_video(clip_path, wav_done)
+            if muxed:
+                log.info("audio: muxed into %s", clip_path.name)
+
         size = clip_path.stat().st_size if clip_path.exists() else 0
         log.info(
             "recorded %s: %d frames, %.1f MB (reason=%s)",

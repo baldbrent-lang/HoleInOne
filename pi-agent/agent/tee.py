@@ -20,7 +20,14 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from .common import BackendClient, FrameBuffer, HeartbeatThread, open_camera
+from .common import (
+    BackendClient,
+    FrameBuffer,
+    HeartbeatThread,
+    build_audio_recorder,
+    mux_audio_into_video,
+    open_camera,
+)
 from .livestream import LiveStreamer
 
 log = logging.getLogger("golfreelz_agent.tee")
@@ -256,6 +263,14 @@ class TeeAgent:
             log.error("VideoWriter failed to open for %s", clip_path)
             return
 
+        # Kick off parallel audio capture. The WAV runs alongside the
+        # video write and gets ffmpeg-muxed into the MP4 at release(),
+        # so the uploaded clip has audio. Best-effort: if arecord
+        # isn't installed or the device can't be opened, the agent
+        # carries on with silent video.
+        audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
+        audio_wav = audio_recorder.start(session_id)
+
         for _ts, f in snapshot:
             writer.write(f)
         last_person_seen = time.time()
@@ -296,6 +311,16 @@ class TeeAgent:
             self.client.event_stop(session_id)
         except Exception as exc:
             log.warning("event_stop failed for %s: %s", session_id, exc)
+
+        # Stop the parallel audio capture and fold the WAV into the
+        # MP4. Each step is best-effort; failures leave the video
+        # untouched (silent) so the upload still succeeds.
+        wav_done = audio_recorder.stop()
+        if wav_done is not None:
+            muxed = mux_audio_into_video(clip_path, wav_done)
+            if muxed:
+                log.info("audio: muxed into %s", clip_path.name)
+
         size = clip_path.stat().st_size if clip_path.exists() else 0
         log.info(
             "recorded %s: %d frames, %.1f MB",
