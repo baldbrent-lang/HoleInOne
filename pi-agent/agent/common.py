@@ -271,18 +271,25 @@ def open_camera(cam_cfg: dict):
 # ---------------------------------------------------------------------
 
 def _detect_audio_device() -> Optional[str]:
-    """Auto-pick an ALSA capture device for the GoPro / USB-webcam.
+    """Auto-pick an ALSA capture device for the GoPro / USB-mic.
 
     Reads /proc/asound/cards and returns a plughw:CARD=Name string for
-    the first card whose name looks like a GoPro / camera audio
-    interface. Falls back to None — callers can default to 'default'
-    or skip audio entirely."""
+    the first card whose name looks like a real capture interface. Pi
+    built-in HDMI cards (vc4hdmi*) and other output-only devices are
+    excluded — they open as 'capture' but produce empty WAVs.
+
+    Returns None when no plausible input is attached; callers should
+    fall back to silent video rather than picking the wrong device.
+    """
     try:
         with open("/proc/asound/cards") as f:
             text = f.read()
     except OSError:
         return None
-    preferred = ("hero", "gopro", "uvc", "usb")
+    # Cards we know are output-only on a Raspberry Pi — never pick
+    # these even as a last resort.
+    excluded_prefixes = ("vc4hdmi", "headphones", "snd_rpi_")
+    preferred = ("hero", "gopro", "uvc", "usb", "mic", "lavalier")
     candidates: list[str] = []
     # Each card is two lines; first line looks like:
     #   " 1 [HERO13Black    ]: USB-Audio - HERO13 Black"
@@ -290,13 +297,14 @@ def _detect_audio_device() -> Optional[str]:
         name = m.group(1).strip()
         if not name:
             continue
+        if any(name.lower().startswith(p) for p in excluded_prefixes):
+            continue
         candidates.append(name)
     if not candidates:
         return None
     for name in candidates:
         if any(p in name.lower() for p in preferred):
             return f"plughw:CARD={name}"
-    # Nothing obvious; return the first non-built-in card we found.
     return f"plughw:CARD={candidates[0]}"
 
 
