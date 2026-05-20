@@ -182,6 +182,10 @@ class TeeAgent:
 
         streamer = LiveStreamer(self.client)
         streamer.start()
+        # Stash on self so _record_and_upload can keep pushing live
+        # frames while recording — otherwise the live view freezes on
+        # the last pre-trigger frame until the clip ends.
+        self.streamer = streamer
 
         person_first_seen: Optional[float] = None
         frame_idx = 0
@@ -284,6 +288,10 @@ class TeeAgent:
                 time.sleep(0.02)
                 continue
             writer.write(frame)
+            # Keep the live view fresh — otherwise the admin sees a
+            # frozen frame from when recording started.
+            if getattr(self, "streamer", None) is not None:
+                self.streamer.update_frame(frame)
             n_frames_written += 1
             now = time.time()
             if now - recording_start > self.max_clip_seconds:
