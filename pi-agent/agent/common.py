@@ -105,6 +105,28 @@ class BackendClient:
             data={"session_id": session_id},
         )
 
+    def event_stop(self, session_id: str) -> dict:
+        # Called by the tee Pi the instant its writer.release()
+        # returns, before the (potentially slow) upload. Short
+        # retries — if it really can't get through, the green Pi
+        # still bails out at its runaway-safety cap.
+        return self._retry(
+            "POST", "/event-stop",
+            data={"session_id": session_id},
+            retries=2,
+            timeout=10,
+        )
+
+    def event_status(self, session_id: str) -> dict:
+        # Polled by the green Pi every ~1s while recording so it can
+        # mirror the tee's stop decision. Short timeout + retries —
+        # the loop will try again next tick on transient failure.
+        return self._retry(
+            "GET", f"/event-status?session_id={session_id}",
+            retries=1,
+            timeout=8,
+        )
+
     def poll_trigger(self, timeout_seconds: int = 25) -> dict:
         # HTTP timeout slightly exceeds the server-side long-poll
         # timeout so the request actually gets the response.

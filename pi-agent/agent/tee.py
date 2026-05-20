@@ -135,7 +135,12 @@ class TeeAgent:
         self.cam_cfg = cfg.get("camera", {})
         self.det_cfg = cfg.get("detection", {})
         self.buffer_seconds = float(cfg.get("buffer_seconds", 5))
-        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 30))
+        # Runaway-safety cap. A normal session ends when the tee box
+        # has been empty for no_person_timeout_seconds; this cap is
+        # only ever hit if the detector misclassifies something (eg a
+        # parked cart) as a person for an extended period. 10 min is
+        # long enough for a foursome on a slow tee box.
+        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 600))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
         self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-tee"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -282,6 +287,15 @@ class TeeAgent:
                     )
                     break
         writer.release()
+        # Tell the backend recording is done before starting the
+        # (possibly multi-minute) upload, so the paired green Pi —
+        # which is polling /event-status — can release its writer at
+        # roughly the same wall-clock moment. Best-effort: if the
+        # call fails the green Pi will eventually hit its safety cap.
+        try:
+            self.client.event_stop(session_id)
+        except Exception as exc:
+            log.warning("event_stop failed for %s: %s", session_id, exc)
         size = clip_path.stat().st_size if clip_path.exists() else 0
         log.info(
             "recorded %s: %d frames, %.1f MB",

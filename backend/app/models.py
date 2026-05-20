@@ -294,13 +294,23 @@ class CameraEvent(Base):
 
     Lifecycle:
       1. Tee Pi POSTs /event-trigger → backend creates row,
-         status='triggered'.
-      2. Tee Pi finishes recording, POSTs /upload-event → tee_clip_filename
-         set, status='tee_uploaded'.
-      3. Green Pi finishes recording, POSTs /upload-event → green_clip_filename
-         set, status='paired_uploaded'.
-      4. Worker picks up paired rows, runs the per-segment pipeline,
-         flips to 'processed' with produced_clip_id set.
+         status='triggered'. Both Pis start recording.
+      2. Tee Pi keeps recording until the tee box has been empty for
+         no_person_timeout_seconds, then POSTs /event-stop → backend
+         sets stop_signal_at=now. Green Pi (which has been polling
+         /event-status) sees the flag and stops recording too.
+      3. Tee Pi POSTs /upload-event → tee_clip_filename set,
+         status='tee_uploaded'.
+      4. Green Pi POSTs /upload-event → green_clip_filename set,
+         status='paired_uploaded'.
+      5. Worker picks up paired rows, detects swings inside the raw
+         clip, runs the per-segment pipeline, flips to 'processed'
+         with produced_clip_id set to the first emitted clip.
+
+    An event now represents a group session (potentially many swings),
+    not a single swing. produced_clip_id points at the first clip
+    produced by the multi-swing detector; sibling clips are linked by
+    long_upload_id on the VideoClip rows.
     """
 
     __tablename__ = "camera_events"
@@ -318,6 +328,10 @@ class CameraEvent(Base):
     triggered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     tee_clip_filename: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     green_clip_filename: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Set by the tee Pi's /event-stop call once the tee box has been
+    # empty long enough. The green Pi polls /event-status looking for
+    # this so both clips end at roughly the same wall-clock moment.
+    stop_signal_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # triggered | tee_uploaded | paired_uploaded | processed | failed
     status: Mapped[str] = mapped_column(String(30), default="triggered")
     # VideoClip row produced from the pair, once the pipeline runs.

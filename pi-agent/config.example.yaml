@@ -73,15 +73,17 @@ detection:
 # this buffer first so the address frame and backswing are captured.
 buffer_seconds: 5
 
-# Hard cap on a single event's clip length (safety against the
-# detector glitching and recording forever).
-max_clip_seconds: 30
+# Runaway-safety cap on a single session's clip length. A session
+# normally ends when the tee box has been empty for
+# detection.no_person_timeout_seconds; this cap is only hit if the
+# stop signal never arrives (tee crash, network split, detector
+# misclassification). 600 s = 10 min covers a slow foursome.
+max_clip_seconds: 600
 
-# Green-side only: how many seconds of total clip (including the
-# pre-roll buffer) to record after a trigger fires. The ball arrives
-# 4-8 s after the swing depending on shot length, so 12 s is a safe
-# floor.
-recording_seconds: 12
+# Green-side only: how often to ask the backend whether the tee has
+# signalled end-of-session. Lower = green stops closer to the tee but
+# more HTTP traffic. 1 s is a good balance.
+stop_poll_interval_seconds: 1.0
 
 # ---------------------------------------------------------------------
 # Network

@@ -6,7 +6,8 @@ Raspberry Pi in the field; see docs/field-deployment.md for the
 deployment plan and routers/admin.py for the operator-facing CRUD
 that mints the tokens these routes accept.
 
-Flow per swing:
+Flow per session (a session covers a whole group's time on the tee
+box — potentially many swings — not a single swing):
 
   1. Tee Pi detects a person in its tee-box ROI for >=2 s.
   2. Tee Pi POSTs /event-trigger with a session_id (UUID4) it
@@ -15,11 +16,21 @@ Flow per swing:
      id. Tee Pi starts recording from its pre-roll buffer.
   3. Green Pi is sitting in /poll-trigger long-polling. It wakes up
      with the session_id, commits its pre-roll, keeps recording.
-  4. Both Pis upload their MP4s via /upload-event with the shared
+  4. Tee Pi keeps recording until its tee box has been empty for
+     no_person_timeout_seconds (default 5 s). Then it POSTs
+     /event-stop, releases the writer, and uploads. /event-stop sets
+     stop_signal_at on the event row.
+  5. Green Pi polls /event-status every ~1 s while recording. When
+     stop_signal_at is non-null it releases its writer and uploads.
+     There is a hard runaway-safety cap (default 10 min) on both Pis
+     in case /event-stop never arrives (tee crash, network split).
+  6. Both Pis upload their MP4s via /upload-event with the shared
      session_id. As soon as the second clip lands (or the only clip,
      for unpaired-tee single-camera setups), a background thread
-     runs the existing _process_long_upload_segments pipeline and
-     produces a VideoClip row + composite.
+     runs the existing _process_long_upload_segments pipeline. Since
+     the raw clips can contain multiple swings, the worker first
+     auto-detects them via the same audio+motion detector the long-
+     upload flow uses and produces one VideoClip per detected swing.
 
 State that lives in-memory only:
   _pending_triggers: dict[camera_id -> asyncio.Queue] — the wake-up
@@ -316,6 +327,78 @@ async def event_trigger(
     }
 
 
+@router.post("/{token}/event-stop")
+def event_stop(
+    token: str,
+    session_id: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Tee-Pi-only: signals that recording has ended for this session.
+    Called right after the tee Pi releases its VideoWriter, before the
+    (potentially slow) upload, so the paired green Pi — which polls
+    /event-status — can stop recording at roughly the same moment.
+
+    Idempotent: repeat calls with the same session_id keep the first
+    stop_signal_at and return ok=True. Cheap and fire-and-forget.
+    """
+    cam = _get_camera_by_token(token, db)
+    if cam.assigned_role != "tee":
+        raise HTTPException(400, "event-stop is only valid for tee cameras")
+
+    sid = (session_id or "").strip()[:80]
+    if not sid:
+        raise HTTPException(400, "session_id is required")
+
+    event = db.query(CameraEvent).filter(CameraEvent.session_id == sid).first()
+    if event is None:
+        raise HTTPException(404, "no event for that session_id; trigger first")
+    if event.tee_camera_id != cam.id:
+        raise HTTPException(403, "this camera is not the tee for that event")
+
+    if event.stop_signal_at is None:
+        event.stop_signal_at = _utcnow_naive()
+        db.commit()
+    return {
+        "ok": True,
+        "event_id": event.id,
+        "stop_signal_at": event.stop_signal_at.isoformat(),
+    }
+
+
+@router.get("/{token}/event-status")
+def event_status(
+    token: str,
+    session_id: str,
+    db: Session = Depends(get_db),
+):
+    """Either Pi can poll this. Reports whether the tee has signalled
+    end-of-session (via /event-stop) for `session_id`. The green Pi
+    uses this to mirror the tee's stop decision instead of recording
+    a hard-coded duration."""
+    cam = _get_camera_by_token(token, db)
+    db.commit()  # touch last_seen_at
+
+    sid = (session_id or "").strip()[:80]
+    if not sid:
+        raise HTTPException(400, "session_id is required")
+
+    event = db.query(CameraEvent).filter(CameraEvent.session_id == sid).first()
+    if event is None:
+        raise HTTPException(404, "no event for that session_id")
+    # Auth: only the tee or paired green for this event may peek at it.
+    if cam.id not in (event.tee_camera_id, event.green_camera_id):
+        raise HTTPException(403, "this camera is not part of that event")
+
+    return {
+        "session_id": sid,
+        "stop_signal": event.stop_signal_at is not None,
+        "stop_signal_at": (
+            event.stop_signal_at.isoformat() if event.stop_signal_at else None
+        ),
+        "server_time": _utcnow_naive().isoformat(),
+    }
+
+
 @router.get("/{token}/poll-trigger")
 async def poll_trigger(
     token: str,
@@ -451,9 +534,14 @@ async def upload_event(
 
 def _process_camera_event_job(event_id: int) -> None:
     """Run the existing per-segment pipeline on a fully-uploaded
-    CameraEvent. The whole uploaded clip is treated as one swing —
-    no audio/motion detection needed (the Pi already triggered on a
-    real person). Updates the event's status + produced_clip_id.
+    CameraEvent. The uploaded clip now covers a whole group's time on
+    the tee box (potentially many swings), so we auto-detect swing
+    windows inside it via the same audio+motion detector the
+    /long-upload flow uses, then emit one VideoClip per swing.
+
+    Updates the event's status + produced_clip_id (set to the first
+    produced clip; siblings are reachable via the regular clip
+    listings on the same course/hole).
 
     Owns its own DB session so the HTTP request that kicked us off
     has long since returned. Best-effort: any failure marks the event
@@ -462,6 +550,8 @@ def _process_camera_event_job(event_id: int) -> None:
     # Imported here to dodge a circular import (admin.py imports
     # heavy modules at top level).
     from .admin import _process_long_upload_segments
+    from ..services.ai_tracer import detect_swings_combined
+    from ..services.video import probe_fps
 
     db = SessionLocal()
     try:
@@ -505,19 +595,55 @@ def _process_camera_event_job(event_id: int) -> None:
         if duration <= 0.1:
             duration = 10.0
 
-        # Single segment covering the whole uploaded clip. start=0
-        # because the Pi already trimmed to the swing window.
-        seg_list = [
-            {
-                "hole_number": int(event.hole_number),
-                "start_sec": 0.0,
-                "end_sec": float(duration),
-            }
-        ]
+        tee_fps = probe_fps(tee_path) or 30.0
+        # Auto-detect swing windows. Same detector the long-upload
+        # flow uses (audio impacts gated by a paired motion burst
+        # within ±3 s); the operator can re-run/edit later.
+        try:
+            detected = detect_swings_combined(tee_path, fps=tee_fps)
+        except Exception as exc:
+            log.warning(
+                "cameras: event %s swing-detect crashed (%s); falling back "
+                "to single-segment",
+                event.id, exc,
+            )
+            detected = []
 
-        # captured_at = the trigger moment. Approximate — the actual
-        # impact is ~2 s into the clip — but good enough for the
-        # match-clip-to-player window logic.
+        if detected:
+            seg_list = [
+                {
+                    "hole_number": int(event.hole_number),
+                    "start_sec": float(d["start_sec"]),
+                    "end_sec": float(d["end_sec"]),
+                }
+                for d in detected
+            ]
+            log.info(
+                "cameras: event %s detected %d swing(s) in %.1fs of tee video",
+                event.id, len(seg_list), duration,
+            )
+        else:
+            # No detected swings (silent recording, or detector
+            # couldn't find paired peaks). Fall back to a single
+            # segment so the operator still gets something to look
+            # at and can edit it from the production page.
+            seg_list = [
+                {
+                    "hole_number": int(event.hole_number),
+                    "start_sec": 0.0,
+                    "end_sec": float(duration),
+                }
+            ]
+            log.info(
+                "cameras: event %s no swings auto-detected; falling back to "
+                "single %.1fs segment",
+                event.id, duration,
+            )
+
+        # captured_at = the trigger moment. Approximate but good
+        # enough for the match-clip-to-player window logic; the
+        # per-segment pipeline offsets each clip by start_sec when
+        # the multi-swing detector is used.
         base_dt = event.triggered_at or _utcnow_naive()
 
         results = _process_long_upload_segments(
@@ -537,21 +663,25 @@ def _process_camera_event_job(event_id: int) -> None:
         )  # re-fetch in case session was rolled back
         if event is None:
             return
-        if results and results[0].get("ok") and results[0].get("clip_id"):
+        produced = [r for r in (results or []) if r.get("ok") and r.get("clip_id")]
+        if produced:
             event.status = "processed"
-            event.produced_clip_id = int(results[0]["clip_id"])
+            event.produced_clip_id = int(produced[0]["clip_id"])
             event.last_error = None
         else:
             event.status = "failed"
-            event.last_error = (
-                (results[0].get("error") if results else None)
-                or "processing returned no result"
-            )[:2000]
+            first_err = next(
+                (r.get("error") for r in (results or []) if r.get("error")), None
+            )
+            event.last_error = (first_err or "processing returned no result")[:2000]
         db.commit()
         log.info(
-            "cameras: event %s processed — status=%s clip=%s",
+            "cameras: event %s processed — status=%s segs=%d produced=%d "
+            "first_clip=%s",
             event.id,
             event.status,
+            len(seg_list),
+            len(produced),
             event.produced_clip_id,
         )
     except Exception as exc:  # pragma: no cover

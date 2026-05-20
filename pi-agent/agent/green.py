@@ -1,7 +1,14 @@
 """Green-side capture agent. Continuously buffers frames in RAM and
 long-polls the backend for triggers. When a trigger arrives (sent by
 the paired tee's event-trigger call), commits the pre-roll buffer and
-keeps recording for `recording_seconds` more, then uploads.
+keeps recording until the tee's /event-stop hits the backend (polled
+once per second via /event-status), then uploads.
+
+The duration of one session is therefore variable — it matches what
+the tee Pi recorded, which itself ends when the tee box has been
+empty for no_person_timeout_seconds. A hard runaway cap
+(max_clip_seconds, default 10 min) bounds the recording in case the
+stop signal never arrives (tee crash, network split).
 
 No person detection here — the trigger comes from the tee Pi, so the
 green just has to be recording when the ball lands."""
@@ -29,7 +36,14 @@ class GreenAgent:
         self.client = BackendClient(cfg["backend_url"], cfg["auth_token"])
         self.cam_cfg = cfg.get("camera", {})
         self.buffer_seconds = float(cfg.get("buffer_seconds", 5))
-        self.recording_seconds = float(cfg.get("recording_seconds", 12))
+        # Runaway-safety cap — recording normally ends on the tee's
+        # /event-stop signal, this only kicks in if the signal never
+        # arrives. 10 min handles a slow foursome.
+        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 600))
+        # How often to ask the backend whether the tee has signalled
+        # end-of-session. 1 s keeps the green's clip within ~1 s of
+        # the tee's clip without spamming the endpoint.
+        self.stop_poll_interval = float(cfg.get("stop_poll_interval_seconds", 1.0))
         self.poll_timeout = int(cfg.get("poll_timeout_seconds", 25))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
         self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-green"))
@@ -65,8 +79,8 @@ class GreenAgent:
         hb.start()
 
         log.info(
-            "green agent running: buffer=%.1fs record=%.1fs poll=%ds",
-            self.buffer_seconds, self.recording_seconds, self.poll_timeout,
+            "green agent running: buffer=%.1fs max=%.0fs poll=%ds",
+            self.buffer_seconds, self.max_clip_seconds, self.poll_timeout,
         )
         try:
             while not self.stopping.is_set():
@@ -112,8 +126,9 @@ class GreenAgent:
 
     def _record_and_upload(self, session_id: str) -> None:
         """Commit the current ring buffer to an MP4 and keep writing
-        new frames from the buffer until `recording_seconds` of clip
-        wall-clock has been captured. Then upload."""
+        new frames from the buffer until the tee Pi signals stop
+        (via /event-stop, observed by polling /event-status) or the
+        runaway-safety cap is hit. Then upload."""
         snapshot = self.buffer.snapshot()
         if not snapshot:
             log.warning("buffer empty at trigger; skipping session=%s", session_id)
@@ -132,13 +147,10 @@ class GreenAgent:
         last_written_ts = snapshot[-1][0]
         frames_written = len(snapshot)
         start = time.time()
-        target_seconds = self.recording_seconds
-        safety_deadline = start + target_seconds + 5  # +5 s cushion
+        deadline = start + self.max_clip_seconds
+        next_stop_check = start + self.stop_poll_interval
+        stop_reason = "unknown"
 
-        # Then continue draining only-new frames from the live buffer
-        # until we've covered `target_seconds` of wall-clock from the
-        # pre-roll's leading edge.
-        target_end_ts = snapshot[0][0] + target_seconds
         while not self.stopping.is_set():
             current = self.buffer.snapshot()
             new_frames = [(ts, f) for ts, f in current if ts > last_written_ts]
@@ -146,17 +158,37 @@ class GreenAgent:
                 writer.write(f)
                 last_written_ts = ts
                 frames_written += 1
-            if last_written_ts >= target_end_ts:
+            now = time.time()
+            if now > deadline:
+                stop_reason = "max_clip_seconds"
+                log.warning(
+                    "max_clip_seconds (%.0fs) hit before stop signal; stopping",
+                    self.max_clip_seconds,
+                )
                 break
-            if time.time() > safety_deadline:
-                log.warning("recording safety deadline hit; stopping")
-                break
+            if now >= next_stop_check:
+                next_stop_check = now + self.stop_poll_interval
+                try:
+                    status = self.client.event_status(session_id)
+                except Exception as exc:
+                    # Transient network error — log at debug and try
+                    # again next interval; we'd rather over-record by
+                    # a second than stop early on a flaky link.
+                    log.debug("event_status poll failed: %s", exc)
+                else:
+                    if status.get("stop_signal"):
+                        stop_reason = "stop_signal"
+                        log.info(
+                            "stop signal received for %s after %.1fs",
+                            session_id, now - start,
+                        )
+                        break
             time.sleep(0.05)
         writer.release()
         size = clip_path.stat().st_size if clip_path.exists() else 0
         log.info(
-            "recorded %s: %d frames, %.1f MB",
-            clip_path.name, frames_written, size / (1024 * 1024),
+            "recorded %s: %d frames, %.1f MB (reason=%s)",
+            clip_path.name, frames_written, size / (1024 * 1024), stop_reason,
         )
 
         try:

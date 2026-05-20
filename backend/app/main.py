@@ -147,6 +147,14 @@ def _migrate() -> None:
         if "long_upload_id" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN long_upload_id INTEGER")
 
+    # CameraEvent additions
+    if "camera_events" in inspector.get_table_names():
+        ce_cols = {c["name"] for c in inspector.get_columns("camera_events")}
+        if "stop_signal_at" not in ce_cols:
+            statements.append(
+                "ALTER TABLE camera_events ADD COLUMN stop_signal_at TIMESTAMP"
+            )
+
     if not statements:
         return
     with engine.begin() as conn:
