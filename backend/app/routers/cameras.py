@@ -630,14 +630,28 @@ def _process_camera_event_job(event_id: int) -> None:
                 "cameras: event %s long-upload job crashed: %s", event.id, exc,
             )
 
-        # Re-fetch both rows post-job (the long-upload worker uses its
-        # own session, so our `lvu` reference is stale).
+        # Re-fetch both rows post-job. The long-upload worker uses its
+        # own session, so anything still in our identity map is stale;
+        # expire_all forces the next attribute access to round-trip the
+        # DB and see the worker's commits.
+        db.expire_all()
         event = db.get(CameraEvent, event_id)
         lvu = db.get(LongVideoUpload, lvu.id)
         if event is None or lvu is None:
             return
 
-        if lvu.processing_status == "completed":
+        # The auto-swing detector treats "no paired audio+motion peaks"
+        # as a hard failure, which is right for the long-upload UI but
+        # wrong for the camera path: the Pi already captured + uploaded
+        # the raws (visible on the production page), there just wasn't
+        # an actual swing to produce a clip from. Treat this as a
+        # successful capture so the event isn't flagged red.
+        no_swings = (
+            lvu.processing_status == "failed"
+            and (lvu.last_error or "").startswith("no swings detected")
+        )
+
+        if lvu.processing_status == "completed" or no_swings:
             event.status = "processed"
             event.last_error = None
             # Pick the first produced clip for the back-compat
