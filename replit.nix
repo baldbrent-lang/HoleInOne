@@ -1,5 +1,6 @@
 { pkgs }: {
   deps = [
+    pkgs.sqlite-interactive
     pkgs.python312
     pkgs.python312Packages.pip
     pkgs.nodejs_20
