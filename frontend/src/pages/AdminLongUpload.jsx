@@ -13,6 +13,14 @@ function nowLocal() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function fmtDuration(sec) {
+  if (sec == null || !Number.isFinite(sec)) return null;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 const EMPTY_SEG = {
   hole_number: "",
   start_sec: "",
@@ -35,17 +43,158 @@ export default function AdminLongUpload() {
   const [baseCapturedAt, setBaseCapturedAt] = useState(nowLocal());
   const [file, setFile] = useState(null);
   const [videoUrl, setVideoUrl] = useState(null);
+  const [fileGreen, setFileGreen] = useState(null);
+  const [aiTracerModel, setAiTracerModel] = useState("claude-opus-4-7");
+  const [autoDetectSwings, setAutoDetectSwings] = useState(true);
+  const [startingHole, setStartingHole] = useState(1);
   const [segments, setSegments] = useState([{ ...EMPTY_SEG }]);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [results, setResults] = useState(null);
+  const [queuedUploadId, setQueuedUploadId] = useState(null);
   const [error, setError] = useState(null);
+  const [priorUploads, setPriorUploads] = useState(null);
+  const [reprocessing, setReprocessing] = useState({}); // {id: true}
+  const [testCutting, setTestCutting] = useState({}); // {id: true}
+  const [testCutResults, setTestCutResults] = useState({}); // {id: {detector, cuts, ...}}
+  const [testCutDetector, setTestCutDetector] = useState({}); // {id: "motion"|"audio"}
+  const [audioMinRatio, setAudioMinRatio] = useState({}); // {id: number}
+  const [motionRatio, setMotionRatio] = useState({}); // {id: number}
+  const [pairWindow, setPairWindow] = useState({}); // {id: number} -> combined-mode pair window
+  const [detectOnly, setDetectOnly] = useState({}); // {id: true} -> skip cutting
+  const [showSource, setShowSource] = useState({}); // {id: true}
+  const [segHole, setSegHole] = useState({}); // {"uploadId-cutIndex": holeNumber}
+  const [segProcessing, setSegProcessing] = useState({}); // {"uploadId-cutIndex": true}
+  const [segResult, setSegResult] = useState({}); // {"uploadId-cutIndex": {clip_id, ok, error}}
   const videoRef = useRef(null);
+
+  const anyProcessing =
+    Array.isArray(priorUploads) &&
+    priorUploads.some(
+      (u) => u.processing_status === "pending" || u.processing_status === "processing",
+    );
 
   useEffect(() => {
     if (!adminPassword) return;
     api.listCourses(adminPassword).then(setCourses).catch((e) => setError(e.message));
+    refreshPriorUploads();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminPassword]);
+
+  // Poll the long-uploads listing while any row is pending/processing so the
+  // UI flips to "completed" without a manual refresh. Polling stops once
+  // everything has settled.
+  useEffect(() => {
+    if (!adminPassword || !anyProcessing) return;
+    const id = setInterval(refreshPriorUploads, 4000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adminPassword, anyProcessing]);
+
+  async function refreshPriorUploads() {
+    try {
+      const list = await api.listLongUploads(adminPassword);
+      setPriorUploads(list);
+    } catch (e) {
+      // Non-fatal — fall back to the upload form alone.
+      setPriorUploads([]);
+    }
+  }
+
+  async function reprocessPrior(uploadId) {
+    setReprocessing((r) => ({ ...r, [uploadId]: true }));
+    setError(null);
+    const fd = new FormData();
+    fd.append("segments", "[]");
+    fd.append("auto_detect_swings", "true");
+    fd.append("starting_hole", String(parseInt(startingHole, 10) || 1));
+    fd.append("ai_tracer_model", aiTracerModel);
+    // Pass the operator's tuned detector thresholds — same numbers
+    // they used to verify clip boundaries in the Test cut UI. Falls
+    // back to the production combined-mode defaults if the inputs
+    // are blank.
+    const aRatio = parseFloat(audioMinRatio[uploadId]);
+    const mRatio = parseFloat(motionRatio[uploadId]);
+    const win = parseFloat(pairWindow[uploadId]);
+    fd.append("audio_min_peak_ratio", String(Number.isFinite(aRatio) && aRatio > 0 ? aRatio : 5));
+    fd.append("motion_ratio", String(Number.isFinite(mRatio) && mRatio > 0 ? mRatio : 2));
+    fd.append("combined_pair_window_sec", String(Number.isFinite(win) && win > 0 ? win : 3));
+    try {
+      await api.reprocessLongUpload(adminPassword, uploadId, fd);
+      setQueuedUploadId(uploadId);
+      refreshPriorUploads();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setReprocessing((r) => ({ ...r, [uploadId]: false }));
+    }
+  }
+
+  async function testCutPrior(uploadId) {
+    const detector = testCutDetector[uploadId] || "motion";
+    const opts = {};
+    if (detector === "audio") {
+      const ratio = parseFloat(audioMinRatio[uploadId]);
+      if (Number.isFinite(ratio) && ratio > 0) opts.audioMinPeakRatio = ratio;
+    } else if (detector === "combined") {
+      const aRatio = parseFloat(audioMinRatio[uploadId] ?? 5);
+      const mRatio = parseFloat(motionRatio[uploadId] ?? 2);
+      const win = parseFloat(pairWindow[uploadId] ?? 3);
+      if (Number.isFinite(aRatio) && aRatio > 0) opts.audioMinPeakRatio = aRatio;
+      if (Number.isFinite(mRatio) && mRatio > 0) opts.motionRatio = mRatio;
+      if (Number.isFinite(win) && win > 0) opts.combinedPairWindowSec = win;
+    } else {
+      const ratio = parseFloat(motionRatio[uploadId]);
+      if (Number.isFinite(ratio) && ratio > 0) opts.motionRatio = ratio;
+    }
+    if (detectOnly[uploadId]) opts.cutClips = false;
+    setTestCutting((t) => ({ ...t, [uploadId]: true }));
+    setError(null);
+    try {
+      const data = await api.testCutLongUpload(adminPassword, uploadId, detector, opts);
+      setTestCutResults((r) => ({ ...r, [uploadId]: data }));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setTestCutting((t) => ({ ...t, [uploadId]: false }));
+    }
+  }
+
+  async function processSegment(uploadId, cut) {
+    const key = `${uploadId}-${cut.index}`;
+    const holeRaw = segHole[key];
+    const startingHoleN = parseInt(startingHole, 10) || 1;
+    const hole = parseInt(holeRaw, 10);
+    const holeNumber = Number.isFinite(hole) && hole > 0
+      ? hole
+      : startingHoleN + cut.index;
+    setSegProcessing((s) => ({ ...s, [key]: true }));
+    setSegResult((r) => ({ ...r, [key]: null }));
+    try {
+      const result = await api.processLongUploadSegment(adminPassword, uploadId, {
+        holeNumber,
+        startSec: cut.start_sec,
+        endSec: cut.end_sec,
+        aiTracerModel,
+      });
+      setSegResult((r) => ({ ...r, [key]: { ok: true, ...result } }));
+    } catch (e) {
+      setSegResult((r) => ({ ...r, [key]: { ok: false, error: e.message } }));
+    } finally {
+      setSegProcessing((s) => ({ ...s, [key]: false }));
+    }
+  }
+
+  async function deletePrior(uploadId) {
+    if (!window.confirm("Delete this stored long upload + its source files? Per-swing clips already produced from it are kept.")) {
+      return;
+    }
+    try {
+      await api.deleteLongUpload(adminPassword, uploadId);
+      refreshPriorUploads();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
 
   useEffect(() => {
     if (!file) { setVideoUrl(null); return; }
@@ -75,29 +224,32 @@ export default function AdminLongUpload() {
   async function submit(e) {
     e.preventDefault();
     setError(null);
-    setResults(null);
+    setQueuedUploadId(null);
 
     if (!file) { setError("Pick a video file."); return; }
-    const cleaned = segments
-      .map((s) => ({
-        hole_number: parseInt(s.hole_number, 10),
-        start_sec: parseFloat(s.start_sec),
-        end_sec: parseFloat(s.end_sec),
-        distance_from_pin_feet: s.distance_from_pin_feet ? parseInt(s.distance_from_pin_feet, 10) : null,
-        carry_yards: s.carry_yards ? parseInt(s.carry_yards, 10) : null,
-        ball_speed_mph: s.ball_speed_mph ? parseInt(s.ball_speed_mph, 10) : null,
-        ball_in_cup: !!s.ball_in_cup,
-      }))
-      .filter((s) => Number.isFinite(s.hole_number) && Number.isFinite(s.start_sec) && Number.isFinite(s.end_sec));
+    let cleaned = [];
+    if (!autoDetectSwings) {
+      cleaned = segments
+        .map((s) => ({
+          hole_number: parseInt(s.hole_number, 10),
+          start_sec: parseFloat(s.start_sec),
+          end_sec: parseFloat(s.end_sec),
+          distance_from_pin_feet: s.distance_from_pin_feet ? parseInt(s.distance_from_pin_feet, 10) : null,
+          carry_yards: s.carry_yards ? parseInt(s.carry_yards, 10) : null,
+          ball_speed_mph: s.ball_speed_mph ? parseInt(s.ball_speed_mph, 10) : null,
+          ball_in_cup: !!s.ball_in_cup,
+        }))
+        .filter((s) => Number.isFinite(s.hole_number) && Number.isFinite(s.start_sec) && Number.isFinite(s.end_sec));
 
-    if (cleaned.length === 0) {
-      setError("At least one segment with hole / start / end is required.");
-      return;
-    }
-    for (const s of cleaned) {
-      if (s.end_sec <= s.start_sec) {
-        setError(`Segment for hole ${s.hole_number}: end must be greater than start.`);
+      if (cleaned.length === 0) {
+        setError("At least one segment with hole / start / end is required (or enable Auto-detect).");
         return;
+      }
+      for (const s of cleaned) {
+        if (s.end_sec <= s.start_sec) {
+          setError(`Segment for hole ${s.hole_number}: end must be greater than start.`);
+          return;
+        }
       }
     }
 
@@ -109,11 +261,18 @@ export default function AdminLongUpload() {
     fd.append("camera_type", cameraType);
     fd.append("base_captured_at", new Date(baseCapturedAt).toISOString());
     fd.append("segments", JSON.stringify(cleaned));
+    fd.append("auto_detect_swings", autoDetectSwings ? "true" : "false");
+    fd.append("starting_hole", String(parseInt(startingHole, 10) || 1));
     fd.append("video", file, file.name);
+    if (fileGreen) {
+      fd.append("video_green", fileGreen, fileGreen.name);
+      fd.append("ai_tracer_model", aiTracerModel);
+    }
 
     try {
       const data = await api.longUploadClips(adminPassword, fd, setProgress);
-      setResults(data.results || []);
+      setQueuedUploadId(data?.upload_id ?? null);
+      refreshPriorUploads();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -138,21 +297,618 @@ export default function AdminLongUpload() {
       <Brand subtitle="Operator Console" />
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
-        <Link to="/admin/participants">Participants</Link>
-        <Link to="/admin/upload">Upload clip</Link>
-        <Link to="/admin/long-upload" className="active">Long upload</Link>
-        <Link to="/admin/showcase">Home videos</Link>
-        <Link to="/admin/review">Hole-in-one review</Link>
+        <Link to="/admin/participants">Players</Link>
+        <Link to="/admin/courses">Courses</Link>
+        <Link to="/admin/upload-videos">Upload</Link>
+        <Link to="/admin/production">Production</Link>
+        <Link to="/admin/produced-clips">Produced Clips</Link>
+        <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras">Cameras</Link>
       </div>
+
+      {queuedUploadId != null && (
+        <div className="card" style={{ borderLeft: "4px solid var(--primary)" }}>
+          <b>Upload #{queuedUploadId} queued.</b>{" "}
+          <span className="small muted">
+            Cutting, AI-tracer, and splicing run in the background — usually
+            5–10 minutes. You can close this page; finished clips appear on{" "}
+            <Link to="/admin/broadcast-clips">Broadcast</Link> when ready, and
+            this list updates automatically.
+          </span>
+        </div>
+      )}
+
+      {priorUploads && priorUploads.length > 0 && (
+        <div className="card">
+          <h3 style={{ marginBottom: 6 }}>Previous long uploads</h3>
+          <p className="small muted" style={{ marginBottom: 10 }}>
+            Re-edit a stored long upload without re-uploading the source(s).
+            Reprocess uses the current <b>Auto-detect</b>, <b>Starting hole</b>,
+            and <b>AI tracer model</b> settings from the form below.
+          </p>
+          <div className="stack" style={{ gap: 8 }}>
+            {priorUploads.map((u) => {
+              const missing = u.tee_missing || u.green_missing;
+              const status = u.processing_status || "completed";
+              const busy = status === "pending" || status === "processing";
+              const statusPill = (
+                status === "processing" ? <span className="pill warn small">processing…</span> :
+                status === "pending"    ? <span className="pill warn small">queued</span> :
+                status === "failed"     ? <span className="pill err small">failed</span> :
+                                          <span className="pill ok small">done</span>
+              );
+              return (
+                <div key={u.id} className="card tight" style={{ margin: 0, padding: 10 }}>
+                  <div className="inline" style={{ justifyContent: "space-between", width: "100%" }}>
+                    <div className="small">
+                      <b>#{u.id}</b>{" "}
+                      <span style={{ marginLeft: 4 }}>{statusPill}</span>{" "}
+                      <span className="muted">
+                        · {u.course_name || `course #${u.course_id}`}{" "}
+                        · {u.base_captured_at ? new Date(u.base_captured_at).toLocaleString() : "—"}
+                        {u.dual_camera && <> · <span className="pill small">dual-cam</span></>}
+                      </span>
+                      <div className="tiny muted" style={{ marginTop: 2 }}>
+                        tee: <code>{u.tee_original_filename || u.tee_filename}</code>
+                        {fmtDuration(u.tee_duration_sec) && <> · {fmtDuration(u.tee_duration_sec)}</>}
+                        {u.tee_size_mb != null && <> · {u.tee_size_mb} MB</>}
+                        {u.tee_missing && <> · <span className="err-text">missing on disk</span></>}
+                        {u.dual_camera && (
+                          <>
+                            <br />
+                            green: <code>{u.green_original_filename || u.green_filename}</code>
+                            {fmtDuration(u.green_duration_sec) && <> · {fmtDuration(u.green_duration_sec)}</>}
+                            {u.green_size_mb != null && <> · {u.green_size_mb} MB</>}
+                            {u.green_missing && <> · <span className="err-text">missing on disk</span></>}
+                          </>
+                        )}
+                        {u.last_n_segments != null && status !== "processing" && (
+                          <> · last run: {u.last_n_succeeded ?? "?"}/{u.last_n_segments} succeeded</>
+                        )}
+                      </div>
+                      {status === "failed" && u.last_error && (
+                        <div className="tiny err-text" style={{ marginTop: 2 }}>
+                          error: <code>{u.last_error}</code>
+                        </div>
+                      )}
+                      {busy && (
+                        <div className="tiny muted" style={{ marginTop: 2 }}>
+                          {status === "pending" ? (
+                            "Queued — will start shortly."
+                          ) : u.last_n_segments == null ? (
+                            "Detecting swings (audio + motion)…"
+                          ) : (
+                            <>
+                              <b>{u.last_n_segments}</b> swings identified ·
+                              {" "}processed <b>{u.last_n_succeeded ?? 0}</b> /{" "}
+                              {u.last_n_segments}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <div className="inline" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <select
+                        value={testCutDetector[u.id] || "motion"}
+                        onChange={(e) =>
+                          setTestCutDetector((d) => ({ ...d, [u.id]: e.target.value }))
+                        }
+                        disabled={!!testCutting[u.id] || missing || busy}
+                        className="small"
+                        style={{ fontSize: 12, padding: "2px 6px" }}
+                        title="Swing detector used for the test cut. 'combined' AND's audio + motion: a swing only counts when an audio peak and a motion peak land within the pair window."
+                      >
+                        <option value="motion">motion</option>
+                        <option value="audio">audio</option>
+                        <option value="combined">combined</option>
+                      </select>
+                      {(testCutDetector[u.id] || "motion") === "audio" && (
+                        <input
+                          type="number"
+                          min="1"
+                          step="0.5"
+                          value={audioMinRatio[u.id] ?? 10}
+                          onChange={(e) =>
+                            setAudioMinRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                          }
+                          disabled={!!testCutting[u.id] || missing || busy}
+                          className="small"
+                          style={{ width: 60, fontSize: 12, padding: "2px 6px" }}
+                          title="Minimum peak/median ratio. Higher = stricter (only the loudest thwacks). Default 10."
+                        />
+                      )}
+                      {(testCutDetector[u.id] || "motion") === "motion" && (
+                        <input
+                          type="number"
+                          min="1"
+                          step="0.5"
+                          value={motionRatio[u.id] ?? 4}
+                          onChange={(e) =>
+                            setMotionRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                          }
+                          disabled={!!testCutting[u.id] || missing || busy}
+                          className="small"
+                          style={{ width: 60, fontSize: 12, padding: "2px 6px" }}
+                          title="Motion threshold = median frame-diff × this ratio. Higher = stricter. Default 4."
+                        />
+                      )}
+                      {(testCutDetector[u.id] || "motion") === "combined" && (
+                        <span
+                          className="tiny"
+                          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                        >
+                          a:
+                          <input
+                            type="number"
+                            min="1"
+                            step="0.5"
+                            value={audioMinRatio[u.id] ?? 5}
+                            onChange={(e) =>
+                              setAudioMinRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                            }
+                            disabled={!!testCutting[u.id] || missing || busy}
+                            className="small"
+                            style={{ width: 50, fontSize: 12, padding: "2px 6px" }}
+                            title="Audio peak/median ratio for combined mode. Default 5."
+                          />
+                          m:
+                          <input
+                            type="number"
+                            min="1"
+                            step="0.5"
+                            value={motionRatio[u.id] ?? 2}
+                            onChange={(e) =>
+                              setMotionRatio((r) => ({ ...r, [u.id]: e.target.value }))
+                            }
+                            disabled={!!testCutting[u.id] || missing || busy}
+                            className="small"
+                            style={{ width: 50, fontSize: 12, padding: "2px 6px" }}
+                            title="Motion threshold ratio for combined mode. Default 2."
+                          />
+                          ±
+                          <input
+                            type="number"
+                            min="0.5"
+                            step="0.5"
+                            value={pairWindow[u.id] ?? 3}
+                            onChange={(e) =>
+                              setPairWindow((r) => ({ ...r, [u.id]: e.target.value }))
+                            }
+                            disabled={!!testCutting[u.id] || missing || busy}
+                            className="small"
+                            style={{ width: 50, fontSize: 12, padding: "2px 6px" }}
+                            title="Max seconds between an audio peak and a motion peak to count them as the same swing. Default 3."
+                          />
+                          s
+                        </span>
+                      )}
+                      <label
+                        className="tiny"
+                        style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+                        title="Skip ffmpeg cutting and just list the detected swing times. Fast — useful while tuning the detector."
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!!detectOnly[u.id]}
+                          onChange={(e) =>
+                            setDetectOnly((d) => ({ ...d, [u.id]: e.target.checked }))
+                          }
+                          disabled={!!testCutting[u.id] || missing || busy}
+                          style={{ margin: 0 }}
+                        />
+                        detect only
+                      </label>
+                      <button
+                        type="button"
+                        className="secondary small"
+                        onClick={() =>
+                          setShowSource((s) => ({ ...s, [u.id]: !s[u.id] }))
+                        }
+                        disabled={missing}
+                        title={
+                          missing
+                            ? "Source file missing on disk"
+                            : "Show the raw long video upload(s) inline so you can scrub and verify swings"
+                        }
+                      >
+                        {showSource[u.id] ? "Hide source" : "Show source"}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary small"
+                        onClick={() => testCutPrior(u.id)}
+                        disabled={!!testCutting[u.id] || missing || busy}
+                        title="Cut the tee video into proposed swing clips (no AI tracer, no matcher) so you can review the segmentation"
+                      >
+                        {testCutting[u.id] ? "Cutting…" : "Test cut"}
+                      </button>
+                      <button
+                        type="button"
+                        className="small"
+                        onClick={() => reprocessPrior(u.id)}
+                        disabled={!!reprocessing[u.id] || missing || busy}
+                        title={
+                          busy
+                            ? "Already running"
+                            : missing
+                            ? "Source file missing on disk"
+                            : `Re-cut + re-process with combined detector at audio=${audioMinRatio[u.id] ?? 5}, motion=${motionRatio[u.id] ?? 2}, pair-window=${pairWindow[u.id] ?? 3}s. Tune via Test cut first.`
+                        }
+                      >
+                        {reprocessing[u.id] ? "Queuing…" : busy ? "Running…" : "Reprocess"}
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost small err-text"
+                        onClick={() => deletePrior(u.id)}
+                        disabled={!!reprocessing[u.id] || busy}
+                        title={busy ? "Wait for processing to finish" : "Delete this stored upload + its source files"}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+
+                  {showSource[u.id] && !missing && (u.tee_url || u.green_url) && (
+                    <div className="card tight" style={{ margin: "10px 0 0", background: "var(--surface-alt)" }}>
+                      <div className="small" style={{ marginBottom: 6 }}>
+                        <b>Source preview{u.dual_camera ? "s" : ""}</b>{" "}
+                        <span className="tiny muted">
+                          · first-frame thumbnails so you can verify the tee/green labels match the footage
+                        </span>
+                      </div>
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fill, minmax(220px, max-content))",
+                          gap: 10,
+                          alignItems: "start",
+                        }}
+                      >
+                        {u.tee_url && (
+                          <div style={{ width: 240 }}>
+                            <div className="tiny muted" style={{ marginBottom: 2 }}>
+                              <b>tee</b> · <code>{u.tee_original_filename || u.tee_filename}</code>
+                            </div>
+                            <video
+                              src={u.tee_url}
+                              preload="metadata"
+                              muted
+                              playsInline
+                              style={{ width: 240, height: 135, borderRadius: 6, background: "#000", objectFit: "cover" }}
+                            />
+                          </div>
+                        )}
+                        {u.dual_camera && u.green_url && (
+                          <div style={{ width: 240 }}>
+                            <div className="tiny muted" style={{ marginBottom: 2 }}>
+                              <b>green</b> · <code>{u.green_original_filename || u.green_filename}</code>
+                            </div>
+                            <video
+                              src={u.green_url}
+                              preload="metadata"
+                              muted
+                              playsInline
+                              style={{ width: 240, height: 135, borderRadius: 6, background: "#000", objectFit: "cover" }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {testCutResults[u.id] && (
+                    <div className="card tight" style={{ margin: "10px 0 0", background: "var(--surface-alt)" }}>
+                      <div className="small" style={{ marginBottom: 6 }}>
+                        <b>Test cut</b>{" "}
+                        <span className="muted">
+                          · detector: <code>{testCutResults[u.id].detector}</code>
+                          {" "}· {testCutResults[u.id].n_windows} window
+                          {testCutResults[u.id].n_windows === 1 ? "" : "s"}
+                          {testCutResults[u.id].tee_fps != null && (
+                            <> · {testCutResults[u.id].tee_fps} fps</>
+                          )}
+                          {testCutResults[u.id].dual_camera && <> · dual-cam</>}
+                        </span>
+                      </div>
+                      {testCutResults[u.id].debug && (
+                        <div className="tiny muted" style={{ marginBottom: 8, fontFamily: "monospace", lineHeight: 1.4 }}>
+                          {testCutResults[u.id].debug.reason ? (
+                            <div className="err-text">reason: {testCutResults[u.id].debug.reason}</div>
+                          ) : testCutResults[u.id].detector === "combined" ? (
+                            <>
+                              {(() => {
+                                const c = testCutResults[u.id].debug.combined || {};
+                                const a = testCutResults[u.id].debug.audio || {};
+                                const m = testCutResults[u.id].debug.motion || {};
+                                return (
+                                  <>
+                                    combined: audio_peaks={c.n_audio_windows ?? "?"}
+                                    {" "}· motion_peaks={c.n_motion_windows ?? "?"}
+                                    {" "}· paired={c.n_paired ?? "?"}
+                                    {" "}· window=±{c.pair_window_sec}s
+                                    <br />
+                                    audio: median={a.median_envelope?.toFixed?.(4) ?? "?"}
+                                    {" "}· threshold={a.threshold?.toFixed?.(4) ?? "?"}
+                                    {" "}(×{a.min_peak_ratio_used})
+                                    {" "}· raw_peaks={a.n_raw_peaks ?? "?"}
+                                    <br />
+                                    motion: median={m.median_motion?.toFixed?.(4) ?? "?"}
+                                    {" "}· threshold={m.threshold?.toFixed?.(4) ?? "?"}
+                                    {" "}(×{m.motion_ratio_used})
+                                    {" "}· raw_bursts={m.n_raw_bursts ?? "?"}
+                                    {" "}· duration_ok={m.n_duration_ok ?? "?"}
+                                    {Array.isArray(c.pairs) && c.pairs.length > 0 && (
+                                      <>
+                                        <br />
+                                        pairs (audio_sec, motion_sec, Δt, ×audio, ×motion):
+                                        <br />
+                                        {c.pairs.map((p, i) => (
+                                          <span key={i} style={{ marginRight: 10 }}>
+                                            [{p.audio_peak_sec}s ↔ {p.motion_peak_sec}s]
+                                            {" "}Δ{p.dt_sec}s
+                                            {" "}×{p.audio_ratio}/{p.motion_ratio}
+                                          </span>
+                                        ))}
+                                      </>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                            </>
+                          ) : testCutResults[u.id].detector === "audio" ? (
+                            <>
+                              audio: median={testCutResults[u.id].debug.median_envelope?.toFixed(4)}{" "}
+                              · threshold={testCutResults[u.id].debug.threshold?.toFixed(4)}{" "}
+                              (×{testCutResults[u.id].debug.min_peak_ratio_used})
+                              {testCutResults[u.id].debug.highpass_hz_used > 0 && (
+                                <> · highpass @ {testCutResults[u.id].debug.highpass_hz_used} Hz</>
+                              )}
+                              {testCutResults[u.id].debug.threshold_floor_hit && (
+                                <> · <span className="warn-text">
+                                  floor {testCutResults[u.id].debug.threshold_floor ?? "0.001"} active —
+                                  raise audio ratio above {(
+                                    (testCutResults[u.id].debug.threshold_floor ?? 0.001)
+                                    / (testCutResults[u.id].debug.median_envelope || 1)
+                                  ).toFixed(1)} to bite
+                                </span></>
+                              )}
+                              <br />
+                              peaks: raw={testCutResults[u.id].debug.n_raw_peaks}
+                              {testCutResults[u.id].debug.n_after_attack != null && (
+                                <> · attack_ok={testCutResults[u.id].debug.n_after_attack}
+                                {" "}(≤{Math.round((testCutResults[u.id].debug.max_attack_sec_used ?? 0)*1000)}ms)</>
+                              )}
+                              {" "}· kept_after_nms={testCutResults[u.id].debug.n_after_nms}
+                              {" "}· min_sep={testCutResults[u.id].debug.min_separation_sec}s
+                              {" "}over {testCutResults[u.id].debug.duration_sec?.toFixed(1)}s
+                              {Array.isArray(testCutResults[u.id].debug.top_peaks) &&
+                                testCutResults[u.id].debug.top_peaks.length > 0 && (
+                                <>
+                                  <br />
+                                  top peaks (sec, ×ratio, attack-ms, kept):
+                                  {" "}✗-attack = sustained sound (voice/rumble);
+                                  {" "}✗-nms = suppressed by another peak nearby.
+                                  <br />
+                                  {testCutResults[u.id].debug.top_peaks.map((p, i) => (
+                                    <span key={i} style={{ marginRight: 10 }}>
+                                      {p.peak_sec}s ×{p.ratio}
+                                      {p.attack_ms != null && (
+                                        <> {p.attack_ms}ms{p.passes_attack ? "" : "✗atk"}</>
+                                      )}
+                                      {" "}{p.kept ? "✓" : "✗"}
+                                    </span>
+                                  ))}
+                                </>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              motion: median={testCutResults[u.id].debug.median_motion?.toFixed(4)}{" "}
+                              · threshold={testCutResults[u.id].debug.threshold?.toFixed(4)}{" "}
+                              (×{testCutResults[u.id].debug.motion_ratio_used})
+                              {" "}· max={testCutResults[u.id].debug.max_motion?.toFixed(4)}
+                              <br />
+                              bursts: raw={testCutResults[u.id].debug.n_raw_bursts}
+                              {" "}· duration_ok={testCutResults[u.id].debug.n_duration_ok}
+                              {" "}· final={testCutResults[u.id].debug.n_final}
+                              {" "}· sampled @ {testCutResults[u.id].debug.effective_hz?.toFixed(1)} Hz
+                              {" "}over {testCutResults[u.id].debug.duration_sec?.toFixed(1)}s
+                              {Array.isArray(testCutResults[u.id].debug.top_raw_bursts) &&
+                                testCutResults[u.id].debug.top_raw_bursts.length > 0 && (
+                                <>
+                                  <br />
+                                  top raw bursts (sec, dur, ×ratio, passes-duration):
+                                  <br />
+                                  {testCutResults[u.id].debug.top_raw_bursts.map((b, i) => (
+                                    <span key={i} style={{ marginRight: 10 }}>
+                                      [{b.start_sec}-{b.end_sec}] {b.duration_sec}s ×{b.peak_ratio}{" "}
+                                      {b.passes_duration ? "✓" : "✗"}
+                                    </span>
+                                  ))}
+                                </>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+                      {testCutResults[u.id].cuts.length === 0 && (
+                        <div className="tiny muted">
+                          No swings detected. The diagnostic line above shows
+                          whether the median/threshold was too high or the
+                          duration filter rejected everything.
+                        </div>
+                      )}
+                      {testCutResults[u.id].cuts_skipped ? (
+                        <div className="tiny" style={{ fontFamily: "monospace", lineHeight: 1.6 }}>
+                          <div className="muted" style={{ marginBottom: 4 }}>
+                            <b>{testCutResults[u.id].cuts.length}</b> swing
+                            {testCutResults[u.id].cuts.length === 1 ? "" : "s"} detected
+                            · cutting skipped
+                          </div>
+                          <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ textAlign: "left" }}>
+                                <th style={{ padding: "2px 10px 2px 0" }}>#</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>peak</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>×ratio</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>window</th>
+                                <th style={{ padding: "2px 10px 2px 0" }}>conf</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {testCutResults[u.id].cuts.map((c) => (
+                                <tr key={c.index}>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>{c.index + 1}</td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.peak_time_sec != null ? `${c.peak_time_sec.toFixed(2)}s` : "—"}
+                                  </td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.ratio != null ? `×${c.ratio.toFixed(1)}` : "—"}
+                                  </td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
+                                  </td>
+                                  <td style={{ padding: "1px 10px 1px 0" }}>
+                                    {c.confidence || "—"}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: testCutResults[u.id].dual_camera
+                              ? "repeat(auto-fill, minmax(360px, 1fr))"
+                              : "repeat(auto-fill, minmax(220px, 1fr))",
+                            gap: 8,
+                          }}
+                        >
+                          {testCutResults[u.id].cuts.map((c) => {
+                            const segKey = `${u.id}-${c.index}`;
+                            const startingHoleN = parseInt(startingHole, 10) || 1;
+                            const segHoleValue = segHole[segKey] ?? (startingHoleN + c.index);
+                            const segState = segResult[segKey];
+                            const isProcessing = !!segProcessing[segKey];
+                            return (
+                              <div key={c.index} style={{ minWidth: 0 }}>
+                                <div className="tiny muted" style={{ marginBottom: 2 }}>
+                                  #{c.index + 1} · {c.start_sec.toFixed(1)}–{c.end_sec.toFixed(1)}s
+                                  {" "}({c.duration_sec}s)
+                                  {c.peak_time_sec != null && (
+                                    <> · peak {c.peak_time_sec.toFixed(2)}s</>
+                                  )}
+                                  {c.ratio != null && <> · ×{c.ratio.toFixed(1)}</>}
+                                  {c.confidence && <> · {c.confidence}</>}
+                                </div>
+                                <div
+                                  style={{
+                                    display: "grid",
+                                    gridTemplateColumns: testCutResults[u.id].dual_camera ? "1fr 1fr" : "1fr",
+                                    gap: 4,
+                                  }}
+                                >
+                                  {c.ok && c.url ? (
+                                    <video
+                                      src={c.url}
+                                      controls
+                                      playsInline
+                                      preload="metadata"
+                                      style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                                    />
+                                  ) : (
+                                    <div className="tiny err-text">tee cut failed</div>
+                                  )}
+                                  {testCutResults[u.id].dual_camera && (
+                                    c.green_url ? (
+                                      <video
+                                        src={c.green_url}
+                                        controls
+                                        playsInline
+                                        preload="metadata"
+                                        style={{ width: "100%", borderRadius: 6, background: "#000" }}
+                                      />
+                                    ) : c.green_ok === false ? (
+                                      <div className="tiny err-text">green cut failed</div>
+                                    ) : null
+                                  )}
+                                </div>
+                                <div
+                                  className="tiny"
+                                  style={{
+                                    marginTop: 4,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  <label style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                    hole
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      value={segHoleValue}
+                                      onChange={(e) =>
+                                        setSegHole((s) => ({ ...s, [segKey]: e.target.value }))
+                                      }
+                                      disabled={isProcessing}
+                                      className="small"
+                                      style={{ width: 46, fontSize: 12, padding: "2px 6px" }}
+                                    />
+                                  </label>
+                                  <button
+                                    type="button"
+                                    className="secondary small"
+                                    onClick={() => processSegment(u.id, c)}
+                                    disabled={isProcessing}
+                                    title="Run the full AI tracer + composite pipeline on this clip and add it to Broadcast"
+                                  >
+                                    {isProcessing ? "Processing…" : "Process for broadcast"}
+                                  </button>
+                                  {segState && segState.ok && segState.clip_id && (
+                                    <span className="ok-text" title={`Clip #${segState.clip_id} created`}>
+                                      ✓ clip #{segState.clip_id}
+                                      {segState.participant_name && <> · {segState.participant_name}</>}
+                                    </span>
+                                  )}
+                                  {segState && !segState.ok && (
+                                    <span className="err-text" title={segState.error}>
+                                      ✗ {String(segState.error || "").slice(0, 60)}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h3 style={{ marginBottom: 6 }}>Long video upload</h3>
         <p className="small muted" style={{ marginBottom: 14 }}>
-          Drop one continuous video (e.g., the whole tee-side feed of a round)
-          and mark the start/end seconds for each swing. We'll cut each segment
-          via ffmpeg, run it through the matcher, and deliver per-clip exactly
-          like the regular upload flow. Captured-at for each clip is set to
-          your base time + the segment's start.
+          Drop one continuous tee-side video and mark the start/end seconds
+          for each swing. We'll cut each segment via ffmpeg, run it through
+          the matcher, and deliver per-clip just like the regular upload
+          flow. Captured-at for each clip is set to your base time + the
+          segment's start.
+          {" "}
+          <b>Optional dual-camera:</b> add a green-side long video that's
+          wall-clock-synced to the tee video and we'll run the full AI
+          tracer on the tee cut, then composite tee-with-tracer until 1 s
+          after the tracer ends, then hard-cut to the green clip for the
+          ball landing.
         </p>
 
         <form onSubmit={submit}>
@@ -182,7 +938,7 @@ export default function AdminLongUpload() {
           </div>
 
           <div className="field">
-            <label>Long video file</label>
+            <label>Long video file (tee side)</label>
             <input
               type="file"
               accept="video/*"
@@ -191,6 +947,41 @@ export default function AdminLongUpload() {
             {file && (
               <div className="small muted" style={{ marginTop: 4 }}>
                 {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB
+              </div>
+            )}
+          </div>
+
+          <div className="field">
+            <label>
+              Green-side long video (optional, dual-camera composite)
+            </label>
+            <input
+              type="file"
+              accept="video/*"
+              onChange={(e) => setFileGreen(e.target.files?.[0] || null)}
+            />
+            <div className="small muted" style={{ marginTop: 4 }}>
+              Must be wall-clock-synced to the tee video (both cameras
+              started recording at the same moment). Same segment
+              start/end times are applied to both files.
+              {fileGreen && (
+                <> · <b>{fileGreen.name}</b> · {(fileGreen.size / 1024 / 1024).toFixed(1)} MB</>
+              )}
+            </div>
+            {fileGreen && (
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 8 }}>
+                <label className="small muted" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                  AI tracer model:
+                  <select
+                    value={aiTracerModel}
+                    onChange={(e) => setAiTracerModel(e.target.value)}
+                    disabled={uploading}
+                    style={{ fontSize: 13 }}
+                  >
+                    <option value="claude-opus-4-7">Opus 4.7 (best)</option>
+                    <option value="claude-haiku-4-5">Haiku 4.5 (5× cheaper, faster)</option>
+                  </select>
+                </label>
               </div>
             )}
           </div>
@@ -212,6 +1003,42 @@ export default function AdminLongUpload() {
             </div>
           )}
 
+          <div className="card" style={{ background: "var(--surface-alt)", margin: "0 0 16px" }}>
+            <label className="inline" style={{ gap: 8, cursor: "pointer", marginBottom: 4 }}>
+              <input
+                type="checkbox"
+                checked={autoDetectSwings}
+                onChange={(e) => setAutoDetectSwings(e.target.checked)}
+              />
+              <span>
+                <b>Auto-detect swings from audio</b>{" "}
+                <span className="small muted">
+                  (server scans the tee video's audio track for impact transients
+                  and segments each swing automatically — no manual marking)
+                </span>
+              </span>
+            </label>
+            {autoDetectSwings && (
+              <div className="row" style={{ marginTop: 8, alignItems: "center", gap: 8 }}>
+                <label className="small muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  Starting hole #:
+                  <input
+                    type="number"
+                    min="1"
+                    value={startingHole}
+                    onChange={(e) => setStartingHole(e.target.value)}
+                    style={{ width: 70, fontSize: 13 }}
+                  />
+                </label>
+                <span className="tiny muted">
+                  Each detected swing gets a sequential hole number from here.
+                  You can re-assign individual clips from /admin/clips after upload.
+                </span>
+              </div>
+            )}
+          </div>
+
+          {!autoDetectSwings && (
           <div className="card" style={{ background: "var(--surface-alt)", margin: "0 0 16px" }}>
             <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
               <h4>Segments</h4>
@@ -321,6 +1148,7 @@ export default function AdminLongUpload() {
               </div>
             ))}
           </div>
+          )}
 
           {error && <p className="err-text small">{error}</p>}
           {uploading && progress > 0 && (
@@ -328,53 +1156,27 @@ export default function AdminLongUpload() {
               <div style={{ height: 8, background: "var(--surface-alt)", borderRadius: 4, overflow: "hidden" }}>
                 <div style={{ width: `${progress}%`, height: "100%", background: "var(--primary)" }} />
               </div>
-              <div className="small muted" style={{ marginTop: 4 }}>{progress}% uploaded — ffmpeg cutting starts as soon as upload finishes</div>
+              <div className="small muted" style={{ marginTop: 4 }}>
+                {progress < 100
+                  ? `${progress}% uploaded — once the upload finishes, AI cutting + splicing runs in the background.`
+                  : "Upload complete — queuing background job…"}
+              </div>
             </div>
           )}
 
           <button disabled={uploading || !file || !courseId}>
-            {uploading ? `Uploading… ${progress}%` : `Cut ${segments.length} swing${segments.length === 1 ? "" : "s"} + run matcher`}
+            {uploading
+              ? `Uploading… ${progress}%`
+              : (autoDetectSwings
+                ? (fileGreen
+                  ? "Upload + queue auto-detect + AI tracer + composite"
+                  : "Upload + queue auto-detect + matcher")
+                : (fileGreen
+                  ? `Upload + queue ${segments.length} swing${segments.length === 1 ? "" : "s"} + AI tracer + composite`
+                  : `Upload + queue ${segments.length} swing${segments.length === 1 ? "" : "s"} + matcher`))}
           </button>
         </form>
       </div>
-
-      {results && (
-        <div className="card">
-          <h3 style={{ marginBottom: 10 }}>Results ({results.filter((r) => r.ok).length}/{results.length} succeeded)</h3>
-          <div className="stack">
-            {results.map((r, i) => (
-              <div key={i} className="card tight" style={{ margin: 0 }}>
-                <div className="inline" style={{ justifyContent: "space-between", width: "100%" }}>
-                  <b>Swing {(r.index ?? i) + 1}{r.hole_number ? ` · Hole ${r.hole_number}` : ""}</b>
-                  {r.ok ? (
-                    <span className={`pill ${r.status === "assigned" ? "ok" : "warn"}`}>{r.status}</span>
-                  ) : (
-                    <span className="pill err">failed</span>
-                  )}
-                </div>
-                {r.ok ? (
-                  <>
-                    <div className="small muted" style={{ marginTop: 4 }}>
-                      {r.participant_name ? `Matched to ${r.participant_name}` : "No match — appears in manual review queue."}
-                    </div>
-                    {r.source_url && (
-                      <video
-                        src={r.source_url}
-                        controls
-                        playsInline
-                        preload="metadata"
-                        style={{ width: "100%", maxWidth: 480, marginTop: 8, borderRadius: 8, background: "#000" }}
-                      />
-                    )}
-                  </>
-                ) : (
-                  <div className="err-text small" style={{ marginTop: 4 }}>{r.error}</div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

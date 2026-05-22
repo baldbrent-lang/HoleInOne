@@ -1,18 +1,40 @@
 import { Link } from "react-router-dom";
 import useAuth from "../hooks/useAuth.js";
 
+// Brand logo lives at frontend/public/golfreelz-logo.png so Vite serves
+// it as /golfreelz-logo.png. The PNG includes the GR + golfer monogram
+// AND the GolfReelz wordmark, so we don't render a separate <h1> text
+// label next to it anymore.
+const LOGO_URL = "/golfreelz-logo.png";
+
 export function Brand({ subtitle, hideAccount }) {
   const { user, logout } = useAuth();
   return (
     <div className="brand" style={{ justifyContent: "space-between", width: "100%" }}>
-      <Link to="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none", color: "inherit" }}>
-        <div className="logo" aria-hidden="true">
-          <FlagIcon />
+      <Link
+        to="/"
+        style={{ display: "flex", alignItems: "center", gap: 14, textDecoration: "none", color: "inherit" }}
+      >
+        {/* Source PNG has ~20% whitespace top/bottom. Wrap with
+            overflow:hidden so we display the tight logo content
+            cropped to ~60px tall while the underlying img renders at
+            100px — the 20px on each side gets clipped. */}
+        <div
+          aria-hidden="false"
+          style={{
+            height: 60,
+            overflow: "hidden",
+            display: "flex",
+            alignItems: "center",
+          }}
+        >
+          <img
+            src={LOGO_URL}
+            alt="GolfReelz"
+            style={{ height: 100, width: "auto", display: "block" }}
+          />
         </div>
-        <div>
-          <h1>GolfReelz</h1>
-          {subtitle && <div className="tag">{subtitle}</div>}
-        </div>
+        {subtitle && <div className="tag">{subtitle}</div>}
       </Link>
       {!hideAccount && (
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -37,6 +59,8 @@ export function Brand({ subtitle, hideAccount }) {
   );
 }
 
+// Kept for backward compatibility with any code that imports FlagIcon
+// directly. The header now uses the full PNG logo (see Brand above).
 export function FlagIcon({ size = 20 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">

@@ -1,0 +1,16 @@
+# Pi capture agent runtime deps.
+# OpenCV reads from the camera + writes MP4 files.
+# Requests handles backend HTTP calls.
+# PyYAML loads config.yaml.
+# MediaPipe runs person detection on the tee side — optional; the
+# agent falls back to a motion-density detector when it's not
+# importable (useful on ARMv7 / minimal Pi OS installs).
+opencv-python-headless==4.10.0.84
+numpy>=1.26,<3
+requests>=2.31,<3
+PyYAML>=6.0,<7
+
+# MediaPipe wheels are available for ARM64 Raspberry Pi OS (Pi 4 + 5).
+# On Pi 3 / armv7 you may need to drop this and accept the fallback
+# motion detector.
+mediapipe>=0.10.18; platform_machine == "aarch64" or platform_machine == "x86_64"

@@ -49,12 +49,22 @@ export default function OperatorDashboard() {
   return (
     <div className="wrap wide">
       <div className="brand" style={{ justifyContent: "space-between", width: "100%" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div className="logo"><Icon name="flag" /></div>
-          <div>
-            <h1>GolfReelz</h1>
-            <div className="tag">{data.course.name} · operator</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div
+            style={{
+              height: 60,
+              overflow: "hidden",
+              display: "flex",
+              alignItems: "center",
+            }}
+          >
+            <img
+              src="/golfreelz-logo.png"
+              alt="GolfReelz"
+              style={{ height: 100, width: "auto", display: "block" }}
+            />
           </div>
+          <div className="tag">{data.course.name} · operator</div>
         </div>
         <button className="ghost small" onClick={logout} style={{ width: "auto" }}>Sign out</button>
       </div>

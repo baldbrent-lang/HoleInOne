@@ -1,0 +1,130 @@
+# GolfReelz Pi capture agent — per-device config.
+# Copy this file to config.yaml and edit the values for THIS Pi.
+# The auth_token determines whether this device runs tee-side
+# (person detection + recording) or green-side (long-poll + recording)
+# logic — the backend tells us at the first heartbeat.
+
+# ---------------------------------------------------------------------
+# Backend connection
+# ---------------------------------------------------------------------
+
+backend_url: "https://your-deployment.replit.dev"
+
+# The auth_token visible on /admin/cameras for this device. Can also
+# be supplied via the GOLFREELZ_AUTH_TOKEN env var (overrides this
+# file value) so you don't have to commit it to the SD card.
+auth_token: "cam_REPLACE_ME"
+
+# ---------------------------------------------------------------------
+# Camera source
+# ---------------------------------------------------------------------
+
+camera:
+  # "auto" tries /dev/video0..3 and picks the first that opens. Or
+  # specify a device path like "/dev/video0" or an integer index "0".
+  device: "auto"
+  # Capture resolution. GoPro Hero 13 USB-webcam mode is 1080p30.
+  # Pi HQ Cam supports up to 4056x3040 but a Pi 5 will struggle at
+  # full res; 1080p30 is the sweet spot for either camera.
+  width: 1920
+  height: 1080
+  fps: 30
+
+# ---------------------------------------------------------------------
+# Tee-side ONLY: where in the camera's frame the "tee box" lives.
+# Pixel coords in the captured frame (origin top-left). Find them by:
+#   1. ssh into the Pi
+#   2. python3 -c "import cv2; cap=cv2.VideoCapture(0); ok,f=cap.read(); cv2.imwrite('frame.jpg',f)"
+#   3. open frame.jpg locally, draw a rectangle around the tee
+#      markers in your image editor, note the pixel coords.
+# Green cameras can leave this commented out.
+# ---------------------------------------------------------------------
+
+tee_box_roi:
+  x: 600
+  y: 400
+  w: 700
+  h: 500
+
+# ---------------------------------------------------------------------
+# Detection (tee-side only)
+# ---------------------------------------------------------------------
+
+detection:
+  # How often to run the person detector (Hz). Lower = less CPU.
+  # 5 fps is plenty for "is a person standing there for >=2 s".
+  fps: 5
+  # Person must be inside the ROI for this many seconds before we
+  # consider it a real address-position (filters cart drive-bys).
+  trigger_dwell_seconds: 2
+  # After the trigger, keep recording until no person is seen for
+  # this many seconds. Includes the follow-through + walk-off.
+  no_person_timeout_seconds: 5
+  # Frame is downsampled to this width before the pose model sees it.
+  # Smaller = faster but less reliable at distance. 320 px works
+  # well for a person at ~5-15 m.
+  detect_width: 320
+
+# ---------------------------------------------------------------------
+# Buffers / recording
+# ---------------------------------------------------------------------
+
+# How many seconds of pre-roll to keep in RAM. The trigger commits
+# this buffer first so the address frame and backswing are captured.
+buffer_seconds: 5
+
+# Runaway-safety cap on a single session's clip length. A session
+# normally ends when the tee box has been empty for
+# detection.no_person_timeout_seconds; this cap is only hit if the
+# stop signal never arrives (tee crash, network split, detector
+# misclassification). 600 s = 10 min covers a slow foursome.
+max_clip_seconds: 600
+
+# Green-side only: how often to ask the backend whether the tee has
+# signalled end-of-session. Lower = green stops closer to the tee but
+# more HTTP traffic. 1 s is a good balance.
+stop_poll_interval_seconds: 1.0
+
+# ---------------------------------------------------------------------
+# Audio (both sides)
+# ---------------------------------------------------------------------
+# Captured in parallel with each recording via `arecord` (alsa-utils)
+# and muxed into the MP4 with ffmpeg before upload. Best-effort: if
+# arecord isn't installed or the device can't be opened, the agent
+# falls back to silent video.
+
+audio:
+  enabled: true
+  # ALSA capture device. Leave unset (or set to null) to auto-detect:
+  # the agent looks in /proc/asound/cards for a GoPro / HERO / UVC /
+  # USB-Audio card and picks the first match. Hardcode if you have
+  # multiple USB audio devices and auto-detect picks the wrong one:
+  #   device: "plughw:CARD=HERO13Black"
+  # List candidates with:
+  #   arecord -L
+  device: null
+  sample_rate: 44100
+  channels: 1   # mono is plenty for swing impact + ambience
+
+# ---------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------
+
+# Heartbeat cadence (s). Backend's offline alert watches last_seen_at.
+heartbeat_seconds: 60
+
+# Long-poll timeout for the green Pi waiting for a trigger. Below
+# typical LTE / Replit-proxy idle timeouts (~30 s).
+poll_timeout_seconds: 25
+
+# ---------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------
+
+# Local working directory for in-flight recordings. Default /tmp is
+# fine for a Pi with tmpfs; if you want recordings to survive a
+# reboot mid-upload, point this at a writable SD-card path.
+work_dir: "/tmp/golfreelz-agent"
+
+# Log verbosity. INFO covers normal operation; DEBUG is loud.
+log_level: "INFO"

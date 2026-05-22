@@ -2,7 +2,8 @@
 // origin as the SPA, so the base URL is empty. In local dev the Vite
 // server runs on a different port, so fall back to localhost:8000.
 const API_BASE =
-  import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? "http://localhost:8000" : "");
+  import.meta.env.VITE_API_BASE ??
+  (import.meta.env.DEV ? "http://localhost:8000" : "");
 
 const USER_TOKEN_STORAGE = "golfreelz.userToken";
 const OPERATOR_TOKEN_STORAGE = "golfreelz.operatorToken";
@@ -33,26 +34,40 @@ async function operatorRequest(path) {
   return res.json();
 }
 
-async function request(path, { method = "GET", body, adminPassword, auth = true, timeoutMs } = {}) {
-  const headers = { "Content-Type": "application/json" };
+async function request(
+  path,
+  { method = "GET", body, adminPassword, auth = true, timeoutMs } = {},
+) {
+  // FormData bodies get sent as multipart/form-data — the browser
+  // sets the Content-Type (incl. the boundary) automatically when we
+  // *don't* set it ourselves. JSON-style bodies keep the explicit
+  // application/json header.
+  const isFormData =
+    typeof FormData !== "undefined" && body instanceof FormData;
+  const headers = {};
+  if (!isFormData) headers["Content-Type"] = "application/json";
   if (adminPassword) headers["X-Admin-Password"] = adminPassword;
   if (auth) {
     const t = getUserToken();
     if (t) headers["Authorization"] = `Bearer ${t}`;
   }
   const controller = timeoutMs ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const timer = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : null;
   let res;
   try {
     res = await fetch(`${API_BASE}${path}`, {
       method,
       headers,
-      body: body ? JSON.stringify(body) : undefined,
+      body: !body ? undefined : isFormData ? body : JSON.stringify(body),
       signal: controller?.signal,
     });
   } catch (e) {
     if (e.name === "AbortError") {
-      throw new Error(`request timed out after ${Math.round(timeoutMs / 1000)}s`);
+      throw new Error(
+        `request timed out after ${Math.round(timeoutMs / 1000)}s`,
+      );
     }
     throw e;
   } finally {
@@ -69,21 +84,37 @@ async function request(path, { method = "GET", body, adminPassword, auth = true,
 }
 
 export const api = {
+  startWatchingCamera: (key, id) =>
+    request(`/api/admin/cameras/${id}/watch`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  stopWatchingCamera: (key, id) =>
+    request(`/api/admin/cameras/${id}/watch`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
+  cameraLiveFrameUrl: (id) => `${API_BASE}/api/admin/cameras/${id}/live-frame`,
   listPublicCourses: () => request(`/api/public/courses`),
   stripeConfig: () => request(`/api/public/stripe-config`, { auth: false }),
-  inviteInfo: (token) => request(`/api/public/invite/${token}`, { auth: false }),
+  inviteInfo: (token) =>
+    request(`/api/public/invite/${token}`, { auth: false }),
   inviteSelfie: async (token, file) => {
     const fd = new FormData();
     fd.append("selfie", file, file.name || "selfie.jpg");
     const res = await fetch(`${API_BASE}/api/public/invite/${token}/selfie`, {
-      method: "POST", body: fd,
+      method: "POST",
+      body: fd,
     });
     if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
     return res.json();
   },
   listShowcase: () => request(`/api/public/showcase`),
   publicStats: () => request(`/api/public/stats`, { auth: false }),
-  leaderboards: (limit) => request(`/api/public/leaderboards${limit ? `?limit=${limit}` : ""}`, { auth: false }),
+  leaderboards: (limit) =>
+    request(`/api/public/leaderboards${limit ? `?limit=${limit}` : ""}`, {
+      auth: false,
+    }),
   contests: () => request(`/api/public/contests`, { auth: false }),
   broadcastNext: (viewerId, courseId) => {
     const qs = new URLSearchParams({ viewer_id: viewerId });
@@ -91,19 +122,30 @@ export const api = {
     return request(`/api/broadcast/next?${qs}`, { auth: false });
   },
   tagHighlight: (key, clipId, tag) =>
-    request(`/api/broadcast/admin/clips/${clipId}/highlight${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`, {
-      method: "POST", adminPassword: key,
-    }),
+    request(
+      `/api/broadcast/admin/clips/${clipId}/highlight${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`,
+      {
+        method: "POST",
+        adminPassword: key,
+      },
+    ),
   untagHighlight: (key, clipId) =>
     request(`/api/broadcast/admin/clips/${clipId}/highlight`, {
-      method: "DELETE", adminPassword: key,
+      method: "DELETE",
+      adminPassword: key,
     }),
   autoTagHighlights: (key) =>
-    request(`/api/broadcast/admin/auto-tag`, { method: "POST", adminPassword: key }),
-  publicProfile: (userId) => request(`/api/public/profile/${userId}`, { auth: false }),
+    request(`/api/broadcast/admin/auto-tag`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  publicProfile: (userId) =>
+    request(`/api/public/profile/${userId}`, { auth: false }),
   setOperatorPassword: (key, courseId, password) =>
     request(`/api/admin/courses/${courseId}/operator-password`, {
-      method: "POST", body: { password }, adminPassword: key,
+      method: "POST",
+      body: { password },
+      adminPassword: key,
     }),
   operatorLogin: ({ course_token, password }) =>
     fetch(`${API_BASE}/api/operator/login`, {
@@ -117,24 +159,35 @@ export const api = {
   operatorMe: () => operatorRequest(`/api/operator/me`),
   operatorDashboard: () => operatorRequest(`/api/operator/dashboard`),
   operatorParticipants: () => operatorRequest(`/api/operator/participants`),
-  adminListShowcase: (key) => request(`/api/admin/showcase`, { adminPassword: key }),
+  adminListShowcase: (key) =>
+    request(`/api/admin/showcase`, { adminPassword: key }),
   updateShowcase: (key, position, payload) =>
     request(`/api/admin/showcase/${position}`, {
-      method: "PATCH", body: payload, adminPassword: key,
+      method: "PATCH",
+      body: payload,
+      adminPassword: key,
     }),
   clearShowcase: (key, position) =>
-    request(`/api/admin/showcase/${position}`, { method: "DELETE", adminPassword: key }),
+    request(`/api/admin/showcase/${position}`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
   uploadShowcase: (key, position, formData, onProgress) =>
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE}/api/admin/showcase/${position}/upload`);
       xhr.setRequestHeader("X-Admin-Password", key);
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+        if (e.lengthComputable && onProgress)
+          onProgress(Math.round((e.loaded / e.total) * 100));
       };
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
         } else {
           reject(new Error(`${xhr.status}: ${xhr.responseText}`));
         }
@@ -144,7 +197,9 @@ export const api = {
     }),
   courseByToken: (token) => request(`/api/public/courses/${token}`),
   teeTimes: (token, date) =>
-    request(`/api/public/courses/${token}/tee-times${date ? `?date=${date}` : ""}`),
+    request(
+      `/api/public/courses/${token}/tee-times${date ? `?date=${date}` : ""}`,
+    ),
   register: async (formData) => {
     const headers = {};
     const t = getUserToken();
@@ -162,54 +217,484 @@ export const api = {
   },
 
   // ---- User auth ----
-  signup: (payload) => request(`/api/auth/signup`, { method: "POST", body: payload, auth: false }),
-  login: (payload) => request(`/api/auth/login`, { method: "POST", body: payload, auth: false }),
+  signup: (payload) =>
+    request(`/api/auth/signup`, { method: "POST", body: payload, auth: false }),
+  login: (payload) =>
+    request(`/api/auth/login`, { method: "POST", body: payload, auth: false }),
   me: () => request(`/api/auth/me`),
   myRounds: () => request(`/api/auth/me/rounds`),
-  myRoundClips: (participantId) => request(`/api/auth/me/rounds/${participantId}/clips`),
+  myRoundClips: (participantId) =>
+    request(`/api/auth/me/rounds/${participantId}/clips`),
   selfieUrl: (path) => `${API_BASE}/uploads/${path}`,
 
   gallery: (token) => request(`/api/gallery/${token}`),
   flagClip: (token, clipId, note) =>
-    request(`/api/gallery/${token}/clips/${clipId}/flag`, { method: "POST", body: { note } }),
+    request(`/api/gallery/${token}/clips/${clipId}/flag`, {
+      method: "POST",
+      body: { note },
+    }),
 
   listCourses: (key) => request(`/api/admin/courses`, { adminPassword: key }),
-  createCourse: (key, payload) => request(`/api/admin/courses`, { method: "POST", body: payload, adminPassword: key }),
-  updateCourse: (key, id, payload) => request(`/api/admin/courses/${id}`, { method: "PATCH", body: payload, adminPassword: key }),
+  createCourse: (key, payload) =>
+    request(`/api/admin/courses`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
+  updateCourse: (key, id, payload) =>
+    request(`/api/admin/courses/${id}`, {
+      method: "PATCH",
+      body: payload,
+      adminPassword: key,
+    }),
   stats: (key) => request(`/api/admin/stats`, { adminPassword: key }),
-  flaggedClips: (key) => request(`/api/admin/flagged-clips`, { adminPassword: key }),
-  listAllClips: (key, limit = 100) =>
-    request(`/api/admin/clips?limit=${limit}`, { adminPassword: key }),
-  retryTracer: (key, clipId) =>
+  flaggedClips: (key) =>
+    request(`/api/admin/flagged-clips`, { adminPassword: key }),
+  listAllClips: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/clips?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
+  listBroadcastClips: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/broadcast-clips?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
+  setClipBroadcast: (key, clipId, broadcast) =>
+    request(`/api/admin/clips/${clipId}/broadcast`, {
+      method: "POST",
+      body: broadcast == null ? {} : { broadcast: !!broadcast },
+      adminPassword: key,
+    }),
+  deleteClip: (key, clipId) =>
+    request(`/api/admin/clips/${clipId}`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
+  listLongUploads: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/long-uploads?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
+
+  // ---- Camera-event production queue ----
+  listCameraEvents: (key, limit = 100, offset = 0) =>
+    request(
+      `/api/admin/camera-events?limit=${limit}&offset=${offset}`,
+      { adminPassword: key },
+    ),
+  reprocessCameraEvent: (key, eventId) =>
+    request(`/api/admin/camera-events/${eventId}/reprocess`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  deleteCameraEvent: (key, eventId) =>
+    request(`/api/admin/camera-events/${eventId}`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
+
+  // ---- Cameras (always-on capture devices) ----
+  listCameras: (key) => request(`/api/admin/cameras`, { adminPassword: key }),
+  createCamera: (key, { courseId, assignedHole, assignedRole, name }) => {
+    const fd = new FormData();
+    fd.append("course_id", String(courseId));
+    fd.append("assigned_hole", String(assignedHole));
+    fd.append("assigned_role", assignedRole);
+    fd.append("name", name || "");
+    return request(`/api/admin/cameras`, {
+      method: "POST",
+      adminPassword: key,
+      body: fd,
+    });
+  },
+  pairCameras: (key, cameraId, partnerId) => {
+    const fd = new FormData();
+    fd.append("partner_id", String(partnerId));
+    return request(`/api/admin/cameras/${cameraId}/pair`, {
+      method: "POST",
+      adminPassword: key,
+      body: fd,
+    });
+  },
+  unpairCamera: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}/unpair`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  rotateCameraToken: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}/rotate-token`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  updateCamera: (key, cameraId, patch) => {
+    const fd = new FormData();
+    if (patch.name !== undefined) fd.append("name", patch.name || "");
+    if (patch.enabled !== undefined)
+      fd.append("enabled", patch.enabled ? "true" : "false");
+    if (patch.note !== undefined) fd.append("note", patch.note || "");
+    if (patch.teeBoxRoi !== undefined) {
+      fd.append("tee_box_roi", JSON.stringify(patch.teeBoxRoi));
+    }
+    if (patch.courseId !== undefined)
+      fd.append("course_id", String(patch.courseId));
+    if (patch.assignedHole !== undefined)
+      fd.append("assigned_hole", String(patch.assignedHole));
+    if (patch.assignedRole !== undefined)
+      fd.append("assigned_role", patch.assignedRole);
+    return request(`/api/admin/cameras/${cameraId}/update`, {
+      method: "POST",
+      adminPassword: key,
+      body: fd,
+    });
+  },
+  deleteCamera: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
+  reprocessLongUpload: (key, uploadId, formData) =>
+    // Re-runs the segmenter + AI tracer + composite on a stored long
+    // upload. XHR-based so we get FormData support without rewriting
+    // the request helper.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(
+        "POST",
+        `${API_BASE}/api/admin/long-uploads/${uploadId}/reprocess`,
+      );
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(formData);
+    }),
+  deleteLongUpload: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
+  autoDetectLongUpload: (key, uploadId) =>
+    // Cheap detection (audio impact + one Claude handedness call).
+    // Typically returns in 5-10s; bump the helper's default timeout
+    // so the Edit-wizard spinner doesn't fall over on cold-start.
+    request(`/api/admin/long-uploads/${uploadId}/auto-detect`, {
+      method: "POST",
+      adminPassword: key,
+      timeoutMs: 90_000,
+    }),
+  detectSwingsForUpload: (key, uploadId) =>
+    // Multi-swing wizard: audio + motion swing detection only — no
+    // Claude calls. Returns the list of swing windows (start_frame
+    // / end_frame / address_frame / impact_frame per swing).
+    request(`/api/admin/long-uploads/${uploadId}/detect-swings`, {
+      method: "POST",
+      adminPassword: key,
+      timeoutMs: 90_000,
+    }),
+  getLongUploadFrame: (key, uploadId, frame) =>
+    request(`/api/admin/long-uploads/${uploadId}/frame?frame=${frame}`, {
+      adminPassword: key,
+      timeoutMs: 20_000,
+    }),
+  saveEditMetrics: (key, uploadId, patch) =>
+    request(`/api/admin/long-uploads/${uploadId}/edit-metrics`, {
+      method: "POST",
+      body: patch,
+      adminPassword: key,
+    }),
+  renderWizardTracer: (key, uploadId, overrides = {}) =>
+    // Heavy: runs the full ai-trace pipeline (address + handedness +
+    // impact + ball-track + tracer render). Bump timeout to a few
+    // minutes so we don't fall over on cold starts.
+    request(`/api/admin/long-uploads/${uploadId}/render-tracer`, {
+      method: "POST",
+      body: overrides,
+      adminPassword: key,
+      timeoutMs: 5 * 60_000,
+    }),
+  renderWizardTracerFast: (key, uploadId, payload = {}) =>
+    // cv2-only: merges manual_positions into the cached ball_track
+    // and re-renders the tracer overlay. No Claude calls.
+    request(`/api/admin/long-uploads/${uploadId}/render-tracer-fast`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+      timeoutMs: 90_000,
+    }),
+  finalizeWizardVideo: (key, uploadId, payload = {}) =>
+    request(`/api/admin/long-uploads/${uploadId}/finalize`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+      timeoutMs: 2 * 60_000,
+    }),
+  commitWizardClip: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/commit`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  processLongUploadSegment: (
+    key,
+    uploadId,
+    { holeNumber, startSec, endSec, aiTracerModel },
+  ) =>
+    // Synchronous endpoint that runs the full per-segment pipeline
+    // (real cut + AI tracer + composite + VideoClip row) on ONE
+    // detected window. Typically 30-90 s; allow up to 5 min before
+    // timing out so the request doesn't fall over on slow encoders.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(
+        "POST",
+        `${API_BASE}/api/admin/long-uploads/${uploadId}/process-segment`,
+      );
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 5 * 60 * 1000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 5 min"));
+      const fd = new FormData();
+      fd.append("hole_number", String(holeNumber));
+      fd.append("start_sec", String(startSec));
+      fd.append("end_sec", String(endSec));
+      if (aiTracerModel) fd.append("ai_tracer_model", aiTracerModel);
+      xhr.send(fd);
+    }),
+  testCutLongUpload: (key, uploadId, detector = "motion", opts = {}) =>
+    // Form-encoded POST so we get FastAPI's Form(...) parsing without
+    // needing the JSON path in request().
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(
+        "POST",
+        `${API_BASE}/api/admin/long-uploads/${uploadId}/test-cut`,
+      );
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      const fd = new FormData();
+      fd.append("detector", detector);
+      if (opts.audioMinPeakRatio != null) {
+        fd.append("audio_min_peak_ratio", String(opts.audioMinPeakRatio));
+      }
+      if (opts.motionRatio != null) {
+        fd.append("motion_ratio", String(opts.motionRatio));
+      }
+      if (opts.combinedPairWindowSec != null) {
+        fd.append(
+          "combined_pair_window_sec",
+          String(opts.combinedPairWindowSec),
+        );
+      }
+      if (opts.cutClips === false) {
+        fd.append("cut_clips", "false");
+      }
+      xhr.send(fd);
+    }),
+  retryTracer: (key, clipId, { sensitivity } = {}) =>
     // Tracer can run ~1-3 min on long clips. Time out at 4 min so the
     // UI doesn't spin forever if the server hangs or gets killed.
-    request(`/api/admin/clips/${clipId}/retry-tracer`, {
-      method: "POST", adminPassword: key, timeoutMs: 240_000,
+    // Optional `sensitivity` multiplier (>1 = looser, <1 = stricter)
+    // gets sent as a form param.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/clips/${clipId}/retry-tracer`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 240_000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 4 min"));
+      // Always send sensitivity (default 1.0) — FastAPI's multipart
+      // parser rejects an empty body with "There was an error parsing
+      // the body".
+      const fd = new FormData();
+      fd.append("sensitivity", String(sensitivity ?? 1.0));
+      xhr.send(fd);
     }),
+  audioImpactFrame: (key, clipId, { minRatio = 25 } = {}) =>
+    // Synchronous, cheap (~1-2 s): runs only the audio impact detector
+    // and grabs the matching frame as a JPG. Test harness for swapping
+    // the AI impact-pick / refine steps out of the production tracer.
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(
+        "POST",
+        `${API_BASE}/api/admin/clips/${clipId}/audio-impact-frame`,
+      );
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 30_000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 30 s"));
+      const fd = new FormData();
+      fd.append("min_ratio", String(minRatio));
+      xhr.send(fd);
+    }),
+  aiTrace: (key, clipId, modelOrOpts) => {
+    // Five Claude steps: address, handedness, rough impact, refined
+    // impact, ball-track. The track step is up to 60 parallel calls
+    // and dominates wall time (~30-60 s on a typical swing). Cap at
+    // 5 min so we don't time out the UI mid-track. Optional `model`
+    // overrides the backend default for per-clip A/B testing.
+    //
+    // Backwards-compatible signature: pass a string for just the
+    // model, or an object for model + manual-override params:
+    //   { model, impactFrameOverride, ballTrackMaxFrames,
+    //     ballAtRestX, ballAtRestY, manualBallPositions }
+    // `manualBallPositions` is an array of {frame, x, y} in NATIVE
+    // pixel coords of the source video.
+    const opts =
+      typeof modelOrOpts === "string"
+        ? { model: modelOrOpts }
+        : modelOrOpts || {};
+    const qs = opts.model ? `?model=${encodeURIComponent(opts.model)}` : "";
+    const hasOverrides =
+      opts.impactFrameOverride != null ||
+      opts.ballTrackMaxFrames != null ||
+      opts.ballAtRestX != null ||
+      opts.ballAtRestY != null ||
+      (opts.manualBallPositions && opts.manualBallPositions.length > 0) ||
+      (opts.handednessOverride && opts.handednessOverride !== "auto");
+
+    // Fast path: no overrides → use the existing JSON request helper.
+    if (!hasOverrides) {
+      return request(`/api/admin/clips/${clipId}/ai-trace${qs}`, {
+        method: "POST",
+        adminPassword: key,
+        timeoutMs: 300_000,
+      });
+    }
+
+    // Override path: hand-roll XHR with multipart FormData so the
+    // backend's Form(...) params parse cleanly.
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/clips/${clipId}/ai-trace${qs}`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.timeout = 300_000;
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.ontimeout = () => reject(new Error("timed out after 5 min"));
+      const fd = new FormData();
+      if (opts.impactFrameOverride != null) {
+        fd.append("impact_frame_override", String(opts.impactFrameOverride));
+      }
+      if (opts.ballTrackMaxFrames != null) {
+        fd.append("ball_track_max_frames", String(opts.ballTrackMaxFrames));
+      }
+      if (opts.ballAtRestX != null) {
+        fd.append("ball_at_rest_x", String(opts.ballAtRestX));
+      }
+      if (opts.ballAtRestY != null) {
+        fd.append("ball_at_rest_y", String(opts.ballAtRestY));
+      }
+      if (opts.manualBallPositions && opts.manualBallPositions.length > 0) {
+        fd.append(
+          "manual_ball_positions_json",
+          JSON.stringify(opts.manualBallPositions),
+        );
+      }
+      if (opts.handednessOverride && opts.handednessOverride !== "auto") {
+        fd.append("handedness_override", opts.handednessOverride);
+      }
+      xhr.send(fd);
+    });
+  },
   listParticipants: (key, params = {}) => {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
       if (v !== undefined && v !== null && v !== "") qs.set(k, v);
     });
-    return request(`/api/admin/participants${qs.toString() ? `?${qs}` : ""}`, { adminPassword: key });
-  },
-  participantClips: (key, id) => request(`/api/admin/participants/${id}/clips`, { adminPassword: key }),
-  assignClip: (key, clipId, participantId) =>
-    request(`/api/admin/clips/${clipId}/assign?participant_id=${participantId}`, {
-      method: "POST",
+    return request(`/api/admin/participants${qs.toString() ? `?${qs}` : ""}`, {
       adminPassword: key,
-    }),
+    });
+  },
+  participantClips: (key, id) =>
+    request(`/api/admin/participants/${id}/clips`, { adminPassword: key }),
+  assignClip: (key, clipId, participantId) =>
+    request(
+      `/api/admin/clips/${clipId}/assign?participant_id=${participantId}`,
+      {
+        method: "POST",
+        adminPassword: key,
+      },
+    ),
   uploadClip: (key, formData, onProgress) =>
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE}/api/admin/clips/upload`);
       xhr.setRequestHeader("X-Admin-Password", key);
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+        if (e.lengthComputable && onProgress)
+          onProgress(Math.round((e.loaded / e.total) * 100));
       };
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
         } else {
           reject(new Error(`${xhr.status}: ${xhr.responseText}`));
         }
@@ -223,11 +708,41 @@ export const api = {
       xhr.open("POST", `${API_BASE}/api/admin/clips/long-upload`);
       xhr.setRequestHeader("X-Admin-Password", key);
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+        if (e.lengthComputable && onProgress)
+          onProgress(Math.round((e.loaded / e.total) * 100));
       };
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) {
-          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`${xhr.status}: ${xhr.responseText}`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("network error"));
+      xhr.send(formData);
+    }),
+  // Simple upload backing /admin/upload — saves files, creates a
+  // queued LongVideoUpload row, does NOT start processing.
+  quickUploadVideos: (key, formData, onProgress) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/admin/clips/quick-upload`);
+      xhr.setRequestHeader("X-Admin-Password", key);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress)
+          onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
         } else {
           reject(new Error(`${xhr.status}: ${xhr.responseText}`));
         }
@@ -236,18 +751,35 @@ export const api = {
       xhr.send(formData);
     }),
   resendGallery: (key, id) =>
-    request(`/api/admin/participants/${id}/resend-gallery`, { method: "POST", adminPassword: key }),
-  refundParticipant: (key, id) =>
-    request(`/api/admin/participants/${id}/refund`, { method: "POST", adminPassword: key }),
-  sendRoundSummary: (key, id, force = false) =>
-    request(`/api/admin/participants/${id}/send-summary${force ? "?force=true" : ""}`, {
-      method: "POST", adminPassword: key,
+    request(`/api/admin/participants/${id}/resend-gallery`, {
+      method: "POST",
+      adminPassword: key,
     }),
+  refundParticipant: (key, id) =>
+    request(`/api/admin/participants/${id}/refund`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  sendRoundSummary: (key, id, force = false) =>
+    request(
+      `/api/admin/participants/${id}/send-summary${force ? "?force=true" : ""}`,
+      {
+        method: "POST",
+        adminPassword: key,
+      },
+    ),
   sendTestEmail: (key, payload) =>
-    request(`/api/admin/test-email`, { method: "POST", body: payload, adminPassword: key }),
+    request(`/api/admin/test-email`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
   listHIO: (key, status) =>
-    request(`/api/admin/hio${status ? `?status=${status}` : ""}`, { adminPassword: key }),
-  hioDetail: (key, id) => request(`/api/admin/hio/${id}`, { adminPassword: key }),
+    request(`/api/admin/hio${status ? `?status=${status}` : ""}`, {
+      adminPassword: key,
+    }),
+  hioDetail: (key, id) =>
+    request(`/api/admin/hio/${id}`, { adminPassword: key }),
   hioDecide: (key, id, action, reviewer, note) =>
     request(`/api/admin/hio/${id}/decision`, {
       method: "POST",

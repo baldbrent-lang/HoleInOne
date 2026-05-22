@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from pathlib import Path
+
+# Silence the libav decoder inside cv2 before any service module
+# imports cv2. The Pi's cv2.VideoWriter-with-mp4v output contains
+# minor bitstream quirks that libav's H.264 decoder logs as NAL-unit
+# warnings on every frame. Production still produces the right
+# composite, but the warnings flood uvicorn's stderr at 30 fps × N
+# clips. -8 = AV_LOG_QUIET — caught at first FFmpeg backend init,
+# so this has to land before any cv2.VideoCapture call.
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +23,19 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
 from .database import Base, engine
-from .routers import admin, auth, broadcast, gallery, operator, public, webhooks
+from .routers import admin, auth, broadcast, cameras, gallery, operator, public, webhooks
+
+# Our internal loggers (`golfreelz.tracer`, `golfreelz.admin`, etc.) default to
+# WARNING and uvicorn doesn't configure them, so INFO diagnostics were never
+# making it to the Replit console. Attach a stdout handler at INFO once at
+# import time so retry / encode / heatmap stats show up next to uvicorn's own
+# request logs.
+_glog = logging.getLogger("golfreelz")
+_glog.setLevel(logging.INFO)
+if not _glog.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _glog.addHandler(_h)
 
 app = FastAPI(title="GolfReelz API", version="0.1.0")
 
@@ -70,6 +93,44 @@ def _migrate() -> None:
         if "operator_password_hash" not in course_cols:
             statements.append("ALTER TABLE courses ADD COLUMN operator_password_hash VARCHAR(200)")
 
+    # LongVideoUpload additions — background-job UX fields.
+    if "long_video_uploads" in inspector.get_table_names():
+        lvu_cols = {c["name"] for c in inspector.get_columns("long_video_uploads")}
+        if "processing_status" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN processing_status VARCHAR(20) DEFAULT 'completed'"
+            )
+            # Existing rows predate the background-job flow — backfill as
+            # completed so the UI doesn't flag them as stuck.
+            statements.append(
+                "UPDATE long_video_uploads SET processing_status = 'completed' WHERE processing_status IS NULL"
+            )
+        if "processing_started_at" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN processing_started_at TIMESTAMP"
+            )
+        if "processing_completed_at" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN processing_completed_at TIMESTAMP"
+            )
+        if "last_error" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN last_error TEXT"
+            )
+        if "swing_count" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN swing_count VARCHAR(20) DEFAULT 'multiple'"
+            )
+            statements.append(
+                "UPDATE long_video_uploads SET swing_count = 'multiple' WHERE swing_count IS NULL"
+            )
+        if "edit_metrics" not in lvu_cols:
+            statements.append("ALTER TABLE long_video_uploads ADD COLUMN edit_metrics JSON")
+        if "camera_event_id" not in lvu_cols:
+            statements.append(
+                "ALTER TABLE long_video_uploads ADD COLUMN camera_event_id INTEGER"
+            )
+
     # VideoClip additions
     if "video_clips" in inspector.get_table_names():
         clip_cols = {c["name"] for c in inspector.get_columns("video_clips")}
@@ -79,12 +140,26 @@ def _migrate() -> None:
             statements.append("ALTER TABLE video_clips ADD COLUMN distance_from_pin_feet INTEGER")
         if "tracer_url" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN tracer_url TEXT")
+        if "tee_clip_url" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN tee_clip_url TEXT")
         if "is_highlight" not in clip_cols:
             # SQLite allows BOOLEAN; Postgres treats it as BOOLEAN natively.
             statements.append("ALTER TABLE video_clips ADD COLUMN is_highlight BOOLEAN DEFAULT FALSE")
             statements.append("UPDATE video_clips SET is_highlight = FALSE WHERE is_highlight IS NULL")
         if "highlight_tag" not in clip_cols:
             statements.append("ALTER TABLE video_clips ADD COLUMN highlight_tag VARCHAR(60)")
+        if "long_upload_id" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN long_upload_id INTEGER")
+        if "tracer_diagnostics" not in clip_cols:
+            statements.append("ALTER TABLE video_clips ADD COLUMN tracer_diagnostics JSON")
+
+    # CameraEvent additions
+    if "camera_events" in inspector.get_table_names():
+        ce_cols = {c["name"] for c in inspector.get_columns("camera_events")}
+        if "stop_signal_at" not in ce_cols:
+            statements.append(
+                "ALTER TABLE camera_events ADD COLUMN stop_signal_at TIMESTAMP"
+            )
 
     if not statements:
         return
@@ -97,8 +172,59 @@ def _migrate() -> None:
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate()
+    _remove_retired_courses()
     _seed_default_courses()
     _seed_showcase_slots()
+
+
+# Demo courses previously seeded into the DB that we no longer want shown
+# anywhere. Safe to leave indefinitely — the deletion silently skips any
+# course that still has dependent rows (bookings, cameras, etc).
+_RETIRED_COURSE_NAMES = ("Kiawah Island",)
+
+
+def _remove_retired_courses() -> None:
+    from .database import SessionLocal
+    from .models import Course
+
+    # Leaves first, course last. Each statement is a no-op if there's
+    # nothing to delete, so the whole block is idempotent.
+    cascade_sql = [
+        "DELETE FROM broadcast_views WHERE course_id = :c "
+        "OR clip_id IN (SELECT id FROM video_clips WHERE course_id = :c)",
+        "DELETE FROM camera_events WHERE course_id = :c",
+        "DELETE FROM hole_in_one_events WHERE "
+        "participant_id IN (SELECT p.id FROM participants p "
+        "JOIN tee_times t ON p.tee_time_id = t.id WHERE t.course_id = :c) "
+        "OR tee_clip_id  IN (SELECT id FROM video_clips WHERE course_id = :c) "
+        "OR wide_clip_id IN (SELECT id FROM video_clips WHERE course_id = :c) "
+        "OR hole_clip_id IN (SELECT id FROM video_clips WHERE course_id = :c)",
+        "DELETE FROM video_clips WHERE course_id = :c",
+        "DELETE FROM cameras WHERE course_id = :c",
+        "DELETE FROM long_video_uploads WHERE course_id = :c",
+        "DELETE FROM participants WHERE tee_time_id IN "
+        "(SELECT id FROM tee_times WHERE course_id = :c)",
+        "DELETE FROM tee_times WHERE course_id = :c",
+        "DELETE FROM courses WHERE id = :c",
+    ]
+
+    db = SessionLocal()
+    try:
+        for name in _RETIRED_COURSE_NAMES:
+            row = db.query(Course).filter(Course.name == name).first()
+            if not row:
+                continue
+            cid = row.id
+            try:
+                for stmt in cascade_sql:
+                    db.execute(text(stmt), {"c": cid})
+                db.commit()
+                _glog.info("removed retired course %r (id=%s) and dependents", name, cid)
+            except Exception as exc:
+                db.rollback()
+                _glog.warning("failed to remove retired course %r: %s", name, exc)
+    finally:
+        db.close()
 
 
 def _seed_showcase_slots() -> None:
@@ -138,13 +264,6 @@ def _seed_default_courses() -> None:
             "hole_yardages": {"5": 195, "7": 106, "12": 202, "17": 178},
             "minutes_per_hole": 14,
         },
-        {
-            "name": "Kiawah Island",
-            "location": "Kiawah Island, SC",
-            "par3_holes": [5, 8, 14, 17],
-            "hole_yardages": {"5": 207, "8": 197, "14": 194, "17": 221},
-            "minutes_per_hole": 14,
-        },
     ]
     db = SessionLocal()
     try:
@@ -170,6 +289,7 @@ app.include_router(admin.router)
 app.include_router(auth.router)
 app.include_router(operator.router)
 app.include_router(broadcast.router)
+app.include_router(cameras.router)
 
 
 # --- Uploads (selfies) -------------------------------------------------------

@@ -61,11 +61,13 @@ export default function AdminReview() {
       <Brand subtitle="Operator Console" />
       <div className="nav">
         <Link to="/admin">Dashboard</Link>
-        <Link to="/admin/participants">Participants</Link>
-        <Link to="/admin/upload">Upload clip</Link>
-        <Link to="/admin/long-upload">Long upload</Link>
-        <Link to="/admin/showcase">Home videos</Link>
-        <Link to="/admin/review" className="active">Hole-in-one review</Link>
+        <Link to="/admin/participants">Players</Link>
+        <Link to="/admin/courses">Courses</Link>
+        <Link to="/admin/upload-videos">Upload</Link>
+        <Link to="/admin/production">Production</Link>
+        <Link to="/admin/produced-clips">Produced Clips</Link>
+        <Link to="/admin/broadcast-clips">Broadcast</Link>
+        <Link to="/admin/cameras">Cameras</Link>
       </div>
 
       {error && <div className="card" style={{ color: "var(--danger)" }}>{error}</div>}

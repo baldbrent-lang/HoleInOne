@@ -8,6 +8,13 @@ import AdminReview from "./pages/AdminReview.jsx";
 import AdminUpload from "./pages/AdminUpload.jsx";
 import AdminLongUpload from "./pages/AdminLongUpload.jsx";
 import AdminClips from "./pages/AdminClips.jsx";
+import AdminClipsAi from "./pages/AdminClipsAi.jsx";
+import AdminBroadcastClips from "./pages/AdminBroadcastClips.jsx";
+import AdminCameras from "./pages/AdminCameras.jsx";
+import AdminUploadVideos from "./pages/AdminUploadVideos.jsx";
+import AdminProduction from "./pages/AdminProduction.jsx";
+import AdminProducedClips from "./pages/AdminProducedClips.jsx";
+import AdminCourses from "./pages/AdminCourses.jsx";
 import AdminShowcase from "./pages/AdminShowcase.jsx";
 import Login from "./pages/Login.jsx";
 import Signup from "./pages/Signup.jsx";
@@ -67,6 +74,13 @@ export default function App() {
         <Route path="/admin/upload" element={<AdminUpload />} />
         <Route path="/admin/long-upload" element={<AdminLongUpload />} />
         <Route path="/admin/clips" element={<AdminClips />} />
+        <Route path="/admin/clips/ai" element={<AdminClipsAi />} />
+        <Route path="/admin/broadcast-clips" element={<AdminBroadcastClips />} />
+        <Route path="/admin/cameras" element={<AdminCameras />} />
+        <Route path="/admin/upload-videos" element={<AdminUploadVideos />} />
+        <Route path="/admin/production" element={<AdminProduction />} />
+        <Route path="/admin/produced-clips" element={<AdminProducedClips />} />
+        <Route path="/admin/courses" element={<AdminCourses />} />
         <Route path="/admin/showcase" element={<AdminShowcase />} />
         <Route path="/admin/review" element={<AdminReview />} />
         <Route

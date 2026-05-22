@@ -27,7 +27,7 @@ const DOCS = {
       ["Can I get a refund?",
         "Yes — if we don't deliver any matched clips after your round, we refund automatically within 5 business days. If matching was incomplete, we refund pro-rata."],
       ["Which courses are supported?",
-        "Currently Maridoe Golf Club (Carrollton, TX), Pebble Beach (CA), and Kiawah Island (SC). Want your course added? Email hello@golfreelz.com."],
+        "Currently Maridoe Golf Club (Carrollton, TX) and Pebble Beach (CA). Want your course added? Email hello@golfreelz.com."],
     ],
   },
 
