@@ -957,6 +957,12 @@ function WizardBody({
     return Math.max(0, Math.min(max, (cur || 0) + delta));
   }
 
+  function clampedJump(absolute) {
+    const max = (navTotal ?? totalFrames ?? 1) - 1;
+    const n = Number.isFinite(absolute) ? absolute : 0;
+    return Math.max(0, Math.min(max, n));
+  }
+
   let leftImageUrl = draft.addressImageUrl;
   let leftFrameLabel = `Address frame · ${draft.addressFrame}`;
   const showFrameNav = FRAME_PICK_MODES.has(editing);
@@ -1069,6 +1075,7 @@ function WizardBody({
             total={navTotal}
             loading={navLoading}
             onStep={(delta) => loadFrame(clampedStep(delta))}
+            onJump={(n) => loadFrame(clampedJump(n))}
             onApply={() => {
               if (navFrame == null) return;
               const url = navUrl || draft.addressImageUrl;
@@ -1092,6 +1099,7 @@ function WizardBody({
             total={navTotal}
             loading={navLoading}
             onStep={(delta) => loadFrame(clampedStep(delta))}
+            onJump={(n) => loadFrame(clampedJump(n))}
             onApply={() => {
               if (navFrame == null) return;
               setDraft((d) => ({ ...d, impactFrame: navFrame }));
@@ -1111,17 +1119,42 @@ function WizardBody({
         >
           <div className="tiny muted" style={{ marginBottom: 6 }}>
             Step backward / forward to trim the clip in. Defaults to
-            the start of the source (frame 0).
+            the start of the source (frame 0). Address / impact frames
+            below the new start are bumped forward to match.
           </div>
           <FrameStepper
             current={navFrame}
             total={navTotal}
             loading={navLoading}
             onStep={(delta) => loadFrame(clampedStep(delta))}
+            onJump={(n) => loadFrame(clampedJump(n))}
             onApply={() => {
               if (navFrame == null) return;
-              setDraft((d) => ({ ...d, startFrame: navFrame }));
-              persistPatch({ start_frame: navFrame });
+              const newStart = navFrame;
+              // Auto-bump address / impact when the operator picks a
+              // start frame past them — keeps the wizard's frame order
+              // sane (start ≤ address ≤ impact) without forcing an
+              // extra round-trip to re-pick them. End frame is left
+              // alone; an operator who deliberately set a short clip
+              // can re-trim.
+              setDraft((d) => {
+                const next = { ...d, startFrame: newStart };
+                if (d.addressFrame != null && d.addressFrame < newStart) {
+                  next.addressFrame = newStart;
+                }
+                if (d.impactFrame != null && d.impactFrame < newStart) {
+                  next.impactFrame = newStart;
+                }
+                return next;
+              });
+              const patch = { start_frame: newStart };
+              if (draft.addressFrame != null && draft.addressFrame < newStart) {
+                patch.address_frame = newStart;
+              }
+              if (draft.impactFrame != null && draft.impactFrame < newStart) {
+                patch.impact_frame = newStart;
+              }
+              persistPatch(patch);
               setEditing(null);
             }}
           />
@@ -1146,6 +1179,7 @@ function WizardBody({
             total={navTotal}
             loading={navLoading}
             onStep={(delta) => loadFrame(clampedStep(delta))}
+            onJump={(n) => loadFrame(clampedJump(n))}
             onApply={() => {
               if (navFrame == null) return;
               setDraft((d) => ({ ...d, endFrame: navFrame }));
@@ -1308,8 +1342,19 @@ function EditableRow({ label, value, active, onActivate, children }) {
   );
 }
 
-function FrameStepper({ current, total, loading, onStep, onApply }) {
+function FrameStepper({ current, total, loading, onStep, onJump, onApply }) {
   const disabled = loading || current == null;
+  const [jumpVal, setJumpVal] = useState("");
+  const maxFrame = total != null ? total - 1 : null;
+
+  function commitJump() {
+    if (jumpVal === "") return;
+    const n = parseInt(jumpVal, 10);
+    if (!Number.isFinite(n)) return;
+    onJump?.(n);
+    setJumpVal("");
+  }
+
   return (
     <div>
       <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
@@ -1325,6 +1370,30 @@ function FrameStepper({ current, total, loading, onStep, onApply }) {
         <button type="button" className="ghost" style={{ width: "auto" }}
           disabled={disabled} onClick={() => onStep(10)}>+10</button>
       </div>
+      {onJump && (
+        <div className="row" style={{ gap: 6, marginTop: 8, alignItems: "center" }}>
+          <input
+            type="number"
+            min="0"
+            max={maxFrame ?? undefined}
+            value={jumpVal}
+            onChange={(e) => setJumpVal(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitJump(); } }}
+            placeholder={maxFrame != null ? `Jump to frame (0–${maxFrame})` : "Jump to frame"}
+            disabled={loading}
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto" }}
+            disabled={loading || jumpVal === ""}
+            onClick={commitJump}
+          >
+            Go
+          </button>
+        </div>
+      )}
       <button
         type="button"
         style={{ width: "100%", marginTop: 8 }}
@@ -1904,10 +1973,18 @@ function TracerStep({
   }
 
   function addFrame(delta) {
+    // Advance from the operator's current view if they've already
+    // walked past the AI-tracked frames; otherwise start from the
+    // last AI-tracked frame. Without the selectedFrame fallback,
+    // repeated "+5 frames" clicks always anchored to the same AI
+    // max and stayed on the same target.
     const lastTracked = frames.length
       ? Math.max(...frames.map((f) => f.frame))
-      : (selectedFrame ?? 0);
-    const target = Math.max(0, Math.min(maxFrame ?? lastTracked + delta, lastTracked + delta));
+      : 0;
+    const base = selectedFrame != null
+      ? Math.max(selectedFrame, lastTracked)
+      : lastTracked;
+    const target = Math.max(0, Math.min(maxFrame ?? base + delta, base + delta));
     loadEditorFrame(target);
   }
 

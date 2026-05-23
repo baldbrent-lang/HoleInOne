@@ -3414,6 +3414,36 @@ def finalize_wizard_video(
     except Exception as exc:
         raise HTTPException(500, f"copy failed: {exc}")
 
+    # Trim the final to the operator's [start_frame, end_frame] window
+    # from Step 1. Skipped when both are unset (full clip). Done before
+    # the intro overlay so the graphics land at the new clip's start
+    # instead of getting trimmed off.
+    start_frame_saved = saved.get("start_frame")
+    end_frame_saved = saved.get("end_frame")
+    if start_frame_saved or end_frame_saved:
+        tracer_fps = float((saved.get("tracer_info") or {}).get("fps") or 0)
+        if tracer_fps <= 0:
+            tracer_fps = float(probe_fps(final_path) or 30.0)
+        start_sec = max(0.0, float(start_frame_saved or 0) / tracer_fps)
+        if end_frame_saved is not None:
+            end_sec = float(int(end_frame_saved) + 1) / tracer_fps
+        else:
+            duration = float((probe_video_info(final_path) or {}).get("duration") or 0.0)
+            end_sec = duration if duration > 0 else start_sec + 60.0
+        if end_sec > start_sec + 0.05:
+            trimmed_path = final_path.with_name(
+                final_path.stem + ".trim" + final_path.suffix
+            )
+            ok = cut_segment(final_path, trimmed_path, start_sec, end_sec)
+            if ok and trimmed_path.exists() and trimmed_path.stat().st_size > 0:
+                trimmed_path.replace(final_path)
+            else:
+                log.warning(
+                    "finalize: trim failed for upload %s "
+                    "(start_sec=%.2f end_sec=%.2f); using untrimmed final",
+                    upload_id, start_sec, end_sec,
+                )
+
     course = db.get(Course, row.course_id) if row.course_id else None
     course_name = course.name if course else ""
     hole_number = int(payload.get("hole_number") or 1)
