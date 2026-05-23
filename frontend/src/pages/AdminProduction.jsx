@@ -523,6 +523,37 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     }
   }
 
+  async function deleteSwing(index) {
+    // Drop a false-positive swing the detector picked up. Removes it
+    // from the swing list and persists. Re-hydrates the draft for
+    // whatever swing ends up selected afterward.
+    if (!isMulti) return;
+    if (swings.length <= 1) {
+      window.alert(
+        "Can't delete the only swing. Close the wizard and use Delete " +
+        "on the production card to remove the whole upload."
+      );
+      return;
+    }
+    if (!window.confirm(`Delete Swing ${index + 1}? It won't be produced.`)) {
+      return;
+    }
+    const next = swings.filter((_, i) => i !== index);
+    setSwings(next);
+    // Keep the selection pointing at a sane swing.
+    let nextSelected = selectedSwing;
+    if (index === selectedSwing) nextSelected = Math.max(0, index - 1);
+    else if (index < selectedSwing) nextSelected = selectedSwing - 1;
+    setSelectedSwing(nextSelected);
+    applySaved(next[nextSelected] || next[0] || {});
+    try {
+      const r = await api.saveEditMetrics(adminPassword, row.id, { swings: next });
+      onSaved?.(r);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
   async function handleNext() {
     // Persist current draft, then either reuse the cached tracer or
     // render a fresh one.
@@ -785,7 +816,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               swings={swings}
               selectedSwing={selectedSwing}
               setSelectedSwing={setSelectedSwing}
-              fps={fw && fh ? null : null /* fps not used here */}
+              onDeleteSwing={deleteSwing}
             />
           )}
           {!running && !detectingSwings && !error && draft && step === "metrics" && (
@@ -901,12 +932,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   );
 }
 
-function SwingSelectorBar({ swings, selectedSwing, setSelectedSwing }) {
+function SwingSelectorBar({ swings, selectedSwing, setSelectedSwing, onDeleteSwing }) {
   // Horizontal scroll of numbered swing chips. Sticky to the top of
   // the wizard body so the operator can switch between swings on
   // every step without losing context. Each chip shows the frame
   // window so it's obvious where in the source video that swing
-  // lives.
+  // lives, plus a × to drop a false-positive swing.
+  const canDelete = swings.length > 1;
   return (
     <div
       style={{
@@ -921,25 +953,50 @@ function SwingSelectorBar({ swings, selectedSwing, setSelectedSwing }) {
       {swings.map((sw, i) => {
         const active = i === selectedSwing;
         return (
-          <button
+          <div
             key={sw.idx ?? i}
-            type="button"
             className={active ? "" : "ghost"}
-            onClick={() => setSelectedSwing(i)}
             style={{
-              width: "auto", padding: "4px 10px",
+              display: "inline-flex", alignItems: "center", gap: 4,
+              padding: "4px 6px 4px 10px",
               flex: "0 0 auto", fontSize: "0.82rem",
+              border: "1px solid var(--border, #2a2a2a)",
+              borderRadius: 6,
+              background: active ? "var(--primary-soft, rgba(34,197,94,0.12))" : "transparent",
+              cursor: "pointer",
             }}
             title={`Frames ${sw.start_frame ?? "—"}–${sw.end_frame ?? "—"}`}
           >
-            Swing {i + 1}
-            <span
-              className="tiny"
-              style={{ marginLeft: 6, opacity: 0.75 }}
+            <button
+              type="button"
+              onClick={() => setSelectedSwing(i)}
+              style={{
+                width: "auto", padding: 0, background: "transparent",
+                border: "none", color: "inherit", cursor: "pointer",
+                fontWeight: active ? 600 : 400,
+              }}
             >
-              {sw.start_frame ?? "—"}–{sw.end_frame ?? "—"}
-            </span>
-          </button>
+              Swing {i + 1}
+              <span className="tiny" style={{ marginLeft: 6, opacity: 0.75 }}>
+                {sw.start_frame ?? "—"}–{sw.end_frame ?? "—"}
+              </span>
+            </button>
+            {canDelete && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onDeleteSwing?.(i); }}
+                title={`Delete Swing ${i + 1}`}
+                aria-label={`Delete Swing ${i + 1}`}
+                style={{
+                  width: "auto", padding: "0 4px", background: "transparent",
+                  border: "none", color: "var(--err, #dc2626)",
+                  cursor: "pointer", fontSize: "1rem", lineHeight: 1,
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
         );
       })}
     </div>
