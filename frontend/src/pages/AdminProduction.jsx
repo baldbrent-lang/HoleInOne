@@ -959,14 +959,23 @@ function WizardBody({
   const [navTotal, setNavTotal] = useState(totalFrames);
   const [navLoading, setNavLoading] = useState(false);
 
-  // Frame-pick modes: address, impact, start, end. Each seeds the
+  // Default cut frame (until manually set): 2.5 s after impact. The
+  // produced clip cuts from the tee tracer to the green camera here.
+  const fps = row?.tee_fps || 30;
+  const autoCutFrame = draft.impactFrame != null
+    ? Math.round(draft.impactFrame + 2.5 * fps)
+    : null;
+  const effectiveCutFrame = draft.cutFrame ?? autoCutFrame;
+
+  // Frame-pick modes: address, impact, start, end, cut. Each seeds the
   // navigator from the corresponding draft frame index when entered.
-  const FRAME_PICK_MODES = new Set(["address", "impact", "start", "end"]);
+  const FRAME_PICK_MODES = new Set(["address", "impact", "start", "end", "cut"]);
   const frameForMode = {
     address: draft.addressFrame,
     impact: draft.impactFrame,
     start: draft.startFrame ?? 0,
     end: draft.endFrame ?? (totalFrames ? totalFrames - 1 : 0),
+    cut: effectiveCutFrame ?? 0,
   };
 
   useEffect(() => {
@@ -1009,7 +1018,7 @@ function WizardBody({
     const total = navTotal != null ? ` / ${navTotal - 1}` : "";
     const labels = {
       address: "Address", impact: "Impact",
-      start: "Start", end: "End",
+      start: "Start", end: "End", cut: "Cut",
     };
     leftFrameLabel =
       `${labels[editing] || "Frame"} frame · ${navFrame ?? "—"}${total}`;
@@ -1203,15 +1212,16 @@ function WizardBody({
             label="Cut frame (→ green camera)"
             value={draft.cutFrame != null
               ? `Frame ${draft.cutFrame}`
-              : "Not set (tee only)"}
+              : (autoCutFrame != null
+                ? `Frame ${autoCutFrame} (auto: 2.5s after impact)`
+                : "Auto: 2.5s after impact")}
             active={editing === "cut"}
             onActivate={() => setEditing(editing === "cut" ? null : "cut")}
           >
             <div className="tiny muted" style={{ marginBottom: 6 }}>
               The produced clip plays the tee tracer up to this frame,
               then cuts to the green camera (which plays to the End
-              frame). Pick the moment the ball is leaving the top of
-              the tee frame.
+              frame). Defaults to 2.5s after impact until you set it.
             </div>
             <FrameStepper
               current={navFrame}
@@ -1237,7 +1247,7 @@ function WizardBody({
                   setEditing(null);
                 }}
               >
-                Clear (tee only, no cut)
+                Reset to auto (2.5s after impact)
               </button>
             )}
           </EditableRow>

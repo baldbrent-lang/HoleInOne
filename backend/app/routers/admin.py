@@ -3418,6 +3418,7 @@ def finalize_wizard_video(
     start_frame_saved = _pick_frame("start_frame")
     end_frame_saved = _pick_frame("end_frame")
     cut_frame_saved = _pick_frame("cut_frame")
+    impact_frame_saved = _pick_frame("impact_frame")
 
     # Frame → seconds. Frame indices are in the tee SOURCE's space, so
     # use the source fps (fall back to tracer_info, then 30).
@@ -3430,10 +3431,18 @@ def finalize_wizard_video(
 
     start_sec = max(0.0, float(start_frame_saved or 0) / fps)
     end_sec = float(int(end_frame_saved) + 1) / fps if end_frame_saved is not None else None
-    cut_sec = max(0.0, float(cut_frame_saved) / fps) if cut_frame_saved is not None else None
 
     green_path = CLIPS_DIR / row.green_filename if row.green_filename else None
     has_green = green_path is not None and green_path.exists()
+
+    # Cut point for the tee→green switch. Operator's manual value wins;
+    # otherwise default to 2.5s after impact (matches the wizard's
+    # displayed default). Only relevant when there's a green clip.
+    cut_sec = None
+    if cut_frame_saved is not None:
+        cut_sec = max(0.0, float(cut_frame_saved) / fps)
+    elif has_green and impact_frame_saved is not None:
+        cut_sec = max(0.0, float(impact_frame_saved) / fps + 2.5)
 
     built = False
     # Dual-camera cut: tee tracer [start, cut] then green [cut, end].
