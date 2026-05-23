@@ -320,6 +320,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       impactFrame: s.impact_frame ?? 0,
       startFrame: s.start_frame ?? null,
       endFrame: s.end_frame ?? null,
+      cutFrame: s.cut_frame ?? null,
       ball: s.ball || null,
       roi: s.roi || null,
       target: s.target || null,
@@ -591,6 +592,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         yardage: Number(graphics.yardage) || null,
         start_frame: draft.startFrame ?? null,
         end_frame: draft.endFrame ?? null,
+        cut_frame: draft.cutFrame ?? null,
       });
       setFinalUrl(out.final_video_url);
       setFinalizedGraphics({ ...graphics });
@@ -668,6 +670,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             yardage: Number(graphics.yardage) || null,
             start_frame: draft.startFrame ?? null,
             end_frame: draft.endFrame ?? null,
+            cut_frame: draft.cutFrame ?? null,
           });
           setFinalUrl(fin.final_video_url);
           setFinalizedGraphics({ ...graphics });
@@ -1100,51 +1103,6 @@ function WizardBody({
         </EditableRow>
 
         <EditableRow
-          label="Address frame"
-          value={`Frame ${draft.addressFrame}`}
-          active={editing === "address"}
-          onActivate={() => setEditing(editing === "address" ? null : "address")}
-        >
-          <FrameStepper
-            current={navFrame}
-            total={navTotal}
-            loading={navLoading}
-            onStep={(delta) => loadFrame(clampedStep(delta))}
-            onJump={(n) => loadFrame(clampedJump(n))}
-            onApply={() => {
-              if (navFrame == null) return;
-              const url = navUrl || draft.addressImageUrl;
-              setDraft((d) => ({
-                ...d, addressFrame: navFrame, addressImageUrl: url,
-              }));
-              persistPatch({ address_frame: navFrame, address_image_url: url });
-              setEditing(null);
-            }}
-          />
-        </EditableRow>
-
-        <EditableRow
-          label="Impact frame"
-          value={`Frame ${draft.impactFrame}`}
-          active={editing === "impact"}
-          onActivate={() => setEditing(editing === "impact" ? null : "impact")}
-        >
-          <FrameStepper
-            current={navFrame}
-            total={navTotal}
-            loading={navLoading}
-            onStep={(delta) => loadFrame(clampedStep(delta))}
-            onJump={(n) => loadFrame(clampedJump(n))}
-            onApply={() => {
-              if (navFrame == null) return;
-              setDraft((d) => ({ ...d, impactFrame: navFrame }));
-              persistPatch({ impact_frame: navFrame });
-              setEditing(null);
-            }}
-          />
-        </EditableRow>
-
-        <EditableRow
           label="Start frame"
           value={draft.startFrame != null
             ? `Frame ${draft.startFrame}`
@@ -1196,6 +1154,96 @@ function WizardBody({
         </EditableRow>
 
         <EditableRow
+          label="Address frame"
+          value={`Frame ${draft.addressFrame}`}
+          active={editing === "address"}
+          onActivate={() => setEditing(editing === "address" ? null : "address")}
+        >
+          <FrameStepper
+            current={navFrame}
+            total={navTotal}
+            loading={navLoading}
+            onStep={(delta) => loadFrame(clampedStep(delta))}
+            onJump={(n) => loadFrame(clampedJump(n))}
+            onApply={() => {
+              if (navFrame == null) return;
+              const url = navUrl || draft.addressImageUrl;
+              setDraft((d) => ({
+                ...d, addressFrame: navFrame, addressImageUrl: url,
+              }));
+              persistPatch({ address_frame: navFrame, address_image_url: url });
+              setEditing(null);
+            }}
+          />
+        </EditableRow>
+
+        <EditableRow
+          label="Impact frame"
+          value={`Frame ${draft.impactFrame}`}
+          active={editing === "impact"}
+          onActivate={() => setEditing(editing === "impact" ? null : "impact")}
+        >
+          <FrameStepper
+            current={navFrame}
+            total={navTotal}
+            loading={navLoading}
+            onStep={(delta) => loadFrame(clampedStep(delta))}
+            onJump={(n) => loadFrame(clampedJump(n))}
+            onApply={() => {
+              if (navFrame == null) return;
+              setDraft((d) => ({ ...d, impactFrame: navFrame }));
+              persistPatch({ impact_frame: navFrame });
+              setEditing(null);
+            }}
+          />
+        </EditableRow>
+
+        {row.dual_camera && (
+          <EditableRow
+            label="Cut frame (→ green camera)"
+            value={draft.cutFrame != null
+              ? `Frame ${draft.cutFrame}`
+              : "Not set (tee only)"}
+            active={editing === "cut"}
+            onActivate={() => setEditing(editing === "cut" ? null : "cut")}
+          >
+            <div className="tiny muted" style={{ marginBottom: 6 }}>
+              The produced clip plays the tee tracer up to this frame,
+              then cuts to the green camera (which plays to the End
+              frame). Pick the moment the ball is leaving the top of
+              the tee frame.
+            </div>
+            <FrameStepper
+              current={navFrame}
+              total={navTotal}
+              loading={navLoading}
+              onStep={(delta) => loadFrame(clampedStep(delta))}
+              onJump={(n) => loadFrame(clampedJump(n))}
+              onApply={() => {
+                if (navFrame == null) return;
+                setDraft((d) => ({ ...d, cutFrame: navFrame }));
+                persistPatch({ cut_frame: navFrame });
+                setEditing(null);
+              }}
+            />
+            {draft.cutFrame != null && (
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto", marginTop: 6 }}
+                onClick={() => {
+                  setDraft((d) => ({ ...d, cutFrame: null }));
+                  persistPatch({ cut_frame: null });
+                  setEditing(null);
+                }}
+              >
+                Clear (tee only, no cut)
+              </button>
+            )}
+          </EditableRow>
+        )}
+
+        <EditableRow
           label="End frame"
           value={draft.endFrame != null
             ? `Frame ${draft.endFrame}`
@@ -1244,53 +1292,6 @@ function WizardBody({
           >
             Done
           </button>
-        </EditableRow>
-
-        <EditableRow
-          label="Detection area"
-          value={draft.roi
-            ? `${draft.roi.w} × ${draft.roi.h} px @ (${draft.roi.x}, ${draft.roi.y})`
-            : "Not set"}
-          active={editing === "roi"}
-          onActivate={() => setEditing(editing === "roi" ? null : "roi")}
-        >
-          <div className="tiny muted">
-            Drag the green rectangle to move it. Drag any corner to resize.
-          </div>
-          {hasDims && draft.roi && (
-            <div className="row" style={{ gap: 6, marginTop: 6 }}>
-              <button
-                type="button"
-                className="ghost"
-                style={{ width: "auto" }}
-                onClick={() => setDraft((d) => ({
-                  ...d, roi: scaleRoi(d.roi, 0.85, frameW, frameH),
-                }))}
-              >
-                Shrink
-              </button>
-              <button
-                type="button"
-                className="ghost"
-                style={{ width: "auto" }}
-                onClick={() => setDraft((d) => ({
-                  ...d, roi: scaleRoi(d.roi, 1.18, frameW, frameH),
-                }))}
-              >
-                Grow
-              </button>
-              <button
-                type="button"
-                style={{ width: "auto", marginLeft: "auto" }}
-                onClick={() => {
-                  if (draft.roi) persistPatch({ roi: draft.roi });
-                  setEditing(null);
-                }}
-              >
-                Done
-              </button>
-            </div>
-          )}
         </EditableRow>
 
         <EditableRow
@@ -1355,7 +1356,7 @@ function EditableRow({ label, value, active, onActivate, children }) {
       style={{
         border: "1px solid var(--border, #2a2a2a)",
         borderRadius: 6,
-        padding: 8,
+        padding: 6,
         background: active ? "rgba(34,197,94,0.06)" : "transparent",
       }}
     >
@@ -1368,7 +1369,7 @@ function EditableRow({ label, value, active, onActivate, children }) {
         }}
       >
         <div className="tiny upper muted">{label}</div>
-        <div style={{ fontSize: "0.95rem" }}>{value}</div>
+        <div style={{ fontSize: "0.8rem" }}>{value}</div>
       </button>
       {active && (
         <div style={{ marginTop: 8 }}>{children}</div>
