@@ -445,8 +445,8 @@ export default function AdminCameras() {
           const tokenVisible = !!revealedToken[cam.id];
           return (
             <div key={cam.id} className="card tight" style={{ margin: 0, padding: 12 }}>
-              <div className="inline" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-                <div className="small">
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                <div className="small" style={{ flex: 1, minWidth: 0 }}>
                   <b>#{cam.id}</b>{" "}
                   <span className={`pill small ${cam.enabled ? "ok" : "warn"}`}>
                     {cam.enabled ? "enabled" : "disabled"}
@@ -489,9 +489,13 @@ export default function AdminCameras() {
                     )}
                   </div>
                 </div>
-                <div className="inline" style={{ gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <div style={{
+                  width: 230, flexShrink: 0,
+                  display: "flex", flexDirection: "column",
+                  gap: 6, alignItems: "stretch",
+                }}>
                   {partner ? (
-                    <span className="small muted">
+                    <span className="small muted" style={{ textAlign: "center" }}>
                       paired with{" "}
                       <code>#{partner.id} ({partner.assigned_role})</code>
                       {" "}
