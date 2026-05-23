@@ -3444,24 +3444,53 @@ def finalize_wizard_video(
     elif has_green and impact_frame_saved is not None:
         cut_sec = max(0.0, float(impact_frame_saved) / fps + 2.5)
 
+    # Real-time offset between the two cameras. The tee and green start
+    # recording a fraction of a second apart (trigger latency), so the
+    # same frame index isn't the same real instant. Pull it from the
+    # source CameraEvent's reported first-frame timestamps:
+    #   green_local_time(M) = tee_local_time(M) + (tee_started − green_started)
+    # delta < 0 when green started later (the usual case). Falls back to
+    # 0 (frame-aligned) when timestamps are missing — old clips / Pis.
+    green_delta = 0.0
+    if row.camera_event_id:
+        from ..models import CameraEvent
+        cam_evt = db.get(CameraEvent, row.camera_event_id)
+        if (
+            cam_evt is not None
+            and cam_evt.tee_recording_started_at is not None
+            and cam_evt.green_recording_started_at is not None
+        ):
+            green_delta = (
+                cam_evt.tee_recording_started_at
+                - cam_evt.green_recording_started_at
+            ).total_seconds()
+
     built = False
-    # Dual-camera cut: tee tracer [start, cut] then green [cut, end].
-    # Green committed its pre-roll when the tee triggered, so the two
-    # share a time base — frame N lines up across both cameras.
+    # Dual-camera cut: tee tracer [start, cut] then green [cut+Δ, end+Δ],
+    # where Δ aligns the green clip to the tee's real-world clock so the
+    # switch lands on the same instant in both cameras.
     if has_green and cut_sec is not None and cut_sec > start_sec + 0.05:
         tracer_dur = float((probe_video_info(tracer_path) or {}).get("duration") or 0.0)
         green_dur = float((probe_video_info(green_path) or {}).get("duration") or 0.0)
         composite_cut = min(cut_sec, tracer_dur or cut_sec)
-        composite_end = end_sec if end_sec is not None else (green_dur or composite_cut + 10.0)
-        if green_dur:
-            composite_end = min(composite_end, green_dur)
+        composite_end = end_sec if end_sec is not None else (composite_cut + 10.0)
         composite_end = max(composite_cut + 0.1, composite_end)
+        # Map the tee-local cut/end into green-local time.
+        green_cut = max(0.0, composite_cut + green_delta)
+        green_end = composite_end + green_delta
+        if green_dur:
+            green_end = min(green_end, green_dur)
+        green_end = max(green_cut + 0.1, green_end)
         if concat_two_clips(
             tracer_path, start_sec, composite_cut,
-            green_path, composite_cut, composite_end,
+            green_path, green_cut, green_end,
             final_path,
         ) and final_path.exists() and final_path.stat().st_size > 0:
             built = True
+            log.info(
+                "finalize: composite upload=%s tee[%.2f-%.2f] green[%.2f-%.2f] Δ=%.3fs",
+                upload_id, start_sec, composite_cut, green_cut, green_end, green_delta,
+            )
         else:
             log.warning(
                 "finalize: tee→green composite failed for upload %s; "

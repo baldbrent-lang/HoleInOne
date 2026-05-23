@@ -442,6 +442,7 @@ async def poll_trigger(
 async def upload_event(
     token: str,
     session_id: str = Form(...),
+    recording_started_at: float | None = Form(None),
     video: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -480,10 +481,23 @@ async def upload_event(
         )
 
     fname = _save_event_clip(data, event.id, role, video.filename)
+    # First-frame wall-clock time (epoch seconds from the Pi). Stored
+    # per role so the dual-camera cut can align the green clip to the
+    # tee cut's real-world moment instead of trusting frame indices.
+    started_dt = None
+    if recording_started_at is not None:
+        try:
+            started_dt = datetime.utcfromtimestamp(float(recording_started_at))
+        except (ValueError, OverflowError, OSError):
+            started_dt = None
     if role == "tee":
         event.tee_clip_filename = fname
+        if started_dt is not None:
+            event.tee_recording_started_at = started_dt
     else:
         event.green_clip_filename = fname
+        if started_dt is not None:
+            event.green_recording_started_at = started_dt
 
     # Decide the new status + whether we're ready to process. A paired
     # event needs both clips; an unpaired tee event needs only its own.

@@ -141,6 +141,9 @@ class GreenAgent:
             log.warning("buffer empty at trigger; skipping session=%s", session_id)
             return
         height, width = snapshot[0][1].shape[:2]
+        # First-frame wall-clock time (start of the committed pre-roll).
+        # Reported on upload for dual-camera cut alignment.
+        first_frame_ts = snapshot[0][0]
         clip_path = self.work_dir / f"{session_id}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(clip_path), fourcc, self.fps, (width, height))
@@ -212,7 +215,9 @@ class GreenAgent:
         )
 
         try:
-            result = self.client.upload_event(session_id, clip_path)
+            result = self.client.upload_event(
+                session_id, clip_path, recording_started_at=first_frame_ts,
+            )
             log.info(
                 "uploaded: event=%s status=%s ready=%s",
                 result.get("event_id"), result.get("status"),

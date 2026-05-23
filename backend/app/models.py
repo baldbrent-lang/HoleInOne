@@ -351,6 +351,15 @@ class CameraEvent(Base):
     triggered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     tee_clip_filename: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     green_clip_filename: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Wall-clock time of each clip's FIRST frame, reported by the Pi on
+    # upload (epoch → naive UTC). The two cameras start a fraction of a
+    # second apart (trigger network latency), so a frame index doesn't
+    # map to the same real instant across them. The dual-camera cut
+    # uses the delta between these to enter the green clip at the frame
+    # matching the tee cut's real-world moment. Requires NTP-synced Pi
+    # clocks; null on older clips → cut falls back to frame-aligned.
+    tee_recording_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    green_recording_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # Set by the tee Pi's /event-stop call once the tee box has been
     # empty long enough. The green Pi polls /event-status looking for
     # this so both clips end at roughly the same wall-clock moment.

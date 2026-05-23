@@ -160,6 +160,14 @@ def _migrate() -> None:
             statements.append(
                 "ALTER TABLE camera_events ADD COLUMN stop_signal_at TIMESTAMP"
             )
+        if "tee_recording_started_at" not in ce_cols:
+            statements.append(
+                "ALTER TABLE camera_events ADD COLUMN tee_recording_started_at TIMESTAMP"
+            )
+        if "green_recording_started_at" not in ce_cols:
+            statements.append(
+                "ALTER TABLE camera_events ADD COLUMN green_recording_started_at TIMESTAMP"
+            )
 
     # Camera additions — per-camera trigger kill-switch.
     if "cameras" in inspector.get_table_names():

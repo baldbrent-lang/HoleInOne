@@ -139,12 +139,22 @@ class BackendClient:
             retries=2,
         )
 
-    def upload_event(self, session_id: str, video_path: Path) -> dict:
+    def upload_event(
+        self,
+        session_id: str,
+        video_path: Path,
+        recording_started_at: float | None = None,
+    ) -> dict:
+        data = {"session_id": session_id}
+        # Wall-clock epoch of this clip's first frame. The backend uses
+        # the tee/green delta to align the dual-camera cut by real time.
+        if recording_started_at is not None:
+            data["recording_started_at"] = repr(float(recording_started_at))
         with open(video_path, "rb") as fh:
             files = {"video": (video_path.name, fh, "video/mp4")}
             return self._retry(
                 "POST", "/upload-event",
-                data={"session_id": session_id},
+                data=data,
                 files=files,
                 timeout=180,
                 retries=3,
