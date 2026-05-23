@@ -299,6 +299,12 @@ class Camera(Base):
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     firmware_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Soft toggle distinct from `enabled`: when False the camera stays
+    # online (heartbeats + live-watch still work) but the backend
+    # refuses to create CameraEvents from its /event-trigger calls.
+    # Lets the operator silence a camera that's powered on indoors
+    # (testing, storage) without it spamming the production queue.
+    triggering_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

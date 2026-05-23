@@ -332,6 +332,8 @@ export const api = {
     if (patch.name !== undefined) fd.append("name", patch.name || "");
     if (patch.enabled !== undefined)
       fd.append("enabled", patch.enabled ? "true" : "false");
+    if (patch.triggeringEnabled !== undefined)
+      fd.append("triggering_enabled", patch.triggeringEnabled ? "true" : "false");
     if (patch.note !== undefined) fd.append("note", patch.note || "");
     if (patch.teeBoxRoi !== undefined) {
       fd.append("tee_box_roi", JSON.stringify(patch.teeBoxRoi));

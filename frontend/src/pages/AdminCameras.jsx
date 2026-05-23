@@ -241,6 +241,20 @@ export default function AdminCameras() {
     }
   }
 
+  async function toggleTriggering(cam) {
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    try {
+      await api.updateCamera(adminPassword, cam.id, {
+        triggeringEnabled: cam.triggering_enabled === false,
+      });
+      await load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
   function openMove(cam) {
     setMoveDraft({
       courseId: String(cam.course_id),
@@ -440,6 +454,9 @@ export default function AdminCameras() {
                   <span className={`pill small ${cam.assigned_role === "tee" ? "" : "ok"}`}>
                     {cam.assigned_role}
                   </span>{" "}
+                  {cam.assigned_role === "tee" && cam.triggering_enabled === false && (
+                    <span className="pill small warn">triggering paused</span>
+                  )}{" "}
                   <span className="muted">
                     · hole {cam.assigned_hole}
                     {cam.name && <> · {cam.name}</>}
@@ -521,6 +538,17 @@ export default function AdminCameras() {
                   >
                     {cam.enabled ? "Disable" : "Enable"}
                   </button>
+                  {cam.assigned_role === "tee" && (
+                    <button
+                      type="button" className="secondary small"
+                      onClick={() => toggleTriggering(cam)} disabled={isBusy}
+                      title="Pause/resume motion triggering. Paused = camera stays online but won't record events (use when it's powered on indoors)."
+                    >
+                      {cam.triggering_enabled === false
+                        ? "Resume triggering"
+                        : "Pause triggering"}
+                    </button>
+                  )}
                   <button
                     type="button" className="secondary small"
                     onClick={() => openMove(cam)} disabled={isBusy}

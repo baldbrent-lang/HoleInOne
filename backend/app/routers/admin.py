@@ -4570,6 +4570,7 @@ def _camera_to_dict(c: Camera, last_event: CameraEvent | None = None) -> dict:
         "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
         "firmware_version": c.firmware_version,
         "enabled": bool(c.enabled),
+        "triggering_enabled": bool(c.triggering_enabled),
         "note": c.note,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "last_event_at": (
@@ -4764,6 +4765,7 @@ def update_camera(
     camera_id: int,
     name: str | None = Form(None),
     enabled: bool | None = Form(None),
+    triggering_enabled: bool | None = Form(None),
     tee_box_roi: str | None = Form(None),  # JSON string {"x":N,"y":N,"w":N,"h":N}
     note: str | None = Form(None),
     course_id: int | None = Form(None),
@@ -4788,6 +4790,8 @@ def update_camera(
         cam.name = name.strip()[:120]
     if enabled is not None:
         cam.enabled = bool(enabled)
+    if triggering_enabled is not None:
+        cam.triggering_enabled = bool(triggering_enabled)
     if note is not None:
         cam.note = note.strip() or None
     if tee_box_roi is not None and tee_box_roi.strip():

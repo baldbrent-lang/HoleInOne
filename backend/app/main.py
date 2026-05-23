@@ -161,6 +161,19 @@ def _migrate() -> None:
                 "ALTER TABLE camera_events ADD COLUMN stop_signal_at TIMESTAMP"
             )
 
+    # Camera additions — per-camera trigger kill-switch.
+    if "cameras" in inspector.get_table_names():
+        cam_cols = {c["name"] for c in inspector.get_columns("cameras")}
+        if "triggering_enabled" not in cam_cols:
+            statements.append(
+                "ALTER TABLE cameras ADD COLUMN triggering_enabled BOOLEAN DEFAULT TRUE"
+            )
+            # Existing cameras default to triggering-on so behavior is
+            # unchanged until the operator flips the switch.
+            statements.append(
+                "UPDATE cameras SET triggering_enabled = TRUE WHERE triggering_enabled IS NULL"
+            )
+
     if not statements:
         return
     with engine.begin() as conn:

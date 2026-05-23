@@ -201,6 +201,10 @@ def heartbeat(
         "ok": True,
         "camera_id": cam.id,
         "enabled": cam.enabled,
+        # Pi can read this to skip its person-detection loop entirely
+        # while paused. Older agents that ignore it are still covered:
+        # /event-trigger refuses to create events when this is False.
+        "triggering_enabled": cam.triggering_enabled,
         "assigned_role": cam.assigned_role,
         "course_id": cam.course_id,
         "assigned_hole": cam.assigned_hole,
@@ -255,6 +259,14 @@ async def event_trigger(
     cam = _get_camera_by_token(token, db)
     if cam.assigned_role != "tee":
         raise HTTPException(400, "event-trigger is only valid for tee cameras")
+
+    # Operator kill-switch: camera is online but triggering is paused
+    # (e.g. powered on indoors for testing). Touch last_seen_at (done
+    # in _get_camera_by_token) but don't create an event — return a
+    # benign signal so the Pi doesn't bother recording / uploading.
+    if not cam.triggering_enabled:
+        db.commit()  # persist the last_seen_at bump
+        return {"ok": True, "triggering_disabled": True, "event_id": None}
 
     sid = (session_id or "").strip()[:80]
     if not sid:
