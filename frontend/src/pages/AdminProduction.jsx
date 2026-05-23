@@ -550,6 +550,15 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
       });
+      // Cache the AI run into the swing so re-opens hydrate the
+      // tracer instead of triggering another expensive AI pass. The
+      // backend already writes these to top-level edit_metrics; for
+      // multi-swing rows we also need them inside swings[selectedSwing]
+      // since applySaved hydrates from there.
+      await persistPatch({
+        tracer_url: out.tracer_url,
+        ball_track_frames: out.ball_track_frames || [],
+      });
       onSaved?.();
       setStep("tracer");
     } catch (e) {
@@ -585,6 +594,14 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       });
       setFinalUrl(out.final_video_url);
       setFinalizedGraphics({ ...graphics });
+      // Cache the finalized output per-swing so re-opens land on
+      // Step 3 with the saved final video pre-loaded.
+      await persistPatch({
+        finalized_video_url: out.final_video_url,
+        finalized_hole_number: Number(graphics.hole_number) || 1,
+        finalized_yardage: Number(graphics.yardage) || null,
+        finalized_player_name: graphics.player_name,
+      });
       onSaved?.();
     } catch (e) {
       setFinalError(e.message);
@@ -627,6 +644,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             frames: fast.ball_track_frames || [],
           });
           setManualPositions({});
+          // Persist the merged tracer (operator marks baked in) per
+          // swing so re-opens skip the AI re-run AND keep the manual
+          // anchor points.
+          await persistPatch({
+            tracer_url: fast.tracer_url,
+            ball_track_frames: fast.ball_track_frames || [],
+          });
         } finally {
           setFinalizing(false);
         }
@@ -647,6 +671,12 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           });
           setFinalUrl(fin.final_video_url);
           setFinalizedGraphics({ ...graphics });
+          await persistPatch({
+            finalized_video_url: fin.final_video_url,
+            finalized_hole_number: Number(graphics.hole_number) || 1,
+            finalized_yardage: Number(graphics.yardage) || null,
+            finalized_player_name: graphics.player_name,
+          });
         } finally {
           setFinalizing(false);
         }
@@ -784,6 +814,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               frameH={fh}
               totalFrames={totalFrames}
               onSaved={onSaved}
+              persistPatch={persistPatch}
               manualPositions={manualPositions}
               setManualPositions={setManualPositions}
             />
@@ -1768,7 +1799,7 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
 function TracerStep({
   row, adminPassword, draft, tracer, setTracer,
   rendering, setRendering, error, setError,
-  frameW, frameH, totalFrames, onSaved,
+  frameW, frameH, totalFrames, onSaved, persistPatch,
   manualPositions, setManualPositions,
 }) {
   // manualPositions / setManualPositions are hoisted to the wizard so
@@ -2015,6 +2046,13 @@ function TracerStep({
       setSelectedFrame(null);
       setEditorBg(null);
       setEditorBall(null);
+      // Persist the merged track per swing so re-opens hydrate it
+      // (with the operator's manual marks baked in) instead of
+      // falling back to a fresh AI re-run on the next Step 1 → 2.
+      await persistPatch?.({
+        tracer_url: out.tracer_url,
+        ball_track_frames: out.ball_track_frames || [],
+      });
       onSaved?.();
     } catch (e) {
       setError(e.message);
