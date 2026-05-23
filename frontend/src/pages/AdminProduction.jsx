@@ -474,6 +474,14 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     if (!sw) return;
     applySaved(sw);
 
+    // Step 3 shows the produced clip for the SELECTED swing. applySaved
+    // only sets finalUrl when the swing has a wizard-finalized video,
+    // so without this an unfinalized swing would keep showing the
+    // previous swing's clip. Prefer the wizard-finalized URL; fall back
+    // to the auto-produced clip matched by swing order; else clear it.
+    const producedForSwing = row.produced_clips?.[selectedSwing]?.video_url || null;
+    setFinalUrl(sw.finalized_video_url || producedForSwing || null);
+
     // /detect-swings only returns frame indices, not JPGs. The
     // preview shows the address frame; lazy-fetch it on first
     // selection of each swing, then cache the URL back into
