@@ -3418,8 +3418,18 @@ def finalize_wizard_video(
     # from Step 1. Skipped when both are unset (full clip). Done before
     # the intro overlay so the graphics land at the new clip's start
     # instead of getting trimmed off.
-    start_frame_saved = saved.get("start_frame")
-    end_frame_saved = saved.get("end_frame")
+    #
+    # Prefer the payload values — for multi-swing uploads the frame
+    # indices live inside edit_metrics.swings[i], not at the top level,
+    # so the frontend has to send the currently-selected swing's
+    # start/end explicitly. Falls back to top-level edit_metrics for
+    # single-swing rows.
+    start_frame_saved = payload.get("start_frame")
+    if start_frame_saved is None:
+        start_frame_saved = saved.get("start_frame")
+    end_frame_saved = payload.get("end_frame")
+    if end_frame_saved is None:
+        end_frame_saved = saved.get("end_frame")
     if start_frame_saved or end_frame_saved:
         tracer_fps = float((saved.get("tracer_info") or {}).get("fps") or 0)
         if tracer_fps <= 0:

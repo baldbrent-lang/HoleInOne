@@ -580,6 +580,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         player_name: graphics.player_name,
         hole_number: Number(graphics.hole_number) || 1,
         yardage: Number(graphics.yardage) || null,
+        start_frame: draft.startFrame ?? null,
+        end_frame: draft.endFrame ?? null,
       });
       setFinalUrl(out.final_video_url);
       setFinalizedGraphics({ ...graphics });
@@ -640,6 +642,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             player_name: graphics.player_name,
             hole_number: Number(graphics.hole_number) || 1,
             yardage: Number(graphics.yardage) || null,
+            start_frame: draft.startFrame ?? null,
+            end_frame: draft.endFrame ?? null,
           });
           setFinalUrl(fin.final_video_url);
           setFinalizedGraphics({ ...graphics });
