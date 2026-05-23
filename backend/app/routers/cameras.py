@@ -90,7 +90,7 @@ _pending_triggers: dict[int, asyncio.Queue] = {}
 # Max bytes per uploaded event clip (~100 MB). 1080p30 for 12 s is
 # typically 30-50 MB; this catches malformed uploads / wrong files
 # without rejecting legitimate captures.
-MAX_EVENT_CLIP_BYTES = 100 * 1024 * 1024
+MAX_EVENT_CLIP_BYTES = 500 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------
