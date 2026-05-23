@@ -3405,54 +3405,89 @@ def finalize_wizard_video(
         raise HTTPException(404, f"tracer file missing on disk: {fname}")
 
     final_path = CLIPS_DIR / f"wizard-{upload_id}_final.mp4"
-    # Copy tracer → final, then apply intro overlay in-place on the
-    # copy. Keeps the bare tracer available for re-finalize / debug.
-    try:
-        import shutil
 
-        shutil.copyfile(tracer_path, final_path)
-    except Exception as exc:
-        raise HTTPException(500, f"copy failed: {exc}")
+    # Resolve the operator's trim / cut frames. Prefer payload values —
+    # for multi-swing uploads the frame indices live inside
+    # edit_metrics.swings[i], not at the top level, so the frontend
+    # sends the selected swing's values; fall back to top-level
+    # edit_metrics for single-swing rows.
+    def _pick_frame(key):
+        v = payload.get(key)
+        return saved.get(key) if v is None else v
 
-    # Trim the final to the operator's [start_frame, end_frame] window
-    # from Step 1. Skipped when both are unset (full clip). Done before
-    # the intro overlay so the graphics land at the new clip's start
-    # instead of getting trimmed off.
-    #
-    # Prefer the payload values — for multi-swing uploads the frame
-    # indices live inside edit_metrics.swings[i], not at the top level,
-    # so the frontend has to send the currently-selected swing's
-    # start/end explicitly. Falls back to top-level edit_metrics for
-    # single-swing rows.
-    start_frame_saved = payload.get("start_frame")
-    if start_frame_saved is None:
-        start_frame_saved = saved.get("start_frame")
-    end_frame_saved = payload.get("end_frame")
-    if end_frame_saved is None:
-        end_frame_saved = saved.get("end_frame")
-    if start_frame_saved or end_frame_saved:
-        tracer_fps = float((saved.get("tracer_info") or {}).get("fps") or 0)
-        if tracer_fps <= 0:
-            tracer_fps = float(probe_fps(final_path) or 30.0)
-        start_sec = max(0.0, float(start_frame_saved or 0) / tracer_fps)
-        if end_frame_saved is not None:
-            end_sec = float(int(end_frame_saved) + 1) / tracer_fps
+    start_frame_saved = _pick_frame("start_frame")
+    end_frame_saved = _pick_frame("end_frame")
+    cut_frame_saved = _pick_frame("cut_frame")
+
+    # Frame → seconds. Frame indices are in the tee SOURCE's space, so
+    # use the source fps (fall back to tracer_info, then 30).
+    tee_src = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+    fps = float(probe_fps(tee_src) or 0) if (tee_src and tee_src.exists()) else 0.0
+    if fps <= 0:
+        fps = float((saved.get("tracer_info") or {}).get("fps") or 0)
+    if fps <= 0:
+        fps = 30.0
+
+    start_sec = max(0.0, float(start_frame_saved or 0) / fps)
+    end_sec = float(int(end_frame_saved) + 1) / fps if end_frame_saved is not None else None
+    cut_sec = max(0.0, float(cut_frame_saved) / fps) if cut_frame_saved is not None else None
+
+    green_path = CLIPS_DIR / row.green_filename if row.green_filename else None
+    has_green = green_path is not None and green_path.exists()
+
+    built = False
+    # Dual-camera cut: tee tracer [start, cut] then green [cut, end].
+    # Green committed its pre-roll when the tee triggered, so the two
+    # share a time base — frame N lines up across both cameras.
+    if has_green and cut_sec is not None and cut_sec > start_sec + 0.05:
+        tracer_dur = float((probe_video_info(tracer_path) or {}).get("duration") or 0.0)
+        green_dur = float((probe_video_info(green_path) or {}).get("duration") or 0.0)
+        composite_cut = min(cut_sec, tracer_dur or cut_sec)
+        composite_end = end_sec if end_sec is not None else (green_dur or composite_cut + 10.0)
+        if green_dur:
+            composite_end = min(composite_end, green_dur)
+        composite_end = max(composite_cut + 0.1, composite_end)
+        if concat_two_clips(
+            tracer_path, start_sec, composite_cut,
+            green_path, composite_cut, composite_end,
+            final_path,
+        ) and final_path.exists() and final_path.stat().st_size > 0:
+            built = True
         else:
-            duration = float((probe_video_info(final_path) or {}).get("duration") or 0.0)
-            end_sec = duration if duration > 0 else start_sec + 60.0
-        if end_sec > start_sec + 0.05:
-            trimmed_path = final_path.with_name(
-                final_path.stem + ".trim" + final_path.suffix
+            log.warning(
+                "finalize: tee→green composite failed for upload %s; "
+                "falling back to tee-only", upload_id,
             )
-            ok = cut_segment(final_path, trimmed_path, start_sec, end_sec)
-            if ok and trimmed_path.exists() and trimmed_path.stat().st_size > 0:
-                trimmed_path.replace(final_path)
-            else:
-                log.warning(
-                    "finalize: trim failed for upload %s "
-                    "(start_sec=%.2f end_sec=%.2f); using untrimmed final",
-                    upload_id, start_sec, end_sec,
+
+    if not built:
+        # Tee-only: copy the tracer, then trim to [start, end].
+        try:
+            import shutil
+
+            shutil.copyfile(tracer_path, final_path)
+        except Exception as exc:
+            raise HTTPException(500, f"copy failed: {exc}")
+        if start_frame_saved or end_frame_saved:
+            trim_end = end_sec
+            if trim_end is None:
+                dur = float((probe_video_info(final_path) or {}).get("duration") or 0.0)
+                trim_end = dur if dur > 0 else start_sec + 60.0
+            if trim_end > start_sec + 0.05:
+                trimmed_path = final_path.with_name(
+                    final_path.stem + ".trim" + final_path.suffix
                 )
+                if (
+                    cut_segment(final_path, trimmed_path, start_sec, trim_end)
+                    and trimmed_path.exists()
+                    and trimmed_path.stat().st_size > 0
+                ):
+                    trimmed_path.replace(final_path)
+                else:
+                    log.warning(
+                        "finalize: trim failed for upload %s "
+                        "(start_sec=%.2f end_sec=%.2f); using untrimmed final",
+                        upload_id, start_sec, trim_end,
+                    )
 
     course = db.get(Course, row.course_id) if row.course_id else None
     course_name = course.name if course else ""
