@@ -136,7 +136,7 @@ def transcode_for_web(path: Path) -> bool:
                 "-crf", "23",
                 "-pix_fmt", "yuv420p",
                 "-movflags", "+faststart",
-                "-an",  # Pi captures have no audio; strip the silent track.
+                "-c:a", "aac", "-b:a", "128k",
                 str(tmp),
             ],
             check=True,
