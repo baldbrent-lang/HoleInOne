@@ -3345,7 +3345,7 @@ export default function AdminProduction() {
           row={editingRow}
           adminPassword={adminPassword}
           onClose={() => { setEditingRow(null); refreshAll(); }}
-          onSaved={load}
+          onSaved={refreshAll}
         />
       )}
     </div>
