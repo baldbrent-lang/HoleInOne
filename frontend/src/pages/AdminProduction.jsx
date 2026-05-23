@@ -368,14 +368,31 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         .detectSwingsForUpload(adminPassword, row.id)
         .then(async (data) => {
           if (cancelled) return;
-          const list = data.swings || [];
+          let list = data.swings || [];
+          // Auto-detect found nothing — common for clips with no
+          // clean audio impact (mic too far, quiet scene, indoor
+          // testing). Seed a placeholder swing so the wizard still
+          // opens and the operator can pick the address/impact
+          // frames manually from the timeline.
+          if (list.length === 0) {
+            list = [
+              {
+                idx: 0,
+                start_frame: 0,
+                end_frame: row.tee_nb_frames || null,
+                address_frame: 0,
+                impact_frame: 0,
+                fps: row.tee_fps || 30,
+              },
+            ];
+          }
           setSwings(list);
           setFrameDims({
             width: row.tee_width || null,
             height: row.tee_height || null,
             totalFrames: row.tee_nb_frames || null,
           });
-          if (list[0]) applySaved(list[0]);
+          applySaved(list[0]);
           try { onSaved?.(); } catch {}
         })
         .catch((e) => { if (!cancelled) setError(e.message); })
@@ -433,10 +450,16 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       }
       if (!cancelled) {
         setRunning(false);
-        setError(
-          "No saved metrics yet — auto-detect didn't complete. " +
-          "Click Re-detect from source on Step 1 to try again."
-        );
+        // Auto-detect didn't complete or found nothing. Seed a
+        // placeholder draft so the wizard still opens and the
+        // operator can pick the address/impact frames manually
+        // from the timeline.
+        applySaved({});
+        setFrameDims({
+          width: row.tee_width || null,
+          height: row.tee_height || null,
+          totalFrames: row.tee_nb_frames || null,
+        });
       }
     })();
     return () => { cancelled = true; };
