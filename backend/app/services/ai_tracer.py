@@ -3122,7 +3122,7 @@ SWING_AUDIO_MAX_DURATION_MS: float = 200.0
 # computed after the 1.5 kHz high-pass.  Club-on-ball is broadband and
 # produces a centroid >> 3 kHz; footsteps and low-frequency thuds sit
 # below.  Set to 0.0 to disable this sub-check entirely.
-SWING_AUDIO_MIN_SPECTRAL_CENTROID_HZ: float = 2500.0
+SWING_AUDIO_MIN_SPECTRAL_CENTROID_HZ: float = 1500.0
 
 # How far back from the impact timestamp to require sustained motion
 # (backswing window).  A typical golf swing takes 0.5–1.0 s from
