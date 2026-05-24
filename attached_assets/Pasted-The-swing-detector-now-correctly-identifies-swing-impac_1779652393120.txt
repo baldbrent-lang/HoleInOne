@@ -1,0 +1,25 @@
+The swing detector now correctly identifies swing impact timestamps in clip #156 (Produced 2/2 clips). But the producer is just dumping a fixed window from motion-detection start — it's not actually using the swing impact timestamp to build a proper clip. Need to fix the production pipeline.
+
+Each produced clip should be a 12-second multi-camera clip structured like this:
+
+TEE camera  ← (impact - 3s) to (impact + 3s)      [6 seconds]
+                              ↓ hard cut ↓
+GREEN camera ← (impact + 3s) to (impact + 9s)     [6 seconds]
+Audio: use the TEE camera's audio for the entire 12 seconds (green has no mic). Audio continues uninterrupted across the camera cut.
+
+Cut style: hard cut at impact + 3s (no fade/dissolve).
+
+Implementation notes:
+
+Anchor on swing impact timestamp — the swing detector already returns a list of impact times per clip. Use that as the anchor. The motion-detection start time is irrelevant for the cut points.
+Tee↔Green time correlation. Both tee and green Pis are triggered roughly simultaneously but their internal clip timestamps can differ by a couple seconds (different start moments). If the swing impact is at internal time T in the tee clip, you need to find the corresponding real-world moment in the green clip — using each clip's recording_start wall-clock timestamps (or whatever metadata you store) to compute the green-side offset. Don't assume tee and green clips have identical internal times.
+Use ffmpeg for the cuts. Either two -ss/-t extractions piped into a concat demuxer, or one filter_complex with [0:v]trim/[1:v]trim and concat=n=2:v=1:a=0 for video, with tee's audio extracted separately and added as [0:a]atrim/asetpts.
+Expose pacing as tunable constants at the top of the production module so I can tweak per round if needed:
+CLIP_SECONDS_BEFORE_IMPACT = 3.0
+CLIP_SECONDS_TEE_AFTER_IMPACT = 3.0
+CLIP_SECONDS_GREEN_AFTER_CUT = 6.0
+Handle edge cases gracefully:
+If swing impact is less than 3s into the tee clip → start the produced clip from the tee clip's beginning (don't pad with black).
+If green clip doesn't have enough footage to cover impact + 9s → end the produced clip wherever green runs out.
+If green clip is missing entirely → produce tee-only clip from impact - 3s to impact + 6s (still 9s worth, but better than nothing).
+Show me the updated production function and the ffmpeg command(s) it builds.

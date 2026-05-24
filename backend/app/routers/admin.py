@@ -69,6 +69,10 @@ from ..services.ai_tracer import (
     detect_swings_combined,
 )
 from ..services.video import (
+    CLIP_SECONDS_BEFORE_IMPACT,
+    CLIP_SECONDS_GREEN_AFTER_CUT,
+    CLIP_SECONDS_TEE_AFTER_IMPACT,
+    CLIP_SECONDS_TEE_ONLY_AFTER_IMPACT,
     compress_for_email,
     concat_two_clips,
     cut_segment,
@@ -76,6 +80,7 @@ from ..services.video import (
     probe_fps,
     probe_source_device,
     probe_video_info,
+    splice_impact_clip,
 )
 from ..services.intro_overlay import apply_intro_overlay_inplace
 
@@ -1130,6 +1135,7 @@ def _run_long_upload_job(
     audio_min_peak_ratio: float = 3.0,
     motion_ratio: float = 2.0,
     combined_pair_window_sec: float = 3.0,
+    tee_green_delta_sec: float = 0.0,
 ) -> None:
     """Background worker for the long-upload cut / splice / AI-tracer
     pipeline.
@@ -1188,6 +1194,7 @@ def _run_long_upload_job(
                             "hole_number": starting_hole + i,
                             "start_sec": d["start_sec"],
                             "end_sec": d["end_sec"],
+                            "peak_time_sec": d.get("peak_time_sec"),
                         }
                     )
                 if not segs:
@@ -1225,9 +1232,12 @@ def _run_long_upload_job(
                 end_sec = float(seg.get("end_sec") or start_sec)
                 start_frame = int(round(start_sec * (tee_fps or 30.0)))
                 end_frame = int(round(end_sec * (tee_fps or 30.0)))
-                # Impact frame estimate sits 4.5 s into the window
-                # (matches detect_swings_combined's before_impact_sec).
-                impact_frame = int(round((start_sec + 4.5) * (tee_fps or 30.0)))
+                # Impact frame from the detector's peak_time_sec if available;
+                # falls back to CLIP_SECONDS_BEFORE_IMPACT into the window.
+                _peak_t = float(
+                    seg.get("peak_time_sec") or (start_sec + CLIP_SECONDS_BEFORE_IMPACT)
+                )
+                impact_frame = int(round(_peak_t * (tee_fps or 30.0)))
                 address_frame = max(
                     start_frame,
                     impact_frame - int(round(1.5 * (tee_fps or 30.0))),
@@ -1255,6 +1265,7 @@ def _run_long_upload_job(
                 dual_camera=green_src_path is not None,
                 ai_tracer_model=ai_tracer_model,
                 progress_upload_id=upload_id,
+                tee_green_delta_sec=float(tee_green_delta_sec),
             )
 
             # Re-fetch in case the session was rolled back during segment work.
@@ -1325,6 +1336,7 @@ def _process_long_upload_segments(
     dual_camera: bool,
     ai_tracer_model: str | None,
     progress_upload_id: int | None = None,
+    tee_green_delta_sec: float = 0.0,
 ) -> list[dict]:
     """Cut + process each swing segment from one (or two) source video(s).
 
@@ -1416,9 +1428,40 @@ def _process_long_upload_segments(
             )
             continue
 
+        # ── Impact anchor ────────────────────────────────────────────────────
+        # Use the detector's peak_time_sec when available; fall back to
+        # CLIP_SECONDS_BEFORE_IMPACT into the segment window.
+        _raw_peak = seg.get("peak_time_sec")
+        peak_time_sec = (
+            float(_raw_peak) if _raw_peak is not None
+            else start_sec + CLIP_SECONDS_BEFORE_IMPACT
+        )
+
+        # ── Tee cut bounds ───────────────────────────────────────────────────
+        # Dual-camera: cover 12 s so the tee audio can run uninterrupted
+        # through the full composite (tee video + green video halves).
+        # Single-camera: cover 9 s (BEFORE + TEE_ONLY_AFTER).
+        tee_cut_start = max(0.0, peak_time_sec - CLIP_SECONDS_BEFORE_IMPACT)
+        if dual_camera and green_src_path is not None:
+            tee_cut_end = (
+                peak_time_sec + CLIP_SECONDS_TEE_AFTER_IMPACT + CLIP_SECONDS_GREEN_AFTER_CUT
+            )
+        else:
+            tee_cut_end = peak_time_sec + CLIP_SECONDS_TEE_ONLY_AFTER_IMPACT
+        # Within-segment offset to the impact moment (≤ CLIP_SECONDS_BEFORE_IMPACT
+        # when the impact is very close to the start of the recording).
+        actual_before_sec = peak_time_sec - tee_cut_start
+        # TEE video duration in the composite (before the hard cut to green).
+        tee_video_dur = actual_before_sec + CLIP_SECONDS_TEE_AFTER_IMPACT
+        log.info(
+            "long-upload seg %d: peak_time=%.2fs tee cut [%.2f, %.2f] "
+            "tee_video_dur=%.2fs dual_camera=%s",
+            idx, peak_time_sec, tee_cut_start, tee_cut_end, tee_video_dur, dual_camera,
+        )
+
         seg_name = f"{course_id}-h{hole_number}-{secrets.token_hex(6)}.mp4"
         seg_path = CLIPS_DIR / seg_name
-        ok = cut_segment(src_path, seg_path, start_sec, end_sec)
+        ok = cut_segment(src_path, seg_path, tee_cut_start, tee_cut_end)
         if not ok:
             results.append(
                 {
@@ -1435,15 +1478,42 @@ def _process_long_upload_segments(
                 f"{course_id}-h{hole_number}-green-{secrets.token_hex(6)}.mp4"
             )
             green_seg_path = CLIPS_DIR / green_seg_name
+            # ── Green cut bounds ─────────────────────────────────────────────
+            # The green camera starts at a different wall-clock time than the
+            # tee camera.  tee_green_delta_sec = green_start − tee_start.
+            # A positive delta means green started LATER, so the same
+            # real-world instant is EARLIER in the green clip.
+            #
+            #   green_impact_offset = peak in green coords
+            #                       = peak_in_tee − delta
+            #
+            # Cut the green from (green_impact + TEE_AFTER) to
+            # (green_impact + TEE_AFTER + GREEN_AFTER).
+            green_impact_offset = peak_time_sec - tee_green_delta_sec
+            green_cut_start = max(
+                0.0, green_impact_offset + CLIP_SECONDS_TEE_AFTER_IMPACT
+            )
+            green_cut_end = (
+                green_impact_offset
+                + CLIP_SECONDS_TEE_AFTER_IMPACT
+                + CLIP_SECONDS_GREEN_AFTER_CUT
+            )
+            if green_cut_end <= green_cut_start:
+                green_cut_end = green_cut_start + CLIP_SECONDS_GREEN_AFTER_CUT
+            log.info(
+                "long-upload seg %d: green cut [%.2f, %.2f] (delta=%.3fs)",
+                idx, green_cut_start, green_cut_end, tee_green_delta_sec,
+            )
             green_cut_ok = cut_segment(
-                green_src_path, green_seg_path, start_sec, end_sec
+                green_src_path, green_seg_path, green_cut_start, green_cut_end
             )
             if not green_cut_ok:
-                seg_path.unlink(missing_ok=True)
-                results.append(
-                    {"index": idx, "ok": False, "error": "green ffmpeg cut failed"}
+                log.warning(
+                    "long-upload seg %d: green cut failed — falling back to "
+                    "tee-only composite",
+                    idx,
                 )
-                continue
+                green_seg_path = None  # splice_impact_clip handles the fallback
 
             # Pull operator-verified examples from prior broadcast
             # clips at this course/hole to few-shot the AI tracer.
@@ -1469,48 +1539,47 @@ def _process_long_upload_segments(
             composite_url = None
             composite_info: dict | None = None
             composite_path: Path | None = None
-            cutover = pipe.get("cutover_time_sec")
             tracer_path = pipe.get("tracer_video_path")
-            if (
-                pipe.get("ok")
-                and tracer_path is not None
-                and cutover is not None
-                and cutover > 0
-                and tracer_path.exists()
+            # For the composite VIDEO use the tracer-overlaid tee clip when
+            # available; fall back to the raw tee cut.  Either way the AUDIO
+            # comes from the tee source (splice_impact_clip maps 0:a? from the
+            # first input, which the tracer pipeline muxes back in).
+            tee_source_for_composite = (
+                tracer_path
+                if (pipe.get("ok") and tracer_path is not None and tracer_path.exists())
+                else seg_path
+            )
+            # Clamp the green video window to the clip's actual duration so we
+            # never ask ffmpeg to trim past EOF.
+            green_video_dur = CLIP_SECONDS_GREEN_AFTER_CUT
+            if green_seg_path is not None and green_seg_path.exists():
+                _ginfo = probe_video_info(green_seg_path)
+                _gdur = float(_ginfo.get("duration") or 0.0)
+                if _gdur > 0.1:
+                    green_video_dur = min(CLIP_SECONDS_GREEN_AFTER_CUT, _gdur)
+            composite_name = f"{seg_path.stem}_composite.mp4"
+            composite_path = CLIPS_DIR / composite_name
+            if splice_impact_clip(
+                tee_source_for_composite,
+                tee_video_dur,
+                green_seg_path,
+                green_video_dur,
+                composite_path,
             ):
-                tee_info = probe_video_info(tracer_path)
-                green_info = probe_video_info(green_seg_path)
-                tee_duration = float(tee_info.get("duration") or 0.0)
-                green_duration = float(green_info.get("duration") or 0.0)
-                switch_sec = max(0.0, min(cutover, tee_duration or cutover))
-                end_green_sec = max(
-                    switch_sec + 0.1, green_duration or (end_sec - start_sec)
-                )
-                composite_name = f"{seg_path.stem}_composite.mp4"
-                composite_path = CLIPS_DIR / composite_name
-                if concat_two_clips(
-                    tracer_path,
-                    0.0,
-                    switch_sec,
-                    green_seg_path,
-                    switch_sec,
-                    end_green_sec,
-                    composite_path,
-                ):
-                    compress_for_email(composite_path)
-                    if composite_path.exists() and composite_path.stat().st_size > 0:
-                        composite_url = (
-                            f"{settings.app_base_url}/uploads/clips/{composite_name}"
-                        )
-                        composite_info = {
-                            "switch_sec": round(switch_sec, 2),
-                            "end_sec": round(end_green_sec, 2),
-                            "fps": pipe.get("fps"),
-                            "tracer_frame_range": (
-                                pipe.get("tracer_video_info") or {}
-                            ).get("frame_range"),
-                            "method": (pipe.get("impact") or {}).get("method"),
-                        }
+                compress_for_email(composite_path)
+                if composite_path.exists() and composite_path.stat().st_size > 0:
+                    composite_url = (
+                        f"{settings.app_base_url}/uploads/clips/{composite_name}"
+                    )
+                    composite_info = {
+                        "tee_video_dur_sec": round(tee_video_dur, 2),
+                        "green_video_dur_sec": round(green_video_dur, 2),
+                        "total_dur_sec": round(tee_video_dur + green_video_dur, 2),
+                        "impact_offset_in_tee_sec": round(actual_before_sec, 2),
+                        "tee_green_delta_sec": round(tee_green_delta_sec, 3),
+                        "fps": pipe.get("fps"),
+                        "method": (pipe.get("impact") or {}).get("method"),
+                    }
 
             thumb_source = (
                 tracer_path if (tracer_path and tracer_path.exists()) else seg_path
@@ -1546,7 +1615,7 @@ def _process_long_upload_segments(
                 public_source = f"{settings.app_base_url}/uploads/clips/{seg_name}"
                 public_tracer = None
 
-            captured_dt = base_dt + timedelta(seconds=start_sec)
+            captured_dt = base_dt + timedelta(seconds=tee_cut_start)
             clip = VideoClip(
                 course_id=course_id,
                 hole_number=hole_number,
@@ -1610,7 +1679,7 @@ def _process_long_upload_segments(
         )
         tracer_url, _, _, _ = _run_tracer(seg_path)
 
-        captured_dt = base_dt + timedelta(seconds=start_sec)
+        captured_dt = base_dt + timedelta(seconds=tee_cut_start)
         clip = VideoClip(
             course_id=course_id,
             hole_number=hole_number,
@@ -1929,6 +1998,7 @@ async def upload_long_video(
     audio_min_peak_ratio: float = Form(3.0),
     motion_ratio: float = Form(2.0),
     combined_pair_window_sec: float = Form(3.0),
+    tee_green_delta_sec: float = Form(0.0),
     db: Session = Depends(get_db),
 ):
     """Cut a long video into multiple per-swing clips and run each through
@@ -2055,6 +2125,7 @@ async def upload_long_video(
             "audio_min_peak_ratio": float(audio_min_peak_ratio),
             "motion_ratio": float(motion_ratio),
             "combined_pair_window_sec": float(combined_pair_window_sec),
+            "tee_green_delta_sec": float(tee_green_delta_sec),
         },
         daemon=True,
         name=f"long-upload-{upload_id}",
@@ -2578,6 +2649,7 @@ def reprocess_long_upload(
     audio_min_peak_ratio: float = Form(3.0),
     motion_ratio: float = Form(2.0),
     combined_pair_window_sec: float = Form(3.0),
+    tee_green_delta_sec: float = Form(0.0),
     db: Session = Depends(get_db),
 ):
     """Re-cut / re-process a previously-uploaded long video without
@@ -2634,6 +2706,7 @@ def reprocess_long_upload(
             "audio_min_peak_ratio": float(audio_min_peak_ratio),
             "motion_ratio": float(motion_ratio),
             "combined_pair_window_sec": float(combined_pair_window_sec),
+            "tee_green_delta_sec": float(tee_green_delta_sec),
         },
         daemon=True,
         name=f"long-upload-reprocess-{row.id}",

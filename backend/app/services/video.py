@@ -27,6 +27,23 @@ AUDIO_KBPS = 96
 MAX_VIDEO_KBPS = 4000  # cap so short clips don't waste bytes
 MIN_VIDEO_KBPS = 220   # floor so we don't produce unwatchable garbage
 
+# ── Impact-clip pacing ────────────────────────────────────────────────────────
+# These constants define the cut structure for every produced clip.
+# Adjust per round via constant edits; each can also be overridden
+# at call-time via the corresponding kwargs on splice_impact_clip.
+#
+# Dual-camera output (12 s at defaults):
+#   [← BEFORE_IMPACT →|impact|← TEE_AFTER →||←── GREEN_AFTER ──→]
+#   |       TEE video + uninterrupted TEE audio                   |
+#                                          | GREEN video          |
+#
+# Tee-only fallback (9 s at defaults):
+#   [← BEFORE_IMPACT →|impact|←──── TEE_ONLY_AFTER ────→]
+CLIP_SECONDS_BEFORE_IMPACT: float = 3.0       # tee footage before the impact
+CLIP_SECONDS_TEE_AFTER_IMPACT: float = 3.0    # tee footage after impact (→ hard cut to green)
+CLIP_SECONDS_GREEN_AFTER_CUT: float = 6.0     # green footage after the camera switch
+CLIP_SECONDS_TEE_ONLY_AFTER_IMPACT: float = 6.0  # post-impact duration when green unavailable
+
 
 def cut_segment(
     input_path: Path,
@@ -313,6 +330,145 @@ def concat_two_clips(
         return True
     log.info("concat: retrying without audio (one input may be silent)")
     return _attempt(with_audio=False)
+
+
+def splice_impact_clip(
+    tee_long_path: Path,
+    tee_video_dur_sec: float,
+    green_seg_path: "Path | None",
+    green_video_dur_sec: float,
+    output_path: Path,
+    target_height: int = 720,
+    target_fps: int = 30,
+) -> bool:
+    """Build the 12-second impact composite: TEE video then GREEN video
+    with the TEE audio track playing uninterrupted for the full duration.
+
+    tee_long_path
+        The tee source (tracer-overlaid or raw cut) starting at
+        ``impact − CLIP_SECONDS_BEFORE_IMPACT``.  Its audio is used
+        for the entire output — including the green-video half — because
+        the green camera has no microphone.  Must cover at least
+        ``tee_video_dur_sec + green_video_dur_sec`` seconds for the
+        audio track.
+
+    tee_video_dur_sec
+        How many seconds of tee VIDEO appear in the output.  Equals
+        ``actual_before_sec + CLIP_SECONDS_TEE_AFTER_IMPACT`` under
+        normal conditions; may be shorter when the impact is within
+        CLIP_SECONDS_BEFORE_IMPACT of the recording start.
+
+    green_seg_path
+        Green cut starting at the real-world moment
+        ``impact + CLIP_SECONDS_TEE_AFTER_IMPACT``.  Pass ``None``
+        (or a missing/empty file) for the tee-only fallback.
+
+    green_video_dur_sec
+        How many seconds of green VIDEO to append.  Should be clamped
+        to the green clip's actual duration before calling.
+
+    Output layout
+        Video  : tee_long[0 → tee_video_dur_sec] ++ green_seg[0 → green_video_dur_sec]
+        Audio  : tee_long[0 → (tee_video_dur_sec + green_video_dur_sec)]
+                 — completely uninterrupted across the camera cut.
+
+    Tee-only fallback
+        When green_seg_path is absent/missing, the output is a plain
+        tee-only clip trimmed to ``tee_video_dur_sec + green_video_dur_sec``
+        (total 9 s at defaults) so the clip still covers the full
+        expected duration.
+
+    Returns True on success, False otherwise.  ``output_path`` is
+    removed on failure.  Never raises.
+    """
+    if not have_ffmpeg():
+        log.warning("ffmpeg missing; cannot splice impact clip")
+        return False
+
+    tee_v = max(0.1, float(tee_video_dur_sec))
+    green_v = max(0.1, float(green_video_dur_sec))
+
+    green_available = (
+        green_seg_path is not None
+        and Path(green_seg_path).exists()
+        and Path(green_seg_path).stat().st_size > 0
+    )
+
+    if not green_available:
+        # Tee-only fallback: just trim the long tee source to cover the
+        # full expected window.  The output length equals tee_v + green_v
+        # (or the recording end, whichever comes first).
+        total_dur = tee_v + green_v
+        log.info(
+            "splice_impact_clip: no green — tee-only (%.1f s tee + %.1f s extended "
+            "= %.1f s total) → %s",
+            tee_v, green_v, total_dur, output_path.name,
+        )
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(tee_long_path),
+            "-t", str(total_dur),
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, timeout=600)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            log.warning("splice_impact_clip tee-only encode failed: %s", exc)
+            output_path.unlink(missing_ok=True)
+            return False
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            output_path.unlink(missing_ok=True)
+            return False
+        return True
+
+    # Dual-camera composite.
+    #
+    # Video : tee_long[0 → tee_v] ++ green_seg[0 → green_v]  (hard cut)
+    # Audio : tee_long[0 → (tee_v + green_v)] — uninterrupted across the cut.
+    #
+    # The filter_complex handles only video (concat=a=0).  The tee audio
+    # is mapped directly from input 0 without an atrim so it runs for the
+    # full tee source duration, covering both the tee and green video
+    # halves.  If the tee recording ends before the composite video does,
+    # the audio simply stops — no padding, no crash.
+    log.info(
+        "splice_impact_clip: dual-cam %.1f s tee + %.1f s green → %s",
+        tee_v, green_v, output_path.name,
+    )
+    filter_complex = (
+        f"[0:v]trim=end={tee_v:.3f},setpts=PTS-STARTPTS,"
+        f"scale=-2:{target_height},fps={target_fps},setsar=1[v0];"
+        f"[1:v]trim=end={green_v:.3f},setpts=PTS-STARTPTS,"
+        f"scale=-2:{target_height},fps={target_fps},setsar=1[v1];"
+        f"[v0][v1]concat=n=2:v=1:a=0[out_v]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(tee_long_path),
+        "-i", str(green_seg_path),
+        "-filter_complex", filter_complex,
+        "-map", "[out_v]",
+        "-map", "0:a?",   # tee audio; '?' = keep going if tee has no audio stream
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, timeout=600)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("splice_impact_clip dual-cam encode failed: %s", exc)
+        output_path.unlink(missing_ok=True)
+        return False
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        output_path.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def extract_thumbnail(video_path: Path) -> Path | None:
