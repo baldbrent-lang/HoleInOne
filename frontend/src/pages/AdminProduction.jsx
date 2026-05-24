@@ -1299,7 +1299,7 @@ function WizardBody({
             </div>
             {cutClockMs != null && (
               <div className="tiny" style={{ marginBottom: 6, color: "#1f9d57" }}>
-                Cut timestamp: {fmtClock(cutClockMs)} UTC — the green
+                Cut timestamp: {fmtClock(cutClockMs)} CT — the green
                 camera switches at this same instant.
               </div>
             )}
@@ -3028,14 +3028,18 @@ function CameraEventCard({
 }
 
 function fmtClock(ms) {
-  // HH:MM:SS.mmm in UTC so the tee and green overlays use the same
-  // reference — at the same real instant both clips read identically.
+  // HH:MM:SS.mmm in US Central time (auto CST/CDT). Both the tee and
+  // green overlays use the same zone, so at the same real instant they
+  // read identically — that's what lets the operator eyeball sync.
   const d = new Date(ms);
-  const p = (n, w = 2) => String(n).padStart(w, "0");
-  return (
-    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}` +
-    `.${p(d.getUTCMilliseconds(), 3)}`
-  );
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    hourCycle: "h23",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(d);
+  const get = (t) => parts.find((p) => p.type === t)?.value || "00";
+  const millis = String(d.getMilliseconds()).padStart(3, "0");
+  return `${get("hour")}:${get("minute")}:${get("second")}.${millis}`;
 }
 
 function VideoLightbox({ url, title, startedAt, onClose }) {
@@ -3116,7 +3120,7 @@ function VideoLightbox({ url, title, startedAt, onClose }) {
                 pointerEvents: "none", letterSpacing: "0.5px",
               }}
             >
-              {fmtClock(clockMs)} UTC
+              {fmtClock(clockMs)} CT
             </div>
           )}
         </div>
