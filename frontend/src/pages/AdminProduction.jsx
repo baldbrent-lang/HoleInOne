@@ -160,7 +160,7 @@ function Thumb({ src, alt, missing, placeholder, onClick }) {
 
 function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
                      startsAt, missing, notUploaded, qualityLabel, width, height,
-                     videoUrl, onOpenViewer }) {
+                     videoUrl, recordingStartedAt, onOpenViewer }) {
   // When the tile has no underlying source (file missing or never
   // uploaded), every meta row renders blank — the labels stay so the
   // tiles in the row line up visually.
@@ -173,7 +173,7 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
         alt={`${label} thumbnail`}
         missing={missing}
         placeholder={notUploaded ? "Not Uploaded" : "No preview"}
-        onClick={videoUrl ? () => onOpenViewer(videoUrl, label) : undefined}
+        onClick={videoUrl ? () => onOpenViewer(videoUrl, label, recordingStartedAt) : undefined}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <MetaRow k="Quality" v={hasSource ? qualityText(qualityLabel, width, height) : ""} />
@@ -1031,6 +1031,15 @@ function WizardBody({
     ? Math.round(draft.impactFrame + 2.5 * fps)
     : null;
   const effectiveCutFrame = draft.cutFrame ?? autoCutFrame;
+  // Real-world wall-clock time of the cut frame (tee start + cut/fps).
+  // This is the same instant the green camera switches to, so the
+  // operator can verify it against the clock overlay on each raw clip.
+  const teeStartMs = row?.tee_recording_started_at
+    ? Date.parse(row.tee_recording_started_at)
+    : null;
+  const cutClockMs = (teeStartMs != null && effectiveCutFrame != null)
+    ? teeStartMs + (effectiveCutFrame / fps) * 1000
+    : null;
 
   // Frame-pick modes: address, impact, start, end, cut. Each seeds the
   // navigator from the corresponding draft frame index when entered.
@@ -1288,6 +1297,12 @@ function WizardBody({
               then cuts to the green camera (which plays to the End
               frame). Defaults to 2.5s after impact until you set it.
             </div>
+            {cutClockMs != null && (
+              <div className="tiny" style={{ marginBottom: 6, color: "#1f9d57" }}>
+                Cut timestamp: {fmtClock(cutClockMs)} UTC — the green
+                camera switches at this same instant.
+              </div>
+            )}
             <FrameStepper
               current={navFrame}
               total={navTotal}
@@ -3012,7 +3027,36 @@ function CameraEventCard({
   );
 }
 
-function VideoLightbox({ url, title, onClose }) {
+function fmtClock(ms) {
+  // HH:MM:SS.mmm in UTC so the tee and green overlays use the same
+  // reference — at the same real instant both clips read identically.
+  const d = new Date(ms);
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return (
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}` +
+    `.${p(d.getUTCMilliseconds(), 3)}`
+  );
+}
+
+function VideoLightbox({ url, title, startedAt, onClose }) {
+  const videoRef = useRef(null);
+  const [clockMs, setClockMs] = useState(null);
+  const startMs = startedAt ? Date.parse(startedAt) : null;
+
+  // Running wall-clock overlay = clip start + the video's currentTime.
+  // rAF keeps it smooth during playback; also updates on seek/scrub.
+  useEffect(() => {
+    if (!url || startMs == null) return undefined;
+    let raf = 0;
+    const tick = () => {
+      const v = videoRef.current;
+      if (v) setClockMs(startMs + v.currentTime * 1000);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [url, startMs]);
+
   if (!url) return null;
   return (
     <div
@@ -3051,15 +3095,31 @@ function VideoLightbox({ url, title, onClose }) {
             Close ✕
           </button>
         </div>
-        <video
-          src={url}
-          controls
-          autoPlay
-          style={{
-            width: "100%", maxHeight: "80vh",
-            background: "#000", borderRadius: 6,
-          }}
-        />
+        <div style={{ position: "relative" }}>
+          <video
+            ref={videoRef}
+            src={url}
+            controls
+            autoPlay
+            style={{
+              width: "100%", maxHeight: "80vh",
+              background: "#000", borderRadius: 6, display: "block",
+            }}
+          />
+          {startMs != null && clockMs != null && (
+            <div
+              style={{
+                position: "absolute", top: 8, left: 8,
+                background: "rgba(0,0,0,0.7)", color: "#3ee37a",
+                fontFamily: "monospace", fontSize: "1rem",
+                padding: "4px 8px", borderRadius: 4,
+                pointerEvents: "none", letterSpacing: "0.5px",
+              }}
+            >
+              {fmtClock(clockMs)} UTC
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -3098,12 +3158,12 @@ export default function AdminProduction() {
   const setError = setActionError;
   const [busyId, setBusyId] = useState(null);
   const [busyEventId, setBusyEventId] = useState(null);
-  const [viewer, setViewer] = useState(null); // {url, title}
+  const [viewer, setViewer] = useState(null); // {url, title, startedAt}
   const [editingRow, setEditingRow] = useState(null);
 
-  function openViewer(url, title) {
+  function openViewer(url, title, startedAt = null) {
     if (!url) return;
-    setViewer({ url, title });
+    setViewer({ url, title, startedAt });
   }
 
   // Re-fetch the currently-loaded range on both lists. Called by the
@@ -3373,6 +3433,7 @@ export default function AdminProduction() {
                   width={row.tee_width}
                   height={row.tee_height}
                   videoUrl={row.tee_url}
+                  recordingStartedAt={row.tee_recording_started_at}
                   onOpenViewer={openViewer}
                 />
                 <VideoTile
@@ -3389,6 +3450,7 @@ export default function AdminProduction() {
                   width={row.dual_camera ? row.green_width : null}
                   height={row.dual_camera ? row.green_height : null}
                   videoUrl={row.dual_camera ? row.green_url : null}
+                  recordingStartedAt={row.dual_camera ? row.green_recording_started_at : null}
                   onOpenViewer={openViewer}
                 />
                 <ProducedTile
@@ -3532,6 +3594,7 @@ export default function AdminProduction() {
       <VideoLightbox
         url={viewer?.url}
         title={viewer?.title}
+        startedAt={viewer?.startedAt}
         onClose={() => setViewer(null)}
       />
 

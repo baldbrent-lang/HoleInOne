@@ -2247,6 +2247,20 @@ def list_long_uploads(
                 if r.base_captured_at
                 else None,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                # First-frame wall-clock times from the source camera
+                # event (null for manual uploads). Used by the wizard to
+                # show the cut frame's real-world timestamp and by the
+                # production page's clock overlay.
+                "tee_recording_started_at": (
+                    cam_event.tee_recording_started_at.isoformat()
+                    if cam_event and cam_event.tee_recording_started_at
+                    else None
+                ),
+                "green_recording_started_at": (
+                    cam_event.green_recording_started_at.isoformat()
+                    if cam_event and cam_event.green_recording_started_at
+                    else None
+                ),
                 "swing_count": r.swing_count or "multiple",
                 "tee_filename": r.tee_filename,
                 "tee_original_filename": r.tee_original_filename,
