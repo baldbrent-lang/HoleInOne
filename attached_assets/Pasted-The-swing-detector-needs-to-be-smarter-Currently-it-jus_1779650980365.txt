@@ -1,0 +1,19 @@
+The swing detector needs to be smarter. Currently it just looks at audio peaks and motion peaks separately. That's why a ball drop (loud audio, tiny motion) or a practice swing (motion, no impact) both can pass or fail incorrectly. A real golf swing has a very specific signature we need to match.
+
+Rewrite detect_swings_combined to use this 4-signal heuristic for each candidate event:
+
+Sharp audio transient (not just "loud"). The audio peak must be transient: short rise time (< 30ms) and short duration (< 150ms). A ball drop on hard floor has slower attack and longer ring-out. Talking is even more sustained. Use the envelope's local slope around the peak to distinguish. If you can compute the spectral centroid, real ball impact is also broadband (lots of high frequencies) vs. footsteps which are low-mid dominant.
+Motion intensity at impact. At the exact moment of the audio transient, the motion magnitude must be large (well above the clip's median motion). Reject if motion is near-zero at impact (= the audio came from something off-camera).
+Backswing + follow-through pattern. Within a window of 0.5-1.0s BEFORE the impact AND 0.3-0.5s AFTER the impact, motion must be sustained (above some min threshold, not just one frame). This is what distinguishes a swing from a ball drop (no preceding motion) and from a practice swing tap (no follow-through).
+Person in tee ROI. The person centroid (already tracked by detector) must be inside the tee/swing zone at the time of impact. Reject if no person centroid was detected, or if it's far from the tee.
+All four must pass for an event to be classified as a real swing. Log which signals passed/failed per candidate so we can debug.
+
+Also keep the threshold tunables exposed at the top of the file as constants (with reasonable defaults), AND log them on each run so we can iterate:
+
+SWING_AUDIO_MIN_PEAK_RATIO (currently 3.0 — leave at 3.0 since transient check will provide the selectivity)
+SWING_AUDIO_MAX_RISE_MS (new — default 30)
+SWING_AUDIO_MAX_DURATION_MS (new — default 150)
+SWING_BACKSWING_WINDOW_S (new — default 0.7)
+SWING_FOLLOWTHROUGH_WINDOW_S (new — default 0.4)
+SWING_MIN_MOTION_RATIO (new — default 2.0, peak motion / median motion at impact)
+Show me the updated function and the new constants. Keep the motion-only fallback as a separate code path (only triggered if audio detection produces zero candidates at all).

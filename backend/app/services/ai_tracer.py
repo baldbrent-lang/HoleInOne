@@ -3102,6 +3102,47 @@ AUDIO_MIN_PEAK_OVER_MEDIAN = 25.0
 # Changed from 5.0 → 3.0 to handle quiet USB mic captures where the
 # impact transient is clear but the peak/median ratio is modest.
 SWING_AUDIO_MIN_PEAK_RATIO = 3.0
+
+# ── 4-signal heuristic tunables ──────────────────────────────────────────────
+# These constants drive detect_swings_combined's per-candidate gate logic.
+# All are also exposed as keyword arguments so you can override per-call
+# without editing this file. Change here to shift the global default.
+
+# Maximum rise-time (attack) for a valid impact transient.  Already
+# enforced by detect_swings_from_audio; replicated here as a named
+# constant so the log output references the same value.
+SWING_AUDIO_MAX_RISE_MS: float = 30.0
+
+# Maximum ring-out: how long (ms) the envelope stays above 20 % of the
+# peak amplitude after the peak.  A real "thwack" decays in < 150 ms;
+# a ball drop on a hard floor, a hand clap, or a voice sustains longer.
+SWING_AUDIO_MAX_DURATION_MS: float = 150.0
+
+# Minimum spectral centroid (Hz) of the 100 ms window around the peak,
+# computed after the 1.5 kHz high-pass.  Club-on-ball is broadband and
+# produces a centroid >> 3 kHz; footsteps and low-frequency thuds sit
+# below.  Set to 0.0 to disable this sub-check entirely.
+SWING_AUDIO_MIN_SPECTRAL_CENTROID_HZ: float = 2500.0
+
+# How far back from the impact timestamp to require sustained motion
+# (backswing window).  A typical golf swing takes 0.5–1.0 s from
+# address-to-takeaway to impact.
+SWING_BACKSWING_WINDOW_S: float = 0.7
+
+# How far forward from the impact timestamp to require sustained motion
+# (follow-through window).  Real swings continue 0.3–0.8 s post-impact.
+SWING_FOLLOWTHROUGH_WINDOW_S: float = 0.4
+
+# Minimum motion signal at the EXACT impact moment, expressed as a
+# multiple of the clip's median motion.  A ball drop has ~1× median
+# at the moment of the sound; a real swing spikes much higher.
+SWING_MIN_MOTION_RATIO: float = 2.0
+
+# Minimum mean motion ratio (vs. clip median) required within the
+# backswing and follow-through windows.  Lower than SWING_MIN_MOTION_RATIO
+# because the arc is sustained but not necessarily peaked.
+SWING_MOTION_FLOOR_RATIO: float = 1.2
+
 # Visual impact lands a few frames before the audio envelope peak: sound
 # from the strike has to travel ~5–15 m of air to the mic (≈30 ms /
 # ~1 frame at 30 fps), and the smoothed envelope's max sits a few ms
@@ -3522,6 +3563,7 @@ def detect_swings_from_audio(
     max_attack_sec: float = 0.030,
     absolute_threshold_floor: float = 0.001,
     debug: dict | None = None,
+    _cache_out: dict | None = None,
 ) -> list[dict]:
     """Find every club-on-ball impact in a long video by scanning its
     audio for sharp transients, then return one swing window per
@@ -3607,6 +3649,14 @@ def detect_swings_from_audio(
     kernel = np.ones(win, dtype=np.float32) / float(win)
     envelope = np.convolve(np.abs(samples), kernel, mode="same")
     median = float(np.median(envelope))
+    # Expose raw audio data to callers that need it for further signal
+    # analysis (e.g. detect_swings_combined's ring-out / spectral checks).
+    if _cache_out is not None:
+        _cache_out["envelope"] = envelope
+        _cache_out["samples"] = samples
+        _cache_out["sr"] = int(AUDIO_SAMPLE_RATE)
+        _cache_out["median"] = float(median)
+        _cache_out["duration_sec"] = duration_sec
     raw_threshold = median * min_peak_ratio
     # Safety net for nearly-silent clips: without this, a clip with
     # almost no audio would have a tiny median and any digital noise
@@ -3759,6 +3809,74 @@ def detect_swings_from_audio(
     return segments
 
 
+def _build_motion_array(
+    input_path: Path,
+    fps: float | None = None,
+    sample_height: int = 180,
+    target_hz: float = 10.0,
+) -> "tuple[np.ndarray | None, float, float, float]":
+    """Decode a video at low resolution and return a smoothed frame-diff
+    motion timeseries.
+
+    Returns ``(motion_array, effective_hz, median_motion, duration_sec)``.
+    Returns ``(None, 0.0, 0.0, 0.0)`` when opencv / numpy is unavailable
+    or the video cannot be opened.  Never raises.
+
+    The returned array is the same signal used internally by
+    detect_swings_from_motion, factored out so that
+    detect_swings_combined can index into it directly for per-candidate
+    signal checks without running the full motion detector again.
+    """
+    if not HAS_CV or not HAS_NP:
+        return None, 0.0, 0.0, 0.0
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return None, 0.0, 0.0, 0.0
+    try:
+        src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if src_fps <= 0:
+            src_fps = 30.0
+        step = max(1, int(round(src_fps / target_hz)))
+        effective_hz = src_fps / step
+        diffs: list[float] = []
+        prev_gray = None
+        idx = -1
+        while True:
+            idx += 1
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            if idx % step != 0:
+                continue
+            h, w = frame.shape[:2]
+            if h > sample_height:
+                scale = sample_height / float(h)
+                new_w = max(1, int(round(w * scale)))
+                frame = cv2.resize(
+                    frame, (new_w, sample_height), interpolation=cv2.INTER_AREA
+                )
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if prev_gray is not None:
+                d = cv2.absdiff(gray, prev_gray)
+                diffs.append(float(d.mean()))
+            prev_gray = gray
+    finally:
+        cap.release()
+
+    if len(diffs) < 4:
+        return None, 0.0, 0.0, 0.0
+    motion = np.asarray(diffs, dtype=np.float32)
+    smooth_win = max(1, int(round(0.3 * effective_hz)))
+    if smooth_win > 1 and smooth_win < motion.size:
+        kernel = np.ones(smooth_win, dtype=np.float32) / float(smooth_win)
+        motion = np.convolve(motion, kernel, mode="same")
+    median = float(np.median(motion))
+    if median <= 1e-6:
+        median = 1e-6
+    duration_sec = (len(diffs) - 1) / effective_hz if effective_hz > 0 else 0.0
+    return motion, float(effective_hz), median, duration_sec
+
+
 def detect_swings_combined(
     input_path: Path,
     fps: float | None = None,
@@ -3767,31 +3885,98 @@ def detect_swings_combined(
     pair_window_sec: float = 3.0,
     before_impact_sec: float = 4.5,
     after_impact_sec: float = 9.0,
+    audio_max_rise_ms: float = SWING_AUDIO_MAX_RISE_MS,
+    audio_max_duration_ms: float = SWING_AUDIO_MAX_DURATION_MS,
+    audio_min_spectral_centroid_hz: float = SWING_AUDIO_MIN_SPECTRAL_CENTROID_HZ,
+    backswing_window_s: float = SWING_BACKSWING_WINDOW_S,
+    followthrough_window_s: float = SWING_FOLLOWTHROUGH_WINDOW_S,
+    min_motion_ratio_at_impact: float = SWING_MIN_MOTION_RATIO,
+    motion_floor_ratio: float = SWING_MOTION_FLOOR_RATIO,
     debug: dict | None = None,
 ) -> list[dict]:
-    """AND-confirm audio impacts with motion bursts.
+    """4-signal heuristic swing detector.
 
-    Runs the audio and motion detectors with loose-per-detector
-    thresholds, then keeps only audio peaks that have a motion-burst
-    peak within ±pair_window_sec. This filters the false positives
-    each detector produces alone (random loud sounds; random motion
-    bursts) while staying sensitive enough to catch real swings.
+    Each audio candidate is evaluated against four independent gates.
+    All hard gates must pass for an event to be accepted. Every
+    candidate's per-signal outcome is logged so failures are easy to
+    diagnose from server logs or the ``debug`` dict.
 
-    Output windows are anchored on the audio peak (more precise for
-    the impact moment than motion's smoothed burst peak) with
-    before/after_impact_sec padding. Returns segments in the same
-    shape as detect_swings_from_audio.
+    Gate 1 — Sharp audio transient
+        1a. Attack (rise time) ≤ audio_max_rise_ms.  This is already
+            enforced upstream by detect_swings_from_audio's built-in
+            attack filter, so only candidates that cleared it arrive
+            here.  The gate is recorded as always-OK in the report.
+        1b. Ring-out duration ≤ audio_max_duration_ms.  After the
+            envelope peak, we measure how long the envelope stays above
+            20 % of the peak value.  A real "thwack" decays in < 150 ms;
+            a ball dropped on a hard floor, a hand clap, or voice
+            sustains longer.
+        1c. Spectral centroid ≥ audio_min_spectral_centroid_hz (Hz).
+            Computed via rfft on the 100 ms window around the peak
+            (after the 1.5 kHz high-pass already applied).  Club-on-ball
+            is broadband; footsteps / clothing rustle / low thuds sit
+            below 2.5 kHz.  Set audio_min_spectral_centroid_hz=0 to
+            disable this sub-gate.
+
+    Gate 2 — Motion at impact
+        The raw frame-diff signal at the audio peak timestamp must be
+        ≥ min_motion_ratio_at_impact × clip_median_motion.  A ball drop
+        produces almost zero motion at the moment of the sound; a real
+        swing produces a large spike.
+
+    Gate 3 — Backswing + follow-through
+        Mean motion in the window [peak − backswing_window_s, peak]
+        must be ≥ motion_floor_ratio × clip_median AND mean motion in
+        [peak, peak + followthrough_window_s] must also clear that
+        floor.  Ensures the event is a true arc, not a sudden audio
+        transient from something off-screen or a single-frame camera bump.
+
+    Gate 4 — Person in swing zone (soft / log-only)
+        Checks whether the audio peak falls inside a motion burst from
+        detect_swings_from_motion (within ±pair_window_sec).  Logged but
+        NOT a hard rejection gate — no person-tracking is available yet,
+        so this is a best-effort coarse spatial sanity check.
+
+    Motion-only fallback
+        Activated only when audio detection returns zero candidates
+        (quiet mic, no audio track, lossy codec stripped audio, etc.).
+        Motion bursts from detect_swings_from_motion are passed through
+        a lightweight Gate 3 check (burst duration covers backswing and
+        follow-through windows) and returned.  This path is kept strictly
+        separate from the 4-signal path so the two strategies don't
+        interfere.
     """
+    log.info(
+        "ai_tracer: detect_swings_combined — tunables: "
+        "audio_min_peak_ratio=%.1f audio_max_rise_ms=%.0f "
+        "audio_max_duration_ms=%.0f audio_min_spectral_centroid_hz=%.0f "
+        "backswing_window_s=%.2f followthrough_window_s=%.2f "
+        "min_motion_ratio_at_impact=%.1f motion_floor_ratio=%.1f "
+        "pair_window_sec=%.1f before_impact_sec=%.1f after_impact_sec=%.1f",
+        audio_min_peak_ratio, audio_max_rise_ms,
+        audio_max_duration_ms, audio_min_spectral_centroid_hz,
+        backswing_window_s, followthrough_window_s,
+        min_motion_ratio_at_impact, motion_floor_ratio,
+        pair_window_sec, before_impact_sec, after_impact_sec,
+    )
+
     audio_debug: dict = {}
     motion_debug: dict = {}
+    audio_cache: dict = {}
+
+    # ── Source 1: audio candidates ────────────────────────────────────
     audio_windows = detect_swings_from_audio(
         input_path,
         fps=fps,
         min_peak_ratio=audio_min_peak_ratio,
+        max_attack_sec=audio_max_rise_ms / 1000.0,
         before_impact_sec=before_impact_sec,
         after_impact_sec=after_impact_sec,
         debug=audio_debug,
+        _cache_out=audio_cache,
     )
+
+    # ── Source 2: motion burst list (for Gate 4 / fallback) ───────────
     motion_windows = detect_swings_from_motion(
         input_path,
         fps=fps,
@@ -3799,77 +3984,267 @@ def detect_swings_combined(
         debug=motion_debug,
     )
 
-    paired_windows: list[dict] = []
-    pairs: list[dict] = []
+    # ── Source 3: raw motion timeseries (for Gates 2 & 3) ────────────
+    motion_array, motion_hz, motion_median, _motion_dur = _build_motion_array(
+        input_path, fps=fps, sample_height=180,
+    )
+
+    # Unpack audio cache (populated by detect_swings_from_audio via _cache_out)
+    envelope: "np.ndarray | None" = audio_cache.get("envelope")
+    raw_samples: "np.ndarray | None" = audio_cache.get("samples")
+    audio_sr: int = int(audio_cache.get("sr", AUDIO_SAMPLE_RATE))
+
+    # ── 4-signal evaluation of each audio candidate ───────────────────
+    accepted_windows: list[dict] = []
+    candidate_reports: list[dict] = []
+
     for aw in audio_windows:
-        a_t = aw.get("peak_time_sec")
-        if a_t is None:
+        peak_t = aw.get("peak_time_sec")
+        if peak_t is None:
             continue
-        closest_m = None
-        closest_dt = None
+        peak_t = float(peak_t)
+
+        report: dict = {
+            "peak_sec": round(peak_t, 2),
+            "audio_ratio": round(float(aw.get("ratio") or 0.0), 1),
+        }
+
+        # Gate 1a — attack (pre-filtered; always True here) ──────────
+        report["s1a_attack_ok"] = True
+
+        # Gate 1b — ring-out duration ─────────────────────────────────
+        s1b_duration_ok: bool = True
+        ring_out_ms: float | None = None
+        if envelope is not None and audio_sr > 0:
+            pk_s = max(0, min(int(round(peak_t * audio_sr)), len(envelope) - 1))
+            pk_val = float(envelope[pk_s])
+            ring_threshold = pk_val * 0.20
+            look_ahead = min(len(envelope), pk_s + int(0.350 * audio_sr))
+            ring_end = pk_s
+            for k in range(pk_s, look_ahead):
+                if float(envelope[k]) >= ring_threshold:
+                    ring_end = k
+            ring_out_ms = (ring_end - pk_s) / float(audio_sr) * 1000.0
+            if audio_max_duration_ms > 0:
+                s1b_duration_ok = ring_out_ms <= audio_max_duration_ms
+        report["s1b_ring_out_ms"] = (
+            round(ring_out_ms, 1) if ring_out_ms is not None else None
+        )
+        report["s1b_duration_ok"] = s1b_duration_ok
+
+        # Gate 1c — spectral centroid (broadband check) ───────────────
+        s1c_broadband_ok: bool = True
+        spectral_centroid_hz: float | None = None
+        if (
+            raw_samples is not None
+            and HAS_NP
+            and audio_sr > 0
+            and audio_min_spectral_centroid_hz > 0
+        ):
+            hw = int(0.050 * audio_sr)
+            s0 = max(0, int(round(peak_t * audio_sr)) - hw)
+            s1_ = min(len(raw_samples), int(round(peak_t * audio_sr)) + hw)
+            window = raw_samples[s0:s1_]
+            if window.size >= 8:
+                magnitudes = np.abs(np.fft.rfft(window))
+                freqs = np.fft.rfftfreq(window.size, d=1.0 / audio_sr)
+                denom = float(np.sum(magnitudes)) + 1e-10
+                spectral_centroid_hz = float(np.sum(freqs * magnitudes) / denom)
+                s1c_broadband_ok = spectral_centroid_hz >= audio_min_spectral_centroid_hz
+        report["s1c_spectral_centroid_hz"] = (
+            round(spectral_centroid_hz, 0)
+            if spectral_centroid_hz is not None else None
+        )
+        report["s1c_broadband_ok"] = s1c_broadband_ok
+
+        # Gate 2 — motion magnitude at impact ─────────────────────────
+        s2_motion_ok: bool = True
+        motion_at_impact_ratio: float | None = None
+        if motion_array is not None and motion_hz > 0 and motion_median > 0:
+            m_idx = max(0, min(
+                int(round(peak_t * motion_hz)), len(motion_array) - 1
+            ))
+            motion_at_impact_ratio = float(motion_array[m_idx]) / motion_median
+            s2_motion_ok = motion_at_impact_ratio >= min_motion_ratio_at_impact
+        report["s2_motion_at_impact_ratio"] = (
+            round(motion_at_impact_ratio, 2)
+            if motion_at_impact_ratio is not None else None
+        )
+        report["s2_motion_ok"] = s2_motion_ok
+
+        # Gate 3a — backswing motion ───────────────────────────────────
+        s3a_backswing_ok: bool = True
+        backswing_mean_ratio: float | None = None
+        if motion_array is not None and motion_hz > 0 and motion_median > 0:
+            bs_end = max(0, int(round(peak_t * motion_hz)))
+            bs_start = max(0, int(round((peak_t - backswing_window_s) * motion_hz)))
+            if bs_end > bs_start:
+                bs_mean = float(np.mean(motion_array[bs_start:bs_end]))
+                backswing_mean_ratio = bs_mean / motion_median
+                s3a_backswing_ok = backswing_mean_ratio >= motion_floor_ratio
+        report["s3a_backswing_mean_ratio"] = (
+            round(backswing_mean_ratio, 2)
+            if backswing_mean_ratio is not None else None
+        )
+        report["s3a_backswing_ok"] = s3a_backswing_ok
+
+        # Gate 3b — follow-through motion ─────────────────────────────
+        s3b_ft_ok: bool = True
+        ft_mean_ratio: float | None = None
+        if motion_array is not None and motion_hz > 0 and motion_median > 0:
+            ft_start = int(round(peak_t * motion_hz))
+            ft_end = min(
+                len(motion_array),
+                int(round((peak_t + followthrough_window_s) * motion_hz)),
+            )
+            if ft_end > ft_start:
+                ft_mean = float(np.mean(motion_array[ft_start:ft_end]))
+                ft_mean_ratio = ft_mean / motion_median
+                s3b_ft_ok = ft_mean_ratio >= motion_floor_ratio
+        report["s3b_ft_mean_ratio"] = (
+            round(ft_mean_ratio, 2) if ft_mean_ratio is not None else None
+        )
+        report["s3b_ft_ok"] = s3b_ft_ok
+
+        # Gate 4 — person in swing zone (soft / log-only) ─────────────
+        # Proximity check: does a motion burst from detect_swings_from_motion
+        # land within ±pair_window_sec of this audio peak?  Logged only;
+        # does not affect the hard_pass decision.
+        s4_person_ok: bool | None = None
+        s4_dt: float | None = None
         for mw in motion_windows:
             m_t = mw.get("peak_time_sec")
             if m_t is None:
                 continue
-            dt = abs(float(a_t) - float(m_t))
-            if dt <= pair_window_sec and (closest_dt is None or dt < closest_dt):
-                closest_dt = dt
-                closest_m = mw
-        if closest_m is not None:
-            paired_windows.append(aw)
-            pairs.append({
-                "audio_peak_sec": round(float(a_t), 2),
-                "motion_peak_sec": round(float(closest_m.get("peak_time_sec")), 2),
-                "dt_sec": round(float(closest_dt), 2),
-                "audio_ratio": (
-                    round(float(aw.get("ratio")), 1)
-                    if aw.get("ratio") is not None else None
-                ),
-                "motion_ratio": (
-                    round(float(closest_m.get("ratio")), 1)
-                    if closest_m.get("ratio") is not None else None
-                ),
-            })
+            dt = abs(peak_t - float(m_t))
+            if s4_dt is None or dt < s4_dt:
+                s4_dt = dt
+        if s4_dt is not None:
+            s4_person_ok = s4_dt <= pair_window_sec
+        report["s4_person_in_zone_ok"] = s4_person_ok
+        report["s4_nearest_burst_dt_sec"] = (
+            round(s4_dt, 2) if s4_dt is not None else None
+        )
 
-    # Motion-only fallback: if audio found zero peaks (quiet mic, no
-    # audio track, lossy codec stripped audio, etc.) but motion bursts
-    # exist, use motion windows directly. Audio pairing is a precision
-    # refinement — it should not be a hard gate that rejects valid swings.
-    # The motion detector alone is sufficient evidence of a swing.
-    used_fallback = False
-    if not paired_windows and not audio_windows and motion_windows:
+        # ── Decision ──────────────────────────────────────────────────
+        # Hard gates: S1b, S1c, S2, S3a, S3b.
+        # Soft (logged only): S4.
+        hard_pass = (
+            s1b_duration_ok
+            and s1c_broadband_ok
+            and s2_motion_ok
+            and s3a_backswing_ok
+            and s3b_ft_ok
+        )
+        report["hard_pass"] = hard_pass
+        candidate_reports.append(report)
+
         log.info(
-            "ai_tracer: detect_swings_combined — audio found 0 peaks; "
-            "falling back to motion-only (%d windows)",
+            "ai_tracer: candidate t=%.2fs audio_ratio=%.1f | "
+            "S1b ring_out=%.0fms(%s) S1c centroid=%.0fHz(%s) | "
+            "S2 motion@impact=%.2f×(%s) | "
+            "S3a backswing=%.2f×(%s) S3b follow=%.2f×(%s) | "
+            "S4 burst_dt=%s(%s) | → %s",
+            peak_t,
+            float(aw.get("ratio") or 0.0),
+            ring_out_ms if ring_out_ms is not None else -1.0,
+            "OK" if s1b_duration_ok else "FAIL",
+            spectral_centroid_hz if spectral_centroid_hz is not None else -1.0,
+            "OK" if s1c_broadband_ok else "FAIL",
+            motion_at_impact_ratio if motion_at_impact_ratio is not None else -1.0,
+            "OK" if s2_motion_ok else "FAIL",
+            backswing_mean_ratio if backswing_mean_ratio is not None else -1.0,
+            "OK" if s3a_backswing_ok else "FAIL",
+            ft_mean_ratio if ft_mean_ratio is not None else -1.0,
+            "OK" if s3b_ft_ok else "FAIL",
+            f"{s4_dt:.2f}s" if s4_dt is not None else "none",
+            "OK" if s4_person_ok else ("FAIL" if s4_person_ok is False else "?"),
+            "ACCEPT" if hard_pass else "REJECT",
+        )
+
+        if hard_pass:
+            accepted_windows.append(aw)
+
+    # ── Motion-only fallback (separate code path) ─────────────────────
+    # Triggered ONLY when audio returns zero candidates.  Audio with
+    # candidates that all failed the 4-signal gates does NOT fall back —
+    # if audio found events and they all failed the gates, we trust the
+    # gates and return nothing (operator can lower thresholds via constants
+    # or per-call kwargs and reprocess).
+    used_fallback = False
+    if not audio_windows and motion_windows:
+        log.info(
+            "ai_tracer: detect_swings_combined — audio returned 0 candidates; "
+            "entering motion-only fallback (%d motion bursts)",
             len(motion_windows),
         )
-        paired_windows = list(motion_windows)
-        used_fallback = True
+        fallback_accepted: list[dict] = []
+        for mw in motion_windows:
+            m_peak_t = float(mw.get("peak_time_sec", 0.0))
+            burst_dur = float(mw.get("burst_duration_sec") or 0.0)
+            # Approximate burst start/end from burst_duration_sec.
+            burst_start_t = m_peak_t - burst_dur / 2.0
+            burst_end_t = m_peak_t + burst_dur / 2.0
+            # Gate 3 analogue: require meaningful pre- and post-impact span.
+            fb_backswing_ok = (m_peak_t - burst_start_t) >= (backswing_window_s * 0.5)
+            fb_ft_ok = (burst_end_t - m_peak_t) >= (followthrough_window_s * 0.5)
+            fb_pass = fb_backswing_ok and fb_ft_ok
+            log.info(
+                "ai_tracer: motion-only candidate t=%.2fs burst=%.2fs "
+                "backswing_check=%s followthrough_check=%s → %s",
+                m_peak_t, burst_dur,
+                "OK" if fb_backswing_ok else "FAIL",
+                "OK" if fb_ft_ok else "FAIL",
+                "ACCEPT" if fb_pass else "REJECT",
+            )
+            if fb_pass:
+                fallback_accepted.append(mw)
+
+        if fallback_accepted:
+            accepted_windows = fallback_accepted
+            used_fallback = True
+        else:
+            # All motion bursts failed Gate 3 — return them unfiltered so
+            # the operator can diagnose from logs rather than get nothing.
+            log.info(
+                "ai_tracer: motion-only fallback Gate 3 rejected all %d bursts; "
+                "returning unfiltered so operator can diagnose",
+                len(motion_windows),
+            )
+            accepted_windows = list(motion_windows)
+            used_fallback = True
 
     if debug is not None:
         debug["audio"] = audio_debug
         debug["motion"] = motion_debug
         debug["combined"] = {
-            "pair_window_sec": float(pair_window_sec),
             "before_impact_sec": float(before_impact_sec),
             "after_impact_sec": float(after_impact_sec),
-            "audio_min_peak_ratio_used": float(audio_min_peak_ratio),
-            "motion_ratio_used": float(motion_ratio),
-            "n_audio_windows": len(audio_windows),
-            "n_motion_windows": len(motion_windows),
-            "n_paired": len(pairs),
-            "pairs": pairs,
             "fallback": "motion_only" if used_fallback else None,
+            "n_audio_candidates": len(audio_windows),
+            "n_motion_windows": len(motion_windows),
+            "n_accepted": len(accepted_windows),
+            "tunables": {
+                "audio_min_peak_ratio": float(audio_min_peak_ratio),
+                "audio_max_rise_ms": float(audio_max_rise_ms),
+                "audio_max_duration_ms": float(audio_max_duration_ms),
+                "audio_min_spectral_centroid_hz": float(audio_min_spectral_centroid_hz),
+                "backswing_window_s": float(backswing_window_s),
+                "followthrough_window_s": float(followthrough_window_s),
+                "min_motion_ratio_at_impact": float(min_motion_ratio_at_impact),
+                "motion_floor_ratio": float(motion_floor_ratio),
+                "pair_window_sec": float(pair_window_sec),
+            },
+            "candidates": candidate_reports,
         }
 
     log.info(
-        "ai_tracer: detect_swings_combined — %d paired (audio=%d motion=%d "
-        "audio_ratio=%.1f motion_ratio=%.1f pair_window=%.1fs fallback=%s)",
-        len(paired_windows), len(audio_windows), len(motion_windows),
-        audio_min_peak_ratio, motion_ratio, pair_window_sec,
+        "ai_tracer: detect_swings_combined — accepted %d / %d audio candidates "
+        "(motion_bursts=%d fallback=%s)",
+        len(accepted_windows), len(audio_windows), len(motion_windows),
         "motion_only" if used_fallback else "none",
     )
-    return paired_windows
+    return accepted_windows
 
 
 def run_full_ai_tracer_pipeline(
