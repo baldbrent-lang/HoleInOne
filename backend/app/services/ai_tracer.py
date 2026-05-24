@@ -3092,6 +3092,16 @@ AUDIO_ENVELOPE_WINDOW_MS = 10
 # real impact. Below this we treat the audio as too noisy to
 # identify a clear "thwack" and fall back to the AI vision path.
 AUDIO_MIN_PEAK_OVER_MEDIAN = 25.0
+
+# Minimum audio peak-to-median ratio used by the *swing detector*
+# (detect_swings_from_audio / detect_swings_combined) when scanning a
+# long recording for club-on-ball impacts. Lower = more sensitive;
+# catches quiet USB-mic recordings but admits more false positives.
+# Higher = fewer spurious detections but may miss soft impacts.
+# Tune this as you calibrate with real course footage.
+# Changed from 5.0 → 3.0 to handle quiet USB mic captures where the
+# impact transient is clear but the peak/median ratio is modest.
+SWING_AUDIO_MIN_PEAK_RATIO = 3.0
 # Visual impact lands a few frames before the audio envelope peak: sound
 # from the strike has to travel ~5–15 m of air to the mic (≈30 ms /
 # ~1 frame at 30 fps), and the smoothed envelope's max sits a few ms
@@ -3752,7 +3762,7 @@ def detect_swings_from_audio(
 def detect_swings_combined(
     input_path: Path,
     fps: float | None = None,
-    audio_min_peak_ratio: float = 5.0,
+    audio_min_peak_ratio: float = SWING_AUDIO_MIN_PEAK_RATIO,
     motion_ratio: float = 2.0,
     pair_window_sec: float = 3.0,
     before_impact_sec: float = 4.5,
@@ -3821,6 +3831,21 @@ def detect_swings_combined(
                 ),
             })
 
+    # Motion-only fallback: if audio found zero peaks (quiet mic, no
+    # audio track, lossy codec stripped audio, etc.) but motion bursts
+    # exist, use motion windows directly. Audio pairing is a precision
+    # refinement — it should not be a hard gate that rejects valid swings.
+    # The motion detector alone is sufficient evidence of a swing.
+    used_fallback = False
+    if not paired_windows and not audio_windows and motion_windows:
+        log.info(
+            "ai_tracer: detect_swings_combined — audio found 0 peaks; "
+            "falling back to motion-only (%d windows)",
+            len(motion_windows),
+        )
+        paired_windows = list(motion_windows)
+        used_fallback = True
+
     if debug is not None:
         debug["audio"] = audio_debug
         debug["motion"] = motion_debug
@@ -3834,13 +3859,15 @@ def detect_swings_combined(
             "n_motion_windows": len(motion_windows),
             "n_paired": len(pairs),
             "pairs": pairs,
+            "fallback": "motion_only" if used_fallback else None,
         }
 
     log.info(
         "ai_tracer: detect_swings_combined — %d paired (audio=%d motion=%d "
-        "audio_ratio=%.1f motion_ratio=%.1f pair_window=%.1fs)",
-        len(pairs), len(audio_windows), len(motion_windows),
+        "audio_ratio=%.1f motion_ratio=%.1f pair_window=%.1fs fallback=%s)",
+        len(paired_windows), len(audio_windows), len(motion_windows),
         audio_min_peak_ratio, motion_ratio, pair_window_sec,
+        "motion_only" if used_fallback else "none",
     )
     return paired_windows
 
