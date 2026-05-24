@@ -3116,7 +3116,7 @@ SWING_AUDIO_MAX_RISE_MS: float = 30.0
 # Maximum ring-out: how long (ms) the envelope stays above 20 % of the
 # peak amplitude after the peak.  A real "thwack" decays in < 150 ms;
 # a ball drop on a hard floor, a hand clap, or a voice sustains longer.
-SWING_AUDIO_MAX_DURATION_MS: float = 150.0
+SWING_AUDIO_MAX_DURATION_MS: float = 200.0
 
 # Minimum spectral centroid (Hz) of the 100 ms window around the peak,
 # computed after the 1.5 kHz high-pass.  Club-on-ball is broadband and
@@ -4166,13 +4166,14 @@ def detect_swings_combined(
 
         log.info(
             "swing candidate t=%.2fs: "
-            "audio_transient=%s(rise=%dms,dur=%dms) "
+            "audio_transient=%s(rise=%dms,dur=%dms,centroid=%.0fHz) "
             "motion_at_impact=%s(ratio=%.2f) "
             "backswing=%s followthrough=%s in_roi=%s -> %s",
             peak_t,
             "OK" if audio_transient_pass else "FAIL",
             rise_ms_int,
             int(round(ring_out_ms)) if ring_out_ms is not None else -1,
+            spectral_centroid_hz if spectral_centroid_hz is not None else -1.0,
             "OK" if s2_motion_ok else "FAIL",
             motion_at_impact_ratio if motion_at_impact_ratio is not None else -1.0,
             "OK" if s3a_backswing_ok else "FAIL",
