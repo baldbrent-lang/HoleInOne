@@ -3997,6 +3997,14 @@ def detect_swings_combined(
     # ── 4-signal evaluation of each audio candidate ───────────────────
     accepted_windows: list[dict] = []
     candidate_reports: list[dict] = []
+    # Tally how many candidates each hard gate killed (a single candidate
+    # can fail multiple gates; all are counted independently).
+    rejection_counts: dict[str, int] = {
+        "audio_transient": 0,
+        "motion_intensity": 0,
+        "backswing": 0,
+        "followthrough": 0,
+    }
 
     for aw in audio_windows:
         peak_t = aw.get("peak_time_sec")
@@ -4128,10 +4136,11 @@ def detect_swings_combined(
 
         # ── Decision ──────────────────────────────────────────────────
         # Hard gates: S1b, S1c, S2, S3a, S3b.
+        # S1b + S1c together form the "audio_transient" gate.
         # Soft (logged only): S4.
+        audio_transient_pass = s1b_duration_ok and s1c_broadband_ok
         hard_pass = (
-            s1b_duration_ok
-            and s1c_broadband_ok
+            audio_transient_pass
             and s2_motion_ok
             and s3a_backswing_ok
             and s3b_ft_ok
@@ -4139,31 +4148,66 @@ def detect_swings_combined(
         report["hard_pass"] = hard_pass
         candidate_reports.append(report)
 
+        # Rise time: scan backward from the peak sample until the envelope
+        # drops below 10 % of the peak value (max 200 ms lookback).
+        rise_ms_int: int = 0
+        if envelope is not None and audio_sr > 0:
+            _pk_s = max(0, min(int(round(peak_t * audio_sr)), len(envelope) - 1))
+            _pk_val = float(envelope[_pk_s])
+            _lookback = max(0, _pk_s - int(0.200 * audio_sr))
+            _rise_start = _pk_s
+            for _j in range(_pk_s, _lookback, -1):
+                if float(envelope[_j]) < _pk_val * 0.10:
+                    _rise_start = _j
+                    break
+            rise_ms_int = max(0, int(round(
+                (_pk_s - _rise_start) / float(audio_sr) * 1000.0
+            )))
+
         log.info(
-            "ai_tracer: candidate t=%.2fs audio_ratio=%.1f | "
-            "S1b ring_out=%.0fms(%s) S1c centroid=%.0fHz(%s) | "
-            "S2 motion@impact=%.2f×(%s) | "
-            "S3a backswing=%.2f×(%s) S3b follow=%.2f×(%s) | "
-            "S4 burst_dt=%s(%s) | → %s",
+            "swing candidate t=%.2fs: "
+            "audio_transient=%s(rise=%dms,dur=%dms) "
+            "motion_at_impact=%s(ratio=%.2f) "
+            "backswing=%s followthrough=%s in_roi=%s -> %s",
             peak_t,
-            float(aw.get("ratio") or 0.0),
-            ring_out_ms if ring_out_ms is not None else -1.0,
-            "OK" if s1b_duration_ok else "FAIL",
-            spectral_centroid_hz if spectral_centroid_hz is not None else -1.0,
-            "OK" if s1c_broadband_ok else "FAIL",
-            motion_at_impact_ratio if motion_at_impact_ratio is not None else -1.0,
+            "OK" if audio_transient_pass else "FAIL",
+            rise_ms_int,
+            int(round(ring_out_ms)) if ring_out_ms is not None else -1,
             "OK" if s2_motion_ok else "FAIL",
-            backswing_mean_ratio if backswing_mean_ratio is not None else -1.0,
+            motion_at_impact_ratio if motion_at_impact_ratio is not None else -1.0,
             "OK" if s3a_backswing_ok else "FAIL",
-            ft_mean_ratio if ft_mean_ratio is not None else -1.0,
             "OK" if s3b_ft_ok else "FAIL",
-            f"{s4_dt:.2f}s" if s4_dt is not None else "none",
             "OK" if s4_person_ok else ("FAIL" if s4_person_ok is False else "?"),
-            "ACCEPT" if hard_pass else "REJECT",
+            "ACCEPTED" if hard_pass else "REJECTED",
         )
+
+        # Track per-gate rejection tallies for the end-of-loop summary.
+        if not hard_pass:
+            if not audio_transient_pass:
+                rejection_counts["audio_transient"] += 1
+            if not s2_motion_ok:
+                rejection_counts["motion_intensity"] += 1
+            if not s3a_backswing_ok:
+                rejection_counts["backswing"] += 1
+            if not s3b_ft_ok:
+                rejection_counts["followthrough"] += 1
 
         if hard_pass:
             accepted_windows.append(aw)
+
+    # ── Rejection summary (logged when all audio candidates fail) ─────
+    if audio_windows and not accepted_windows:
+        breakdown = ", ".join(
+            f"{gate}={count}"
+            for gate, count in rejection_counts.items()
+            if count > 0
+        ) or "unknown"
+        log.info(
+            "no swings detected: %d candidate(s) considered, "
+            "rejected by: %s",
+            len(audio_windows),
+            breakdown,
+        )
 
     # ── Motion-only fallback (separate code path) ─────────────────────
     # Triggered ONLY when audio returns zero candidates.  Audio with
@@ -4224,6 +4268,7 @@ def detect_swings_combined(
             "n_audio_candidates": len(audio_windows),
             "n_motion_windows": len(motion_windows),
             "n_accepted": len(accepted_windows),
+            "rejection_counts": dict(rejection_counts),
             "tunables": {
                 "audio_min_peak_ratio": float(audio_min_peak_ratio),
                 "audio_max_rise_ms": float(audio_max_rise_ms),

@@ -1181,12 +1181,14 @@ def _run_long_upload_job(
                 # Combined audio + motion detector: an audio impact only
                 # counts when a motion burst peaks within ±3 s. Filters
                 # the false positives each detector produces alone.
+                _detect_debug: dict = {}
                 detected = detect_swings_combined(
                     src_path,
                     fps=tee_fps,
                     audio_min_peak_ratio=float(audio_min_peak_ratio),
                     motion_ratio=float(motion_ratio),
                     pair_window_sec=float(combined_pair_window_sec),
+                    debug=_detect_debug,
                 )
                 for i, d in enumerate(detected):
                     segs.append(
@@ -1198,9 +1200,21 @@ def _run_long_upload_job(
                         }
                     )
                 if not segs:
+                    _comb = _detect_debug.get("combined") or {}
+                    _n = _comb.get("n_audio_candidates", 0)
+                    _rc = _comb.get("rejection_counts") or {}
+                    if _n > 0 and any(_rc.values()):
+                        _bd = ", ".join(
+                            f"{g}={c}" for g, c in _rc.items() if c > 0
+                        )
+                        raise RuntimeError(
+                            f"no swings detected: {_n} candidate(s) considered, "
+                            f"rejected by: {_bd}"
+                        )
                     raise RuntimeError(
-                        "no swings detected (combined audio+motion found "
-                        "no paired peaks within the 3s window)"
+                        "no swings detected (audio found no candidates; "
+                        "motion_bursts=%d — check logs for details)"
+                        % _comb.get("n_motion_windows", 0)
                     )
 
             durations = [s["end_sec"] - s["start_sec"] for s in segs]
