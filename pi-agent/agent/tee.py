@@ -156,14 +156,36 @@ class TeeAgent:
     def stop(self) -> None:
         self.stopping.set()
 
+    def _capture_loop(self, cap) -> None:
+        """Dedicated capture thread — the ONLY place cap.read() runs.
+        Drains the camera into the ring buffer at full frame rate and
+        keeps the live view fresh. Because nothing in here blocks (no
+        detection, no disk writes), the camera is never starved, so no
+        frames get dropped — that starvation was the source of the
+        recorded-clip stutter when detection ran inline."""
+        while not self.stopping.is_set():
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                time.sleep(0.02)
+                continue
+            ts = time.time()
+            self.buffer.push(ts, frame.copy())
+            streamer = getattr(self, "streamer", None)
+            if streamer is not None:
+                streamer.update_frame(frame)
+
     def run(self) -> None:
         cap = open_camera(self.cam_cfg)
         fps = float(self.cam_cfg.get("fps", 30))
-        buffer = FrameBuffer(self.buffer_seconds, fps)
+        self.fps = fps
+        self.buffer = FrameBuffer(self.buffer_seconds, fps)
 
         det_width = int(self.det_cfg.get("detect_width", 320))
         det_fps = float(self.det_cfg.get("fps", 5))
-        det_interval = max(1, int(round(fps / det_fps)))
+        # Seconds between detection samples. Detection no longer gates
+        # the capture rate, so this is purely how often we re-check for
+        # a person — independent of the recorded frame rate.
+        det_period = 1.0 / max(0.5, det_fps)
         dwell_seconds = float(self.det_cfg.get("trigger_dwell_seconds", 2))
         no_person_timeout = float(self.det_cfg.get("no_person_timeout_seconds", 5))
 
@@ -182,58 +204,63 @@ class TeeAgent:
 
         streamer = LiveStreamer(self.client)
         streamer.start()
-        # Stash on self so _record_and_upload can keep pushing live
-        # frames while recording — otherwise the live view freezes on
-        # the last pre-trigger frame until the clip ends.
         self.streamer = streamer
 
+        # Start draining the camera into the buffer before we begin
+        # detecting, so the pre-roll is already populated at trigger.
+        capture_thread = threading.Thread(
+            target=self._capture_loop, args=(cap,),
+            daemon=True, name="tee-capture",
+        )
+        capture_thread.start()
+
         person_first_seen: Optional[float] = None
-        frame_idx = 0
         log.info(
             "tee agent running: roi=%s buffer=%.1fs dwell=%.1fs",
             self.roi, self.buffer_seconds, dwell_seconds,
         )
         try:
             while not self.stopping.is_set():
-                ok, frame = cap.read()
-                if not ok or frame is None:
+                snap = self.buffer.snapshot()
+                if not snap:
                     time.sleep(0.05)
                     continue
-                ts = time.time()
-                buffer.push(ts, frame.copy())
-                streamer.update_frame(frame)
-
-                if frame_idx % det_interval == 0:
-                    centroid = detector.detect(frame)
-                    in_roi = centroid is not None and _in_roi(centroid, self.roi)
-                    if in_roi:
-                        if person_first_seen is None:
-                            person_first_seen = ts
-                            log.info("person entered ROI at %s", centroid)
-                        elif ts - person_first_seen >= dwell_seconds:
-                            session_id = str(uuid.uuid4())
-                            log.info("trigger: session=%s", session_id)
-                            try:
-                                self.client.event_trigger(session_id)
-                            except Exception as exc:
-                                log.error(
-                                    "event_trigger failed (%s) — skipping",
-                                    exc,
-                                )
-                                person_first_seen = None
-                            else:
-                                self._record_and_upload(
-                                    cap, buffer, detector, det_interval,
-                                    no_person_timeout, fps, session_id,
-                                )
-                                person_first_seen = None
-                                buffer.clear()
-                    else:
-                        if person_first_seen is not None:
-                            log.debug("person left ROI before dwell threshold")
-                        person_first_seen = None
-                frame_idx += 1
+                # Detect on the most recent buffered frame. Runs in this
+                # thread, but the capture thread keeps filling the buffer
+                # meanwhile, so a slow detect() can't drop frames.
+                frame = snap[-1][1]
+                now = time.time()
+                centroid = detector.detect(frame)
+                in_roi = centroid is not None and _in_roi(centroid, self.roi)
+                if in_roi:
+                    if person_first_seen is None:
+                        person_first_seen = now
+                        log.info("person entered ROI at %s", centroid)
+                    elif now - person_first_seen >= dwell_seconds:
+                        session_id = str(uuid.uuid4())
+                        log.info("trigger: session=%s", session_id)
+                        try:
+                            self.client.event_trigger(session_id)
+                        except Exception as exc:
+                            log.error(
+                                "event_trigger failed (%s) — skipping", exc,
+                            )
+                            person_first_seen = None
+                        else:
+                            self._record_and_upload(
+                                detector, no_person_timeout, det_period,
+                                fps, session_id,
+                            )
+                            person_first_seen = None
+                            self.buffer.clear()
+                else:
+                    if person_first_seen is not None:
+                        log.debug("person left ROI before dwell threshold")
+                    person_first_seen = None
+                time.sleep(det_period)
         finally:
+            self.stopping.set()
+            capture_thread.join(timeout=2)
             cap.release()
             detector.close()
             hb.stop()
@@ -242,23 +269,20 @@ class TeeAgent:
     # -----------------------------------------------------------------
 
     def _record_and_upload(
-        self, cap, buffer: FrameBuffer, detector, det_interval: int,
-        no_person_timeout: float, fps: float, session_id: str,
+        self, detector, no_person_timeout: float, det_period: float,
+        fps: float, session_id: str,
     ) -> None:
-        """Persist the pre-roll buffer + keep recording until no
-        person is seen for `no_person_timeout` seconds (capped by
-        `max_clip_seconds`), then upload."""
-        snapshot = buffer.snapshot()
+        """Persist the pre-roll buffer + keep recording until no person
+        is seen for `no_person_timeout` seconds (capped by
+        `max_clip_seconds`), then upload. Frames come from the shared
+        ring buffer (filled by the capture thread) — this method never
+        touches the camera directly, so detection here can't stall
+        capture and drop frames."""
+        snapshot = self.buffer.snapshot()
         if not snapshot:
-            log.warning("buffer empty at trigger — recording from now")
-            ok, sample = cap.read()
-            if not ok or sample is None:
-                log.error("can't read frame; aborting record")
-                return
-            height, width = sample.shape[:2]
-            snapshot = [(time.time(), sample.copy())]
-        else:
-            height, width = snapshot[0][1].shape[:2]
+            log.warning("buffer empty at trigger; skipping session=%s", session_id)
+            return
+        height, width = snapshot[0][1].shape[:2]
 
         # Wall-clock time of the first frame in the clip (the start of
         # the committed pre-roll). Reported on upload so the backend can
@@ -278,34 +302,34 @@ class TeeAgent:
         # isn't installed or the device can't be opened, the agent
         # carries on with silent video.
         audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
-        audio_wav = audio_recorder.start(session_id)
+        audio_recorder.start(session_id)
 
+        # Write the pre-roll, then keep draining newly-captured frames
+        # from the buffer (the same pattern the green agent uses).
         for _ts, f in snapshot:
             writer.write(f)
-        last_person_seen = time.time()
-        recording_start = time.time()
-        frames_since_check = 0
+        last_written_ts = snapshot[-1][0]
         n_frames_written = len(snapshot)
+        recording_start = time.time()
+        last_person_seen = recording_start
+        next_det = recording_start + det_period
 
         while not self.stopping.is_set():
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                time.sleep(0.02)
-                continue
-            writer.write(frame)
-            # Keep the live view fresh — otherwise the admin sees a
-            # frozen frame from when recording started.
-            if getattr(self, "streamer", None) is not None:
-                self.streamer.update_frame(frame)
-            n_frames_written += 1
             now = time.time()
+            current = self.buffer.snapshot()
+            new_frames = [(ts, f) for ts, f in current if ts > last_written_ts]
+            for ts, f in new_frames:
+                writer.write(f)
+                last_written_ts = ts
+                n_frames_written += 1
             if now - recording_start > self.max_clip_seconds:
                 log.warning("max_clip_seconds hit; stopping")
                 break
-            frames_since_check += 1
-            if frames_since_check >= det_interval:
-                frames_since_check = 0
-                centroid = detector.detect(frame)
+            # Stop-detection on the latest frame, at the detection
+            # cadence — off the capture path, so it can't drop frames.
+            if now >= next_det and current:
+                next_det = now + det_period
+                centroid = detector.detect(current[-1][1])
                 if centroid is not None:
                     last_person_seen = now
                 elif now - last_person_seen > no_person_timeout:
@@ -314,6 +338,7 @@ class TeeAgent:
                         no_person_timeout, now - recording_start,
                     )
                     break
+            time.sleep(0.02)
         writer.release()
         # Tell the backend recording is done before starting the
         # (possibly multi-minute) upload, so the paired green Pi —
