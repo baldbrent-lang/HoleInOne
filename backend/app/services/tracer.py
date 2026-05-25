@@ -948,6 +948,16 @@ def _render(
                 "n_points": 0,
             }
 
+    # Predict-then-search backfill: fit the parabola from the confident
+    # track, then re-examine the small corridor box around the predicted
+    # position on in-range frames that have NO track point, with a loose
+    # top-hat blob search. Recovers faint ball frames the global detector
+    # was too strict to flag — denser plotting along the known path
+    # without adding noise elsewhere. Additive; never removes points.
+    track, n_backfilled = _corridor_backfill(input_path, track, det_scale)
+    if n_backfilled:
+        log.info("tracer: corridor backfill added %d point(s)", n_backfilled)
+
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
     cap2 = cv2.VideoCapture(str(input_path))
@@ -991,6 +1001,7 @@ def _render(
         "residual_px": _residual(track),
         "n_points": len(track),
         "n_candidates": len(detections),
+        "n_backfilled": n_backfilled,
         "frame_range": [track[0].frame, track[-1].frame],
         "fps": float(fps),
         "error": None,
@@ -2093,6 +2104,106 @@ def _fit_motion(track):
     ys_pred = np.polyval(y_coef, frames)
     rms = float(np.sqrt(np.mean((xs - xs_pred) ** 2 + (ys - ys_pred) ** 2)))
     return y_coef, x_coef, rms
+
+
+# Corridor backfill tuning. Half-box (det px) searched around each
+# predicted position = max(MIN, MULT × fit-RMS). Conservative on
+# purpose: a tight corridor means a stray bright blob far from the
+# predicted path can't be mistaken for the ball. Tune against a real
+# debug image if downrange frames stay empty (raise) or noise sneaks
+# in (lower).
+CORRIDOR_HALF_MIN_PX = 14
+CORRIDOR_EPS_MULT = 3.0
+
+
+def _corridor_backfill(input_path, track, det_scale):
+    """Recover faint ball frames the global detector missed, by looking
+    only where the fitted parabola says the ball should be.
+
+    Fit (x_coef, y_coef) from the confident track, then for each in-range
+    frame WITHOUT a track point, re-decode it, crop a small corridor box
+    around the predicted position, and run the same top-hat ball-blob
+    search the address detector uses. Add the nearest ball-sized hit
+    within the corridor. Confining the search to the corridor is what
+    makes it safe — it plots more points along the known path without
+    flagging noise elsewhere. Additive: returns (track, n_added).
+    """
+    if not HAS_CV or len(track) < 5:
+        return track, 0
+    y_coef, x_coef, rms = _fit_motion(track)
+    if y_coef is None:
+        return track, 0
+    have = {int(d.frame) for d in track}
+    f0 = min(int(d.frame) for d in track)
+    f1 = max(int(d.frame) for d in track)
+    missing = {f for f in range(f0, f1 + 1) if f not in have}
+    if not missing:
+        return track, 0
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return track, 0
+    half = max(CORRIDOR_HALF_MIN_PX, int(round(CORRIDOR_EPS_MULT * rms * det_scale)))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (BALL_ADDR_TOPHAT_KERNEL_PX, BALL_ADDR_TOPHAT_KERNEL_PX),
+    )
+    added: list[_Det] = []
+    idx = -1
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or idx >= f1:
+                break
+            idx += 1
+            if idx not in missing:
+                continue
+            # Predicted native position → detection-resolution coords.
+            dpx = float(np.polyval(x_coef, idx)) * det_scale
+            dpy = float(np.polyval(y_coef, idx)) * det_scale
+            if det_scale != 1.0:
+                det = cv2.resize(
+                    frame,
+                    (max(1, int(round(frame.shape[1] * det_scale))),
+                     max(1, int(round(frame.shape[0] * det_scale)))),
+                )
+            else:
+                det = frame
+            H, W = det.shape[:2]
+            x0 = max(0, int(dpx - half)); x1b = min(W, int(dpx + half))
+            y0 = max(0, int(dpy - half)); y1b = min(H, int(dpy + half))
+            if x1b - x0 < 4 or y1b - y0 < 4:
+                continue
+            gray = cv2.cvtColor(det[y0:y1b, x0:x1b], cv2.COLOR_BGR2GRAY)
+            tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+            _r, bright = cv2.threshold(
+                tophat, BALL_ADDR_TOPHAT_THRESH, 255, cv2.THRESH_BINARY
+            )
+            contours, _h = cv2.findContours(
+                bright, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            best = None
+            best_err = float("inf")
+            for c in contours:
+                area = cv2.contourArea(c)
+                if not (MIN_BALL_AREA <= area <= MAX_BALL_AREA):
+                    continue
+                (bx, by), radius = cv2.minEnclosingCircle(c)
+                if not (MIN_BALL_RADIUS <= radius <= MAX_BALL_RADIUS):
+                    continue
+                gx, gy = x0 + bx, y0 + by  # det-global coords
+                err = float(np.hypot(gx - dpx, gy - dpy))
+                if err < best_err:
+                    best_err = err
+                    best = (gx / det_scale, gy / det_scale, radius / det_scale)
+            if best is not None and best_err <= half:
+                added.append(_Det(frame=idx, x=best[0], y=best[1], radius=best[2]))
+    finally:
+        cap.release()
+
+    if added:
+        track = sorted(list(track) + added, key=lambda d: d.frame)
+    return track, len(added)
 
 
 def _extend_track(seed_track, all_detections, total_frames, frame_w=None, frame_h=None):

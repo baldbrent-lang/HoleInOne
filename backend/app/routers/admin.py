@@ -3224,6 +3224,7 @@ def render_wizard_tracer(
                     "ok": bool(info_c.get("ok")),
                     "n_points": info_c.get("n_points"),
                     "n_candidates": info_c.get("n_candidates"),
+                    "n_backfilled": info_c.get("n_backfilled"),
                     "residual_px": info_c.get("residual_px"),
                     "debug_url": debug_url_c,
                 },
@@ -3257,6 +3258,7 @@ def render_wizard_tracer(
             "ball_track_frames": ball_track_frames_out,
             "n_points": info_c.get("n_points"),
             "n_candidates": info_c.get("n_candidates"),
+            "n_backfilled": info_c.get("n_backfilled"),
             "debug_url": debug_url_c,
             "edit_metrics": row.edit_metrics,
         }

@@ -635,6 +635,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         engine: out.engine || tracerEngine,
         n_points: out.n_points,
         n_candidates: out.n_candidates,
+        n_backfilled: out.n_backfilled,
       });
       // Cache the run into the swing so re-opens hydrate the tracer
       // instead of re-running. Records which engine produced it. The
@@ -902,6 +903,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               {tracerStats.n_candidates != null && (
                 <> · {tracerStats.n_candidates} candidates</>
               )}
+              {tracerStats.n_backfilled ? (
+                <> · {tracerStats.n_backfilled} backfilled</>
+              ) : null}
               {" — switch the Tracer toggle on Step 1 and re-run to compare."}
             </div>
           )}
