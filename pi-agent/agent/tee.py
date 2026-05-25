@@ -163,13 +163,29 @@ class TeeAgent:
         detection, no disk writes), the camera is never starved, so no
         frames get dropped — that starvation was the source of the
         recorded-clip stutter when detection ran inline."""
+        prev = None
         while not self.stopping.is_set():
             ok, frame = cap.read()
             if not ok or frame is None:
                 time.sleep(0.02)
                 continue
+            fcopy = frame.copy()
+            # Drop exact-duplicate reads. The GoPro in USB-webcam mode
+            # hands cv2 the same frame again ~once/second (the read loop
+            # outpaces the sensor's true ~29 fps). Buffered + written at
+            # a fixed fps, each repeat is a 1-frame freeze then a
+            # double-step jump. Genuine captures always differ by at
+            # least sensor noise, so byte-identical means a re-read —
+            # safe to skip so the clip stays smooth.
+            if (
+                prev is not None
+                and fcopy.shape == prev.shape
+                and np.array_equal(fcopy, prev)
+            ):
+                continue
+            prev = fcopy
             ts = time.time()
-            self.buffer.push(ts, frame.copy())
+            self.buffer.push(ts, fcopy)
             streamer = getattr(self, "streamer", None)
             if streamer is not None:
                 streamer.update_frame(frame)
@@ -289,9 +305,27 @@ class TeeAgent:
         # align the dual-camera cut to the tee/green real-time delta.
         first_frame_ts = snapshot[0][0]
 
+        # Write at the camera's REAL delivered rate, measured from the
+        # (already de-duplicated) pre-roll timestamps, instead of the
+        # nominal config fps. The GoPro webcam delivers ~29 unique fps,
+        # so stamping a fixed 30 plays the clip slightly fast and — when
+        # combined with the now-removed duplicates — was the source of
+        # the periodic hitch. Measured rate => smooth, correct-duration
+        # playback. Clamped to sane bounds; falls back to nominal when
+        # the pre-roll is too short to measure.
+        write_fps = fps
+        if len(snapshot) >= 5:
+            span = snapshot[-1][0] - snapshot[0][0]
+            if span > 0.5:
+                write_fps = max(1.0, min(120.0, (len(snapshot) - 1) / span))
+        log.info(
+            "record: nominal_fps=%.1f measured_fps=%.2f preroll_frames=%d",
+            fps, write_fps, len(snapshot),
+        )
+
         clip_path = self.work_dir / f"{session_id}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(clip_path), fourcc, fps, (width, height))
+        writer = cv2.VideoWriter(str(clip_path), fourcc, write_fps, (width, height))
         if not writer.isOpened():
             log.error("VideoWriter failed to open for %s", clip_path)
             return
