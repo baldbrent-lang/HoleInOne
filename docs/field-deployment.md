@@ -19,8 +19,8 @@ Each par-3 hole gets two camera positions:
 ```
 TEE                                                       GREEN
  ┌──────────────────────┐                  ┌──────────────────────┐
- │ GoPro Hero 13        │                  │ Pi HQ Camera + lens  │
- │   ↓ USB-C            │                  │   ↓ CSI ribbon       │
+ │ Pi HQ Camera (wide)  │                  │ Pi HQ Camera + lens  │
+ │   ↓ CSI ribbon       │                  │   ↓ CSI ribbon       │
  │ Raspberry Pi 5       │                  │ Raspberry Pi 5       │
  │   ↓ MediaPipe Pose   │                  │   ↓ continuous       │
  │   detects person     │                  │   5s circular buffer │
@@ -38,8 +38,19 @@ TEE                                                       GREEN
         └────────────────────────────────────────────────────┘
 ```
 
+Both ends run the **same camera** — a Raspberry Pi HQ Camera on a CSI
+ribbon — differing only in lens (tee: wide, to cover the tee box + the
+start of ball flight; green: telephoto, sized to the green distance).
+This replaces the earlier GoPro-over-USB tee plan: the GoPro's
+USB-webcam mode needed re-activation on every bus re-enumeration,
+contended for USB power, and delivered only ~29 unique fps (dropping
+~1 frame/s), which showed up as recorded-clip stutter. A CSI sensor
+feeds OpenCV at a steady true rate and removes that whole class of
+failures, and running identical rigs at both ends halves the parts /
+knowledge you have to maintain.
+
 Tee Pi runs vision detection. When a person enters the tee-box ROI
-for ≥2 s, it (a) starts persisting its GoPro recording with 3 s of
+for ≥2 s, it (a) starts persisting its camera recording with 5 s of
 pre-roll, and (b) POSTs an event-trigger to the backend with a
 shared `session_id`. Backend forwards "start recording" to the
 paired green Pi, which commits its 5 s pre-roll buffer and keeps
@@ -54,9 +65,10 @@ composite — same path a Reprocess uses today.
 **Goal:** validate the architecture on one par 3 for a single
 tournament day. Find out:
 
-- Does MediaPipe Pose on the GoPro feed catch every real swing?
+- Does MediaPipe Pose on the tee feed catch every real swing?
 - What's the false-positive rate (groundskeeper triggers, cart traffic)?
-- Does the Hero-13's 5.3K-and-crop give acceptable tee-camera image quality?
+- Does the Pi HQ Camera + wide lens give acceptable tee-camera image
+  quality — enough resolution on the ball as it shrinks downrange?
 - Is the green Pi's pre-roll + remote trigger reliable for catching the ball landing?
 - Does cellular signal hold at both ends?
 
@@ -68,9 +80,9 @@ tournament day. Find out:
 | Component | Part | Price | Notes |
 |---|---|---|---|
 | **Tee end** | | | |
-| Camera | GoPro Hero 13 | already owned | shoot 5.3K30 Linear |
+| Camera | Pi HQ Camera + 6 mm wide lens | ~$100 | wide FOV: tee box + start of ball flight |
 | Compute | Raspberry Pi 5 8 GB + case + power supply + 64 GB microSD | ~$110 | |
-| USB-C cable | Anker 6 ft USB-C PD cable | $15 | GoPro must stay powered |
+| Camera ribbon | 30 cm CSI ribbon cable | $5 | |
 | Enclosure | Pelican 1050 + cable glands | $50 | weatherproof |
 | Mount | Manfrotto Super Clamp + 2" ratchet strap | $30 | tree-mountable |
 | **Green end** | | | |
@@ -82,7 +94,13 @@ tournament day. Find out:
 | **Shared** | | | |
 | Network (×2) | NETGEAR LM1200 LTE USB modem + month of data | $80 + $20 | one per Pi |
 | Power (×2) | Anker 537 PowerHouse 200 Wh power station | $300 | swap daily |
-| **Total MVP** | | **~$890** | + $20/mo data |
+| **Total MVP** | | **~$980** | + $20/mo data |
+
+Both ends are now the same Pi HQ Camera body — only the lens differs
+(tee 6 mm wide, green 16 mm telephoto). Buy two camera bodies. The
+MVP is ~$90 more than the GoPro plan only because the GoPro was
+"already owned"; in exchange you drop the USB-webcam tooling and the
+stutter, and the two rigs become interchangeable spares.
 
 ### Pre-deploy checklist
 
@@ -93,8 +111,10 @@ tournament day. Find out:
 - [ ] Tree trunks selected: tee within 25 yd of the tee markers,
       green within 30 yd of the apron, both with unobstructed sight
       line to the relevant action area
-- [ ] Lens picked for the green: 16 mm if mount is 15–30 m from the
-      landing zone, 25 mm if 30–55 m (see lens distance table below)
+- [ ] Lenses picked: **tee** gets a wide 6 mm (it sits close behind the
+      tee and must see the box + the start of ball flight); **green**
+      gets 16 mm if its mount is 15–30 m from the landing zone, 25 mm
+      if 30–55 m (see lens distance table below)
 
 ### Lens distance reference
 
@@ -122,13 +142,12 @@ glass.
    enclosure ~20 yd off the green's apron, also tree-strapped. Both
    enclosures live ~3 ft off the ground (low enough that wind sway
    is minimal, high enough to see over walking golfers).
-4. **Cabling** — GoPro to tee Pi via 6 ft USB-C cable inside the
-   enclosure. Pi HQ Camera to green Pi via CSI ribbon. Both Pis
-   powered from their respective Anker 537 power stations sitting
-   in the enclosure.
+4. **Cabling** — Pi HQ Camera to its Pi via CSI ribbon at **both**
+   ends (camera and Pi share an enclosure). Both Pis powered from
+   their respective Anker 537 power stations sitting in the enclosure.
 5. **Tee-box ROI calibration** — Tee Pi capture agent has a config
    file for the tee-box rectangle in pixel coordinates. With the
-   GoPro mounted, send the live feed to the operator's phone, draw
+   camera mounted, send the live feed to the operator's phone, draw
    the rectangle around the tee markers, save.
 6. **Pairing** — In the admin console, link the two cameras to the
    same `paired_with_camera_id`. The backend uses this to relay the
@@ -159,7 +178,7 @@ cameras.
 | Component | Part | Price | Notes |
 |---|---|---|---|
 | **Tee end** | | | |
-| Camera | GoPro Hero 13 | $400 | additional units for non-MVP holes |
+| Camera | Pi HQ Camera + 6 mm wide lens | $75–100 | wide FOV for tee box + ball flight |
 | Compute | Raspberry Pi 5 8 GB kit | $110 | |
 | Mount + enclosure | Strap mount + Pelican 1050 + glands | $80 | |
 | **Green end** | | | |
@@ -169,12 +188,14 @@ cameras.
 | **Per side (×2 — tee + green)** | | | |
 | Network | LTE USB modem + SIM | $30 + $10/mo | one per Pi |
 | Power | 100 W solar panel + 100 Wh LiFePO4 battery + charge controller + PIR sensor | $200 | self-sustaining |
-| **Per hole total** | | **~$1,495–1,530** | + $20/mo data |
-| **4-hole course** | | **~$6,000** | + $80/mo data |
+| **Per hole total** | | **~$1,195–1,230** | + $20/mo data |
+| **4-hole course** | | **~$4,800** | + $80/mo data |
 
-The production tier is roughly 2× the MVP cost mostly because of
-solar/battery instead of swappable power stations, plus a second
-GoPro for the additional holes.
+Switching the tee from a $400 GoPro to a ~$100 Pi HQ Camera drops the
+per-hole cost by ~$300 (a ~$1,200 saving across a 4-hole course) and
+makes both ends identical rigs. The production tier still runs more
+than the MVP mainly because of solar/battery instead of swappable
+power stations.
 
 ### What changes vs. MVP
 
@@ -272,13 +293,13 @@ to feed it from cameras:
 A standalone Python service that runs on each Pi.
 
 **Tee agent responsibilities:**
-- Read frames from the GoPro UVC device with OpenCV (already a Pi 5
-  dependency).
+- Read frames from the Pi HQ Camera (CSI, via libcamera → V4L2) with
+  OpenCV in a dedicated capture thread (already a Pi 5 dependency).
 - MediaPipe Pose at 5 fps, ROI intersection check.
 - Maintain a 5 s circular buffer of full-res frames.
 - On trigger (person in ROI ≥2 s): POST event-trigger to backend
-  with `session_id = uuid4()`, start recording GoPro feed at full
-  fps, persist the pre-roll.
+  with `session_id = uuid4()`, start recording the camera feed at the
+  sensor's true fps, persist the pre-roll.
 - After 5 s of no person: stop recording, upload clip with same
   `session_id`, delete local file.
 - Retry on network errors with exponential backoff.
@@ -325,14 +346,14 @@ All three are deferred features sketched in chat but not committed.
 
 ## Decision points
 
-1. **Field test commitment** — buy the ~$890 MVP kit and pick one
+1. **Field test commitment** — buy the ~$980 MVP kit and pick one
    par 3 to deploy for a single tournament day. Goal: real data on
    detection rate and image quality before scaling.
 2. **Software build** — schedule the Pi capture agent + backend
    `Camera` plumbing (~3 weeks total) once the field test confirms
    the architecture works.
 3. **Scale to full course** — only after the single-hole test
-   produces clean clips. ~$6 k per 4-hole course, ~3-week install
+   produces clean clips. ~$4.8 k per 4-hole course, ~3-week install
    + maintenance training.
 
 If revenue per clip clears ~$5 net of compute + share-API fees, a
