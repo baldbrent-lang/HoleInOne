@@ -994,6 +994,19 @@ def _render(
         "frame_range": [track[0].frame, track[-1].frame],
         "fps": float(fps),
         "error": None,
+        # Per-frame detected ball positions (native coords), so callers
+        # like the Edit wizard can hydrate a manual editor from the
+        # classical detections — same {frame,x,y} shape the AI tracer's
+        # ball_track_frames uses. `smoothed` is the fitted per-frame
+        # curve used for the render; `track` is the raw detections.
+        "track": [
+            {"frame": int(d.frame), "x": float(d.x), "y": float(d.y)}
+            for d in track
+        ],
+        "smoothed": [
+            {"frame": int(f), "x": float(x), "y": float(y)}
+            for (f, x, y) in smoothed
+        ],
     }
 
 

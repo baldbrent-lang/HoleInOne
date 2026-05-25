@@ -286,6 +286,12 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   const [tracer, setTracer] = useState(null); // { url, frames }
   const [renderingTracer, setRenderingTracer] = useState(false);
   const [tracerError, setTracerError] = useState(null);
+  // Tracer engine A/B: "ai" (Claude vision, default) vs "classical"
+  // (CV motion + parabola). tracerEngineUsed tracks what produced the
+  // current tracer so switching engines forces a fresh render.
+  const [tracerEngine, setTracerEngine] = useState("ai");
+  const [tracerEngineUsed, setTracerEngineUsed] = useState(null);
+  const [tracerStats, setTracerStats] = useState(null); // {engine,n_points,n_candidates}
   const [finalUrl, setFinalUrl] = useState(null);
   const [finalizing, setFinalizing] = useState(false);
   const [finalError, setFinalError] = useState(null);
@@ -604,7 +610,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       roi: draft.roi,
       target: draft.target,
     });
-    if (tracer?.url) {
+    // Re-render when there's no tracer yet, or the operator switched
+    // engines since the last render (so the A/B actually re-runs on the
+    // same clip). Otherwise reuse the cached tracer.
+    if (tracer?.url && tracerEngineUsed === tracerEngine) {
       setStep("tracer");
       return;
     }
@@ -615,19 +624,26 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         handedness: draft.handedness,
         impact_frame: draft.impactFrame,
         ball_at_rest: draft.ball,
+        engine: tracerEngine,
       });
       setTracer({
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
       });
-      // Cache the AI run into the swing so re-opens hydrate the
-      // tracer instead of triggering another expensive AI pass. The
-      // backend already writes these to top-level edit_metrics; for
-      // multi-swing rows we also need them inside swings[selectedSwing]
-      // since applySaved hydrates from there.
+      setTracerEngineUsed(out.engine || tracerEngine);
+      setTracerStats({
+        engine: out.engine || tracerEngine,
+        n_points: out.n_points,
+        n_candidates: out.n_candidates,
+      });
+      // Cache the run into the swing so re-opens hydrate the tracer
+      // instead of re-running. Records which engine produced it. The
+      // backend also writes these to top-level edit_metrics; multi-swing
+      // rows additionally need them inside swings[selectedSwing].
       await persistPatch({
         tracer_url: out.tracer_url,
         ball_track_frames: out.ball_track_frames || [],
+        tracer_engine: out.engine || tracerEngine,
       });
       onSaved?.();
       setStep("tracer");
@@ -872,6 +888,23 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               persistPatch={persistPatch}
             />
           )}
+          {!running && !error && draft && step === "tracer" && tracerStats && (
+            <div
+              className="tiny"
+              style={{
+                marginBottom: 8, padding: "4px 8px", borderRadius: 4,
+                background: "rgba(34,197,94,0.08)",
+                border: "1px solid var(--border, #2a2a2a)",
+              }}
+            >
+              Engine: <b>{tracerStats.engine === "classical" ? "Classical CV" : "AI"}</b>
+              {" · "}{tracerStats.n_points ?? "—"} points plotted
+              {tracerStats.n_candidates != null && (
+                <> · {tracerStats.n_candidates} candidates</>
+              )}
+              {" — switch the Tracer toggle on Step 1 and re-run to compare."}
+            </div>
+          )}
           {!running && !error && draft && step === "tracer" && (
             <TracerStep
               row={row}
@@ -911,7 +944,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           )}
         </div>
 
-        <div className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
+        <div className="row" style={{ gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
           {step !== "metrics" && (
             <button
               type="button"
@@ -922,6 +955,31 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             >
               ← Back
             </button>
+          )}
+          {step === "metrics" && (
+            <div className="row" style={{ gap: 4, alignItems: "center", marginRight: "auto" }}>
+              <span className="tiny upper muted">Tracer</span>
+              <button
+                type="button"
+                className={tracerEngine === "ai" ? "small" : "ghost small"}
+                style={{ width: "auto" }}
+                onClick={() => setTracerEngine("ai")}
+                disabled={renderingTracer}
+                title="Claude vision tracer"
+              >
+                AI
+              </button>
+              <button
+                type="button"
+                className={tracerEngine === "classical" ? "small" : "ghost small"}
+                style={{ width: "auto" }}
+                onClick={() => setTracerEngine("classical")}
+                disabled={renderingTracer}
+                title="Classical CV tracer (motion + parabola, no API)"
+              >
+                Classical
+              </button>
+            </div>
           )}
           <button
             type="button"

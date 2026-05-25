@@ -3186,6 +3186,81 @@ def render_wizard_tracer(
     if isinstance(ball_pt, dict) and ball_pt.get("x") is not None:
         ball_at_rest_override = (float(ball_pt["x"]), float(ball_pt["y"]))
 
+    # Engine selector (A/B). "classical" runs the CV tracer (motion
+    # detection + parabola fit, no API calls); default "ai" keeps the
+    # Claude-vision pipeline below. The manual ball-editor and the
+    # render-tracer-fast backup work with either engine, since both
+    # produce the same ball_track_frames shape. Lets the operator run
+    # both on the same clip and compare traces + point counts.
+    engine = str(payload.get("engine") or saved.get("tracer_engine") or "ai").lower()
+    if engine == "classical":
+        tracer_url_c, info_c, _traced_c, debug_url_c = _run_tracer(src_path)
+        info_c = info_c or {}
+        track = info_c.get("track") or []
+        ball_track_frames_out = [
+            {
+                "frame": int(p["frame"]),
+                "found": True,
+                "x": int(round(p["x"])),
+                "y": int(round(p["y"])),
+                "confidence": None,
+                "manual": False,
+                "image_url": None,
+            }
+            for p in track
+        ]
+        audio_impact = info_c.get("audio_impact") or {}
+        classical_impact = (
+            int(audio_impact["impact_frame"])
+            if audio_impact.get("ok") and audio_impact.get("impact_frame") is not None
+            else saved.get("impact_frame")
+        )
+        saved.update(
+            {
+                "tracer_engine": "classical",
+                "tracer_url": tracer_url_c,
+                "tracer_info": {
+                    "engine": "classical",
+                    "ok": bool(info_c.get("ok")),
+                    "n_points": info_c.get("n_points"),
+                    "n_candidates": info_c.get("n_candidates"),
+                    "residual_px": info_c.get("residual_px"),
+                    "debug_url": debug_url_c,
+                },
+                "ball_track_frames": ball_track_frames_out,
+            }
+        )
+        if classical_impact is not None:
+            saved["impact_frame"] = int(classical_impact)
+        row.edit_metrics = saved
+        db.add(row)
+        db.add(
+            AuditLog(
+                actor="admin",
+                action="render_wizard_tracer_classical",
+                target=f"long_upload:{upload_id}",
+                detail=str(
+                    {
+                        "ok": bool(info_c.get("ok")),
+                        "n_points": info_c.get("n_points"),
+                        "n_candidates": info_c.get("n_candidates"),
+                    }
+                ),
+            )
+        )
+        db.commit()
+        db.refresh(row)
+        return {
+            "upload_id": upload_id,
+            "engine": "classical",
+            "tracer_url": tracer_url_c,
+            "ball_track_frames": ball_track_frames_out,
+            "n_points": info_c.get("n_points"),
+            "n_candidates": info_c.get("n_candidates"),
+            "debug_url": debug_url_c,
+            "edit_metrics": row.edit_metrics,
+        }
+
     # Few-shot prior from prior broadcast clips on the same course.
     # Excluding the upload itself so a re-produce doesn't reference
     # its own (possibly-stale) prior result.
@@ -3295,8 +3370,10 @@ def render_wizard_tracer(
 
     return {
         "upload_id": upload_id,
+        "engine": "ai",
         "tracer_url": tracer_url,
         "ball_track_frames": ball_track_frames_out,
+        "n_points": len(ball_track_frames_out),
         "edit_metrics": row.edit_metrics,
         "pipeline_error": pipe.get("error"),
     }
