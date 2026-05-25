@@ -562,6 +562,36 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     }
   }
 
+  async function addSwing() {
+    // Add a swing the auto-detector missed. Seeds a blank window
+    // spanning the clip; the operator then sets start/address/impact/
+    // end (and cut) via the frame pickers. Selects the new swing.
+    if (!isMulti) return;
+    const newIdx = swings.length
+      ? Math.max(...swings.map((s) => s.idx ?? 0)) + 1
+      : 0;
+    const newSwing = {
+      idx: newIdx,
+      start_frame: 0,
+      end_frame: row.tee_nb_frames ? row.tee_nb_frames - 1 : null,
+      address_frame: 0,
+      impact_frame: 0,
+      fps: row.tee_fps || 30,
+    };
+    const next = [...swings, newSwing];
+    setSwings(next);
+    const nextSelected = next.length - 1;
+    setSelectedSwing(nextSelected);
+    applySaved(newSwing);
+    setStep("metrics");
+    try {
+      const r = await api.saveEditMetrics(adminPassword, row.id, { swings: next });
+      onSaved?.(r);
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
   async function handleNext() {
     // Persist current draft, then either reuse the cached tracer or
     // render a fresh one.
@@ -825,6 +855,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               selectedSwing={selectedSwing}
               setSelectedSwing={setSelectedSwing}
               onDeleteSwing={deleteSwing}
+              onAddSwing={addSwing}
             />
           )}
           {!running && !detectingSwings && !error && draft && step === "metrics" && (
@@ -940,7 +971,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   );
 }
 
-function SwingSelectorBar({ swings, selectedSwing, setSelectedSwing, onDeleteSwing }) {
+function SwingSelectorBar({ swings, selectedSwing, setSelectedSwing, onDeleteSwing, onAddSwing }) {
   // Horizontal scroll of numbered swing chips. Sticky to the top of
   // the wizard body so the operator can switch between swings on
   // every step without losing context. Each chip shows the frame
@@ -1007,6 +1038,22 @@ function SwingSelectorBar({ swings, selectedSwing, setSelectedSwing, onDeleteSwi
           </div>
         );
       })}
+      {onAddSwing && (
+        <button
+          type="button"
+          className="ghost"
+          onClick={onAddSwing}
+          title="Add a swing the detector missed"
+          style={{
+            width: "auto", padding: "4px 12px",
+            flex: "0 0 auto", fontSize: "0.82rem",
+            border: "1px dashed var(--border, #2a2a2a)",
+            borderRadius: 6,
+          }}
+        >
+          + Add swing
+        </button>
+      )}
     </div>
   );
 }
