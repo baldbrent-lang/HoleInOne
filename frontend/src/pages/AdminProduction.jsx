@@ -173,7 +173,7 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
         alt={`${label} thumbnail`}
         missing={missing}
         placeholder={notUploaded ? "Not Uploaded" : "No preview"}
-        onClick={videoUrl ? () => onOpenViewer(videoUrl, label, recordingStartedAt) : undefined}
+        onClick={videoUrl ? () => onOpenViewer(videoUrl, label, recordingStartedAt, fps) : undefined}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <MetaRow k="Quality" v={hasSource ? qualityText(qualityLabel, width, height) : ""} />
@@ -3089,24 +3089,26 @@ function fmtClock(ms) {
   return `${get("hour")}:${get("minute")}:${get("second")}.${millis}`;
 }
 
-function VideoLightbox({ url, title, startedAt, onClose }) {
+function VideoLightbox({ url, title, startedAt, fps, onClose }) {
   const videoRef = useRef(null);
-  const [clockMs, setClockMs] = useState(null);
+  const [curTime, setCurTime] = useState(0);
   const startMs = startedAt ? Date.parse(startedAt) : null;
+  const hasFps = !!(fps && fps > 0);
+  const showOverlay = startMs != null || hasFps;
 
-  // Running wall-clock overlay = clip start + the video's currentTime.
-  // rAF keeps it smooth during playback; also updates on seek/scrub.
+  // Track the video's currentTime via rAF so the clock + frame
+  // readouts stay smooth during playback and update on seek/scrub.
   useEffect(() => {
-    if (!url || startMs == null) return undefined;
+    if (!url || !showOverlay) return undefined;
     let raf = 0;
     const tick = () => {
       const v = videoRef.current;
-      if (v) setClockMs(startMs + v.currentTime * 1000);
+      if (v) setCurTime(v.currentTime);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [url, startMs]);
+  }, [url, showOverlay]);
 
   if (!url) return null;
   return (
@@ -3157,7 +3159,7 @@ function VideoLightbox({ url, title, startedAt, onClose }) {
               background: "#000", borderRadius: 6, display: "block",
             }}
           />
-          {startMs != null && clockMs != null && (
+          {showOverlay && (
             <div
               style={{
                 position: "absolute", top: 8, left: 8,
@@ -3165,9 +3167,11 @@ function VideoLightbox({ url, title, startedAt, onClose }) {
                 fontFamily: "monospace", fontSize: "1rem",
                 padding: "4px 8px", borderRadius: 4,
                 pointerEvents: "none", letterSpacing: "0.5px",
+                display: "flex", flexDirection: "column", gap: 2,
               }}
             >
-              {fmtClock(clockMs)} CT
+              {startMs != null && <span>{fmtClock(startMs + curTime * 1000)} CT</span>}
+              {hasFps && <span>Frame {Math.floor(curTime * fps)}</span>}
             </div>
           )}
         </div>
@@ -3209,12 +3213,12 @@ export default function AdminProduction() {
   const setError = setActionError;
   const [busyId, setBusyId] = useState(null);
   const [busyEventId, setBusyEventId] = useState(null);
-  const [viewer, setViewer] = useState(null); // {url, title, startedAt}
+  const [viewer, setViewer] = useState(null); // {url, title, startedAt, fps}
   const [editingRow, setEditingRow] = useState(null);
 
-  function openViewer(url, title, startedAt = null) {
+  function openViewer(url, title, startedAt = null, fps = null) {
     if (!url) return;
-    setViewer({ url, title, startedAt });
+    setViewer({ url, title, startedAt, fps });
   }
 
   // Re-fetch the currently-loaded range on both lists. Called by the
@@ -3646,6 +3650,7 @@ export default function AdminProduction() {
         url={viewer?.url}
         title={viewer?.title}
         startedAt={viewer?.startedAt}
+        fps={viewer?.fps}
         onClose={() => setViewer(null)}
       />
 
