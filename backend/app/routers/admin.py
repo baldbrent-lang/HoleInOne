@@ -1529,38 +1529,27 @@ def _process_long_upload_segments(
                 )
                 green_seg_path = None  # splice_impact_clip handles the fallback
 
-            # Pull operator-verified examples from prior broadcast
-            # clips at this course/hole to few-shot the AI tracer.
-            # Excluding the current upload prevents self-referential
-            # examples when re-processing. Silent no-op when no
-            # examples qualify yet (early days).
-            tracer_examples_by_kind = tracer_examples.fetch_all_kinds(
-                db,
-                course_id=course_id,
-                hole_number=hole_number,
-                exclude_lvu_ids=(
-                    {progress_upload_id} if progress_upload_id else None
-                ),
-            )
-            pipe = run_full_ai_tracer_pipeline(
-                seg_path,
-                output_dir=CLIPS_DIR,
-                output_prefix=seg_path.stem,
-                model=ai_tracer_model,
-                examples_by_kind=tracer_examples_by_kind,
-            )
+            # Classical CV tracer (primary): detect the ball by motion +
+            # fit the parabola, no AI calls. Audio-impact anchoring lives
+            # inside _run_tracer. The AI pipeline stays available as a
+            # manual fallback via the /clips ai-trace endpoint. The cut
+            # to green here is driven by tee_video_dur (audio impact +
+            # fixed offset), not by the tracer, so dropping the AI
+            # doesn't affect the cut point.
+            _tracer_url, tracer_info, traced_path, _debug_url = _run_tracer(seg_path)
+            tracer_ok = bool(tracer_info and tracer_info.get("ok"))
 
             composite_url = None
             composite_info: dict | None = None
             composite_path: Path | None = None
-            tracer_path = pipe.get("tracer_video_path")
+            tracer_path = traced_path
             # For the composite VIDEO use the tracer-overlaid tee clip when
             # available; fall back to the raw tee cut.  Either way the AUDIO
-            # comes from the tee source (splice_impact_clip maps 0:a? from the
-            # first input, which the tracer pipeline muxes back in).
+            # comes from the tee source (splice_impact_clip maps 0:a? from
+            # the first input).
             tee_source_for_composite = (
                 tracer_path
-                if (pipe.get("ok") and tracer_path is not None and tracer_path.exists())
+                if (tracer_ok and tracer_path is not None and tracer_path.exists())
                 else seg_path
             )
             # Clamp the green video window to the clip's actual duration so we
@@ -1591,8 +1580,8 @@ def _process_long_upload_segments(
                         "total_dur_sec": round(tee_video_dur + green_video_dur, 2),
                         "impact_offset_in_tee_sec": round(actual_before_sec, 2),
                         "tee_green_delta_sec": round(tee_green_delta_sec, 3),
-                        "fps": pipe.get("fps"),
-                        "method": (pipe.get("impact") or {}).get("method"),
+                        "fps": probe_fps(seg_path),
+                        "method": "classical-cv",
                     }
 
             thumb_source = (
@@ -1647,7 +1636,7 @@ def _process_long_upload_segments(
                 ball_in_cup=bool(seg.get("ball_in_cup", False)),
                 processing_status=ClipProcessingStatus.received.value,
                 tracer_diagnostics=_build_tracer_diagnostics(
-                    pipe, tracer_examples_by_kind,
+                    tracer_info, None,
                 ),
             )
             db.add(clip)
@@ -1676,7 +1665,7 @@ def _process_long_upload_segments(
                     "issue_note": clip.issue_note,
                     "dual_camera": True,
                     "composite": composite_info,
-                    "ai_tracer_error": pipe.get("error"),
+                    "tracer_error": (tracer_info or {}).get("error"),
                 }
             )
             n_done += 1
