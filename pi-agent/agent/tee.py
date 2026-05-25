@@ -389,9 +389,18 @@ class TeeAgent:
         # untouched (silent) so the upload still succeeds.
         wav_done = audio_recorder.stop()
         if wav_done is not None:
-            muxed = mux_audio_into_video(clip_path, wav_done)
+            # The clip opens with a silent pre-roll (buffered before
+            # arecord started), so delay the audio by the pre-roll's
+            # playback length to line it up with the trigger moment.
+            preroll_seconds = len(snapshot) / write_fps if write_fps else 0.0
+            muxed = mux_audio_into_video(
+                clip_path, wav_done, audio_delay_seconds=preroll_seconds,
+            )
             if muxed:
-                log.info("audio: muxed into %s", clip_path.name)
+                log.info(
+                    "audio: muxed into %s (delay=%.2fs)",
+                    clip_path.name, preroll_seconds,
+                )
 
         size = clip_path.stat().st_size if clip_path.exists() else 0
         log.info(

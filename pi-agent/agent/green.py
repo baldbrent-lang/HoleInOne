@@ -204,9 +204,18 @@ class GreenAgent:
         # Stop the parallel audio capture and fold the WAV into the MP4.
         wav_done = audio_recorder.stop()
         if wav_done is not None:
-            muxed = mux_audio_into_video(clip_path, wav_done)
+            # Delay audio by the silent pre-roll's playback length so it
+            # lines up with the trigger moment, not the start of the
+            # pre-roll (arecord only starts once recording begins).
+            preroll_seconds = len(snapshot) / self.fps if self.fps else 0.0
+            muxed = mux_audio_into_video(
+                clip_path, wav_done, audio_delay_seconds=preroll_seconds,
+            )
             if muxed:
-                log.info("audio: muxed into %s", clip_path.name)
+                log.info(
+                    "audio: muxed into %s (delay=%.2fs)",
+                    clip_path.name, preroll_seconds,
+                )
 
         size = clip_path.stat().st_size if clip_path.exists() else 0
         log.info(

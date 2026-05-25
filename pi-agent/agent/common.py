@@ -413,11 +413,19 @@ class AudioRecorder:
         return wav
 
 
-def mux_audio_into_video(video_path: Path, audio_path: Path) -> bool:
+def mux_audio_into_video(
+    video_path: Path, audio_path: Path, audio_delay_seconds: float = 0.0,
+) -> bool:
     """Re-encode audio with AAC and stream-copy the existing video into
     a new MP4, replacing the original on success. Returns True on
     success, False on any failure (caller can carry on uploading the
     original silent file).
+
+    `audio_delay_seconds` pads the audio with leading silence so it
+    lines up with the right moment in the video. The clip begins with a
+    silent pre-roll (buffered frames captured before recording — and
+    thus before `arecord` started), so without this the audio plays
+    ~pre-roll-length seconds ahead of the picture.
 
     `-shortest` matches the end of the shorter stream so a slightly-
     longer audio recording doesn't pad the video with black frames.
@@ -436,6 +444,14 @@ def mux_audio_into_video(video_path: Path, audio_path: Path) -> bool:
         "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", "128k",
+    ]
+    # Pad the audio with leading silence so it aligns with the trigger
+    # moment instead of the start of the silent pre-roll. adelay pads
+    # all channels; requires the audio re-encode above (it does).
+    delay_ms = int(round(max(0.0, audio_delay_seconds) * 1000))
+    if delay_ms > 0:
+        cmd += ["-af", f"adelay={delay_ms}:all=1"]
+    cmd += [
         "-movflags", "+faststart",
         "-shortest",
         str(tmp_out),
