@@ -424,6 +424,61 @@ committed.
 
 ---
 
+## Contests & payouts (product layer — exploratory)
+
+Layered prize contests on top of the capture system. The
+closest-to-pin and longest-putt contests depend on the green-camera
+measurement features above; the hole-in-one contest only needs
+ball-in-cup detection on a par 3. These are **idea-stage**, and the
+legal structure (below) governs whether any of it is viable as drawn.
+
+### Two contest types want two funding models
+
+| Contest | Profile | Funding model |
+|---|---|---|
+| **Hole-in-one ($10K)** | Rare, may go un-won for weeks, huge payout | **Insure it** (per-round/attempt premium; the insurer pays the ace) **or progressive jackpot** (a slice of each entry feeds a rollover pot that grows until won — self-funding, and the climbing number is itself marketing). Best: a progressive pot with an insured floor. |
+| **Closest-to-pin / longest putt** | A winner *every* round, frequent | **Pari-mutuel pool** — entrants pay in, the house takes a 10–25% rake, the winner takes the rest. The prize auto-scales with participation, so it's self-correcting (never overpay on a slow day). Don't fund these with a fixed house prize. |
+
+The split matters: a fixed daily prize on an always-has-a-winner contest
+bleeds money, while an un-pooled jackpot on a rare event is an unbounded
+liability. Match the model to the profile.
+
+### Scope & cadence — tier it, don't pick one
+
+Frequency and size serve different psychology, so layer them:
+- **Daily, per-hole minis** (CTP, longest putt) — small pots, a winner
+  every day, instant gratification, viral "you won #7 today" moments.
+- **Weekly / monthly, course-wide or all-tracked-holes** — bigger
+  pooled prizes, leaderboard prestige, fewer winners, bigger headline
+  numbers.
+- **Standing hole-in-one jackpot** — the always-on aspirational draw
+  above everything.
+
+### The clip is the real prize
+
+GolfReelz's core deliverable is the broadcast-quality tracer video of
+the golfer's own shot. For most players that's the emotional payoff —
+the cash contest is partly a framing device that makes the clip feel
+earned. So cash prizes can be **modest**; this isn't competing with a
+casino, which eases the funding pressure above.
+
+### Legal constraint — governs everything
+
+Entry fee + chance + prize = a **lottery**, illegal in most US states
+without a license. Golf contests *can* qualify as exempt **skill
+contests**, but a hole-in-one is heavily luck-driven and the
+skill/chance line varies by state. The standard legal structures are:
+- a **"no purchase necessary" sweepstakes** with a free alternate
+  method of entry, or
+- a **bona fide skill contest**.
+
+**Settle this with gaming counsel per state before locking any payout
+structure** — the legal answer dictates whether entry fees (and thus
+pari-mutuel pools) are even on the table, which is the foundation of
+everything above.
+
+---
+
 ## Risks and mitigations
 
 | Risk | Likelihood | Mitigation |
@@ -436,6 +491,7 @@ committed.
 | Battery dies before solar can recover | Low | 10× safety margin in the production power budget; backend alerts on `last_seen_at` stale |
 | Lens fogs in dew / humidity | Medium | Anti-fog spray on inner enclosure window weekly during humid season |
 | Insurance / liability if a ball hits a camera | Real but low-frequency | Course super and ops sign off on mount locations; cameras well clear of typical errant-ball zones |
+| Contest prizes deemed illegal gambling (consideration + chance + prize) | High if unreviewed | Per-state gaming counsel before launch; structure as no-purchase sweepstakes or bona fide skill contest; charge entry only where pari-mutuel / skill contests are permitted; insure or progressive-fund the hole-in-one jackpot |
 
 ---
 
