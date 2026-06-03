@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import socket
+import subprocess
 import threading
 import time
 from collections import deque
@@ -42,6 +44,70 @@ def load_config(path: Path) -> dict:
     if not cfg.get("backend_url"):
         raise RuntimeError("backend_url missing")
     return cfg
+
+
+# ---------------------------------------------------------------------
+# Clip transcode (shrink uploads for slow cellular uplinks)
+# ---------------------------------------------------------------------
+
+# Target video bitrate for the H.264 re-encode. OpenCV writes raw mp4v
+# at roughly 5 Mbps, which makes a multi-minute clip too big to push
+# over a slow 4G uplink before the request times out. H.264 at this
+# bitrate is a 3-5x size reduction at equal-or-better visual quality.
+# Override per-Pi with the GOLFREELZ_UPLOAD_BITRATE env var (e.g.
+# "1500k" on a very slow link, "4000k" on a fast one).
+DEFAULT_UPLOAD_BITRATE = "2500k"
+
+
+def _transcode_to_h264(src_path: Path) -> tuple[Path, bool]:
+    """Re-encode a raw clip to efficient H.264 so the upload is small
+    enough for a slow cellular uplink.
+
+    Returns ``(path_to_upload, is_temp)``. On any problem — ffmpeg
+    missing, encode failure, empty output — it logs a warning and
+    returns the *original* clip (``is_temp=False``), so a transcode
+    issue never blocks the upload; it just falls back to sending the
+    bigger raw file. The caller deletes the temp file when is_temp."""
+    if shutil.which("ffmpeg") is None:
+        log.warning("ffmpeg not found on PATH — uploading raw clip")
+        return src_path, False
+
+    bitrate = os.environ.get("GOLFREELZ_UPLOAD_BITRATE", DEFAULT_UPLOAD_BITRATE)
+    out_path = src_path.with_name(f"{src_path.stem}-h264.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(src_path),
+        "-c:v", "libx264", "-preset", "veryfast", "-b:v", bitrate,
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",  # moov atom up front for fast server reads
+        "-an",                      # cameras have no audio
+        str(out_path),
+    ]
+    try:
+        subprocess.run(
+            cmd, check=True, timeout=600,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+    except Exception as exc:  # FileNotFound / CalledProcess / Timeout
+        log.warning("h264 transcode failed (%s) — uploading raw clip", exc)
+        out_path.unlink(missing_ok=True)
+        return src_path, False
+
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        log.warning("h264 transcode produced an empty file — uploading raw clip")
+        out_path.unlink(missing_ok=True)
+        return src_path, False
+
+    try:
+        src_mb = src_path.stat().st_size / (1024 * 1024)
+        out_mb = out_path.stat().st_size / (1024 * 1024)
+        log.info(
+            "h264 transcode: %.1f MB -> %.1f MB (bitrate %s)",
+            src_mb, out_mb, bitrate,
+        )
+    except OSError:
+        pass
+    return out_path, True
 
 
 # ---------------------------------------------------------------------
@@ -115,15 +181,24 @@ class BackendClient:
         )
 
     def upload_event(self, session_id: str, video_path: Path) -> dict:
-        with open(video_path, "rb") as fh:
-            files = {"video": (video_path.name, fh, "video/mp4")}
-            return self._retry(
-                "POST", "/upload-event",
-                data={"session_id": session_id},
-                files=files,
-                timeout=180,
-                retries=3,
-            )
+        # Shrink the clip to H.264 before sending so long captures fit
+        # through a slow uplink. Falls back to the raw clip if the
+        # transcode can't run. Longer timeout than the small calls
+        # because even a shrunk multi-minute clip takes a while on 4G.
+        upload_path, is_temp = _transcode_to_h264(video_path)
+        try:
+            with open(upload_path, "rb") as fh:
+                files = {"video": (upload_path.name, fh, "video/mp4")}
+                return self._retry(
+                    "POST", "/upload-event",
+                    data={"session_id": session_id},
+                    files=files,
+                    timeout=600,
+                    retries=3,
+                )
+        finally:
+            if is_temp:
+                upload_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------
