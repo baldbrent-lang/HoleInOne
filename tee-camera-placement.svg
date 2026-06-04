@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a9d4f2"/>
+      <stop offset="1" stop-color="#e6f3fb"/>
+    </linearGradient>
+    <linearGradient id="grass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8cbf63"/>
+      <stop offset="0.5" stop-color="#5fa244"/>
+      <stop offset="1" stop-color="#478235"/>
+    </linearGradient>
+    <linearGradient id="fairway" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a4d178"/>
+      <stop offset="1" stop-color="#7cbb55"/>
+    </linearGradient>
+    <linearGradient id="pole" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2f3b33"/>
+      <stop offset="0.5" stop-color="#46554a"/>
+      <stop offset="1" stop-color="#2a342d"/>
+    </linearGradient>
+    <linearGradient id="housing" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d7dde0"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- sky -->
+  <rect x="0" y="0" width="1200" height="372" fill="url(#sky)"/>
+  <circle cx="1030" cy="90" r="38" fill="#fff6cf" opacity="0.85"/>
+
+  <!-- distant treeline -->
+  <g opacity="0.85">
+    <ellipse cx="160" cy="360" rx="180" ry="48" fill="#6f9460"/>
+    <ellipse cx="420" cy="358" rx="150" ry="40" fill="#79a06a"/>
+    <ellipse cx="700" cy="362" rx="200" ry="46" fill="#6b9059"/>
+    <ellipse cx="1000" cy="360" rx="220" ry="50" fill="#76a067"/>
+  </g>
+
+  <!-- ground -->
+  <rect x="0" y="360" width="1200" height="440" fill="url(#grass)"/>
+
+  <!-- mowed fairway lane leading to the green -->
+  <polygon points="330,800 720,800 905,452 820,452" fill="url(#fairway)" opacity="0.9"/>
+
+  <!-- putting green + flag (the target, down the line) -->
+  <ellipse cx="862" cy="452" rx="120" ry="34" fill="#6fb24c"/>
+  <ellipse cx="862" cy="452" rx="120" ry="34" fill="none" stroke="#5a9a3e" stroke-width="2"/>
+  <circle cx="884" cy="452" r="5" fill="#2c3a2c"/>
+  <line x1="884" y1="452" x2="884" y2="372" stroke="#e8e8e8" stroke-width="3"/>
+  <polygon points="884,372 884,396 924,384" fill="#e23b3b"/>
+
+  <!-- tee box -->
+  <polygon points="360,648 770,648 838,724 300,724" fill="#7ec25a"/>
+  <polygon points="360,648 770,648 838,724 300,724" fill="none" stroke="#69ad48" stroke-width="2"/>
+  <!-- tee markers -->
+  <circle cx="430" cy="668" r="9" fill="#2f6fd0"/>
+  <circle cx="712" cy="668" r="9" fill="#2f6fd0"/>
+
+  <!-- golfer at address, facing the green (down the line) -->
+  <g fill="#27322b" stroke="#27322b" stroke-width="6" stroke-linecap="round">
+    <circle cx="596" cy="556" r="13" stroke="none"/>
+    <line x1="598" y1="570" x2="610" y2="612"/>            <!-- spine, bent -->
+    <line x1="610" y1="612" x2="600" y2="660"/>            <!-- back leg -->
+    <line x1="610" y1="612" x2="624" y2="660"/>            <!-- front leg -->
+    <line x1="602" y1="582" x2="636" y2="612"/>            <!-- arms to hands -->
+    <line x1="636" y1="612" x2="660" y2="658" stroke-width="3"/> <!-- club -->
+  </g>
+  <circle cx="662" cy="660" r="3.5" fill="#ffffff" stroke="#cfd6cf" stroke-width="1"/>
+
+  <!-- POLE behind/left of the tee (down-the-line position) -->
+  <rect x="231" y="250" width="16" height="452" rx="6" fill="url(#pole)" filter="url(#soft)"/>
+  <ellipse cx="239" cy="702" rx="34" ry="9" fill="#3c4d3f" opacity="0.5"/>
+
+  <!-- aluminum bracket arm -->
+  <path d="M247,278 h44 v10 h-44 z" fill="#b9c0c4" stroke="#9aa2a6" stroke-width="1.5"/>
+  <circle cx="293" cy="283" r="7" fill="#aab1b5" stroke="#8d9498" stroke-width="1.5"/>
+
+  <!-- CAMERA HOUSING (white bullet), tilted slightly down toward the golfer/green -->
+  <g transform="rotate(9 320 284)" filter="url(#soft)">
+    <!-- sunshade hood -->
+    <rect x="296" y="262" width="120" height="14" rx="7" fill="#eef1f2"/>
+    <!-- body -->
+    <rect x="300" y="272" width="116" height="40" rx="14" fill="url(#housing)" stroke="#c2c9cc" stroke-width="1.5"/>
+    <!-- lens (front, pointing toward green) -->
+    <circle cx="410" cy="292" r="13" fill="#22282b"/>
+    <circle cx="410" cy="292" r="13" fill="none" stroke="#0f1416" stroke-width="3"/>
+    <circle cx="406" cy="288" r="3.5" fill="#48555a"/>
+    <!-- mount foot to bracket -->
+    <rect x="318" y="306" width="16" height="14" rx="3" fill="#cdd3d6"/>
+  </g>
+
+  <!-- down-the-line sightline -->
+  <line x1="430" y1="300" x2="884" y2="430" stroke="#ffffff" stroke-width="2.5" stroke-dasharray="9 8" opacity="0.85"/>
+  <line x1="430" y1="300" x2="600" y2="565" stroke="#ffffff" stroke-width="2.5" stroke-dasharray="9 8" opacity="0.6"/>
+
+  <!-- title -->
+  <text x="40" y="52" font-size="30" font-weight="700" fill="#1d2a20">GolfReelz — Tee Camera Placement</text>
+  <text x="40" y="80" font-size="17" fill="#3a4a3a">Elevated, offset behind the tee, aimed down-the-line. Concept — not to scale.</text>
+
+  <!-- callout: housing -->
+  <g font-size="15" fill="#16201a">
+    <line x1="470" y1="250" x2="610" y2="170" stroke="#1d2a20" stroke-width="1.5"/>
+    <circle cx="470" cy="250" r="3" fill="#1d2a20"/>
+    <rect x="610" y="150" width="372" height="50" rx="8" fill="#ffffff" opacity="0.92" stroke="#c9d2c9"/>
+    <text x="624" y="172" font-weight="700">White CCTV housing — low-profile</text>
+    <text x="624" y="190">Aimed down-the-line: golfer + ball flight toward the green</text>
+  </g>
+
+  <!-- callout: pole -->
+  <g font-size="15" fill="#16201a">
+    <line x1="239" y1="470" x2="150" y2="470" stroke="#1d2a20" stroke-width="1.5"/>
+    <circle cx="239" cy="470" r="3" fill="#1d2a20"/>
+    <rect x="20" y="486" width="300" height="50" rx="8" fill="#ffffff" opacity="0.92" stroke="#c9d2c9"/>
+    <text x="34" y="508" font-weight="700">Slim pole, ~10–15 ft</text>
+    <text x="34" y="526">Painted dark green to blend in</text>
+  </g>
+
+  <!-- callout: tee -->
+  <g font-size="15" fill="#16201a">
+    <line x1="566" y1="690" x2="820" y2="700" stroke="#1d2a20" stroke-width="1.5"/>
+    <circle cx="566" cy="690" r="3" fill="#1d2a20"/>
+    <rect x="820" y="676" width="360" height="50" rx="8" fill="#ffffff" opacity="0.92" stroke="#c9d2c9"/>
+    <text x="834" y="698" font-weight="700">Offset behind the tee</text>
+    <text x="834" y="716">Out of the golfer's eyeline and walking path</text>
+  </g>
+</svg>
