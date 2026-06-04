@@ -500,6 +500,70 @@ def _process_camera_event_job(event_id: int) -> None:
             db.commit()
             return
 
+        # Optional: route the whole session into the long-upload
+        # swing-detection pipeline so it lands in Production as raw
+        # footage and is split into one produced clip per detected swing
+        # (all tagged to this camera's hole). Falls back to the
+        # single-clip path below on ANY error, so a problem here never
+        # costs the operator a clip.
+        if settings.camera_swing_split:
+            try:
+                from .admin import _run_long_upload_job
+                from ..models import LongVideoUpload
+
+                base_dt = event.triggered_at or _utcnow_naive()
+                upload = LongVideoUpload(
+                    course_id=event.course_id,
+                    camera_type="tee",
+                    base_captured_at=base_dt,
+                    tee_filename=event.tee_clip_filename,
+                    green_filename=event.green_clip_filename,
+                    swing_count="multiple",
+                    processing_status="pending",
+                    note=(
+                        f"camera session · event {event.id} · "
+                        f"hole {event.hole_number}"
+                    ),
+                )
+                db.add(upload)
+                db.commit()
+                db.refresh(upload)
+
+                # Synchronous (we're already in a background thread); the
+                # worker owns its own DB session and status lifecycle.
+                _run_long_upload_job(
+                    upload.id,
+                    seg_list=[],
+                    auto_detect_swings=True,
+                    starting_hole=int(event.hole_number),
+                    ai_tracer_model=None,
+                    single_hole=True,
+                )
+
+                event = db.get(CameraEvent, event_id)
+                if event is not None:
+                    # 'split' = handed off to a long-upload. The
+                    # Production camera-events list filters these out so
+                    # the session isn't listed twice.
+                    event.status = "split"
+                    event.produced_clip_id = None
+                    event.last_error = None
+                    db.commit()
+                log.info(
+                    "cameras: event %s split into long-upload %s",
+                    event_id, upload.id,
+                )
+                return
+            except Exception as exc:
+                log.exception(
+                    "cameras: event %s swing-split failed (%s) — falling "
+                    "back to single-clip", event_id, exc,
+                )
+                db.rollback()
+                event = db.get(CameraEvent, event_id)
+                if event is None:
+                    return
+
         info = probe_video_info(tee_path) or {}
         duration = float(info.get("duration") or 10.0)
         if duration <= 0.1:

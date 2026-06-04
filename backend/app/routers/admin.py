@@ -1121,9 +1121,15 @@ def _run_long_upload_job(
     audio_min_peak_ratio: float = 5.0,
     motion_ratio: float = 2.0,
     combined_pair_window_sec: float = 3.0,
+    single_hole: bool = False,
 ) -> None:
     """Background worker for the long-upload cut / splice / AI-tracer
     pipeline.
+
+    `single_hole` tags every auto-detected swing to `starting_hole`
+    instead of incrementing per swing — used when the source is a
+    single-hole camera session (all swings are on the same par-3)
+    rather than a full-round walk-through video.
 
     Owns its own DB session so the calling HTTP request can return
     immediately. Flips the LongVideoUpload row's processing_status
@@ -1176,16 +1182,40 @@ def _run_long_upload_job(
                 for i, d in enumerate(detected):
                     segs.append(
                         {
-                            "hole_number": starting_hole + i,
+                            "hole_number": (
+                                starting_hole if single_hole else starting_hole + i
+                            ),
                             "start_sec": d["start_sec"],
                             "end_sec": d["end_sec"],
                         }
                     )
                 if not segs:
-                    raise RuntimeError(
-                        "no swings detected (combined audio+motion found "
-                        "no paired peaks within the 3s window)"
-                    )
+                    if single_hole:
+                        # A camera session triggered on a real person but the
+                        # swing detector found no clean peak — produce the
+                        # whole clip as one swing so the session still lands
+                        # a clip instead of failing.
+                        info = probe_video_info(src_path) or {}
+                        whole = float(info.get("duration") or 0.0)
+                        if whole <= 0.1:
+                            whole = 12.0
+                        segs = [
+                            {
+                                "hole_number": starting_hole,
+                                "start_sec": 0.0,
+                                "end_sec": whole,
+                            }
+                        ]
+                        log.info(
+                            "long-upload worker: upload=%s no swings detected "
+                            "— falling back to whole-clip (%.1fs)",
+                            upload_id, whole,
+                        )
+                    else:
+                        raise RuntimeError(
+                            "no swings detected (combined audio+motion found "
+                            "no paired peaks within the 3s window)"
+                        )
 
             durations = [s["end_sec"] - s["start_sec"] for s in segs]
             log.info(
@@ -2206,6 +2236,10 @@ def list_camera_events(
     can render both kinds of rows with the same building blocks."""
     rows = (
         db.query(CameraEvent)
+        # 'split' events were handed off to a long-upload and show in
+        # Production as that long-upload instead — exclude them here so
+        # the session isn't listed twice.
+        .filter(CameraEvent.status != "split")
         .order_by(CameraEvent.triggered_at.desc())
         .offset(max(0, offset))
         .limit(max(1, min(500, limit)))

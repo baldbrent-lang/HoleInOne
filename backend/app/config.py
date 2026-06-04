@@ -57,5 +57,15 @@ class Settings(BaseSettings):
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2
     upload_dir: str = "uploads"
 
+    # When True, a fully-uploaded camera *session* clip (recorded
+    # enter-to-leave, so it can contain several swings) is routed into
+    # the long-upload swing-detection pipeline: it lands in Production
+    # as raw footage and is split into one produced clip per detected
+    # swing, all tagged to the camera's hole. When False (default) a
+    # session is produced as a single whole-clip — the original
+    # behaviour. Off by default so it can be turned on per-deployment
+    # (env CAMERA_SWING_SPLIT=true) once verified end-to-end.
+    camera_swing_split: bool = False
+
 
 settings = Settings()
