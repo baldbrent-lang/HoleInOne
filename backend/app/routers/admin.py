@@ -1122,6 +1122,7 @@ def _run_long_upload_job(
     motion_ratio: float = 2.0,
     combined_pair_window_sec: float = 3.0,
     single_hole: bool = False,
+    motion_only: bool = False,
 ) -> None:
     """Background worker for the long-upload cut / splice / AI-tracer
     pipeline.
@@ -1169,16 +1170,24 @@ def _run_long_upload_job(
             if not segs and auto_detect_swings:
                 auto_used = True
                 tee_fps = probe_fps(src_path) or 30.0
-                # Combined audio + motion detector: an audio impact only
-                # counts when a motion burst peaks within ±3 s. Filters
-                # the false positives each detector produces alone.
-                detected = detect_swings_combined(
-                    src_path,
-                    fps=tee_fps,
-                    audio_min_peak_ratio=float(audio_min_peak_ratio),
-                    motion_ratio=float(motion_ratio),
-                    pair_window_sec=float(combined_pair_window_sec),
-                )
+                if motion_only:
+                    # Vision-only: key on the swing's motion burst — the
+                    # explosive downswing-through-impact and ball launch.
+                    # Used when the source has no audio (camera sessions),
+                    # so we can't pair against an audio "crack".
+                    detected = detect_swings_from_motion(src_path, fps=tee_fps)
+                else:
+                    # Combined audio + motion detector: an audio impact
+                    # only counts when a motion burst peaks within ±3 s.
+                    # Filters the false positives each detector produces
+                    # alone.
+                    detected = detect_swings_combined(
+                        src_path,
+                        fps=tee_fps,
+                        audio_min_peak_ratio=float(audio_min_peak_ratio),
+                        motion_ratio=float(motion_ratio),
+                        pair_window_sec=float(combined_pair_window_sec),
+                    )
                 for i, d in enumerate(detected):
                     segs.append(
                         {

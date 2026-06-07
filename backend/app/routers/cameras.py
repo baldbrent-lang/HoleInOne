@@ -538,6 +538,9 @@ def _process_camera_event_job(event_id: int) -> None:
                     starting_hole=int(event.hole_number),
                     ai_tracer_model=None,
                     single_hole=True,
+                    # Camera clips have no audio — detect swings from the
+                    # motion of the swing + ball launch, not an audio crack.
+                    motion_only=True,
                 )
 
                 event = db.get(CameraEvent, event_id)
