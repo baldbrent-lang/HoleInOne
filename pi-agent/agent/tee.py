@@ -243,12 +243,28 @@ class TeeAgent:
         frames, on its own thread. Decoupling capture from the main
         loop is the whole point: a 30 s hang on a slow backend call no
         longer starves cap.read(), so the camera never wedges."""
+        prev = None
         while not self.stopping.is_set():
             ok, frame = cap.read()
             if not ok or frame is None:
                 time.sleep(0.02)
                 continue
-            self.buffer.push(time.time(), frame.copy())
+            fcopy = frame.copy()
+            # Drop exact-duplicate reads. The sensor's true rate (~29
+            # fps) is below this read loop's, so cv2 re-hands the same
+            # frame ~once a second. Buffered and written at a fixed fps,
+            # each repeat is a 1-frame freeze then a forward jump — the
+            # periodic stutter. Real frames always differ by at least
+            # sensor noise, so a byte-identical read is a re-read and is
+            # safe to skip.
+            if (
+                prev is not None
+                and fcopy.shape == prev.shape
+                and np.array_equal(fcopy, prev)
+            ):
+                continue
+            prev = fcopy
+            self.buffer.push(time.time(), fcopy)
             self.streamer.update_frame(frame)
 
     def _record_and_upload(self, session_id: str) -> None:
@@ -264,9 +280,25 @@ class TeeAgent:
             return
         height, width = snapshot[0][1].shape[:2]
 
+        # Write at the camera's REAL delivered rate, measured from the
+        # (now de-duplicated) pre-roll timestamps, not the nominal config
+        # fps. The sensor delivers ~29 unique fps; stamping a fixed 30
+        # plays the clip slightly fast and is the other half of the
+        # periodic stutter. Falls back to nominal when the pre-roll is
+        # too short to measure.
+        write_fps = self.fps
+        if len(snapshot) >= 5:
+            span = snapshot[-1][0] - snapshot[0][0]
+            if span > 0.5:
+                write_fps = max(1.0, min(120.0, (len(snapshot) - 1) / span))
+        log.info(
+            "record: nominal_fps=%.1f measured_fps=%.2f preroll_frames=%d",
+            self.fps, write_fps, len(snapshot),
+        )
+
         clip_path = self.work_dir / f"{session_id}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(clip_path), fourcc, self.fps, (width, height))
+        writer = cv2.VideoWriter(str(clip_path), fourcc, write_fps, (width, height))
         if not writer.isOpened():
             log.error("VideoWriter failed to open for %s", clip_path)
             return
