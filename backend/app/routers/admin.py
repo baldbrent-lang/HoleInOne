@@ -67,6 +67,7 @@ from ..services.ai_tracer import (
     detect_swings_from_audio,
     detect_swings_from_motion,
     detect_swings_combined,
+    filter_swings_by_ball_departure,
 )
 from ..services.video import (
     compress_for_email,
@@ -1176,6 +1177,13 @@ def _run_long_upload_job(
                     # Used when the source has no audio (camera sessions),
                     # so we can't pair against an audio "crack".
                     detected = detect_swings_from_motion(src_path, fps=tee_fps)
+                    # Reject practice swings: keep only swings where the
+                    # ball actually left the tee. Fail-safe — uncertain
+                    # cases (ball not found, occluded) are kept, so a real
+                    # shot is never dropped on a shaky check.
+                    detected = filter_swings_by_ball_departure(
+                        src_path, detected, tee_fps,
+                    )
                 else:
                     # Combined audio + motion detector: an audio impact
                     # only counts when a motion burst peaks within ±3 s.

@@ -785,6 +785,168 @@ def find_ball_at_address_cv(
     return info
 
 
+def _ball_present_near(
+    input_path: Path,
+    frame_idx: int,
+    x: int,
+    y: int,
+    target_w: int = 1024,
+    radius_px: int = 16,
+) -> bool | None:
+    """Is there a small bright ball-like blob within `radius_px` of
+    (x, y) in the frame at `frame_idx`? Coords are in a target_w-wide
+    normalised image — the same space find_ball_at_address_cv returns.
+    Uses the identical tophat + circularity test so 'is the ball still
+    here' is judged exactly like 'where is the ball'. Returns True /
+    False, or None if the frame can't be read."""
+    if not HAS_CV or not HAS_NP:
+        return None
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return None
+    try:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        idx = max(0, min(total - 1, int(frame_idx)))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return None
+        h, w = frame.shape[:2]
+        if w > target_w:
+            scale = target_w / float(w)
+            frame = cv2.resize(
+                frame, (target_w, int(round(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+        _, mask = cv2.threshold(tophat, 50, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        r2 = float(radius_px * radius_px)
+        for c in contours:
+            area = float(cv2.contourArea(c))
+            if area < 3.0 or area > 200.0:
+                continue
+            peri = float(cv2.arcLength(c, True))
+            if peri <= 0:
+                continue
+            if (4.0 * math.pi * area / (peri * peri)) < 0.5:
+                continue
+            (cx, cy), _r = cv2.minEnclosingCircle(c)
+            if (cx - x) ** 2 + (cy - y) ** 2 <= r2:
+                return True
+        return False
+    finally:
+        cap.release()
+
+
+def ball_departed_for_swing(
+    input_path: Path,
+    peak_time_sec: float,
+    fps: float,
+    before_offset_sec: float = 1.5,
+    after_offsets_sec: tuple[float, ...] = (1.8, 3.0),
+    search_radius_px: int = 16,
+    debug: dict | None = None,
+) -> bool | None:
+    """Did the ball actually leave the tee for the swing peaking at
+    `peak_time_sec`? This is what separates a real shot from a practice
+    swing without any audio.
+
+    Locates the ball at address (~before_offset_sec before the swing),
+    then checks whether a ball-like blob is still at that exact spot a
+    couple of seconds later.
+
+    Returns:
+      True  — ball gone after the swing  → REAL shot
+      False — ball still on the tee       → practice swing
+      None  — couldn't tell (no ball found at address, or frames
+              unreadable) → caller should KEEP the swing (fail-safe, so
+              we never drop a real shot just because the check is unsure)
+    """
+    if not HAS_CV or not HAS_NP or not fps or fps <= 0:
+        return None
+    addr_idx = max(0, int(round((peak_time_sec - before_offset_sec) * fps)))
+    ball = find_ball_at_address_cv(input_path, addr_idx)
+    if not ball.get("ok"):
+        if debug is not None:
+            debug.setdefault("ball_filter", []).append(
+                {"peak_sec": round(peak_time_sec, 2),
+                 "result": "no_ball_at_address", "kept": True}
+            )
+        return None
+
+    bx, by = int(ball["ball_x"]), int(ball["ball_y"])
+    present_after = False
+    checked = 0
+    for off in after_offsets_sec:
+        aidx = int(round((peak_time_sec + off) * fps))
+        res = _ball_present_near(
+            input_path, aidx, bx, by, radius_px=search_radius_px
+        )
+        if res is None:
+            continue
+        checked += 1
+        if res:
+            present_after = True
+            break
+
+    if checked == 0:
+        if debug is not None:
+            debug.setdefault("ball_filter", []).append(
+                {"peak_sec": round(peak_time_sec, 2),
+                 "result": "after_unreadable", "kept": True}
+            )
+        return None
+
+    departed = not present_after
+    if debug is not None:
+        debug.setdefault("ball_filter", []).append({
+            "peak_sec": round(peak_time_sec, 2),
+            "ball_xy": [bx, by],
+            "present_after": present_after,
+            "departed": departed,
+            "kept": departed,
+        })
+    return departed
+
+
+def filter_swings_by_ball_departure(
+    input_path: Path,
+    swings: list[dict],
+    fps: float,
+    debug: dict | None = None,
+) -> list[dict]:
+    """Drop candidate swings where the ball never left the tee — i.e.
+    practice swings. Fail-safe: a swing is kept unless we're *confident*
+    the ball is still on the tee afterwards, so a real shot is never
+    discarded just because the ball check was uncertain (occluded,
+    ball not found, etc.)."""
+    if not swings:
+        return swings
+    kept: list[dict] = []
+    dropped = 0
+    for sw in swings:
+        peak = float(sw.get("peak_time_sec") or sw.get("start_sec") or 0.0)
+        departed = ball_departed_for_swing(input_path, peak, fps, debug=debug)
+        if departed is False:
+            dropped += 1
+            log.info(
+                "ai_tracer: swing@%.1fs dropped — ball still on tee "
+                "(practice swing)", peak,
+            )
+            continue
+        kept.append(sw)
+    log.info(
+        "ai_tracer: ball-departure filter — kept %d of %d swings (dropped "
+        "%d practice swing(s))", len(kept), len(swings), dropped,
+    )
+    return kept
+
+
 def detect_handedness_at_address(
     input_path: Path, address_frame_idx: int,
     frame_w: int = HANDEDNESS_FRAME_W,
