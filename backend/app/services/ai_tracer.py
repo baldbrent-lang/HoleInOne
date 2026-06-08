@@ -851,33 +851,31 @@ def ball_departed_for_swing(
     after_offsets_sec: tuple[float, ...] = (1.8, 3.0),
     search_radius_px: int = 16,
     debug: dict | None = None,
-) -> bool | None:
-    """Did the ball actually leave the tee for the swing peaking at
-    `peak_time_sec`? This is what separates a real shot from a practice
-    swing without any audio.
+) -> str:
+    """Classify a candidate swing by what the ball did — this separates a
+    real golf shot from a practice swing or non-golf motion, with no
+    audio.
 
     Locates the ball at address (~before_offset_sec before the swing),
     then checks whether a ball-like blob is still at that exact spot a
-    couple of seconds later.
-
-    Returns:
-      True  — ball gone after the swing  → REAL shot
-      False — ball still on the tee       → practice swing
-      None  — couldn't tell (no ball found at address, or frames
-              unreadable) → caller should KEEP the swing (fail-safe, so
-              we never drop a real shot just because the check is unsure)
+    couple of seconds later. Returns one of:
+      "departed"  — a ball was on the tee and is gone after → REAL shot
+      "present"   — a ball is still on the tee after        → practice swing
+      "no_ball"   — no ball found at address                → not a golf shot
+                    (random motion, someone walking through frame, indoors)
+      "uncertain" — a ball WAS found but the after-frame couldn't be read
+                    → treat as a likely shot (don't drop on a glitch)
     """
     if not HAS_CV or not HAS_NP or not fps or fps <= 0:
-        return None
+        return "uncertain"
     addr_idx = max(0, int(round((peak_time_sec - before_offset_sec) * fps)))
     ball = find_ball_at_address_cv(input_path, addr_idx)
     if not ball.get("ok"):
         if debug is not None:
             debug.setdefault("ball_filter", []).append(
-                {"peak_sec": round(peak_time_sec, 2),
-                 "result": "no_ball_at_address", "kept": True}
+                {"peak_sec": round(peak_time_sec, 2), "result": "no_ball"}
             )
-        return None
+        return "no_ball"
 
     bx, by = int(ball["ball_x"]), int(ball["ball_y"])
     present_after = False
@@ -898,20 +896,26 @@ def ball_departed_for_swing(
         if debug is not None:
             debug.setdefault("ball_filter", []).append(
                 {"peak_sec": round(peak_time_sec, 2),
-                 "result": "after_unreadable", "kept": True}
+                 "ball_xy": [bx, by], "result": "uncertain"}
             )
-        return None
+        return "uncertain"
 
-    departed = not present_after
+    result = "present" if present_after else "departed"
     if debug is not None:
         debug.setdefault("ball_filter", []).append({
             "peak_sec": round(peak_time_sec, 2),
             "ball_xy": [bx, by],
             "present_after": present_after,
-            "departed": departed,
-            "kept": departed,
+            "result": result,
         })
-    return departed
+    return result
+
+
+# Keep a swing as a real shot only when the ball was confirmed to leave
+# the tee — or a ball was present but the after-check glitched. "present"
+# (practice swing, ball stayed) and "no_ball" (no golf ball at all) are
+# dropped, so only actual golf shots reach Production.
+_BALL_KEEP_RESULTS = {"departed", "uncertain"}
 
 
 def filter_swings_by_ball_departure(
@@ -920,29 +924,37 @@ def filter_swings_by_ball_departure(
     fps: float,
     debug: dict | None = None,
 ) -> list[dict]:
-    """Drop candidate swings where the ball never left the tee — i.e.
-    practice swings. Fail-safe: a swing is kept unless we're *confident*
-    the ball is still on the tee afterwards, so a real shot is never
-    discarded just because the ball check was uncertain (occluded,
-    ball not found, etc.)."""
+    """Keep only candidate swings that are real golf shots — a ball was
+    on the tee and left it. Drops practice swings (ball stayed) AND any
+    motion with no ball at all (not a golf shot: random movement, someone
+    walking through frame, an indoor test with no ball). This is what
+    keeps non-shots out of Production.
+
+    Bias is intentionally STRICT — it requires a detectable ball, so the
+    tee camera must clearly see the ball on the tee. If the ball can't be
+    seen (poor placement, heavy occlusion, no ball present), those swings
+    are dropped. We'd rather miss the occasional shot than fill Production
+    with non-shots; an operator can re-produce a missed one from the raw
+    clip."""
     if not swings:
         return swings
     kept: list[dict] = []
     dropped = 0
     for sw in swings:
         peak = float(sw.get("peak_time_sec") or sw.get("start_sec") or 0.0)
-        departed = ball_departed_for_swing(input_path, peak, fps, debug=debug)
-        if departed is False:
+        result = ball_departed_for_swing(input_path, peak, fps, debug=debug)
+        if result in _BALL_KEEP_RESULTS:
+            kept.append(sw)
+        else:
             dropped += 1
             log.info(
-                "ai_tracer: swing@%.1fs dropped — ball still on tee "
-                "(practice swing)", peak,
+                "ai_tracer: swing@%.1fs dropped — %s", peak,
+                "ball still on tee (practice swing)"
+                if result == "present" else "no ball detected (not a shot)",
             )
-            continue
-        kept.append(sw)
     log.info(
-        "ai_tracer: ball-departure filter — kept %d of %d swings (dropped "
-        "%d practice swing(s))", len(kept), len(swings), dropped,
+        "ai_tracer: ball filter — kept %d of %d swings as real shots "
+        "(dropped %d non-shot(s))", len(kept), len(swings), dropped,
     )
     return kept
 
