@@ -67,6 +67,7 @@ from ..services.ai_tracer import (
     detect_swings_from_audio,
     detect_swings_from_motion,
     detect_swings_combined,
+    filter_swings_by_ball_departure,
 )
 from ..services.video import (
     CLIP_SECONDS_BEFORE_IMPACT,
@@ -1136,6 +1137,8 @@ def _run_long_upload_job(
     motion_ratio: float = 2.0,
     combined_pair_window_sec: float = 3.0,
     tee_green_delta_sec: float = 0.0,
+    single_hole: bool = False,
+    motion_only: bool = False,
 ) -> None:
     """Background worker for the long-upload cut / splice / AI-tracer
     pipeline.
@@ -1178,44 +1181,69 @@ def _run_long_upload_job(
             if not segs and auto_detect_swings:
                 auto_used = True
                 tee_fps = probe_fps(src_path) or 30.0
-                # Combined audio + motion detector: an audio impact only
-                # counts when a motion burst peaks within ±3 s. Filters
-                # the false positives each detector produces alone.
                 _detect_debug: dict = {}
-                detected = detect_swings_combined(
-                    src_path,
-                    fps=tee_fps,
-                    audio_min_peak_ratio=float(audio_min_peak_ratio),
-                    motion_ratio=float(motion_ratio),
-                    pair_window_sec=float(combined_pair_window_sec),
-                    debug=_detect_debug,
-                )
+                if motion_only:
+                    # Vision-only: key on the swing's motion burst (the
+                    # downswing-through-impact + ball launch), then keep
+                    # ONLY swings where a ball was on the tee and left it.
+                    # Used for camera sessions, detected from video alone
+                    # (no audio "crack"). Drops practice swings and any
+                    # non-golf motion.
+                    detected = detect_swings_from_motion(
+                        src_path, fps=tee_fps, debug=_detect_debug,
+                    )
+                    detected = filter_swings_by_ball_departure(
+                        src_path, detected, tee_fps, debug=_detect_debug,
+                    )
+                else:
+                    # Combined audio + motion detector: an audio impact
+                    # only counts when a motion burst peaks within ±3 s.
+                    detected = detect_swings_combined(
+                        src_path,
+                        fps=tee_fps,
+                        audio_min_peak_ratio=float(audio_min_peak_ratio),
+                        motion_ratio=float(motion_ratio),
+                        pair_window_sec=float(combined_pair_window_sec),
+                        debug=_detect_debug,
+                    )
                 for i, d in enumerate(detected):
                     segs.append(
                         {
-                            "hole_number": starting_hole + i,
+                            "hole_number": (
+                                starting_hole if single_hole else starting_hole + i
+                            ),
                             "start_sec": d["start_sec"],
                             "end_sec": d["end_sec"],
                             "peak_time_sec": d.get("peak_time_sec"),
                         }
                     )
                 if not segs:
-                    _comb = _detect_debug.get("combined") or {}
-                    _n = _comb.get("n_audio_candidates", 0)
-                    _rc = _comb.get("rejection_counts") or {}
-                    if _n > 0 and any(_rc.values()):
-                        _bd = ", ".join(
-                            f"{g}={c}" for g, c in _rc.items() if c > 0
+                    if motion_only:
+                        # Camera session with no CONFIRMED golf shot (ball
+                        # never left the tee). Valid outcome — produce
+                        # nothing, don't fail. "Only golf shots." Fall
+                        # through with empty segs → 0 produced clips.
+                        log.info(
+                            "long-upload worker: upload=%s no confirmed shot "
+                            "— producing 0 clips", upload_id,
                         )
+                    else:
+                        _comb = _detect_debug.get("combined") or {}
+                        _n = _comb.get("n_audio_candidates", 0)
+                        _rc = _comb.get("rejection_counts") or {}
+                        if _n > 0 and any(_rc.values()):
+                            _bd = ", ".join(
+                                f"{g}={c}" for g, c in _rc.items() if c > 0
+                            )
+                            raise RuntimeError(
+                                f"no swings detected: {_n} candidate(s) considered, "
+                                f"rejected by: {_bd}"
+                            )
                         raise RuntimeError(
-                            f"no swings detected: {_n} candidate(s) considered, "
-                            f"rejected by: {_bd}"
+                            "no swings detected (audio found no candidates; "
+                            "motion_bursts=%d — check logs for details)"
+                            % _comb.get("n_motion_windows", 0)
                         )
-                    raise RuntimeError(
-                        "no swings detected (audio found no candidates; "
-                        "motion_bursts=%d — check logs for details)"
-                        % _comb.get("n_motion_windows", 0)
-                    )
 
             durations = [s["end_sec"] - s["start_sec"] for s in segs]
             log.info(

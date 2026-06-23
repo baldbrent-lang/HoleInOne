@@ -650,6 +650,11 @@ def _process_camera_event_job(event_id: int) -> None:
                 auto_detect_swings=True,
                 starting_hole=int(event.hole_number),
                 ai_tracer_model=None,
+                # A camera covers one par-3, so every swing is on the same
+                # hole. Detect from video alone (no audio) and keep only
+                # confirmed golf shots — the ball must leave the tee.
+                single_hole=True,
+                motion_only=True,
             )
         except Exception as exc:
             log.exception(
