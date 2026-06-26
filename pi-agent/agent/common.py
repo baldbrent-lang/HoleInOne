@@ -65,13 +65,22 @@ class BackendClient:
         return f"{self.base_url}/api/cameras/{self.token}{path}"
 
     def _retry(self, method: str, path: str, *, retries: int = 4,
-               timeout: int = 30, **kwargs) -> dict:
+               timeout: int = 30, make_files=None, **kwargs) -> dict:
         delay = 1.0
         last_err: str = ""
         for attempt in range(retries):
+            # Rebuild any multipart file payload fresh for every attempt.
+            # A single shared file handle gets consumed by the first
+            # attempt; if that attempt times out, the retry would upload
+            # an empty body and the server rejects it with 400 "empty
+            # upload" — turning a transient stall into a fatal error.
+            files = make_files() if make_files is not None else None
             try:
+                call_kwargs = dict(kwargs)
+                if files is not None:
+                    call_kwargs["files"] = files
                 resp = self.session.request(
-                    method, self._url(path), timeout=timeout, **kwargs,
+                    method, self._url(path), timeout=timeout, **call_kwargs,
                 )
                 if 200 <= resp.status_code < 300:
                     return resp.json() if resp.content else {}
@@ -91,6 +100,16 @@ class BackendClient:
                     "backend %s %s network error %s (attempt %d/%d)",
                     method, path, e, attempt + 1, retries,
                 )
+            finally:
+                # Close handles opened for this attempt so the next attempt
+                # re-reads the file from the start.
+                if files:
+                    for v in files.values():
+                        fh = v[1] if isinstance(v, (tuple, list)) else v
+                        try:
+                            fh.close()
+                        except Exception:
+                            pass
             time.sleep(delay)
             delay = min(delay * 2, 30)
         raise RuntimeError(f"backend {method} {path} failed: {last_err}")
@@ -150,15 +169,22 @@ class BackendClient:
         # the tee/green delta to align the dual-camera cut by real time.
         if recording_started_at is not None:
             data["recording_started_at"] = repr(float(recording_started_at))
-        with open(video_path, "rb") as fh:
-            files = {"video": (video_path.name, fh, "video/mp4")}
-            return self._retry(
-                "POST", "/upload-event",
-                data=data,
-                files=files,
-                timeout=180,
-                retries=3,
-            )
+
+        # Hand _retry a factory so it re-opens the file for each attempt.
+        # The tee's clips are larger than the green's and can stall long
+        # enough to trip the write timeout when the single-core backend is
+        # busy transcoding a sibling upload; a clean re-open lets the next
+        # attempt actually succeed instead of sending an empty body.
+        def _make_files():
+            return {"video": (video_path.name, open(video_path, "rb"), "video/mp4")}
+
+        return self._retry(
+            "POST", "/upload-event",
+            data=data,
+            make_files=_make_files,
+            timeout=180,
+            retries=5,
+        )
 
 
 # ---------------------------------------------------------------------
