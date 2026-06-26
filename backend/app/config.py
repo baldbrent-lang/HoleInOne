@@ -4,8 +4,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _default_app_base_url() -> str:
-    # Replit sets REPLIT_DEV_DOMAIN automatically — use it so QR codes and
-    # outbound links point at the public URL without manual config.
+    # Explicit override wins — set APP_BASE_URL in production env vars.
+    explicit = os.environ.get("APP_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    # Replit sets REPLIT_DEV_DOMAIN automatically in development.
     replit_domain = os.environ.get("REPLIT_DEV_DOMAIN")
     if replit_domain:
         return f"https://{replit_domain}"
