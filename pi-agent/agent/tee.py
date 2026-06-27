@@ -109,9 +109,18 @@ class MotionFallbackDetector:
             return None
         diff = cv2.absdiff(gray, self.bg)
         self.bg = (1 - self.alpha) * self.bg + self.alpha * gray
-        _, mask = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+        # Higher per-pixel threshold ignores sensor noise; a pixel has to
+        # really change, not just flicker.
+        _, mask = cv2.threshold(diff, 35, 255, cv2.THRESH_BINARY)
         coords = cv2.findNonZero(mask.astype(np.uint8))
-        if coords is None or len(coords) < 200:
+        n_changed = 0 if coords is None else len(coords)
+        total_px = small.shape[0] * small.shape[1]
+        # Reject two kinds of false positives that plagued a blank-wall
+        # scene: (1) too FEW changed pixels = noise, not a person; (2) too
+        # MANY = a global lighting / auto-exposure shift hitting the whole
+        # frame at once, also not a person. A real person at the tee sits
+        # comfortably between these bounds.
+        if n_changed < 1500 or n_changed > 0.40 * total_px:
             return None
         cx = float(coords[:, 0, 0].mean())
         cy = float(coords[:, 0, 1].mean())
