@@ -120,7 +120,7 @@ class MotionFallbackDetector:
         # MANY = a global lighting / auto-exposure shift hitting the whole
         # frame at once, also not a person. A real person at the tee sits
         # comfortably between these bounds.
-        if n_changed < 1500 or n_changed > 0.40 * total_px:
+        if n_changed < 600 or n_changed > 0.40 * total_px:
             return None
         cx = float(coords[:, 0, 0].mean())
         cy = float(coords[:, 0, 1].mean())
