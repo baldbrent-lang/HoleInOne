@@ -109,22 +109,37 @@ class MotionFallbackDetector:
             return None
         diff = cv2.absdiff(gray, self.bg)
         self.bg = (1 - self.alpha) * self.bg + self.alpha * gray
-        # Higher per-pixel threshold ignores sensor noise; a pixel has to
-        # really change, not just flicker.
-        _, mask = cv2.threshold(diff, 35, 255, cv2.THRESH_BINARY)
-        coords = cv2.findNonZero(mask.astype(np.uint8))
-        n_changed = 0 if coords is None else len(coords)
-        total_px = small.shape[0] * small.shape[1]
-        # Reject two kinds of false positives that plagued a blank-wall
-        # scene: (1) too FEW changed pixels = noise, not a person; (2) too
-        # MANY = a global lighting / auto-exposure shift hitting the whole
-        # frame at once, also not a person. A real person at the tee sits
-        # comfortably between these bounds.
-        if n_changed < 600 or n_changed > 0.40 * total_px:
+        _, mask = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        mask = mask.astype(np.uint8)
+        # Open kills isolated speckle (sensor noise); close merges a
+        # person's separate motion patches (torso, arms, club) into one
+        # coherent blob.
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        total_px = mask.shape[0] * mask.shape[1]
+        # A global lighting / auto-exposure shift lights up most of the
+        # frame at once — never a person.
+        if int(cv2.countNonZero(mask)) > 0.40 * total_px:
             return None
-        cx = float(coords[:, 0, 0].mean())
-        cy = float(coords[:, 0, 1].mean())
-        sh, sw = small.shape[:2]
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+        )
+        if not contours:
+            return None
+        # Key idea: a person is ONE coherent blob; sensor noise is many
+        # scattered specks. Take the single largest connected region and
+        # require it to be person-sized. Catches a golfer standing back at
+        # the tee (small but solid) while ignoring the speckle that made a
+        # blank wall false-trigger.
+        biggest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(biggest) < 300:
+            return None
+        m = cv2.moments(biggest)
+        if m["m00"] == 0:
+            return None
+        cx = m["m10"] / m["m00"]
+        cy = m["m01"] / m["m00"]
         return int(round(cx / scale)), int(round(cy / scale))
 
     def close(self):
