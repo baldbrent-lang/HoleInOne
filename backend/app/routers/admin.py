@@ -1297,7 +1297,7 @@ def _run_long_upload_job(
             db.commit()
 
             results = _process_long_upload_segments(
-                db,
+                SessionLocal,
                 course_id=row.course_id,
                 camera_type=row.camera_type,
                 base_dt=row.base_captured_at,
@@ -1368,7 +1368,7 @@ def _build_tracer_diagnostics(pipe: dict, examples_by_kind: dict | None) -> dict
 
 
 def _process_long_upload_segments(
-    db: Session,
+    db_factory,
     course_id: int,
     camera_type: str,
     base_dt: datetime,
@@ -1394,14 +1394,28 @@ def _process_long_upload_segments(
     def _bump_progress(done_so_far: int) -> None:
         if progress_upload_id is None:
             return
-        row = db.get(LongVideoUpload, progress_upload_id)
-        if row is not None:
-            row.last_n_succeeded = done_so_far
-            db.commit()
+        _db = db_factory()
+        try:
+            row = _db.get(LongVideoUpload, progress_upload_id)
+            if row is not None:
+                row.last_n_succeeded = done_so_far
+                _db.commit()
+        finally:
+            _db.close()
 
-    # Cache the course once per call — _intro_overlay_for_clip needs
-    # course.name / par3_holes / hole_yardages for every segment.
-    _course_for_intro: Course | None = db.get(Course, course_id)
+    # Fetch course fields into a plain dict so no DB session stays open
+    # across the long video-processing work below.
+    _course_data: dict = {}
+    _tmp = db_factory()
+    try:
+        _c = _tmp.get(Course, course_id)
+        if _c:
+            _course_data = {
+                "name": _c.name or "",
+                "hole_yardages": dict(_c.hole_yardages or {}),
+            }
+    finally:
+        _tmp.close()
 
     def _intro_overlay_for_clip(
         clip: VideoClip, participant: Participant | None
@@ -1418,18 +1432,17 @@ def _process_long_upload_segments(
         fpath = CLIPS_DIR / fname
         if not fpath.exists():
             return
-        course = _course_for_intro
-        course_name = course.name if course and course.name else ""
+        course_name = _course_data.get("name", "")
         # Default yardage when this hole isn't in course.hole_yardages
         # (e.g. fresh course setup or a newly added hole).
         yardage = 101
-        if course and course.hole_yardages:
-            raw_y = course.hole_yardages.get(str(int(clip.hole_number)))
-            try:
-                if raw_y is not None:
-                    yardage = int(raw_y)
-            except (TypeError, ValueError):
-                pass
+        _yardages = _course_data.get("hole_yardages") or {}
+        raw_y = _yardages.get(str(int(clip.hole_number)))
+        try:
+            if raw_y is not None:
+                yardage = int(raw_y)
+        except (TypeError, ValueError):
+            pass
         try:
             apply_intro_overlay_inplace(
                 fpath,
@@ -1667,15 +1680,19 @@ def _process_long_upload_segments(
                     tracer_info, None,
                 ),
             )
-            db.add(clip)
-            db.flush()
-            participant = match_clip(db, clip)
-            if participant and clip.ball_in_cup:
-                notifications.notify_hio_under_review(
-                    participant.name, participant.mobile, participant.email
-                )
-            _intro_overlay_for_clip(clip, participant)
-            db.commit()
+            _seg_db = db_factory()
+            try:
+                _seg_db.add(clip)
+                _seg_db.flush()
+                participant = match_clip(_seg_db, clip)
+                if participant and clip.ball_in_cup:
+                    notifications.notify_hio_under_review(
+                        participant.name, participant.mobile, participant.email
+                    )
+                _intro_overlay_for_clip(clip, participant)
+                _seg_db.commit()
+            finally:
+                _seg_db.close()
 
             results.append(
                 {
@@ -1727,16 +1744,19 @@ def _process_long_upload_segments(
             ball_in_cup=bool(seg.get("ball_in_cup", False)),
             processing_status=ClipProcessingStatus.received.value,
         )
-        db.add(clip)
-        db.flush()
-
-        participant = match_clip(db, clip)
-        if participant and clip.ball_in_cup:
-            notifications.notify_hio_under_review(
-                participant.name, participant.mobile, participant.email
-            )
-        _intro_overlay_for_clip(clip, participant)
-        db.commit()
+        _seg_db = db_factory()
+        try:
+            _seg_db.add(clip)
+            _seg_db.flush()
+            participant = match_clip(_seg_db, clip)
+            if participant and clip.ball_in_cup:
+                notifications.notify_hio_under_review(
+                    participant.name, participant.mobile, participant.email
+                )
+            _intro_overlay_for_clip(clip, participant)
+            _seg_db.commit()
+        finally:
+            _seg_db.close()
 
         results.append(
             {
@@ -4251,7 +4271,7 @@ def process_long_upload_segment(
         }
     ]
     results = _process_long_upload_segments(
-        db,
+        SessionLocal,
         course_id=row.course_id,
         camera_type=row.camera_type,
         base_dt=row.base_captured_at,
