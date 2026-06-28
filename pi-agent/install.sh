@@ -36,7 +36,7 @@ apt-get install -y --no-install-recommends \
   python3 python3-venv python3-pip python3-dev \
   ffmpeg \
   alsa-utils \
-  libatlas-base-dev libopenblas-dev \
+  libopenblas-dev \
   libavcodec-dev libavformat-dev libswscale-dev libv4l-dev \
   v4l-utils
 
