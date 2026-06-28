@@ -43,6 +43,14 @@ install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" \
   "$TMP_DIR/repo/pi-agent/agent/"*.py \
   "$INSTALL_DIR/agent/"
 
+if compgen -G "$TMP_DIR/repo/pi-agent/models/*" >/dev/null; then
+  echo "==> copying models/ (YOLO ONNX) into $INSTALL_DIR/models/"
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" "$INSTALL_DIR/models"
+  install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" \
+    "$TMP_DIR/repo/pi-agent/models/"* \
+    "$INSTALL_DIR/models/"
+fi
+
 echo "==> refreshing top-level files (golfreelz_agent.py, update.sh, README)"
 install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" \
   "$TMP_DIR/repo/pi-agent/golfreelz_agent.py" \

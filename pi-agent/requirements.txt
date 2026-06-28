@@ -1,16 +1,19 @@
 # Pi capture agent runtime deps.
-# OpenCV reads from the camera + writes MP4 files.
-# Requests handles backend HTTP calls.
-# PyYAML loads config.yaml.
-# MediaPipe runs person detection on the tee side — optional; the
-# agent falls back to a motion-density detector when it's not
-# importable (useful on ARMv7 / minimal Pi OS installs).
+# OpenCV reads from the camera, runs the YOLOv8n person detector via its
+# built-in DNN module (models/yolov8n.onnx), and writes MP4 files.
+# Requests handles backend HTTP calls. PyYAML loads config.yaml.
+#
+# The production person detector (YoloPersonDetector) runs entirely on
+# opencv — no torch / ncnn / mediapipe needed — so there are no heavy or
+# OS-version-sensitive ML wheels to install on the Pi.
 opencv-python-headless==4.10.0.84
 numpy>=1.26,<3
 requests>=2.31,<3
 PyYAML>=6.0,<7
 
-# MediaPipe wheels are available for ARM64 Raspberry Pi OS (Pi 4 + 5).
-# On Pi 3 / armv7 you may need to drop this and accept the fallback
-# motion detector.
-mediapipe>=0.10.18; platform_machine == "aarch64" or platform_machine == "x86_64"
+# MediaPipe is an OPTIONAL secondary detector (used only if the YOLO
+# model is missing). Pinned below Python 3.13 because no wheel exists for
+# 3.13 yet (Raspberry Pi OS Trixie) — without this gate pip prints a
+# fatal-looking "No matching distribution" error on every update. The
+# agent doesn't need it: YOLO-via-opencv is the primary detector.
+mediapipe>=0.10.18; (platform_machine == "aarch64" or platform_machine == "x86_64") and python_version < "3.13"

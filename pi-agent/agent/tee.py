@@ -83,6 +83,87 @@ class MediaPipePersonDetector:
             pass
 
 
+class YoloPersonDetector:
+    """YOLOv8n person detector running on OpenCV's built-in DNN module.
+
+    This is the production detector. It loads a pre-exported ONNX model
+    (shipped in the repo at pi-agent/models/) and runs it with cv2.dnn —
+    so it needs NO extra Python packages beyond the opencv we already
+    depend on. That deliberately sidesteps the torch / ncnn / mediapipe
+    wheel problems on newer Pi OS (Trixie / Python 3.13), which is what
+    kept knocking us back to the motion detector.
+
+    detect() returns the pixel center of the highest-confidence person
+    in native-frame coords, or None. Same contract as the other
+    detectors so the main loop doesn't care which one is active.
+    """
+
+    # COCO class 0 is "person". The model outputs 4 bbox + 80 class
+    # scores per anchor; we only ever look at the person column.
+    PERSON_CLASS = 0
+
+    def __init__(
+        self,
+        model_path,
+        input_size: int = 320,
+        conf_threshold: float = 0.4,
+        iou_threshold: float = 0.5,
+        min_box_area_frac: float = 0.0,
+    ):
+        self.input_size = int(input_size)
+        self.conf = float(conf_threshold)
+        self.iou = float(iou_threshold)
+        # Reject persons whose box is smaller than this fraction of the
+        # frame — lets the operator ignore golfers on a *different* tee
+        # far in the background. 0.0 = accept any person in the ROI.
+        self.min_box_area_frac = float(min_box_area_frac)
+        self.net = cv2.dnn.readNetFromONNX(str(model_path))
+        self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+    def detect(self, frame) -> Optional[tuple[int, int]]:
+        h, w = frame.shape[:2]
+        n = self.input_size
+        blob = cv2.dnn.blobFromImage(
+            frame, 1 / 255.0, (n, n), swapRB=True, crop=False,
+        )
+        self.net.setInput(blob)
+        out = self.net.forward()          # (1, 84, anchors)
+        out = out[0].T                    # (anchors, 84)
+        # Person score is column 4 (first class after the 4 bbox coords).
+        person_scores = out[:, 4 + self.PERSON_CLASS]
+        keep = person_scores >= self.conf
+        if not np.any(keep):
+            return None
+        rows = out[keep]
+        scores = person_scores[keep]
+        min_area_px = self.min_box_area_frac * (w * h)
+        boxes, confs = [], []
+        for row, sc in zip(rows, scores):
+            cx, cy, bw, bh = row[0], row[1], row[2], row[3]
+            bw_px = bw / n * w
+            bh_px = bh / n * h
+            if bw_px * bh_px < min_area_px:
+                continue
+            x = (cx - bw / 2) / n * w
+            y = (cy - bh / 2) / n * h
+            boxes.append([int(x), int(y), int(bw_px), int(bh_px)])
+            confs.append(float(sc))
+        if not boxes:
+            return None
+        idxs = cv2.dnn.NMSBoxes(boxes, confs, self.conf, self.iou)
+        if idxs is None or len(idxs) == 0:
+            return None
+        idxs = np.array(idxs).flatten()
+        # Among surviving boxes, return the most confident person's center.
+        best = max(idxs, key=lambda i: confs[i])
+        x, y, bw_px, bh_px = boxes[best]
+        return int(x + bw_px / 2), int(y + bh_px / 2)
+
+    def close(self):
+        pass
+
+
 class MotionFallbackDetector:
     """Fallback when MediaPipe isn't installed: per-frame absolute
     difference against a running background mean, then the centroid
@@ -180,6 +261,53 @@ class TeeAgent:
     def stop(self) -> None:
         self.stopping.set()
 
+    def _resolve_model_path(self) -> Optional[Path]:
+        """Find the YOLO ONNX model. Honors detection.model_path in the
+        config, else looks for models/yolov8n.onnx alongside the agent
+        install (../models relative to this file). Returns None if absent."""
+        configured = self.det_cfg.get("model_path")
+        if configured:
+            p = Path(configured)
+            return p if p.exists() else None
+        # agent/tee.py -> agent/ -> install root -> models/
+        default = Path(__file__).resolve().parent.parent / "models" / "yolov8n.onnx"
+        return default if default.exists() else None
+
+    def _build_detector(self, det_width: int):
+        """Pick the best available detector: YOLOv8n (OpenCV DNN) first —
+        no extra deps, OS-independent — then MediaPipe if installed, then
+        the crude motion detector as a last resort."""
+        model_path = self._resolve_model_path()
+        if model_path is not None:
+            try:
+                detector = YoloPersonDetector(
+                    model_path,
+                    input_size=int(self.det_cfg.get("input_size", 320)),
+                    conf_threshold=float(self.det_cfg.get("conf_threshold", 0.4)),
+                    iou_threshold=float(self.det_cfg.get("iou_threshold", 0.5)),
+                    min_box_area_frac=float(
+                        self.det_cfg.get("min_box_area_frac", 0.0)
+                    ),
+                )
+                log.info(
+                    "using YOLOv8n person detector (OpenCV DNN) — model=%s",
+                    model_path,
+                )
+                return detector
+            except Exception as exc:
+                log.warning(
+                    "YOLO model load failed (%s) — trying next detector", exc,
+                )
+        if HAS_MEDIAPIPE:
+            log.info("using MediaPipe Pose person detector")
+            return MediaPipePersonDetector(detect_width=det_width)
+        log.warning(
+            "no YOLO model and mediapipe not importable — falling back to "
+            "motion-density detector (less selective; ship models/yolov8n.onnx "
+            "for production accuracy).",
+        )
+        return MotionFallbackDetector(detect_width=det_width)
+
     def _capture_loop(self, cap) -> None:
         """Dedicated capture thread — the ONLY place cap.read() runs.
         Drains the camera into the ring buffer at full frame rate and
@@ -229,15 +357,7 @@ class TeeAgent:
         dwell_seconds = float(self.det_cfg.get("trigger_dwell_seconds", 2))
         no_person_timeout = float(self.det_cfg.get("no_person_timeout_seconds", 5))
 
-        if HAS_MEDIAPIPE:
-            detector = MediaPipePersonDetector(detect_width=det_width)
-            log.info("using MediaPipe Pose person detector")
-        else:
-            detector = MotionFallbackDetector(detect_width=det_width)
-            log.warning(
-                "mediapipe not importable — falling back to motion-density "
-                "detector. Install mediapipe for production accuracy.",
-            )
+        detector = self._build_detector(det_width)
 
         hb = HeartbeatThread(self.client, self.heartbeat_seconds, FIRMWARE)
         hb.start()
