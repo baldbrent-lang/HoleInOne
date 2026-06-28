@@ -299,6 +299,28 @@ def open_camera(cam_cfg: dict):
         "camera open: requested %dx%d@%d, got %dx%d@%.1f",
         width, height, fps, actual_w, actual_h, actual_fps,
     )
+
+    # Warm up the sensor before handing the camera to the capture loop.
+    # The IMX477 (and most libcamera pipelines) deliver several all-black
+    # frames right after open while auto-exposure / auto-white-balance
+    # converge — measured ~6 black frames (~0.6s) on the Pi 5 / HQ cam.
+    # If those leak through they (a) seed the motion detector's background
+    # model with black, so the first real frame reads as a full-frame
+    # "lighting shift" and detection is suppressed, and (b) become the
+    # first thing the live view shows. Drain frames until the picture
+    # actually comes up (non-trivial mean brightness) or a short timeout
+    # elapses, so everything downstream only ever sees lit frames.
+    warmup_timeout = float(cam_cfg.get("warmup_seconds", 3.0))
+    warmup_deadline = time.time() + warmup_timeout
+    discarded = 0
+    while time.time() < warmup_deadline:
+        ok, frame = cap.read()
+        if ok and frame is not None and float(frame.mean()) > 5.0:
+            break
+        discarded += 1
+        time.sleep(0.03)
+    log.info("camera warmup: discarded %d black frame(s)", discarded)
+
     return cap
 
 
