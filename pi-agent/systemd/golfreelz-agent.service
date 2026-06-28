@@ -10,7 +10,12 @@ Type=simple
 User=golfreelz
 Group=golfreelz
 WorkingDirectory=/opt/golfreelz-agent
-ExecStart=/opt/golfreelz-agent/venv/bin/python3 /opt/golfreelz-agent/golfreelz_agent.py /opt/golfreelz-agent/config.yaml
+# libcamerify wraps the process with libcamera's V4L2 compat shim. The
+# Raspberry Pi CSI cameras (IMX477 HQ cam, etc.) ONLY deliver processed
+# RGB frames through this shim — opened raw via OpenCV they hand back
+# all-black frames. (A plain USB/UVC webcam like a GoPro doesn't need it
+# and passes straight through, so this is safe to leave on for both.)
+ExecStart=/usr/bin/libcamerify /opt/golfreelz-agent/venv/bin/python3 /opt/golfreelz-agent/golfreelz_agent.py /opt/golfreelz-agent/config.yaml
 Restart=on-failure
 RestartSec=10
 # Don't pin a memory limit — MediaPipe Pose can briefly use ~500 MB
