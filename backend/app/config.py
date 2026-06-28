@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     # never matched.
     match_window_minutes: int = 540  # 9 hours
 
+    # Camera-event shot production.
+    # When True (course-testing phase), produce a clip for EVERY detected
+    # swing and tag each with the ball-departure verdict, instead of
+    # silently dropping swings where the ball wasn't confirmed leaving the
+    # tee. Prevents a real shot from vanishing when the camera can't clearly
+    # see the ball. Flip to False (env: CAMERA_PRODUCE_UNCONFIRMED_SHOTS=0)
+    # once the ball check is tuned and trustworthy, to keep non-shots out of
+    # Production.
+    camera_produce_unconfirmed_shots: bool = True
+
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2

@@ -1184,16 +1184,19 @@ def _run_long_upload_job(
                 _detect_debug: dict = {}
                 if motion_only:
                     # Vision-only: key on the swing's motion burst (the
-                    # downswing-through-impact + ball launch), then keep
-                    # ONLY swings where a ball was on the tee and left it.
+                    # downswing-through-impact + ball launch), then classify
+                    # each by whether a ball was on the tee and left it.
                     # Used for camera sessions, detected from video alone
-                    # (no audio "crack"). Drops practice swings and any
-                    # non-golf motion.
+                    # (no audio "crack"). Each swing is tagged with a
+                    # ball_verdict; whether non-shots are dropped depends on
+                    # settings.camera_produce_unconfirmed_shots (permissive
+                    # during course testing, strict once the check is tuned).
                     detected = detect_swings_from_motion(
                         src_path, fps=tee_fps, debug=_detect_debug,
                     )
                     detected = filter_swings_by_ball_departure(
                         src_path, detected, tee_fps, debug=_detect_debug,
+                        keep_all=settings.camera_produce_unconfirmed_shots,
                     )
                 else:
                     # Combined audio + motion detector: an audio impact
@@ -1215,17 +1218,20 @@ def _run_long_upload_job(
                             "start_sec": d["start_sec"],
                             "end_sec": d["end_sec"],
                             "peak_time_sec": d.get("peak_time_sec"),
+                            "ball_verdict": d.get("ball_verdict"),
                         }
                     )
                 if not segs:
                     if motion_only:
-                        # Camera session with no CONFIRMED golf shot (ball
-                        # never left the tee). Valid outcome — produce
-                        # nothing, don't fail. "Only golf shots." Fall
+                        # Camera session with nothing to produce: no motion
+                        # burst detected at all (in permissive mode), or no
+                        # confirmed golf shot (in strict mode). Either way a
+                        # valid outcome — produce nothing, don't fail. Fall
                         # through with empty segs → 0 produced clips.
                         log.info(
-                            "long-upload worker: upload=%s no confirmed shot "
-                            "— producing 0 clips", upload_id,
+                            "long-upload worker: upload=%s nothing to produce "
+                            "— 0 clips (keep_all=%s)", upload_id,
+                            settings.camera_produce_unconfirmed_shots,
                         )
                     else:
                         _comb = _detect_debug.get("combined") or {}
@@ -1334,11 +1340,18 @@ def _run_long_upload_job(
         db.close()
 
 
-def _build_tracer_diagnostics(pipe: dict, examples_by_kind: dict | None) -> dict:
+def _build_tracer_diagnostics(
+    pipe: dict, examples_by_kind: dict | None, ball_verdict: str | None = None,
+) -> dict:
     """Collect what the AI tracer produced + which prior examples it
     was shown for this clip. Stored on VideoClip.tracer_diagnostics so
     we can measure whether few-shot examples improved picks. Cheap to
-    construct; safe to call even when the pipeline errored out."""
+    construct; safe to call even when the pipeline errored out.
+
+    `ball_verdict` is the tee-camera ball-departure classification for
+    this swing ("departed" / "present" / "no_ball" / "uncertain"), carried
+    through so we can review — and tune — why each swing was or wasn't
+    treated as a confirmed shot, straight from the produced clip."""
     addr = (pipe or {}).get("address") or {}
     hand = (pipe or {}).get("handedness") or {}
     impact = (pipe or {}).get("impact") or {}
@@ -1363,6 +1376,7 @@ def _build_tracer_diagnostics(pipe: dict, examples_by_kind: dict | None) -> dict
             "impact_confidence": impact.get("confidence"),
         },
         "model": addr.get("model") or impact.get("model"),
+        "ball_verdict": ball_verdict,
         "ts": datetime.utcnow().isoformat(),
     }
 
@@ -1664,7 +1678,7 @@ def _process_long_upload_segments(
                 ball_in_cup=bool(seg.get("ball_in_cup", False)),
                 processing_status=ClipProcessingStatus.received.value,
                 tracer_diagnostics=_build_tracer_diagnostics(
-                    tracer_info, None,
+                    tracer_info, None, ball_verdict=seg.get("ball_verdict"),
                 ),
             )
             db.add(clip)
@@ -1726,6 +1740,9 @@ def _process_long_upload_segments(
             distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
             ball_in_cup=bool(seg.get("ball_in_cup", False)),
             processing_status=ClipProcessingStatus.received.value,
+            tracer_diagnostics=_build_tracer_diagnostics(
+                None, None, ball_verdict=seg.get("ball_verdict"),
+            ),
         )
         db.add(clip)
         db.flush()

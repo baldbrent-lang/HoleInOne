@@ -923,19 +923,25 @@ def filter_swings_by_ball_departure(
     swings: list[dict],
     fps: float,
     debug: dict | None = None,
+    keep_all: bool = False,
 ) -> list[dict]:
-    """Keep only candidate swings that are real golf shots — a ball was
-    on the tee and left it. Drops practice swings (ball stayed) AND any
-    motion with no ball at all (not a golf shot: random movement, someone
-    walking through frame, an indoor test with no ball). This is what
-    keeps non-shots out of Production.
+    """Classify each candidate swing by what the ball did and tag it with a
+    `ball_verdict` ("departed" / "present" / "no_ball" / "uncertain").
 
-    Bias is intentionally STRICT — it requires a detectable ball, so the
-    tee camera must clearly see the ball on the tee. If the ball can't be
-    seen (poor placement, heavy occlusion, no ball present), those swings
-    are dropped. We'd rather miss the occasional shot than fill Production
-    with non-shots; an operator can re-produce a missed one from the raw
-    clip."""
+    Every swing is tagged regardless, so the verdict is always available
+    downstream (stored on the produced clip's diagnostics). What differs is
+    whether non-shots are DROPPED:
+
+    - `keep_all=False` (strict, the eventual production default): keep only
+      real golf shots — a ball was on the tee and left it. Drops practice
+      swings (ball stayed) and any motion with no ball at all. The risk: if
+      the tee camera can't clearly see the ball (poor placement, occlusion),
+      a legitimate shot is silently dropped.
+
+    - `keep_all=True` (permissive, for course testing): keep every detected
+      swing but still tag the verdict. Nothing is silently lost — we produce
+      everything, see what the ball check thought of each, then tune the
+      thresholds and flip back to strict once it's trustworthy."""
     if not swings:
         return swings
     kept: list[dict] = []
@@ -943,8 +949,17 @@ def filter_swings_by_ball_departure(
     for sw in swings:
         peak = float(sw.get("peak_time_sec") or sw.get("start_sec") or 0.0)
         result = ball_departed_for_swing(input_path, peak, fps, debug=debug)
-        if result in _BALL_KEEP_RESULTS:
+        # Tag every swing with the ball check's verdict so it rides along
+        # to the produced clip's diagnostics, whether or not we drop it.
+        sw["ball_verdict"] = result
+        is_shot = result in _BALL_KEEP_RESULTS
+        if is_shot or keep_all:
             kept.append(sw)
+            if keep_all and not is_shot:
+                log.info(
+                    "ai_tracer: swing@%.1fs kept (keep_all) — ball verdict=%s",
+                    peak, result,
+                )
         else:
             dropped += 1
             log.info(
@@ -953,8 +968,8 @@ def filter_swings_by_ball_departure(
                 if result == "present" else "no ball detected (not a shot)",
             )
     log.info(
-        "ai_tracer: ball filter — kept %d of %d swings as real shots "
-        "(dropped %d non-shot(s))", len(kept), len(swings), dropped,
+        "ai_tracer: ball filter — kept %d of %d swings (dropped %d; "
+        "keep_all=%s)", len(kept), len(swings), dropped, keep_all,
     )
     return kept
 
