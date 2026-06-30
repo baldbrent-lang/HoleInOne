@@ -540,6 +540,81 @@ def mux_audio_into_video(
     return True
 
 
+def compress_for_upload(
+    video_path: Path,
+    target_kbps: int = 2500,
+    scale_height: Optional[int] = None,
+    timeout: int = 240,
+) -> bool:
+    """Re-encode an MP4 to H.264 at a controlled bitrate to shrink it
+    before upload. The raw mp4v clips the agent writes are tens to >100
+    MB; on a metered/cellular link those are slow to send (they trip the
+    upload write-timeout and lean on retries) and burn through an IoT SIM
+    data plan fast. A 2.5 Mbps H.264 re-encode cuts a ~100 MB clip to
+    ~10 MB with quality that's plenty for a cosmetic view.
+
+    Replaces the file in place on success. Best-effort: any failure
+    (ffmpeg missing, encode error, timeout) leaves the ORIGINAL file
+    untouched and returns False, so the upload still happens — just with
+    the larger file — rather than dropping the clip.
+
+    `scale_height` (e.g. 720) optionally downscales; leave None to keep
+    the capture resolution (safer for the dual-camera composite, which
+    pairs this with the tee clip).
+    """
+    if not video_path.exists() or target_kbps <= 0:
+        return False
+    tmp_out = video_path.with_suffix(".h264.mp4")
+    vf = ["-vf", f"scale=-2:{int(scale_height)}"] if scale_height else []
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(video_path),
+        *vf,
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-b:v", f"{int(target_kbps)}k",
+        "-maxrate", f"{int(target_kbps * 1.4)}k",
+        "-bufsize", f"{int(target_kbps * 2)}k",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",  # preserve audio track if one was muxed in
+        "-movflags", "+faststart",
+        str(tmp_out),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        log.warning("compress: ffmpeg not installed — uploading original")
+        return False
+    except subprocess.TimeoutExpired:
+        log.warning("compress: ffmpeg timed out — uploading original")
+        tmp_out.unlink(missing_ok=True)
+        return False
+    if (
+        result.returncode != 0
+        or not tmp_out.exists()
+        or tmp_out.stat().st_size == 0
+    ):
+        log.warning(
+            "compress: ffmpeg failed (rc=%s): %s — uploading original",
+            result.returncode, (result.stderr or "")[:200],
+        )
+        tmp_out.unlink(missing_ok=True)
+        return False
+    try:
+        orig_mb = video_path.stat().st_size / (1024 * 1024)
+        tmp_out.replace(video_path)
+        new_mb = video_path.stat().st_size / (1024 * 1024)
+        log.info(
+            "compress: %s %.1f MB -> %.1f MB (H.264 %dk)",
+            video_path.name, orig_mb, new_mb, target_kbps,
+        )
+    except OSError as exc:
+        log.warning("compress: replacing file failed: %s", exc)
+        return False
+    return True
+
+
 def build_audio_recorder(cfg: dict, work_dir: Path) -> AudioRecorder:
     """Construct an AudioRecorder from the config's `audio:` block.
     Missing block → enabled with auto-detected device + sensible

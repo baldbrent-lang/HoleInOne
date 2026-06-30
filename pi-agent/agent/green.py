@@ -28,6 +28,7 @@ from .common import (
     FrameBuffer,
     HeartbeatThread,
     build_audio_recorder,
+    compress_for_upload,
     mux_audio_into_video,
     open_camera,
 )
@@ -53,6 +54,14 @@ class GreenAgent:
         self.stop_poll_interval = float(cfg.get("stop_poll_interval_seconds", 1.0))
         self.poll_timeout = int(cfg.get("poll_timeout_seconds", 25))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
+        # Compress each clip to H.264 at this bitrate before upload. The
+        # green often runs on a cellular SIM where the raw mp4v clips
+        # (tens to >100 MB) are slow to send and eat the data plan; 2.5
+        # Mbps is plenty for the cosmetic landing view. Set to 0 to
+        # disable (e.g. green on fast wired/WiFi). upload_scale_height
+        # optionally downscales (e.g. 720); None keeps capture res.
+        self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 2500))
+        self.upload_scale_height = cfg.get("upload_scale_height")
         self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-green"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.stopping = threading.Event()
@@ -222,6 +231,20 @@ class GreenAgent:
             "recorded %s: %d frames, %.1f MB (reason=%s)",
             clip_path.name, frames_written, size / (1024 * 1024), stop_reason,
         )
+
+        # Shrink the clip before upload — critical on a cellular SIM where
+        # the raw file is slow to send and burns data. Best-effort: on any
+        # failure the original (larger) file is uploaded instead.
+        if self.upload_bitrate_kbps > 0:
+            compress_for_upload(
+                clip_path,
+                target_kbps=self.upload_bitrate_kbps,
+                scale_height=(
+                    int(self.upload_scale_height)
+                    if self.upload_scale_height
+                    else None
+                ),
+            )
 
         try:
             result = self.client.upload_event(
