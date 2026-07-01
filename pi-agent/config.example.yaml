@@ -85,12 +85,14 @@ max_clip_seconds: 600
 # more HTTP traffic. 1 s is a good balance.
 stop_poll_interval_seconds: 1.0
 
-# Green-side only: re-encode each clip to H.264 at this bitrate (kbps)
-# before upload. The raw mp4v clips are tens to >100 MB; on a cellular
-# SIM that's slow to send and burns the data plan, so 2.5 Mbps keeps the
-# landing view looking fine while cutting a ~100 MB clip to ~10 MB. Set
-# to 0 to disable (e.g. green on fast WiFi/wired). Optionally downscale
-# with upload_scale_height (e.g. 720); leave unset to keep capture res.
+# Re-encode each clip to H.264 at this bitrate (kbps) before upload.
+# Two wins: (1) clips play in any browser — the raw mp4v the camera
+# writes won't play in desktop Chrome; (2) far smaller/faster to send on
+# a cellular SIM (a ~100 MB mp4v clip -> ~10 MB). Set to 0 to disable.
+# Code defaults differ by role if this is unset: the GREEN uses ~2.5
+# Mbps (cosmetic landing view), the TEE uses ~5 Mbps (its footage feeds
+# the ball tracer and needs more detail). Optionally downscale with
+# upload_scale_height (e.g. 720); leave unset to keep capture res.
 upload_bitrate_kbps: 2500
 # upload_scale_height: 720
 

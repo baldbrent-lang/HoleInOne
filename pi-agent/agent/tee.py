@@ -22,6 +22,7 @@ import numpy as np
 
 from .common import (
     BackendClient,
+    BackgroundUploader,
     FrameBuffer,
     HeartbeatThread,
     build_audio_recorder,
@@ -254,6 +255,13 @@ class TeeAgent:
         # long enough for a foursome on a slow tee box.
         self.max_clip_seconds = float(cfg.get("max_clip_seconds", 600))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
+        # Compress each clip to H.264 at this bitrate (kbps) before upload.
+        # Makes clips play in any browser (mp4v won't play in desktop
+        # Chrome) and lighter on a cellular SIM. Higher default than the
+        # green (5 Mbps vs 2.5) because the tee feeds the ball tracer and
+        # needs the extra detail. Set to 0 to disable.
+        self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 5000))
+        self.upload_scale_height = cfg.get("upload_scale_height")
         self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-tee"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.stopping = threading.Event()
@@ -366,6 +374,15 @@ class TeeAgent:
         streamer.start()
         self.streamer = streamer
 
+        # Uploads (compress + send) run on a background worker so a slow
+        # cellular upload never blocks us from detecting the next group.
+        self.uploader = BackgroundUploader(
+            self.client,
+            compress_kbps=self.upload_bitrate_kbps,
+            scale_height=self.upload_scale_height,
+        )
+        self.uploader.start()
+
         # Start draining the camera into the buffer before we begin
         # detecting, so the pre-roll is already populated at trigger.
         capture_thread = threading.Thread(
@@ -424,6 +441,7 @@ class TeeAgent:
             cap.release()
             detector.close()
             hb.stop()
+            self.uploader.stop(drain_timeout=10.0)
             streamer.stop()
 
     # -----------------------------------------------------------------
@@ -552,15 +570,7 @@ class TeeAgent:
             clip_path.name, n_frames_written, size / (1024 * 1024),
         )
 
-        try:
-            result = self.client.upload_event(
-                session_id, clip_path, recording_started_at=first_frame_ts,
-            )
-            log.info(
-                "uploaded: event=%s status=%s",
-                result.get("event_id"), result.get("status"),
-            )
-        except Exception as exc:
-            log.error("upload_event failed: %s", exc)
-        finally:
-            clip_path.unlink(missing_ok=True)
+        # Hand off to the background uploader (compress + send + cleanup)
+        # and return to detection AT ONCE, so a slow cellular upload can't
+        # make us miss the next group arriving at the tee.
+        self.uploader.enqueue(session_id, clip_path, first_frame_ts)
