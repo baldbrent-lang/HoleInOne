@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import re
 import shlex
 import socket
@@ -218,6 +219,90 @@ class HeartbeatThread(threading.Thread):
 
     def stop(self) -> None:
         self.stopping.set()
+
+
+# ---------------------------------------------------------------------
+# Background upload worker
+# ---------------------------------------------------------------------
+
+class BackgroundUploader(threading.Thread):
+    """Serialized background upload worker.
+
+    Capture loops enqueue a finished clip and return IMMEDIATELY, so the
+    (slow, on cellular) compress + upload never blocks detecting/polling
+    for the next event. That blocking was why the green — busy uploading
+    the previous clip — missed the start of the next event and recorded a
+    short clip out of sync with the tee. With this, the loop is back
+    listening within milliseconds, so it catches every trigger and records
+    the full window.
+
+    Uploads are processed one at a time (a single worker) so we never run
+    several ffmpeg encodes / uploads at once on the Pi. Optional
+    `compress_kbps` re-encodes each clip to H.264 before sending.
+    """
+
+    def __init__(
+        self,
+        client: "BackendClient",
+        *,
+        compress_kbps: int = 0,
+        scale_height: Optional[int] = None,
+    ):
+        super().__init__(daemon=True, name="uploader")
+        self.client = client
+        self.compress_kbps = int(compress_kbps)
+        self.scale_height = scale_height
+        self._q: "queue.Queue" = queue.Queue()
+        self._stop = threading.Event()
+
+    def enqueue(self, session_id: str, clip_path: Path,
+                recording_started_at: Optional[float]) -> None:
+        """Hand a finished clip to the worker and return at once."""
+        self._q.put((session_id, clip_path, recording_started_at))
+        depth = self._q.qsize()
+        if depth > 1:
+            log.info("uploader: %d clip(s) queued", depth)
+
+    def run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                session_id, clip_path, ts = self._q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                if self.compress_kbps > 0:
+                    compress_for_upload(
+                        clip_path,
+                        target_kbps=self.compress_kbps,
+                        scale_height=(
+                            int(self.scale_height) if self.scale_height else None
+                        ),
+                    )
+                result = self.client.upload_event(
+                    session_id, clip_path, recording_started_at=ts,
+                )
+                log.info(
+                    "uploaded: event=%s status=%s ready=%s",
+                    result.get("event_id"), result.get("status"),
+                    result.get("ready_to_process"),
+                )
+            except Exception as exc:  # pragma: no cover
+                log.error("background upload failed for %s: %s", session_id, exc)
+            finally:
+                try:
+                    clip_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                self._q.task_done()
+
+    def stop(self, drain_timeout: float = 0.0) -> None:
+        """Signal shutdown. Optionally wait up to drain_timeout for any
+        queued uploads to finish before returning."""
+        if drain_timeout > 0:
+            deadline = time.time() + drain_timeout
+            while not self._q.empty() and time.time() < deadline:
+                time.sleep(0.2)
+        self._stop.set()
 
 
 # ---------------------------------------------------------------------

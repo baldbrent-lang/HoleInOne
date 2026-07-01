@@ -25,10 +25,10 @@ import cv2
 
 from .common import (
     BackendClient,
+    BackgroundUploader,
     FrameBuffer,
     HeartbeatThread,
     build_audio_recorder,
-    compress_for_upload,
     mux_audio_into_video,
     open_camera,
 )
@@ -94,6 +94,17 @@ class GreenAgent:
         hb = HeartbeatThread(self.client, self.heartbeat_seconds, FIRMWARE)
         hb.start()
 
+        # Uploads run on a background worker so a slow (cellular) upload
+        # never blocks us from listening for the next trigger — that
+        # blocking was making the green miss the start of an event and
+        # record a short clip out of sync with the tee.
+        self.uploader = BackgroundUploader(
+            self.client,
+            compress_kbps=self.upload_bitrate_kbps,
+            scale_height=self.upload_scale_height,
+        )
+        self.uploader.start()
+
         log.info(
             "green agent running: buffer=%.1fs max=%.0fs poll=%ds",
             self.buffer_seconds, self.max_clip_seconds, self.poll_timeout,
@@ -123,6 +134,8 @@ class GreenAgent:
             capture_thread.join(timeout=2)
             cap.release()
             hb.stop()
+            # Give any in-flight upload a moment to finish before exit.
+            self.uploader.stop(drain_timeout=10.0)
             self.streamer.stop()
 
     # -----------------------------------------------------------------
@@ -232,30 +245,8 @@ class GreenAgent:
             clip_path.name, frames_written, size / (1024 * 1024), stop_reason,
         )
 
-        # Shrink the clip before upload — critical on a cellular SIM where
-        # the raw file is slow to send and burns data. Best-effort: on any
-        # failure the original (larger) file is uploaded instead.
-        if self.upload_bitrate_kbps > 0:
-            compress_for_upload(
-                clip_path,
-                target_kbps=self.upload_bitrate_kbps,
-                scale_height=(
-                    int(self.upload_scale_height)
-                    if self.upload_scale_height
-                    else None
-                ),
-            )
-
-        try:
-            result = self.client.upload_event(
-                session_id, clip_path, recording_started_at=first_frame_ts,
-            )
-            log.info(
-                "uploaded: event=%s status=%s ready=%s",
-                result.get("event_id"), result.get("status"),
-                result.get("ready_to_process"),
-            )
-        except Exception as exc:
-            log.error("upload_event failed: %s", exc)
-        finally:
-            clip_path.unlink(missing_ok=True)
+        # Hand the clip to the background uploader and return AT ONCE, so
+        # we're back listening for the next trigger immediately. The
+        # worker does the (slow, cellular) compress + upload + cleanup off
+        # the capture path, so we never miss the start of the next event.
+        self.uploader.enqueue(session_id, clip_path, first_frame_ts)
