@@ -58,8 +58,12 @@ detection:
   # consider it a real address-position (filters cart drive-bys).
   trigger_dwell_seconds: 2
   # After the trigger, keep recording until no person is seen for
-  # this many seconds. Includes the follow-through + walk-off.
-  no_person_timeout_seconds: 5
+  # this many seconds, then stop. This is the "group window": a golfer
+  # bending to tee up, turning away, or stepping aside briefly makes the
+  # person detector drop out for a few seconds, so keep this generous
+  # (~30s) or one presence gets split into several short clips. Matches
+  # the doc's "record the group, stop after ~30s of an empty tee box".
+  no_person_timeout_seconds: 30
   # Frame is downsampled to this width before the pose model sees it.
   # Smaller = faster but less reliable at distance. 320 px works
   # well for a person at ~5-15 m.
