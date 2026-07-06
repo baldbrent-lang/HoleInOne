@@ -3042,8 +3042,18 @@ def render_tracer_video(
             int(round(float(ball_rest_xy_native[0]))),
             int(round(float(ball_rest_xy_native[1]))),
         ))
+    # If the operator has manually plotted ANY ball positions, their
+    # clicks are the ground-truth trajectory: drop the AI's auto-detected
+    # points so they can't pull the fitted line off the plotted path.
+    # (Bug this fixes: a near-vertical shot plotted straight up over the
+    # golfer rendered with the line yanked sideways, because leftover AI
+    # points stayed in the weighted fit and dragged the single straight
+    # left/right line off to one side.)
+    has_manual = any(m for (_x, _y, m) in points_by_frame.values())
     for f in sorted(points_by_frame):
         x, y, is_manual = points_by_frame[f]
+        if has_manual and not is_manual:
+            continue  # operator override in effect — ignore AI points
         if is_manual:
             manual_anchor_idxs.add(len(anchors))
         anchors.append((f, x, y))
@@ -3058,12 +3068,14 @@ def render_tracer_video(
     smoothed_points: list[tuple[int, int, int]] = []  # (frame, x, y)
     last_kept_frame_global: int | None = None
     rejected_frames: set[int] = set()
-    # Only the rest position is immune to outlier rejection. Manual
-    # marks are weighted heavily so the fit hugs them — but a click
-    # that's clearly off the parabola (residual > TRAJ_OUTLIER_PX)
-    # gets rejected just like a bad AI detection.
+    # The rest position AND every manual click are immune to outlier
+    # rejection — the operator's plotted points are ground truth, so the
+    # fitted curve is forced to keep (and hug) them instead of tossing
+    # them as "outliers" relative to a fit the AI points had skewed.
     rest_is_anchor_zero = ball_rest_xy_native is not None
-    pinned_set: set[int] = {0} if rest_is_anchor_zero else set()
+    pinned_set: set[int] = set(manual_anchor_idxs)
+    if rest_is_anchor_zero:
+        pinned_set.add(0)
     if not pinned_set:
         pinned_set = None  # type: ignore[assignment]
     if len(anchors) > 1:
