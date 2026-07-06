@@ -82,6 +82,7 @@ from ..services.video import (
     probe_source_device,
     probe_video_info,
     splice_impact_clip,
+    transcode_for_web,
 )
 from ..services.intro_overlay import apply_intro_overlay_inplace
 
@@ -2047,10 +2048,17 @@ async def upload_long_video(
     motion_ratio: float = Form(2.0),
     combined_pair_window_sec: float = Form(3.0),
     tee_green_delta_sec: float = Form(0.0),
+    motion_only: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     """Cut a long video into multiple per-swing clips and run each through
     the standard match + deliver pipeline.
+
+    motion_only: when true, detect swings with the SAME vision-only
+    detector the live camera events use (motion bursts + ball-departure
+    filter), instead of the audio-first combined detector. Use this to
+    faithfully test camera-captured clips (which have no 'crack' audio)
+    that were mirrored in via this endpoint.
 
     Body (multipart):
       course_id: int
@@ -2162,6 +2170,26 @@ async def upload_long_video(
     db.refresh(upload_row)
 
     upload_id = upload_row.id
+
+    # Generate the browser-friendly preview + poster thumbnail for the raw
+    # source(s) in the background (same as the camera-upload path does), so
+    # the production card shows a preview instead of "No preview". Best-
+    # effort; failures just leave the card preview-less.
+    raw_sources = [src_path] + ([green_src_path] if green_src_path else [])
+
+    def _preview_raw_sources(paths: list[Path]) -> None:
+        for p in paths:
+            try:
+                transcode_for_web(p)
+                extract_thumbnail(p)
+            except Exception as exc:  # pragma: no cover
+                log.warning("long-upload preview gen failed for %s: %s", p.name, exc)
+
+    threading.Thread(
+        target=_preview_raw_sources, args=(raw_sources,),
+        daemon=True, name=f"long-upload-preview-{upload_id}",
+    ).start()
+
     threading.Thread(
         target=_run_long_upload_job,
         kwargs={
@@ -2174,6 +2202,10 @@ async def upload_long_video(
             "motion_ratio": float(motion_ratio),
             "combined_pair_window_sec": float(combined_pair_window_sec),
             "tee_green_delta_sec": float(tee_green_delta_sec),
+            # motion_only mirrors the live camera detector; when set, all
+            # swings are on one hole (single_hole) as with camera events.
+            "motion_only": bool(motion_only),
+            "single_hole": bool(motion_only),
         },
         daemon=True,
         name=f"long-upload-{upload_id}",

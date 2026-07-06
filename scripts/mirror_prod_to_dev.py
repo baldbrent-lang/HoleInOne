@@ -149,6 +149,9 @@ for i, e in enumerate(todo, 1):
             "auto_detect_swings": "true",
             "starting_hole": str(e.get("hole_number") or 1),
             "motion_ratio": "2.0",
+            # Use the SAME vision-only detector the live camera events use,
+            # so detection results in dev match what prod's camera path does.
+            "motion_only": "true",
         }
         status = _post_upload(fields, files)
         mb = sum(len(v[1]) for v in files.values()) / 1e6
