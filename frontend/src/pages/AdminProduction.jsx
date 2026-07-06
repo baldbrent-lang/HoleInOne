@@ -3277,6 +3277,48 @@ export default function AdminProduction() {
   const [busyEventId, setBusyEventId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title, startedAt, fps}
   const [editingRow, setEditingRow] = useState(null);
+  // Bulk-delete selection: a Set of long-upload row ids the operator
+  // has ticked. Cleared after a bulk delete completes.
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  function toggleSelected(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+  function selectAllVisible() {
+    setSelectedIds(new Set((rows || []).map((r) => r.id)));
+  }
+
+  async function handleBulkDelete() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!confirm(
+      `Delete ${ids.length} selected upload(s)? This removes their source `
+      + `video(s) and can't be undone.`,
+    )) return;
+    setBulkBusy(true);
+    setError(null);
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await api.deleteLongUpload(adminPassword, id);
+      } catch (e) {
+        failed += 1;
+      }
+    }
+    clearSelection();
+    await refreshAll();
+    setBulkBusy(false);
+    if (failed) setError(`${failed} of ${ids.length} deletions failed.`);
+  }
 
   function openViewer(url, title, startedAt = null, fps = null) {
     if (!url) return;
@@ -3442,6 +3484,55 @@ export default function AdminProduction() {
 
       {error && <div className="card err-text small">{error}</div>}
 
+      {rows && rows.length > 0 && (
+        <div
+          className="card"
+          style={{
+            display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+            padding: "10px 14px", marginBottom: 12,
+          }}
+        >
+          <label
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}
+            title="Select every upload loaded on this page"
+          >
+            <input
+              type="checkbox"
+              checked={selectedIds.size > 0 && selectedIds.size === rows.length}
+              ref={(el) => {
+                if (el) {
+                  el.indeterminate =
+                    selectedIds.size > 0 && selectedIds.size < rows.length;
+                }
+              }}
+              onChange={(e) => (e.target.checked ? selectAllVisible() : clearSelection())}
+              style={{ width: 18, height: 18, cursor: "pointer" }}
+            />
+            <span className="small">Select all loaded</span>
+          </label>
+          <span className="small muted">{selectedIds.size} selected</span>
+          <div style={{ flex: 1 }} />
+          {selectedIds.size > 0 && (
+            <button
+              className="small ghost"
+              onClick={clearSelection}
+              disabled={bulkBusy}
+              style={{ width: "auto" }}
+            >
+              Clear
+            </button>
+          )}
+          <button
+            className="small danger"
+            onClick={handleBulkDelete}
+            disabled={bulkBusy || selectedIds.size === 0}
+            style={{ width: "auto" }}
+          >
+            {bulkBusy ? "Deleting…" : `Delete selected (${selectedIds.size})`}
+          </button>
+        </div>
+      )}
+
       {/* Camera-event-sourced uploads now flow through the long-upload
           pipeline (see backend/_process_camera_event_job), so they
           render in the same list below — no separate CameraEventCard
@@ -3474,15 +3565,27 @@ export default function AdminProduction() {
               marginBottom: 12,
               opacity: greyed ? 0.6 : 1,
               position: "relative",
+              outline: selectedIds.has(row.id)
+                ? "2px solid var(--primary, #22c55e)"
+                : "none",
+              outlineOffset: 2,
             }}
           >
             <div
               className="row"
               style={{
-                gap: 10, flexWrap: "wrap", alignItems: "baseline",
+                gap: 10, flexWrap: "wrap", alignItems: "center",
                 marginBottom: 10,
               }}
             >
+              <input
+                type="checkbox"
+                checked={selectedIds.has(row.id)}
+                onChange={() => toggleSelected(row.id)}
+                onClick={(e) => e.stopPropagation()}
+                title="Select for bulk delete"
+                style={{ width: 18, height: 18, cursor: "pointer", flexShrink: 0 }}
+              />
               <h4 style={{ margin: 0 }}>
                 #{row.id} · {row.course_name || `course ${row.course_id}`}
                 {row.source?.kind === "camera" && row.source?.hole_number != null
