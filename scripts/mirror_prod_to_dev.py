@@ -93,14 +93,40 @@ def _post_upload(fields: dict, files: dict) -> int:
         return r.status
 
 
+def _list_events() -> list:
+    """Page through prod's camera-events in small chunks. A single big
+    request (limit=500) makes prod probe every clip's video info at once
+    and 500s; small pages keep each request light. A page that still
+    errors is skipped with a warning rather than aborting the whole run."""
+    events: list = []
+    offset = 0
+    page = 10
+    while True:
+        url = f"{PROD}/api/admin/camera-events?limit={page}&offset={offset}"
+        try:
+            batch = _get_json(url, PROD_PW)
+        except urllib.error.HTTPError as e:
+            print(f"  (skipping events {offset}-{offset + page}: HTTP {e.code})")
+            offset += page
+            if offset > 2000:  # safety stop
+                break
+            continue
+        if not batch:
+            break
+        events.extend(batch)
+        if len(batch) < page:
+            break
+        offset += page
+    return events
+
+
 done = set()
 if STATE.exists():
     done = {ln.strip() for ln in STATE.read_text().splitlines() if ln.strip()}
 
-try:
-    events = _get_json(f"{PROD}/api/admin/camera-events?limit=500", PROD_PW)
-except urllib.error.HTTPError as e:
-    sys.exit(f"Failed to list prod events: HTTP {e.code} {e.reason}")
+events = _list_events()
+if not events:
+    sys.exit("No events returned from prod (all pages failed, or none exist).")
 
 # Newest first from the API; mirror oldest first so dev's ordering matches.
 events = list(reversed(events))
