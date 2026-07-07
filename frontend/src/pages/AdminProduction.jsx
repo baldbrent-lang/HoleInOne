@@ -349,6 +349,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     };
     setGraphics(g);
     if (s.finalized_video_url) setFinalizedGraphics(g);
+    // Restore any queued-but-not-yet-rendered manual ball marks so the
+    // operator's plotted points survive closing + reopening the wizard.
+    setManualPositions(s.pending_manual_positions || {});
   }
 
   useEffect(() => {
@@ -514,6 +517,25 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSwing, swings.length]);
+
+  // Auto-save queued manual ball marks (debounced) so plotted points
+  // survive closing the wizard before a re-render. Persisted under
+  // pending_manual_positions and restored by applySaved on reopen.
+  const manualSaveMounted = useRef(false);
+  useEffect(() => {
+    if (!row) return;
+    // Skip the first run so we don't immediately re-save what we just
+    // hydrated on open.
+    if (!manualSaveMounted.current) {
+      manualSaveMounted.current = true;
+      return;
+    }
+    const t = setTimeout(() => {
+      persistPatch({ pending_manual_positions: manualPositions });
+    }, 700);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manualPositions]);
 
   if (!row) return null;
 

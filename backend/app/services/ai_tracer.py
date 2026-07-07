@@ -3181,7 +3181,12 @@ def render_tracer_video(
             b_y = float(y_coef[1])
             render_end = last_kept_frame
             DESCENT_THRESHOLD_PX = 30.0
-            if a_y > 1e-6:
+            # Apex truncation is a safeguard for AUTO detections that
+            # plateau near the peak. When the operator has manually
+            # plotted the arc, they've explicitly told us where the ball
+            # goes (up AND down) — render the whole plotted trajectory
+            # and never truncate.
+            if a_y > 1e-6 and not has_manual:
                 apex_frame_f = -b_y / (2.0 * a_y)
                 apex_y_predicted = float(np.polyval(y_coef, apex_frame_f))
                 last_anchor_y = float(kept[-1][2])
@@ -3199,11 +3204,17 @@ def render_tracer_video(
             # rest-constrained refit above succeeded, polyval at the
             # first frame returns the exact rest pixel by construction,
             # so the line starts on the ball with no kink.
+            #
+            # SKIP (don't break on) points the parabola predicts outside
+            # the frame: a shot that peaks at the very top edge dips
+            # briefly off-screen near the apex, and breaking there killed
+            # the entire line "on the way up". Skipping lets it draw up to
+            # the edge and resume on the descent.
             for f in range(first_frame, render_end + 1):
                 x = int(round(float(np.polyval(x_coef, f))))
                 y = int(round(float(np.polyval(y_coef, f))))
                 if x < 0 or x >= width or y < 0 or y >= height:
-                    break
+                    continue
                 smoothed_points.append((f, x, y))
         log.info(
             "ai_tracer: tracer fit — %d anchors, %d rejected as outliers, "
