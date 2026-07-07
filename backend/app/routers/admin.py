@@ -654,24 +654,23 @@ def toggle_clip_broadcast(
 def list_broadcast_clips(
     limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
 ):
-    """List clips on the Broadcast channel — any clip an operator has
-    flagged with is_highlight=True, plus the legacy dual-camera
-    composites (source filename contains '_composite') so older
-    long-upload runs keep showing up without a backfill. Newest
-    first. Same per-clip shape as /clips so the existing FPS /
+    """List clips on the Broadcast channel — only clips an operator has
+    explicitly flagged with is_highlight=True by pressing Broadcast.
+    Newest first. Same per-clip shape as /clips so the existing FPS /
     source-device header line works without modification.
-    """
-    from sqlalchemy import or_  # local import — keeps the module
 
-    # header lean
+    NOTE: this used to ALSO include every dual-camera composite (source
+    filename contains '_composite') as a convenience for old runs. That
+    made every produced tee+green swing auto-appear here — hundreds of
+    un-vetted, mostly-garbage clips — because every dual-camera session
+    outputs a composite. Broadcast is a manual, operator-driven promotion
+    (and the only quality gate the AI tracer learns from), so the list now
+    shows strictly what was flagged. The public /broadcast/next playlist
+    already filtered on is_highlight, so viewers never saw the garbage.
+    """
     clips = (
         db.query(VideoClip)
-        .filter(
-            or_(
-                VideoClip.is_highlight.is_(True),
-                VideoClip.source_url.like("%_composite%"),
-            )
-        )
+        .filter(VideoClip.is_highlight.is_(True))
         .order_by(VideoClip.created_at.desc())
         .offset(max(0, offset))
         .limit(max(1, min(500, limit)))
