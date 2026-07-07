@@ -306,6 +306,15 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   const [swings, setSwings] = useState([]);
   const [selectedSwing, setSelectedSwing] = useState(0);
   const [detectingSwings, setDetectingSwings] = useState(false);
+  // Mirror of selectedSwing readable inside async callbacks without
+  // re-creating them, so a render that finishes after the operator
+  // switched tabs only updates the display if they're still on that swing.
+  const selectedSwingRef = useRef(selectedSwing);
+  useEffect(() => { selectedSwingRef.current = selectedSwing; }, [selectedSwing]);
+  // Swings we've already kicked an auto-detect render for this session, so
+  // selecting a swing fires the AI ball-track at most once (no re-fire /
+  // loop when it re-renders after the result is saved).
+  const autoRenderAttempted = useRef(new Set());
   // Editable on-screen graphics for Step 3. Hydrated from saved
   // edit_metrics; default yardage comes from the course's hole_yardages
   // for the chosen hole_number.
@@ -331,18 +340,24 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       roi: s.roi || null,
       target: s.target || null,
     });
-    if (s.tracer_url || s.ball_track_frames) {
-      setTracer({
-        url: s.tracer_url || null,
-        frames: s.ball_track_frames || [],
-      });
-      // Remember which engine produced the saved tracer so clicking
-      // "Next" on Step 1 reuses it instead of re-rendering from scratch
-      // (which would wipe the operator's manually-plotted points).
-      const eng = s.tracer_engine || "ai";
-      setTracerEngine(eng);
-      setTracerEngineUsed(eng);
-    }
+    // ALWAYS reset the tracer to THIS swing's saved render — empty when the
+    // swing hasn't been rendered yet. Without this, switching to an
+    // un-rendered swing kept showing the PREVIOUS swing's ball-track (e.g.
+    // Swing 1's frames while editing Swing 3).
+    const hasSavedTracer = !!(
+      s.tracer_url || (s.ball_track_frames && s.ball_track_frames.length)
+    );
+    setTracer({
+      url: s.tracer_url || null,
+      frames: s.ball_track_frames || [],
+    });
+    // Remember which engine produced the saved tracer so clicking "Next"
+    // on Step 1 reuses it instead of re-rendering (which would wipe the
+    // operator's manually-plotted points). Mark "used" as null when this
+    // swing has no render yet, so Next / auto-detect renders a fresh one.
+    const eng = s.tracer_engine || "ai";
+    setTracerEngine(eng);
+    setTracerEngineUsed(hasSavedTracer ? eng : null);
     if (s.finalized_video_url) setFinalUrl(s.finalized_video_url);
     const hole = s.finalized_hole_number ?? 1;
     const courseYards = row?.course_hole_yardages?.[String(hole)];
@@ -497,6 +512,24 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     const producedForSwing = row.produced_clips?.[selectedSwing]?.video_url || null;
     setFinalUrl(sw.finalized_video_url || producedForSwing || null);
 
+    // Auto-detect: the first time a swing is opened with no rendered
+    // ball-track, kick off the AI tracer for it so the operator lands on
+    // plotted points for THIS swing instead of an empty (or previous
+    // swing's) track. Guarded to fire at most once per swing per session.
+    // Only on Step 2 (the tracer step) — firing on Step 1 would make the
+    // subsequent Step 1 → Next reuse this render and ignore the operator's
+    // address/impact/ball edits.
+    const hasTracer = !!(sw.ball_track_frames && sw.ball_track_frames.length);
+    if (
+      step === "tracer" &&
+      !hasTracer &&
+      !autoRenderAttempted.current.has(selectedSwing) &&
+      !renderingTracer
+    ) {
+      autoRenderAttempted.current.add(selectedSwing);
+      renderTracerForSwing(selectedSwing);
+    }
+
     // /detect-swings only returns frame indices, not JPGs. The
     // preview shows the address frame; lazy-fetch it on first
     // selection of each swing, then cache the URL back into
@@ -623,6 +656,58 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       onSaved?.(r);
     } catch (e) {
       setError(e.message);
+    }
+  }
+
+  async function renderTracerForSwing(swIndex) {
+    // Full AI ball-track render for ONE swing, addressed by index so the
+    // result is persisted to the right swing even if the operator clicked
+    // to another tab while it ran. Used for auto-detect on swing select.
+    const sw = swings[swIndex];
+    if (!sw || renderingTracer) return;
+    setRenderingTracer(true);
+    setTracerError(null);
+    try {
+      const out = await api.renderWizardTracer(adminPassword, row.id, {
+        handedness: sw.handedness || draft.handedness || "right",
+        impact_frame: sw.impact_frame,
+        ball_at_rest: sw.ball || null,
+        engine: tracerEngine,
+      });
+      const frames = out.ball_track_frames || [];
+      // Only reflect into the visible tracer if we're still on this swing.
+      if (selectedSwingRef.current === swIndex) {
+        setTracer({ url: out.tracer_url, frames });
+        setTracerEngineUsed(out.engine || tracerEngine);
+        setTracerStats({
+          engine: out.engine || tracerEngine,
+          n_points: out.n_points,
+          n_candidates: out.n_candidates,
+          n_backfilled: out.n_backfilled,
+        });
+      }
+      // Persist to the captured swing index regardless of current tab.
+      setSwings((prev) => {
+        const next = prev.map((s, i) =>
+          i === swIndex
+            ? {
+                ...s,
+                tracer_url: out.tracer_url,
+                ball_track_frames: frames,
+                tracer_engine: out.engine || tracerEngine,
+              }
+            : s
+        );
+        api
+          .saveEditMetrics(adminPassword, row.id, { swings: next })
+          .then(() => onSaved?.())
+          .catch((e) => console.warn("save tracer failed", e));
+        return next;
+      });
+    } catch (e) {
+      setTracerError(e.message);
+    } finally {
+      setRenderingTracer(false);
     }
   }
 
