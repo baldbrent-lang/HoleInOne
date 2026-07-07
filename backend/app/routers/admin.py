@@ -3504,6 +3504,15 @@ def render_tracer_fast(
             cleared_frames.add(int(cf))
         except (TypeError, ValueError):
             continue
+    # Remember previously-cleared frames too, so a clear STAYS cleared
+    # across re-renders and reopens. Without this the stored track (which
+    # still holds the rejected detection) quietly re-introduces it on the
+    # next merge — the "cleared frame reverts on re-render" bug.
+    for cf in (saved.get("cleared_frames") or []):
+        try:
+            cleared_frames.add(int(cf))
+        except (TypeError, ValueError):
+            continue
 
     # Merge: frame index → entry. Manual wins. Manual additions for
     # frames the AI never visited are flagged manual=True / found=True
@@ -3596,6 +3605,9 @@ def render_tracer_fast(
     saved["tracer_url"] = tracer_url
     saved["tracer_info"] = info
     saved["ball_track_frames"] = merged
+    # Persist the accumulated cleared set (minus any frames just re-marked)
+    # so the rejection is remembered on the next render / reopen.
+    saved["cleared_frames"] = sorted(cleared_frames)
     # Re-finalizing was previously baked from the stale tracer — drop
     # the cached final URL so Step 3 knows to re-apply graphics.
     saved.pop("finalized_video_url", None)
