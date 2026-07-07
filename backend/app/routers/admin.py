@@ -96,6 +96,40 @@ def list_courses(db: Session = Depends(get_db)):
     return db.query(Course).order_by(Course.created_at.desc()).all()
 
 
+@router.get("/debug/db")
+def debug_db(db: Session = Depends(get_db)):
+    """Self-report the running deployment's actual DB state so we can see,
+    from the deployed process itself, which database it's on, whether it
+    has the courses columns, and the real error behind a 500 on /courses.
+    Temporary diagnostic — safe (read-only, masks credentials)."""
+    from sqlalchemy import inspect as _inspect
+    from ..database import db_url as _db_url
+
+    info: dict = {"marker": "debug-db-v1"}
+    try:
+        info["db_host"] = _db_url.split("@")[-1]
+    except Exception as exc:  # noqa: BLE001
+        info["db_host_err"] = str(exc)
+    try:
+        cols = _inspect(db.get_bind()).get_columns("courses")
+        info["courses_columns"] = sorted(c["name"] for c in cols)
+    except Exception as exc:  # noqa: BLE001
+        info["courses_columns_err"] = repr(exc)[:400]
+    try:
+        rows = db.query(Course).order_by(Course.created_at.desc()).all()
+        info["query_ok"] = True
+        info["n_rows"] = len(rows)
+        try:
+            for r in rows:
+                CourseOut.model_validate(r)
+            info["serialize_ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            info["serialize_err"] = repr(exc)[:500]
+    except Exception as exc:  # noqa: BLE001
+        info["query_err"] = repr(exc)[:500]
+    return info
+
+
 @router.post("/courses", response_model=CourseOut)
 def create_course(payload: CourseCreate, db: Session = Depends(get_db)):
     course = Course(
