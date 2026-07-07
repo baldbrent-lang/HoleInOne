@@ -3068,6 +3068,38 @@ def render_tracer_video(
     smoothed_points: list[tuple[int, int, int]] = []  # (frame, x, y)
     last_kept_frame_global: int | None = None
     rejected_frames: set[int] = set()
+
+    # When the operator has manually plotted the trajectory, draw the line
+    # straight THROUGH their points (per-frame linear interpolation between
+    # consecutive plotted anchors) instead of the parametric x=linear /
+    # y=quadratic parabola. That model assumes a down-the-line shot whose x
+    # moves monotonically; a ball hit up-and-over (x goes one way then back)
+    # can't be represented as a straight-line x, so the descent rendered on
+    # the wrong side of the golfer. Interpolating through the marks honours
+    # exactly what was plotted — up AND down, on the correct side.
+    manual_render = False
+    if has_manual and len(anchors) >= 2:
+        manual_render = True
+        sorted_anchors = sorted(anchors, key=lambda a: a[0])
+        for i in range(len(sorted_anchors) - 1):
+            f0, x0, y0 = sorted_anchors[i]
+            f1, x1, y1 = sorted_anchors[i + 1]
+            span = f1 - f0
+            if span <= 0:
+                continue
+            for ff in range(f0, f1):
+                t = (ff - f0) / float(span)
+                xi = int(round(x0 + (x1 - x0) * t))
+                yi = int(round(y0 + (y1 - y0) * t))
+                if 0 <= xi < width and 0 <= yi < height:
+                    smoothed_points.append((ff, xi, yi))
+        f_last, x_last, y_last = sorted_anchors[-1]
+        if 0 <= x_last < width and 0 <= y_last < height:
+            smoothed_points.append((f_last, x_last, y_last))
+        last_kept_frame_global = (
+            smoothed_points[-1][0] if smoothed_points else None
+        )
+
     # The rest position AND every manual click are immune to outlier
     # rejection — the operator's plotted points are ground truth, so the
     # fitted curve is forced to keep (and hug) them instead of tossing
@@ -3091,8 +3123,11 @@ def render_tracer_video(
                 weight_list.append(1.0)
     else:
         weight_list = None
-    fit = _robust_quadratic_fit(
-        anchors, pinned_indices=pinned_set, weights=weight_list,
+    fit = (
+        None if manual_render
+        else _robust_quadratic_fit(
+            anchors, pinned_indices=pinned_set, weights=weight_list,
+        )
     )
     if fit is not None:
         x_coef, y_coef, rejected_indices = fit
@@ -3221,9 +3256,11 @@ def render_tracer_video(
             "%d smoothed render points (parabola)",
             len(anchors), len(rejected_indices), len(smoothed_points),
         )
-    else:
+    elif not manual_render:
         # Not enough anchors for a stable fit (or numpy missing).
-        # Fall back to the raw point-to-point line.
+        # Fall back to the raw point-to-point line. (Skipped in
+        # manual_render mode — smoothed_points is already built by
+        # interpolating through the operator's plotted points above.)
         smoothed_points = list(anchors)
         log.info(
             "ai_tracer: tracer — falling back to raw %d anchors (no fit)",
