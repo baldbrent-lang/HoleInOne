@@ -650,6 +650,33 @@ def toggle_clip_broadcast(
     return {"clip_id": clip.id, "is_highlight": bool(clip.is_highlight)}
 
 
+@router.post("/broadcast-clips/clear")
+def clear_all_broadcast(db: Session = Depends(get_db)):
+    """Un-flag every clip currently on the Broadcast channel — a clean
+    slate. Sets is_highlight=False (and clears highlight_tag) on all clips
+    that were flagged, so the Broadcast page empties and you re-promote
+    only the good ones going forward. The produced clips themselves are
+    untouched; this only removes them from Broadcast. Idempotent.
+    """
+    flagged = db.query(VideoClip).filter(VideoClip.is_highlight.is_(True)).all()
+    n = len(flagged)
+    for clip in flagged:
+        clip.is_highlight = False
+        clip.highlight_tag = None
+        db.add(clip)
+    db.add(
+        AuditLog(
+            actor="admin",
+            action="clear_all_broadcast",
+            target="broadcast",
+            detail=f"cleared={n}",
+        )
+    )
+    db.commit()
+    log.info("admin: cleared %d clip(s) from Broadcast", n)
+    return {"cleared": n}
+
+
 @router.get("/broadcast-clips")
 def list_broadcast_clips(
     limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
