@@ -250,12 +250,25 @@ def _migrate() -> None:
     # ALTER (e.g. a type the dialect won't add in place) can't roll back
     # every other fix and leave the schema stuck.
     mlog = logging.getLogger("golfreelz.migrate")
+    ran = 0
     for stmt in statements:
         try:
             with engine.begin() as conn:
                 conn.execute(text(stmt))
+            ran += 1
         except Exception as exc:  # noqa: BLE001
             mlog.warning("migrate: skipped failing statement [%s]: %s", stmt, exc)
+
+    # Drop every pooled connection after DDL. Postgres caches the result-type
+    # plan of a prepared statement per connection; a SELECT compiled before
+    # these ALTER TABLE ... ADD COLUMN runs will then fail with "cached plan
+    # must not change result type" on any connection the migration reused —
+    # which 500'd GET /courses right after the very deploy that added the
+    # columns, even though the schema and data were correct. Disposing forces
+    # fresh connections (and fresh plans) for all real request traffic.
+    if ran:
+        engine.dispose()
+        mlog.info("migrate: applied %d statement(s); connection pool reset", ran)
 
 
 @app.on_event("startup")
