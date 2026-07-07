@@ -3257,15 +3257,35 @@ def render_tracer_video(
             # Draw the tracer once we've reached the impact frame.
             if smoothed_points and frame_idx >= smoothed_points[0][0]:
                 visible = [
-                    (x, y) for f, x, y in smoothed_points if f <= frame_idx
+                    (f, x, y) for f, x, y in smoothed_points if f <= frame_idx
                 ]
-                if len(visible) >= 2:
+                # Split into contiguous-frame runs. Off-screen (above the
+                # top edge) apex points are skipped during sampling, which
+                # leaves a frame gap; drawing one polyline across that gap
+                # bridged the clipped ascent-top to the descent-top with a
+                # flat horizontal bar across the top of the screen. Break
+                # the line at the gap instead so a shot that peaks at/above
+                # the top edge shows the ascent and descent reaching the
+                # edge rather than a flat plateau.
+                runs: list[list[tuple[int, int]]] = []
+                cur: list[tuple[int, int]] = []
+                prev_f = None
+                for f, x, y in visible:
+                    if prev_f is not None and (f - prev_f) > 2:
+                        if len(cur) >= 2:
+                            runs.append(cur)
+                        cur = []
+                    cur.append((x, y))
+                    prev_f = f
+                if len(cur) >= 2:
+                    runs.append(cur)
+                for run in runs:
                     # Pass the full final point count so the taper rate
                     # stays consistent as the line builds frame-by-frame
                     # (otherwise early frames briefly look like a thin
                     # stub before the full taper develops).
                     _draw_dashed_tracer(
-                        frame, visible,
+                        frame, run,
                         total_points=len(smoothed_points),
                     )
                 # Resting-ball indicator at the origin removed too — operator
