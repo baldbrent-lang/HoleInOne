@@ -92,6 +92,31 @@ def _migrate() -> None:
             statements.append("UPDATE courses SET hole_yardages = '{}' WHERE hole_yardages IS NULL")
         if "operator_password_hash" not in course_cols:
             statements.append("ALTER TABLE courses ADD COLUMN operator_password_hash VARCHAR(200)")
+        # tee-sheet integration fields. Added to the model but historically
+        # missing from this migrator, which 500'd every GET /courses on
+        # prod (SELECT of a column that didn't exist). Backfill the
+        # provider so CourseOut's required `tee_sheet_provider: str` never
+        # sees NULL on pre-existing rows.
+        if "tee_sheet_provider" not in course_cols:
+            statements.append(
+                "ALTER TABLE courses ADD COLUMN tee_sheet_provider VARCHAR(40) DEFAULT 'mock'"
+            )
+            statements.append(
+                "UPDATE courses SET tee_sheet_provider = 'mock' WHERE tee_sheet_provider IS NULL"
+            )
+        else:
+            statements.append(
+                "UPDATE courses SET tee_sheet_provider = 'mock' WHERE tee_sheet_provider IS NULL"
+            )
+        if "tee_sheet_config" not in course_cols:
+            statements.append("ALTER TABLE courses ADD COLUMN tee_sheet_config JSON")
+            statements.append(
+                "UPDATE courses SET tee_sheet_config = '{}' WHERE tee_sheet_config IS NULL"
+            )
+        else:
+            statements.append(
+                "UPDATE courses SET tee_sheet_config = '{}' WHERE tee_sheet_config IS NULL"
+            )
 
     # LongVideoUpload additions — background-job UX fields.
     if "long_video_uploads" in inspector.get_table_names():
@@ -182,11 +207,55 @@ def _migrate() -> None:
                 "UPDATE cameras SET triggering_enabled = TRUE WHERE triggering_enabled IS NULL"
             )
 
+    # Generic backstop: add ANY column defined on a model but missing from
+    # its existing table. The explicit ALTERs above cover special cases
+    # (value backfills, dropping a NOT NULL); this catches plain additions
+    # so the hand-maintained list can't silently drift from the models and
+    # 500 a SELECT — which is exactly what happened when courses gained
+    # tee_sheet_provider / tee_sheet_config without a matching entry here.
+    # Added nullable: we can't backfill a value generically, and every
+    # column added post-hoc is either nullable or has a Python-side default.
+    import re
+
+    already = set()
+    for _s in statements:
+        _m = re.search(r"ADD COLUMN (\w+)", _s)
+        _t = re.search(r"ALTER TABLE (\w+)", _s)
+        if _m and _t:
+            already.add((_t.group(1), _m.group(1)))
+    existing_tables = set(inspector.get_table_names())
+    # .tables.values() (not sorted_tables) — ordering is irrelevant for
+    # independent ADD COLUMNs, and sorted_tables warns/raises on the
+    # camera_events↔video_clips FK cycle.
+    for table in Base.metadata.tables.values():
+        if table.name not in existing_tables:
+            continue  # create_all makes whole missing tables correctly
+        have = {c["name"] for c in inspector.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have or col.primary_key:
+                continue
+            if (table.name, col.name) in already:
+                continue
+            try:
+                coltype = col.type.compile(dialect=engine.dialect)
+            except Exception:
+                continue
+            statements.append(
+                f"ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}"
+            )
+
     if not statements:
         return
-    with engine.begin() as conn:
-        for stmt in statements:
-            conn.execute(text(stmt))
+    # Run each statement in its own transaction, best-effort, so one bad
+    # ALTER (e.g. a type the dialect won't add in place) can't roll back
+    # every other fix and leave the schema stuck.
+    mlog = logging.getLogger("golfreelz.migrate")
+    for stmt in statements:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+        except Exception as exc:  # noqa: BLE001
+            mlog.warning("migrate: skipped failing statement [%s]: %s", stmt, exc)
 
 
 @app.on_event("startup")
