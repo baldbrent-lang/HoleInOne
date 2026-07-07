@@ -3116,6 +3116,28 @@ def render_tracer_video(
         f_last, x_last, y_last = pts[-1]
         if 0 <= x_last < width and 0 <= y_last < height:
             smoothed_points.append((f_last, x_last, y_last))
+
+        # Continue the ball on its logical (ballistic) trajectory past the
+        # last plotted point instead of stopping abruptly: fit a small
+        # local parabola (y quadratic with gravity, x linear) to the last
+        # few plotted points and project it forward, frame by frame, until
+        # the ball leaves the frame (or a ~3s safety cap).
+        if HAS_NP and len(pts) >= 3 and smoothed_points:
+            tail = pts[-min(6, len(pts)):]
+            try:
+                tf = np.array([p[0] for p in tail], dtype=float)
+                yq = np.polyfit(tf, np.array([p[2] for p in tail], float), 2)
+                xl = np.polyfit(tf, np.array([p[1] for p in tail], float), 1)
+                max_extra = int(round(fps * 3)) if fps else 90
+                for ff in range(f_last + 1, f_last + 1 + max_extra):
+                    xe = int(round(float(np.polyval(xl, ff))))
+                    ye = int(round(float(np.polyval(yq, ff))))
+                    if not (0 <= xe < width and 0 <= ye < height):
+                        break  # ball left the frame — end the trajectory
+                    smoothed_points.append((ff, xe, ye))
+            except Exception:  # pragma: no cover
+                pass
+
         last_kept_frame_global = (
             smoothed_points[-1][0] if smoothed_points else None
         )
