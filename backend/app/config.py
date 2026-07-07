@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     # Production.
     camera_produce_unconfirmed_shots: bool = True
 
+    # Garbage weeding. Even in permissive keep-everything mode (above), drop
+    # clips where there was CLEARLY no golf: a motion burst fired but no golf
+    # ball was ever on the tee (verdict "no_ball") — someone walking through
+    # frame, kitchen/indoor motion, a dog, etc. This is a narrower cut than
+    # camera_produce_unconfirmed_shots=False: it still keeps practice swings
+    # (ball present) and shots where the camera just couldn't see the ball
+    # ("uncertain"), so a real shot is never dropped on a "ball not visible"
+    # glitch — only the no-ball-at-all garbage is removed. Set env
+    # CAMERA_DROP_GARBAGE_CLIPS=0 to keep everything (raw course-test mode).
+    camera_drop_garbage_clips: bool = True
+
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2

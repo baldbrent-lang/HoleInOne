@@ -1198,6 +1198,7 @@ def _run_long_upload_job(
                     detected = filter_swings_by_ball_departure(
                         src_path, detected, tee_fps, debug=_detect_debug,
                         keep_all=settings.camera_produce_unconfirmed_shots,
+                        drop_garbage=settings.camera_drop_garbage_clips,
                     )
                 else:
                     # Combined audio + motion detector: an audio impact
@@ -1225,14 +1226,16 @@ def _run_long_upload_job(
                 if not segs:
                     if motion_only:
                         # Camera session with nothing to produce: no motion
-                        # burst detected at all (in permissive mode), or no
+                        # burst detected at all, every burst weeded as garbage
+                        # (no ball ever — kitchen walk-by, etc.), or no
                         # confirmed golf shot (in strict mode). Either way a
                         # valid outcome — produce nothing, don't fail. Fall
                         # through with empty segs → 0 produced clips.
                         log.info(
                             "long-upload worker: upload=%s nothing to produce "
-                            "— 0 clips (keep_all=%s)", upload_id,
+                            "— 0 clips (keep_all=%s drop_garbage=%s)", upload_id,
                             settings.camera_produce_unconfirmed_shots,
+                            settings.camera_drop_garbage_clips,
                         )
                     else:
                         _comb = _detect_debug.get("combined") or {}

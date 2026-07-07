@@ -924,6 +924,7 @@ def filter_swings_by_ball_departure(
     fps: float,
     debug: dict | None = None,
     keep_all: bool = False,
+    drop_garbage: bool = False,
 ) -> list[dict]:
     """Classify each candidate swing by what the ball did and tag it with a
     `ball_verdict` ("departed" / "present" / "no_ball" / "uncertain").
@@ -941,11 +942,20 @@ def filter_swings_by_ball_departure(
     - `keep_all=True` (permissive, for course testing): keep every detected
       swing but still tag the verdict. Nothing is silently lost — we produce
       everything, see what the ball check thought of each, then tune the
-      thresholds and flip back to strict once it's trustworthy."""
+      thresholds and flip back to strict once it's trustworthy.
+
+    - `drop_garbage=True` (only meaningful with keep_all): a middle ground
+      that weeds out CLEAR non-golf — a motion burst with no ball ever on the
+      tee ("no_ball": someone walking through frame, indoor/kitchen motion) —
+      while still keeping practice swings ("present") and shots the camera
+      couldn't quite see the ball for ("uncertain"). This removes the
+      "garbage" clips without reintroducing the strict-mode risk of dropping a
+      real shot on a ball-not-visible glitch."""
     if not swings:
         return swings
     kept: list[dict] = []
     dropped = 0
+    garbage = 0
     for sw in swings:
         peak = float(sw.get("peak_time_sec") or sw.get("start_sec") or 0.0)
         result = ball_departed_for_swing(input_path, peak, fps, debug=debug)
@@ -953,13 +963,25 @@ def filter_swings_by_ball_departure(
         # to the produced clip's diagnostics, whether or not we drop it.
         sw["ball_verdict"] = result
         is_shot = result in _BALL_KEEP_RESULTS
-        if is_shot or keep_all:
+        is_garbage = result == "no_ball"
+        if keep_all:
+            # Permissive: keep everything, EXCEPT clear garbage when the
+            # garbage weeder is on (no ball ever = not golf).
+            if drop_garbage and is_garbage:
+                garbage += 1
+                log.info(
+                    "ai_tracer: swing@%.1fs dropped as garbage — no ball ever "
+                    "on the tee (not golf)", peak,
+                )
+                continue
             kept.append(sw)
-            if keep_all and not is_shot:
+            if not is_shot:
                 log.info(
                     "ai_tracer: swing@%.1fs kept (keep_all) — ball verdict=%s",
                     peak, result,
                 )
+        elif is_shot:
+            kept.append(sw)
         else:
             dropped += 1
             log.info(
@@ -968,8 +990,9 @@ def filter_swings_by_ball_departure(
                 if result == "present" else "no ball detected (not a shot)",
             )
     log.info(
-        "ai_tracer: ball filter — kept %d of %d swings (dropped %d; "
-        "keep_all=%s)", len(kept), len(swings), dropped, keep_all,
+        "ai_tracer: ball filter — kept %d of %d swings (dropped %d, garbage %d; "
+        "keep_all=%s drop_garbage=%s)",
+        len(kept), len(swings), dropped, garbage, keep_all, drop_garbage,
     )
     return kept
 
