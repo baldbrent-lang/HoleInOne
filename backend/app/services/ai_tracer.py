@@ -2945,6 +2945,7 @@ def render_tracer_video(
     ball_rest_xy_native: tuple[float, float] | None,
     impact_frame_idx: int,
     track_frames: list[dict],
+    target_xy: tuple[float, float] | None = None,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
@@ -3117,26 +3118,34 @@ def render_tracer_video(
         if 0 <= x_last < width and 0 <= y_last < height:
             smoothed_points.append((f_last, x_last, y_last))
 
-        # Continue the ball on its logical (ballistic) trajectory past the
-        # last plotted point instead of stopping abruptly: fit a small
-        # local parabola (y quadratic with gravity, x linear) to the last
-        # few plotted points and project it forward, frame by frame, until
-        # the ball leaves the frame (or a ~3s safety cap).
-        if HAS_NP and len(pts) >= 3 and smoothed_points:
-            tail = pts[-min(6, len(pts)):]
-            try:
-                tf = np.array([p[0] for p in tail], dtype=float)
-                yq = np.polyfit(tf, np.array([p[2] for p in tail], float), 2)
-                xl = np.polyfit(tf, np.array([p[1] for p in tail], float), 1)
-                max_extra = int(round(fps * 3)) if fps else 90
-                for ff in range(f_last + 1, f_last + 1 + max_extra):
-                    xe = int(round(float(np.polyval(xl, ff))))
-                    ye = int(round(float(np.polyval(yq, ff))))
-                    if not (0 <= xe < width and 0 <= ye < height):
-                        break  # ball left the frame — end the trajectory
-                    smoothed_points.append((ff, xe, ye))
-            except Exception:  # pragma: no cover
-                pass
+        # Continue past the last plotted point toward the target/landing
+        # spot on a smooth ballistic arc — but ONLY if a target was marked.
+        # A golf shot flies away and lands downrange near the horizon, not
+        # back in the foreground, so we aim the descent at the plotted
+        # landing point instead of fabricating a flat parabola that dives
+        # in front of the golfer. The curve leaves the last plotted point
+        # along the ball's current direction, then bends to the target
+        # (quadratic Bézier), so there's no kink/squiggle at the join. With
+        # no target we simply stop at the last plotted point.
+        if target_xy is not None and len(pts) >= 2:
+            tx_t, ty_t = float(target_xy[0]), float(target_xy[1])
+            _, x_a, y_a = pts[-1]
+            _, x_b, y_b = pts[-2]
+            dx, dy = float(x_a - x_b), float(y_a - y_b)
+            dlen = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / dlen, dy / dlen
+            span = math.hypot(tx_t - x_a, ty_t - y_a)
+            cx = x_a + ux * span * 0.4
+            cy = y_a + uy * span * 0.4
+            steps = int(round(fps * 1.5)) if fps else 45
+            for i in range(1, steps + 1):
+                t = i / float(steps)
+                mt = 1.0 - t
+                bx = int(round(mt * mt * x_a + 2 * mt * t * cx + t * t * tx_t))
+                by = int(round(mt * mt * y_a + 2 * mt * t * cy + t * t * ty_t))
+                if not (0 <= bx < width and 0 <= by < height):
+                    break
+                smoothed_points.append((f_last + i, bx, by))
 
         last_kept_frame_global = (
             smoothed_points[-1][0] if smoothed_points else None

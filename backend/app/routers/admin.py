@@ -3569,6 +3569,16 @@ def render_tracer_fast(
         impact_idx = int(saved.get("impact_frame") or 0)
     except (TypeError, ValueError):
         impact_idx = 0
+    # Target / landing spot (the flag the operator plots). Used to aim the
+    # tracer's continuation past the last plotted point at the downrange
+    # landing point instead of fabricating a descent into the foreground.
+    target = saved.get("target") or {}
+    target_xy = None
+    try:
+        if target and target.get("x") is not None and target.get("y") is not None:
+            target_xy = (float(target["x"]), float(target["y"]))
+    except Exception:
+        target_xy = None
 
     output_path = CLIPS_DIR / f"wizard-{upload_id}_tracer.mp4"
     info = render_tracer_video(
@@ -3576,6 +3586,7 @@ def render_tracer_fast(
         output_path,
         ball_rest_xy_native=ball_xy,
         impact_frame_idx=impact_idx,
+        target_xy=target_xy,
         # Forward the manual flag — the renderer pins manual anchors
         # so the parabola fit can't reject them and weights them so
         # they actually shape the rendered arc instead of getting
