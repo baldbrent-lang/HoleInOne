@@ -336,6 +336,12 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         url: s.tracer_url || null,
         frames: s.ball_track_frames || [],
       });
+      // Remember which engine produced the saved tracer so clicking
+      // "Next" on Step 1 reuses it instead of re-rendering from scratch
+      // (which would wipe the operator's manually-plotted points).
+      const eng = s.tracer_engine || "ai";
+      setTracerEngine(eng);
+      setTracerEngineUsed(eng);
     }
     if (s.finalized_video_url) setFinalUrl(s.finalized_video_url);
     const hole = s.finalized_hole_number ?? 1;
@@ -635,7 +641,15 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     // Re-render when there's no tracer yet, or the operator switched
     // engines since the last render (so the A/B actually re-runs on the
     // same clip). Otherwise reuse the cached tracer.
-    if (tracer?.url && tracerEngineUsed === tracerEngine) {
+    //
+    // Crucially: if the operator has ANY manually-plotted points (saved
+    // in the tracer track or queued), NEVER auto-re-render on Next —
+    // that would overwrite their work with a fresh AI detection. They
+    // can still force a re-render from Step 2's "Re-render" button.
+    const hasManualPoints =
+      (tracer?.frames || []).some((f) => f && f.manual) ||
+      Object.keys(manualPositions).length > 0;
+    if (tracer?.url && (hasManualPoints || tracerEngineUsed === tracerEngine)) {
       setStep("tracer");
       return;
     }
