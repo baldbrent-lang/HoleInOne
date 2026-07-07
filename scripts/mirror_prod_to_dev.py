@@ -40,7 +40,23 @@ PROD_PW = os.environ.get("ADMIN_PASSWORD", "Baldy123")
 DEV_PW = os.environ.get("DEV_ADMIN_PASSWORD") or PROD_PW
 DEV_COURSE_ID = os.environ.get("DEV_COURSE_ID")
 TEE_ONLY = os.environ.get("TEE_ONLY") in ("1", "true", "True", "yes")
-STATE = Path(".mirrored_events.txt")
+
+# Ledger of prod event ids we've ALREADY mirrored. Append-only: deleting a
+# clip in dev deliberately does NOT remove its id here, so a delete stays a
+# delete and re-running won't drag it back in.
+#
+# Anchor to a FIXED absolute path (next to this script) instead of the CWD,
+# so it doesn't matter which directory you launch from — a relative path
+# meant that running from a different folder found no ledger, assumed nothing
+# had ever been mirrored, and re-imported everything (including deleted ones).
+# Override with MIRROR_STATE_FILE to pin it anywhere you like.
+STATE = Path(
+    os.environ.get("MIRROR_STATE_FILE")
+    or (Path(__file__).resolve().parent / ".mirrored_events.txt")
+)
+# Legacy location (older runs wrote the ledger to the CWD). Read it too so any
+# existing history is honored and those events aren't re-mirrored once.
+_LEGACY_STATE = Path(".mirrored_events.txt")
 
 if not DEV:
     sys.exit("Set DEV_URL to your dev site base URL (see header of this file).")
@@ -121,8 +137,11 @@ def _list_events() -> list:
 
 
 done = set()
-if STATE.exists():
-    done = {ln.strip() for ln in STATE.read_text().splitlines() if ln.strip()}
+# Union the fixed ledger and the legacy CWD ledger so no history is lost.
+for _ledger in {STATE.resolve(), _LEGACY_STATE.resolve()}:
+    if _ledger.exists():
+        done |= {ln.strip() for ln in _ledger.read_text().splitlines() if ln.strip()}
+print(f"ledger: {STATE} ({len(done)} event(s) already mirrored, will be skipped)")
 
 events = _list_events()
 if not events:

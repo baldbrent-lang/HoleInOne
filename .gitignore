@@ -31,3 +31,7 @@ pnpm-debug.log*
 
 # Uploads (selfies) — dev only
 backend/uploads/
+
+# Local ledger for scripts/mirror_prod_to_dev.py (never commit)
+.mirrored_events.txt
+scripts/.mirrored_events.txt
