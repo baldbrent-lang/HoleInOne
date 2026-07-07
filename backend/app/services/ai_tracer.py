@@ -3079,21 +3079,41 @@ def render_tracer_video(
     # exactly what was plotted — up AND down, on the correct side.
     manual_render = False
     if has_manual and len(anchors) >= 2:
+        # Draw a SMOOTH Catmull-Rom spline through the plotted anchors.
+        # It still passes through every plotted point, but curves smoothly
+        # between them instead of connecting them with straight segments
+        # (which read as a squiggly, kinked line).
         manual_render = True
-        sorted_anchors = sorted(anchors, key=lambda a: a[0])
-        for i in range(len(sorted_anchors) - 1):
-            f0, x0, y0 = sorted_anchors[i]
-            f1, x1, y1 = sorted_anchors[i + 1]
-            span = f1 - f0
+        pts = sorted(anchors, key=lambda a: a[0])
+        n = len(pts)
+
+        def _catmull(p0, p1, p2, p3, t):
+            # Standard Catmull-Rom basis; p1→p2 is the drawn segment,
+            # p0/p3 are the neighbouring points that set its tangents.
+            t2 = t * t
+            t3 = t2 * t
+            return 0.5 * (
+                (2.0 * p1)
+                + (-p0 + p2) * t
+                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+            )
+
+        for i in range(n - 1):
+            f1, x1, y1 = pts[i]
+            f2, x2, y2 = pts[i + 1]
+            _, x0, y0 = pts[i - 1] if i >= 1 else pts[i]
+            _, x3, y3 = pts[i + 2] if i + 2 < n else pts[i + 1]
+            span = f2 - f1
             if span <= 0:
                 continue
-            for ff in range(f0, f1):
-                t = (ff - f0) / float(span)
-                xi = int(round(x0 + (x1 - x0) * t))
-                yi = int(round(y0 + (y1 - y0) * t))
+            for ff in range(f1, f2):
+                t = (ff - f1) / float(span)
+                xi = int(round(_catmull(x0, x1, x2, x3, t)))
+                yi = int(round(_catmull(y0, y1, y2, y3, t)))
                 if 0 <= xi < width and 0 <= yi < height:
                     smoothed_points.append((ff, xi, yi))
-        f_last, x_last, y_last = sorted_anchors[-1]
+        f_last, x_last, y_last = pts[-1]
         if 0 <= x_last < width and 0 <= y_last < height:
             smoothed_points.append((f_last, x_last, y_last))
         last_kept_frame_global = (
