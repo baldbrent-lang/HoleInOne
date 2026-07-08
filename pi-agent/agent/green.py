@@ -54,14 +54,16 @@ class GreenAgent:
         self.stop_poll_interval = float(cfg.get("stop_poll_interval_seconds", 1.0))
         self.poll_timeout = int(cfg.get("poll_timeout_seconds", 25))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
-        # Compress each clip to H.264 at this bitrate before upload. The
-        # green often runs on a cellular SIM where the raw mp4v clips
-        # (tens to >100 MB) are slow to send and eat the data plan; 2.5
-        # Mbps is plenty for the cosmetic landing view. Set to 0 to
-        # disable (e.g. green on fast wired/WiFi). upload_scale_height
-        # optionally downscales (e.g. 720); None keeps capture res.
-        self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 2500))
-        self.upload_scale_height = cfg.get("upload_scale_height")
+        # Compress each clip to H.264 before upload. Green runs on a
+        # cellular SIM where raw clips are slow to send and eat the data
+        # plan. Green is only the wide/landing angle AND the dual-camera
+        # composite already downscales everything to 720p, so uploading
+        # green at full 1080p / high bitrate was wasted bandwidth: default
+        # to 720p @ 1.5 Mbps — a much smaller file, uploads far faster, and
+        # no quality loss the composite would have kept anyway. Override in
+        # config; set bitrate 0 to disable compression (fast wired/WiFi).
+        self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 1500))
+        self.upload_scale_height = cfg.get("upload_scale_height", 720)
         self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-green"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.stopping = threading.Event()
