@@ -475,11 +475,26 @@ class TeeAgent:
         # the periodic hitch. Measured rate => smooth, correct-duration
         # playback. Clamped to sane bounds; falls back to nominal when
         # the pre-roll is too short to measure.
+        #
+        # Guard against a bogus measurement: the first capture after boot
+        # (or after a long idle) can have a pre-roll of frames the camera
+        # delivered slowly during warmup — e.g. 151 frames spanning 150 s
+        # reads as 1 fps. Stamping the whole clip at that rate plays the
+        # real ~30 fps action in slow motion (and reports an 8-minute
+        # duration). Only trust the measured rate when it's within a sane
+        # band of nominal (±40%); otherwise keep nominal.
         write_fps = fps
         if len(snapshot) >= 5:
             span = snapshot[-1][0] - snapshot[0][0]
             if span > 0.5:
-                write_fps = max(1.0, min(120.0, (len(snapshot) - 1) / span))
+                measured = (len(snapshot) - 1) / span
+                if 0.6 * fps <= measured <= 1.4 * fps:
+                    write_fps = max(1.0, min(120.0, measured))
+                else:
+                    log.warning(
+                        "record: ignoring implausible measured_fps=%.2f "
+                        "(nominal=%.1f) — using nominal", measured, fps,
+                    )
         log.info(
             "record: nominal_fps=%.1f measured_fps=%.2f preroll_frames=%d",
             fps, write_fps, len(snapshot),
