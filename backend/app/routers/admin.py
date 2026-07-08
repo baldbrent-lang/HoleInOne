@@ -3691,6 +3691,10 @@ def render_tracer_fast(
     saved["tracer_url"] = tracer_url
     saved["tracer_info"] = info
     saved["ball_track_frames"] = merged
+    # Record the source frame the tracer video now starts at (its frame 0),
+    # or None when it's the whole clip. Step-3 finalize needs this to trim /
+    # composite against the tracer's own timeline instead of source frames.
+    saved["tracer_segment_start"] = write_start
     # Persist the accumulated cleared set (minus any frames just re-marked)
     # so the rejection is remembered on the next render / reopen.
     saved["cleared_frames"] = sorted(cleared_frames)
@@ -3773,20 +3777,33 @@ def finalize_wizard_video(
     if fps <= 0:
         fps = 30.0
 
-    start_sec = max(0.0, float(start_frame_saved or 0) / fps)
-    end_sec = float(int(end_frame_saved) + 1) / fps if end_frame_saved is not None else None
+    # The Step-2 tracer may be pre-trimmed to just the selected swing (its
+    # frame 0 = source frame `seg_start`). Tee-tracer times must then be in
+    # the TRACER's own timeline (source_sec − seg_off); green stays in
+    # SOURCE time (+Δ) because it's still the whole green clip. seg_off is 0
+    # for a whole-clip tracer (single-swing), giving the old behaviour.
+    _seg = saved.get("tracer_segment_start")
+    seg_off_sec = (float(int(_seg)) / fps) if _seg is not None else 0.0
+
+    # Source-space seconds of the operator's frames.
+    start_src_sec = float(start_frame_saved or 0) / fps
+    end_src_sec = (
+        float(int(end_frame_saved) + 1) / fps if end_frame_saved is not None else None
+    )
 
     green_path = CLIPS_DIR / row.green_filename if row.green_filename else None
     has_green = green_path is not None and green_path.exists()
 
-    # Cut point for the tee→green switch. Operator's manual value wins;
-    # otherwise default to 2.5s after impact (matches the wizard's
-    # displayed default). Only relevant when there's a green clip.
-    cut_sec = None
+    cut_src_sec = None
     if cut_frame_saved is not None:
-        cut_sec = max(0.0, float(cut_frame_saved) / fps)
+        cut_src_sec = max(0.0, float(cut_frame_saved) / fps)
     elif has_green and impact_frame_saved is not None:
-        cut_sec = max(0.0, float(impact_frame_saved) / fps + 2.5)
+        cut_src_sec = max(0.0, float(impact_frame_saved) / fps + 2.5)
+
+    # Tee-tracer-local seconds (0 at the start of the pre-trimmed tracer).
+    start_sec = max(0.0, start_src_sec - seg_off_sec)
+    end_sec = (end_src_sec - seg_off_sec) if end_src_sec is not None else None
+    cut_sec = (cut_src_sec - seg_off_sec) if cut_src_sec is not None else None
 
     # Real-time offset between the two cameras. The tee and green start
     # recording a fraction of a second apart (trigger latency), so the
@@ -3819,9 +3836,11 @@ def finalize_wizard_video(
         composite_cut = min(cut_sec, tracer_dur or cut_sec)
         composite_end = end_sec if end_sec is not None else (composite_cut + 10.0)
         composite_end = max(composite_cut + 0.1, composite_end)
-        # Map the tee-local cut/end into green-local time.
-        green_cut = max(0.0, composite_cut + green_delta)
-        green_end = composite_end + green_delta
+        # Map the tee-local cut/end into green-local time. The tracer is
+        # segment-relative (frame 0 = source seg_off), so add seg_off back to
+        # recover SOURCE seconds, then +Δ to align the green clip's clock.
+        green_cut = max(0.0, composite_cut + seg_off_sec + green_delta)
+        green_end = composite_end + seg_off_sec + green_delta
         if green_dur:
             green_end = min(green_end, green_dur)
         green_end = max(green_cut + 0.1, green_end)
