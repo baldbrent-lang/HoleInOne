@@ -36,9 +36,16 @@ try:  # pragma: no cover - depends on the deploy environment
     from replit.object_storage import Client  # type: ignore
 
     _client = Client()
+    # Probe: the package can import + Client() can construct even when NO
+    # bucket is configured for the repl (e.g. dev). Without this check we'd
+    # think storage is "on" and then fail — and log — on every single file,
+    # flooding the console. A cheap exists() call raises "no default bucket"
+    # when unconfigured, so we disable cleanly and stay local-disk only.
+    _client.exists("__golfreelz_probe__")
     _enabled = True
     log.info("storage: Replit Object Storage enabled")
 except Exception as exc:  # noqa: BLE001
+    _client = None
     log.info(
         "storage: object storage unavailable (%s) — running local-disk only",
         exc,
