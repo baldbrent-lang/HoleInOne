@@ -17,3 +17,6 @@ python-dotenv==1.0.1
 numpy==2.1.2
 opencv-python-headless==4.10.0.84
 anthropic==0.39.0
+# Persistent object storage (survives Replit redeploys). Optional at
+# runtime — app falls back to local-disk-only if it's missing/unconfigured.
+replit-object-storage==1.0.2

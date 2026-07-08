@@ -63,6 +63,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..database import SessionLocal, get_db
 from ..models import Camera, CameraEvent, Course, VideoClip
+from ..services import storage
 from ..services.video import probe_video_info
 
 log = logging.getLogger("golfreelz.cameras")
@@ -585,6 +586,13 @@ def _process_camera_event_job(event_id: int) -> None:
         if event is None:
             log.warning("cameras: event %s vanished before processing", event_id)
             return
+
+        # Rehydrate raws from object storage if the ephemeral disk lost them
+        # (e.g. reprocessing an event after a redeploy).
+        if event.tee_clip_filename:
+            storage.ensure_local(CLIPS_DIR, event.tee_clip_filename)
+        if event.green_clip_filename:
+            storage.ensure_local(CLIPS_DIR, event.green_clip_filename)
 
         tee_path = (
             CLIPS_DIR / event.tee_clip_filename if event.tee_clip_filename else None

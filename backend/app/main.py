@@ -24,6 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .config import settings
 from .database import Base, engine
 from .routers import admin, auth, broadcast, cameras, gallery, operator, public, webhooks
+from .services import storage
 
 # Our internal loggers (`golfreelz.tracer`, `golfreelz.admin`, etc.) default to
 # WARNING and uvicorn doesn't configure them, so INFO diagnostics were never
@@ -399,7 +400,30 @@ app.include_router(cameras.router)
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 UPLOAD_ROOT = BACKEND_ROOT / settings.upload_dir
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+CLIPS_DIR = UPLOAD_ROOT / "clips"
+CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Serve clips through a route (registered BEFORE the /uploads mount so it
+# wins for this path) that rehydrates from object storage when the local
+# file is gone — e.g. after a redeploy wiped the ephemeral disk. FileResponse
+# honours HTTP Range requests, which Safari needs for <video> playback.
+@app.get("/uploads/clips/{name}", include_in_schema=False)
+def serve_clip(name: str):
+    safe = Path(name).name  # filenames only — no path traversal
+    local = CLIPS_DIR / safe
+    if not local.exists():
+        storage.ensure_local(CLIPS_DIR, safe)
+    if not local.exists():
+        raise StarletteHTTPException(status_code=404)
+    return FileResponse(local)
+
+
 app.mount("/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
+
+# Background mirror: push new clips into object storage so a redeploy can't
+# erase footage. No-op when object storage isn't configured (local dev).
+storage.start_sweeper(CLIPS_DIR)
 
 
 # --- Static SPA hosting (Replit / single-port deploy) ------------------------

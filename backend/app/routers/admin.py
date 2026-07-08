@@ -48,7 +48,7 @@ from ..schemas import (
     HIOEventOut,
     HIOReviewAction,
 )
-from ..services import notifications, tracer_examples
+from ..services import notifications, storage, tracer_examples
 from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
@@ -1189,6 +1189,12 @@ def _run_long_upload_job(
         db.commit()
 
         try:
+            # Rehydrate the raw source(s) from object storage if the
+            # ephemeral disk lost them (e.g. re-producing after a redeploy).
+            if row.tee_filename:
+                storage.ensure_local(CLIPS_DIR, row.tee_filename)
+            if row.green_filename:
+                storage.ensure_local(CLIPS_DIR, row.green_filename)
             src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
             if not src_path or not src_path.exists():
                 raise RuntimeError(
