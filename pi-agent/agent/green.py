@@ -242,17 +242,24 @@ class GreenAgent:
                 )
 
         size = clip_path.stat().st_size if clip_path.exists() else 0
-        # Actual delivered rate over the STREAMED portion (excludes the
-        # buffered pre-roll, which a slow warmup could stretch). Green
-        # regularly drops frames under load (livestream + cellular upload),
-        # so writing at the nominal fps made the clip play too fast and end
-        # before the tee. Re-clock to the measured rate on compress so it
-        # plays in real time and stays length-matched to the tee.
-        streamed_frames = frames_written - len(snapshot)
-        streamed_span = last_written_ts - start
+        # Actual delivered rate over the whole recording, measured from
+        # FRAME timestamps (first buffered frame → last written frame).
+        # Green drops frames under load (livestream + cellular upload), so
+        # stamping the nominal fps made clips play too fast; re-clock to the
+        # measured rate on compress so it plays in real time.
+        #
+        # Measure against frame timestamps, NOT a wall-clock `start`: an
+        # earlier version used `start`, which under-counted the span and
+        # inflated the rate (e.g. 42 fps for a 30 fps camera → clips played
+        # ~1.4x fast). Cap at nominal — the camera can't deliver faster than
+        # its configured fps, so any higher reading is measurement error;
+        # floor at 40% so a rare startup glitch can't stamp an absurdly slow
+        # clip.
+        real_span = last_written_ts - first_frame_ts
         real_fps = None
-        if streamed_span > 1.0 and streamed_frames >= 5:
-            real_fps = max(5.0, min(120.0, streamed_frames / streamed_span))
+        if real_span > 1.0 and frames_written >= 5:
+            measured = (frames_written - 1) / real_span
+            real_fps = min(float(self.fps), max(0.4 * float(self.fps), measured))
         log.info(
             "recorded %s: %d frames, %.1f MB (reason=%s, real_fps=%s)",
             clip_path.name, frames_written, size / (1024 * 1024), stop_reason,
