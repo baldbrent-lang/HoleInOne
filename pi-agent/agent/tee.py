@@ -122,7 +122,8 @@ class YoloPersonDetector:
         self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
         self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
 
-    def detect(self, frame) -> Optional[tuple[int, int]]:
+    def detect(self, frame, conf_override: Optional[float] = None) -> Optional[tuple[int, int]]:
+        conf = self.conf if conf_override is None else float(conf_override)
         h, w = frame.shape[:2]
         n = self.input_size
         blob = cv2.dnn.blobFromImage(
@@ -133,7 +134,7 @@ class YoloPersonDetector:
         out = out[0].T                    # (anchors, 84)
         # Person score is column 4 (first class after the 4 bbox coords).
         person_scores = out[:, 4 + self.PERSON_CLASS]
-        keep = person_scores >= self.conf
+        keep = person_scores >= conf
         if not np.any(keep):
             return None
         rows = out[keep]
@@ -152,7 +153,7 @@ class YoloPersonDetector:
             confs.append(float(sc))
         if not boxes:
             return None
-        idxs = cv2.dnn.NMSBoxes(boxes, confs, self.conf, self.iou)
+        idxs = cv2.dnn.NMSBoxes(boxes, confs, conf, self.iou)
         if idxs is None or len(idxs) == 0:
             return None
         idxs = np.array(idxs).flatten()
@@ -247,6 +248,15 @@ class TeeAgent:
         self.roi = cfg["tee_box_roi"]
         self.cam_cfg = cfg.get("camera", {})
         self.det_cfg = cfg.get("detection", {})
+        # Lenient confidence used ONLY to keep an in-progress recording
+        # alive. A golfer bent over the ball reads at lower confidence than
+        # the strict trigger threshold wants, so keying the "still present"
+        # check on the strict threshold dropped them mid-shot (clip ended
+        # while they were clearly on the mat). Starting a clip still needs a
+        # confident person; staying recorded only needs a faint one.
+        self.keepalive_conf = float(
+            self.det_cfg.get("keepalive_conf_threshold", 0.2)
+        )
         self.buffer_seconds = float(cfg.get("buffer_seconds", 5))
         # Runaway-safety cap. A normal session ends when the tee box
         # has been empty for no_person_timeout_seconds; this cap is
@@ -540,7 +550,16 @@ class TeeAgent:
             # cadence — off the capture path, so it can't drop frames.
             if now >= next_det and current:
                 next_det = now + det_period
-                centroid = detector.detect(current[-1][1])
+                # Keep-alive uses the LENIENT confidence so a bent-over
+                # golfer (low YOLO confidence) isn't dropped mid-shot — the
+                # strict trigger confidence already gated starting the clip.
+                # Fall back for detectors that don't take the override.
+                try:
+                    centroid = detector.detect(
+                        current[-1][1], conf_override=self.keepalive_conf
+                    )
+                except TypeError:
+                    centroid = detector.detect(current[-1][1])
                 if centroid is not None:
                     last_person_seen = now
                 elif now - last_person_seen > no_person_timeout:
