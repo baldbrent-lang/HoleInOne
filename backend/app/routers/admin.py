@@ -3545,7 +3545,13 @@ def render_tracer_fast(
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
     saved = dict(row.edit_metrics or {})
-    existing = list(saved.get("ball_track_frames") or [])
+    # For a multi-swing upload the frontend passes the SELECTED swing's own
+    # data (base track, impact, ball, target, window) so we render just that
+    # swing instead of relying on stale top-level metrics + the whole clip.
+    # Single-swing sends none of these and falls back to saved.
+    existing = list(
+        payload.get("base_track_frames") or saved.get("ball_track_frames") or []
+    )
     manual_positions = payload.get("manual_positions") or []
     # Frames the operator explicitly cleared on the wizard. We drop
     # these from the merged track entirely so the renderer doesn't
@@ -3612,7 +3618,7 @@ def render_tracer_fast(
     # Pull anchor data from saved metrics. ball_at_rest seeds the
     # starting point of the tracer line; impact_frame anchors the
     # 'when the line begins' moment.
-    ball = saved.get("ball") or {}
+    ball = payload.get("ball_at_rest") or saved.get("ball") or {}
     ball_xy = None
     try:
         if ball and ball.get("x") is not None and ball.get("y") is not None:
@@ -3620,19 +3626,32 @@ def render_tracer_fast(
     except Exception:
         ball_xy = None
     try:
-        impact_idx = int(saved.get("impact_frame") or 0)
+        impact_idx = int(payload.get("impact_frame") or saved.get("impact_frame") or 0)
     except (TypeError, ValueError):
         impact_idx = 0
     # Target / landing spot (the flag the operator plots). Used to aim the
     # tracer's continuation past the last plotted point at the downrange
     # landing point instead of fabricating a descent into the foreground.
-    target = saved.get("target") or {}
+    target = payload.get("target") or saved.get("target") or {}
     target_xy = None
     try:
         if target and target.get("x") is not None and target.get("y") is not None:
             target_xy = (float(target["x"]), float(target["y"]))
     except Exception:
         target_xy = None
+
+    # Output window: render ONLY the selected swing's frame span (from the
+    # frontend), so a multi-swing / long source produces a short clip of
+    # just that swing instead of re-rendering the whole video.
+    win = payload.get("render_window") or {}
+    write_start = write_end = None
+    try:
+        if win.get("start_frame") is not None:
+            write_start = max(0, int(win["start_frame"]))
+        if win.get("end_frame") is not None:
+            write_end = int(win["end_frame"])
+    except (TypeError, ValueError):
+        write_start = write_end = None
 
     output_path = CLIPS_DIR / f"wizard-{upload_id}_tracer.mp4"
     info = render_tracer_video(
@@ -3641,6 +3660,8 @@ def render_tracer_fast(
         ball_rest_xy_native=ball_xy,
         impact_frame_idx=impact_idx,
         target_xy=target_xy,
+        write_start=write_start,
+        write_end=write_end,
         # Forward the manual flag — the renderer pins manual anchors
         # so the parabola fit can't reject them and weights them so
         # they actually shape the rendered arc instead of getting

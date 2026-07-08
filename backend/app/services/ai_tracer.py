@@ -2969,6 +2969,8 @@ def render_tracer_video(
     impact_frame_idx: int,
     track_frames: list[dict],
     target_xy: tuple[float, float] | None = None,
+    write_start: int | None = None,
+    write_end: int | None = None,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
@@ -3365,6 +3367,14 @@ def render_tracer_video(
             ok, frame = cap.read()
             if not ok:
                 break
+            # Output window: only WRITE frames in [write_start, write_end]
+            # so a multi-swing / long source renders just the selected
+            # swing's segment instead of the whole clip (fast + short clip).
+            if write_end is not None and frame_idx > write_end:
+                break
+            if write_start is not None and frame_idx < write_start:
+                frame_idx += 1
+                continue
             # Draw the tracer once we've reached the impact frame.
             if smoothed_points and frame_idx >= smoothed_points[0][0]:
                 visible = [

@@ -2354,9 +2354,21 @@ function TracerStep({
         ([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y })
       );
       const cleared = Array.from(clearedFrames);
+      // Pass THIS swing's own data + frame window so the backend renders
+      // only the selected swing's segment (not the whole clip) and anchors
+      // to the right swing on a multi-swing upload.
+      const hasWindow =
+        draft?.startFrame != null && draft?.endFrame != null;
       const out = await api.renderWizardTracerFast(adminPassword, row.id, {
         manual_positions: overrides,
         cleared_frames: cleared,
+        base_track_frames: tracer?.frames || [],
+        impact_frame: draft?.impactFrame ?? null,
+        ball_at_rest: draft?.ball || null,
+        target: draft?.target || null,
+        render_window: hasWindow
+          ? { start_frame: draft.startFrame, end_frame: draft.endFrame }
+          : null,
       });
       setTracer({
         url: out.tracer_url,
