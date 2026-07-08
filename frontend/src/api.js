@@ -426,12 +426,14 @@ export const api = {
     }),
   renderWizardTracerFast: (key, uploadId, payload = {}) =>
     // cv2-only: merges manual_positions into the cached ball_track
-    // and re-renders the tracer overlay. No Claude calls.
+    // and re-renders the tracer overlay. No Claude calls. Timeout is
+    // generous because the overlay is re-rendered across the whole source
+    // clip — a long mirrored clip (2+ min) can take a few minutes.
     request(`/api/admin/long-uploads/${uploadId}/render-tracer-fast`, {
       method: "POST",
       body: payload,
       adminPassword: key,
-      timeoutMs: 90_000,
+      timeoutMs: 5 * 60_000,
     }),
   finalizeWizardVideo: (key, uploadId, payload = {}) =>
     request(`/api/admin/long-uploads/${uploadId}/finalize`, {
