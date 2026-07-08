@@ -240,13 +240,25 @@ class GreenAgent:
                 )
 
         size = clip_path.stat().st_size if clip_path.exists() else 0
+        # Actual delivered rate over the STREAMED portion (excludes the
+        # buffered pre-roll, which a slow warmup could stretch). Green
+        # regularly drops frames under load (livestream + cellular upload),
+        # so writing at the nominal fps made the clip play too fast and end
+        # before the tee. Re-clock to the measured rate on compress so it
+        # plays in real time and stays length-matched to the tee.
+        streamed_frames = frames_written - len(snapshot)
+        streamed_span = last_written_ts - start
+        real_fps = None
+        if streamed_span > 1.0 and streamed_frames >= 5:
+            real_fps = max(5.0, min(120.0, streamed_frames / streamed_span))
         log.info(
-            "recorded %s: %d frames, %.1f MB (reason=%s)",
+            "recorded %s: %d frames, %.1f MB (reason=%s, real_fps=%s)",
             clip_path.name, frames_written, size / (1024 * 1024), stop_reason,
+            f"{real_fps:.1f}" if real_fps else "n/a",
         )
 
         # Hand the clip to the background uploader and return AT ONCE, so
         # we're back listening for the next trigger immediately. The
         # worker does the (slow, cellular) compress + upload + cleanup off
         # the capture path, so we never miss the start of the next event.
-        self.uploader.enqueue(session_id, clip_path, first_frame_ts)
+        self.uploader.enqueue(session_id, clip_path, first_frame_ts, real_fps=real_fps)

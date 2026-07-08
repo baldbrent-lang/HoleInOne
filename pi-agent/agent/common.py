@@ -256,9 +256,13 @@ class BackgroundUploader(threading.Thread):
         self._stop = threading.Event()
 
     def enqueue(self, session_id: str, clip_path: Path,
-                recording_started_at: Optional[float]) -> None:
-        """Hand a finished clip to the worker and return at once."""
-        self._q.put((session_id, clip_path, recording_started_at))
+                recording_started_at: Optional[float],
+                real_fps: Optional[float] = None) -> None:
+        """Hand a finished clip to the worker and return at once.
+
+        `real_fps` (measured delivered rate) re-clocks the clip during
+        compression so a frame-dropping capture still plays in real time."""
+        self._q.put((session_id, clip_path, recording_started_at, real_fps))
         depth = self._q.qsize()
         if depth > 1:
             log.info("uploader: %d clip(s) queued", depth)
@@ -266,7 +270,7 @@ class BackgroundUploader(threading.Thread):
     def run(self) -> None:
         while not self._stop.is_set():
             try:
-                session_id, clip_path, ts = self._q.get(timeout=0.5)
+                session_id, clip_path, ts, real_fps = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
             try:
@@ -277,6 +281,7 @@ class BackgroundUploader(threading.Thread):
                         scale_height=(
                             int(self.scale_height) if self.scale_height else None
                         ),
+                        force_input_fps=real_fps,
                     )
                 result = self.client.upload_event(
                     session_id, clip_path, recording_started_at=ts,
@@ -630,6 +635,7 @@ def compress_for_upload(
     target_kbps: int = 2500,
     scale_height: Optional[int] = None,
     timeout: int = 240,
+    force_input_fps: Optional[float] = None,
 ) -> bool:
     """Re-encode an MP4 to H.264 at a controlled bitrate to shrink it
     before upload. The raw mp4v clips the agent writes are tens to >100
@@ -651,8 +657,19 @@ def compress_for_upload(
         return False
     tmp_out = video_path.with_suffix(".h264.mp4")
     vf = ["-vf", f"scale=-2:{int(scale_height)}"] if scale_height else []
+    # When the capture dropped frames, the clip's header fps overstates the
+    # real rate, so it plays too fast / short (green fell to ~18 fps but was
+    # stamped 30, ending 25 s before the tee). Re-interpret the input at the
+    # measured delivered rate so the output plays in real time and stays
+    # length-matched to the paired camera. `-r` BEFORE `-i` reclocks input.
+    reclock = (
+        ["-r", f"{force_input_fps:.3f}"]
+        if force_input_fps and force_input_fps > 0
+        else []
+    )
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
+        *reclock,
         "-i", str(video_path),
         *vf,
         "-c:v", "libx264", "-preset", "veryfast",
