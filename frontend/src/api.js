@@ -445,6 +445,10 @@ export const api = {
       method: "POST",
       adminPassword: key,
     }),
+  mirrorFromProd: (key) =>
+    request(`/api/admin/mirror-from-prod`, { method: "POST", adminPassword: key }),
+  mirrorFromProdStatus: (key) =>
+    request(`/api/admin/mirror-from-prod/status`, { adminPassword: key }),
   processLongUploadSegment: (
     key,
     uploadId,

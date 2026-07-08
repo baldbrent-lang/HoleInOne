@@ -96,6 +96,25 @@ def list_courses(db: Session = Depends(get_db)):
     return db.query(Course).order_by(Course.created_at.desc()).all()
 
 
+@router.post("/mirror-from-prod")
+def mirror_from_prod():
+    """Pull new camera clips from the configured source (prod) backend into
+    this backend — the button version of scripts/mirror_prod_to_dev.py.
+    Kicks a background pull and returns immediately; poll the status route."""
+    from ..services import mirror
+
+    return mirror.start_pull()
+
+
+@router.get("/mirror-from-prod/status")
+def mirror_from_prod_status():
+    """Progress of the current/last 'Pull from prod' run + whether the
+    feature is configured (so the UI can show/hide the button)."""
+    from ..services import mirror
+
+    return {"configured": bool(settings.mirror_course_id), **mirror.status()}
+
+
 @router.post("/courses", response_model=CourseOut)
 def create_course(payload: CourseCreate, db: Session = Depends(get_db)):
     course = Course(

@@ -3402,6 +3402,52 @@ export default function AdminProduction() {
   // has ticked. Cleared after a bulk delete completes.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  // "Pull new from prod" — server-side mirror. Hidden unless the backend
+  // is configured (MIRROR_COURSE_ID set on this deployment).
+  const [mirror, setMirror] = useState({ configured: false, running: false });
+
+  function pollMirror() {
+    const tick = async () => {
+      try {
+        const s = await api.mirrorFromProdStatus(adminPassword);
+        setMirror(s);
+        if (s.running) {
+          setTimeout(tick, 2000);
+        } else {
+          await refreshAll(); // surface newly-imported events
+        }
+      } catch {
+        /* transient — stop polling */
+      }
+    };
+    tick();
+  }
+
+  async function handlePullFromProd() {
+    setError(null);
+    try {
+      const r = await api.mirrorFromProd(adminPassword);
+      if (r && r.ok === false) {
+        setError(r.error || "Pull from prod is not configured.");
+        return;
+      }
+      setMirror((m) => ({ ...m, running: true, done: 0, total: 0, failed: 0 }));
+      pollMirror();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  useEffect(() => {
+    api
+      .mirrorFromProdStatus(adminPassword)
+      .then((s) => {
+        setMirror(s);
+        if (s.running) pollMirror();
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function toggleSelected(id) {
     setSelectedIds((prev) => {
@@ -3632,6 +3678,25 @@ export default function AdminProduction() {
             <span className="small">Select all loaded</span>
           </label>
           <span className="small muted">{selectedIds.size} selected</span>
+          {mirror.configured && (
+            <button
+              className="small"
+              onClick={handlePullFromProd}
+              disabled={mirror.running}
+              style={{ width: "auto" }}
+              title="Import new camera clips from the production site"
+            >
+              {mirror.running
+                ? `Pulling ${mirror.done}/${mirror.total || "?"}…`
+                : "⬇ Pull new from prod"}
+            </button>
+          )}
+          {!mirror.running && mirror.finished_at && (mirror.done || mirror.failed) ? (
+            <span className="small muted">
+              imported {mirror.done}
+              {mirror.failed ? `, ${mirror.failed} failed` : ""}
+            </span>
+          ) : null}
           <div style={{ flex: 1 }} />
           {selectedIds.size > 0 && (
             <button

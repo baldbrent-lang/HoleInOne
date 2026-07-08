@@ -73,6 +73,19 @@ class Settings(BaseSettings):
     # CAMERA_DROP_GARBAGE_CLIPS=0 to keep everything (raw course-test mode).
     camera_drop_garbage_clips: bool = True
 
+    # "Pull new from prod" — the DEV backend fetches new camera clips from a
+    # source (prod) backend and imports them, replacing the manual mirror
+    # script. Set these on the DEV deployment only.
+    #   MIRROR_SOURCE_URL       prod base URL to pull from
+    #   MIRROR_SOURCE_PASSWORD  prod admin password (falls back to
+    #                           admin_password if blank — fine when both are
+    #                           the same)
+    #   MIRROR_COURSE_ID        which local course to attach imports to
+    #                           (0 = feature off / button hidden)
+    mirror_source_url: str = "https://golf-reelz.replit.app"
+    mirror_source_password: str = ""
+    mirror_course_id: int = 0
+
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2

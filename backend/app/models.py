@@ -194,6 +194,21 @@ class HoleInOneEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class MirroredProdEvent(Base):
+    """Append-only ledger of source (prod) camera-event ids already pulled
+    into this backend by the 'Pull from prod' action. Re-pulling skips
+    anything listed here — and, crucially, keeps skipping ones the operator
+    later DELETED locally, because a row is never removed when its imported
+    clip is deleted. So a delete stays a delete, like the mirror script's
+    local ledger file, but persistent + server-side."""
+
+    __tablename__ = "mirrored_prod_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_event_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 
