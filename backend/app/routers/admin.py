@@ -4818,10 +4818,25 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         # wrists, immune to ball occlusion. No-op with a reason when
         # mediapipe isn't installed on this deployment.
         pose_debug: dict = {}
+        pose_shots: list[dict] = []
         try:
             from ..services import pose_swing
 
             pose_swing.detect_swings_from_pose(src_path, fps=tee_fps, debug=pose_debug)
+            # One skeleton-overlay screenshot per pose swing, to verify it
+            # locked onto the golfer.
+            if pose_debug.get("available"):
+                for pk in (pose_debug.get("peaks") or []):
+                    pname = f"debug-pose-{upload_id}-{int(float(pk) * 100)}-{secrets.token_hex(3)}.jpg"
+                    if pose_swing.annotate_frame(src_path, float(pk), tee_fps, CLIPS_DIR / pname):
+                        pp = CLIPS_DIR / pname
+                        pose_shots.append({
+                            "t": pk,
+                            "image_url": (
+                                f"{settings.app_base_url}/uploads/clips/{pname}"
+                                f"?v={int(pp.stat().st_mtime)}"
+                            ),
+                        })
         except Exception as exc:  # noqa: BLE001
             pose_debug = {"reason": f"crashed: {exc}", "available": False}
 
@@ -4869,6 +4884,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 "n_pose_frames": pose_debug.get("n_pose_frames"),
                 "n_swings": pose_debug.get("n_swings"),
                 "peaks": pose_debug.get("peaks") or [],
+                "screenshots": pose_shots,
             }
 
         for i, d in enumerate(detected):

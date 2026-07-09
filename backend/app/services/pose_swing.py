@@ -59,6 +59,49 @@ def _get_pose():
         return None
 
 
+def annotate_frame(input_path, time_sec: float, fps: float, out_path) -> bool:
+    """Grab the frame at time_sec, draw the detected pose skeleton on it, and
+    write it to out_path (for a per-swing verification screenshot). Returns
+    True on success. No-op / False when mediapipe is unavailable."""
+    pose = _get_pose()
+    if pose is None:
+        return False
+    try:
+        import cv2  # type: ignore
+        import mediapipe as mp  # type: ignore
+
+        cap = cv2.VideoCapture(str(input_path))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0.0, time_sec) * (fps or 30.0)))
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            return False
+        res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        lm = getattr(res, "pose_landmarks", None)
+        if lm is not None:
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame, lm, mp.solutions.pose.POSE_CONNECTIONS,
+            )
+            # Extra-visible ring on each wrist (the swing signal).
+            h, w = frame.shape[:2]
+            for wi in (_LEFT_WRIST, _RIGHT_WRIST):
+                p = lm.landmark[wi]
+                if getattr(p, "visibility", 0.0) >= 0.3:
+                    cv2.circle(
+                        frame, (int(p.x * w), int(p.y * h)),
+                        max(10, int(h * 0.02)), (155, 89, 182), 3, cv2.LINE_AA,
+                    )
+        cv2.putText(
+            frame, f"pose swing @ {time_sec:.1f}s", (12, 30),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (155, 89, 182), 2, cv2.LINE_AA,
+        )
+        cv2.imwrite(str(out_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pose_swing: annotate failed: %s", exc)
+        return False
+
+
 def detect_swings_from_pose(
     input_path,
     fps: float | None = None,

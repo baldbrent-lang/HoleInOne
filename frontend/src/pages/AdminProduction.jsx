@@ -3680,11 +3680,35 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
               🧍 Pose detector — {data.pose.available ? `${data.pose.n_swings ?? 0} swing(s)` : "unavailable"}
             </div>
             {data.pose.available ? (
-              <div className="small muted">
-                reads the golfer's wrists (immune to ball occlusion) ·
-                pose found in {data.pose.n_pose_frames ?? 0} frames · purple
-                marks above = detected swings
-              </div>
+              <>
+                <div className="small muted">
+                  reads the golfer's wrists (immune to ball occlusion) ·
+                  pose found in {data.pose.n_pose_frames ?? 0} frames · purple
+                  marks above = detected swings
+                </div>
+                {(data.pose.screenshots || []).length > 0 && (
+                  <div
+                    style={{
+                      display: "flex", flexWrap: "wrap", gap: 10, marginTop: 6,
+                    }}
+                  >
+                    {data.pose.screenshots.map((s, i) => (
+                      <div key={i} style={{ width: 220, maxWidth: "100%" }}>
+                        <a href={s.image_url} target="_blank" rel="noreferrer">
+                          <img
+                            src={s.image_url}
+                            alt={`pose swing ${i + 1}`}
+                            style={{ width: "100%", borderRadius: 6, display: "block" }}
+                          />
+                        </a>
+                        <div className="small muted" style={{ marginTop: 2 }}>
+                          swing {i + 1}: {s.t}s
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
             ) : (
               <div className="small muted">
                 {data.pose.reason || "mediapipe not installed"} — install it on
