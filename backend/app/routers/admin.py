@@ -4814,6 +4814,17 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         else:
             detected = detect_swings_combined(src_path, fps=tee_fps)
 
+        # Pose detector (dev-only, needs mediapipe) — reads the golfer's
+        # wrists, immune to ball occlusion. No-op with a reason when
+        # mediapipe isn't installed on this deployment.
+        pose_debug: dict = {}
+        try:
+            from ..services import pose_swing
+
+            pose_swing.detect_swings_from_pose(src_path, fps=tee_fps, debug=pose_debug)
+        except Exception as exc:  # noqa: BLE001
+            pose_debug = {"reason": f"crashed: {exc}", "available": False}
+
         # Full-rate (30 Hz) motion trace for the chart — avoids the 10 Hz
         # aliasing that made identical swings plot at different heights. Falls
         # back to the detector's own 10 Hz series if it can't run.
@@ -4848,6 +4859,17 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 ],
             }
             st["ball"] = ball_dict
+            st["pose"] = {
+                "available": bool(pose_debug.get("available")),
+                "reason": pose_debug.get("reason"),
+                "series": pose_debug.get("series"),
+                "duration_sec": pose_debug.get("duration_sec"),
+                "median": pose_debug.get("median"),
+                "threshold": pose_debug.get("threshold"),
+                "n_pose_frames": pose_debug.get("n_pose_frames"),
+                "n_swings": pose_debug.get("n_swings"),
+                "peaks": pose_debug.get("peaks") or [],
+            }
 
         for i, d in enumerate(detected):
             start_sec = float(d.get("start_sec") or 0.0)

@@ -3372,7 +3372,7 @@ function VideoLightbox({ url, title, startedAt, fps, onClose }) {
 // Plots the classical detector's per-frame motion signal (mean pixel
 // change over time). Each swing is a burst that rises above the red
 // threshold line; green dashed lines mark where a swing was detected.
-function MotionChart({ motion, ballPeaks }) {
+function MotionChart({ motion, ballPeaks, posePeaks }) {
   if (!motion || !Array.isArray(motion.series) || motion.series.length < 2) {
     return (
       <div className="small muted" style={{ marginBottom: 12 }}>
@@ -3393,17 +3393,19 @@ function MotionChart({ motion, ballPeaks }) {
   const thrY = yOf(thr);
   const peaks = motion.swing_peaks || [];
   const balls = ballPeaks || [];
+  const poses = posePeaks || [];
   return (
     <div style={{ marginBottom: 16 }}>
       <div className="small muted" style={{ marginBottom: 4 }}>
         Motion signal — mean pixel change per frame
         {motion.hz ? ` (~${Math.round(motion.hz)} Hz)` : ""}. Each swing is a
         burst above the <span style={{ color: "#e74c3c" }}>red threshold</span>.{" "}
-        <span style={{ color: "#1a9d55" }}>Green</span> = motion-detector swings,{" "}
-        <span style={{ color: "#e67e22" }}>orange</span> = ball-departure swings.{" "}
+        <span style={{ color: "#1a9d55" }}>Green</span> = motion,{" "}
+        <span style={{ color: "#e67e22" }}>orange</span> = ball,{" "}
+        <span style={{ color: "#9b59b6" }}>purple</span> = pose swings.{" "}
         median={motion.median != null ? motion.median.toFixed(3) : "?"} ·
-        threshold={thr.toFixed(3)} · motion swings={peaks.length} · ball swings=
-        {balls.length}
+        threshold={thr.toFixed(3)} · motion={peaks.length} · ball={balls.length} ·
+        pose={poses.length}
       </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
@@ -3435,6 +3437,19 @@ function MotionChart({ motion, ballPeaks }) {
             y2={H}
             stroke="#e67e22"
             strokeWidth={2}
+            opacity={0.85}
+          />
+        ))}
+        {poses.map((t, i) => (
+          <line
+            key={`po${i}`}
+            x1={(t / dur) * W}
+            x2={(t / dur) * W}
+            y1={0}
+            y2={H}
+            stroke="#9b59b6"
+            strokeWidth={2}
+            strokeDasharray="2 3"
             opacity={0.85}
           />
         ))}
@@ -3647,7 +3662,36 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
         </div>
 
         {data.motion && (
-          <MotionChart motion={data.motion} ballPeaks={data.ball?.peaks} />
+          <MotionChart
+            motion={data.motion}
+            ballPeaks={data.ball?.peaks}
+            posePeaks={data.pose?.peaks}
+          />
+        )}
+
+        {data.pose && (
+          <div
+            style={{
+              border: "1px solid rgba(155,89,182,0.4)", borderRadius: 8,
+              padding: "8px 12px", marginBottom: 14,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>
+              🧍 Pose detector — {data.pose.available ? `${data.pose.n_swings ?? 0} swing(s)` : "unavailable"}
+            </div>
+            {data.pose.available ? (
+              <div className="small muted">
+                reads the golfer's wrists (immune to ball occlusion) ·
+                pose found in {data.pose.n_pose_frames ?? 0} frames · purple
+                marks above = detected swings
+              </div>
+            ) : (
+              <div className="small muted">
+                {data.pose.reason || "mediapipe not installed"} — install it on
+                the dev deployment (<code>pip install mediapipe</code>) to enable.
+              </div>
+            )}
+          </div>
         )}
 
         {data.ref_frame_url && data.course_id ? (
