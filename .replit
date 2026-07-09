@@ -53,3 +53,6 @@ outputType = "webview"
 
 [userenv.shared]
 APP_BASE_URL = "https://ba3bffd1-7dc1-4880-8c4d-e8051f67119d-00-2rqiz1e3i00s0.spock.replit.dev"
+
+[objectStorage]
+defaultBucketID = "replit-objstore-ed97856c-7cdf-4370-bc76-0f40a139bdea"
