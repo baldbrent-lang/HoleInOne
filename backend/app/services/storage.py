@@ -52,6 +52,21 @@ except Exception as exc:  # noqa: BLE001
     )
 
 
+def _is_not_found(exc: Exception) -> bool:
+    """True when an exception means 'object not in bucket' rather than a real
+    failure. Tolerant across replit-object-storage versions: match the error
+    class name or message text."""
+    if "notfound" in type(exc).__name__.lower():
+        return True
+    msg = str(exc).lower()
+    return (
+        "could not be found" in msg
+        or "not found" in msg
+        or "does not exist" in msg
+        or "no such object" in msg
+    )
+
+
 def enabled() -> bool:
     return _enabled
 
@@ -95,7 +110,14 @@ def download(name: str, path: Path) -> bool:
         tmp.replace(path)
         return True
     except Exception as exc:  # noqa: BLE001
-        log.warning("storage: download failed for %s: %s", name, exc)
+        # A plain "not found" is expected, not an error: the object was never
+        # persisted (e.g. clips wiped in a republish before the bucket
+        # existed). Log those at debug so they don't flood the console; keep
+        # genuine failures (permissions, network) at warning.
+        if _is_not_found(exc):
+            log.debug("storage: %s not in bucket (never persisted)", name)
+        else:
+            log.warning("storage: download failed for %s: %s", name, exc)
         return False
 
 
