@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     # CAMERA_DROP_GARBAGE_CLIPS=0 to keep everything (raw course-test mode).
     camera_drop_garbage_clips: bool = True
 
+    # Tee-only fallback. A paired camera event needs BOTH the tee and green
+    # halves to produce. If the green half never arrives (dead cellular,
+    # unplugged, weak signal), the event stalls forever at "tee_uploaded"
+    # and you lose the whole shot. After this many seconds with only the
+    # tee half, produce a TEE-ONLY clip so a green dropout costs you the
+    # green angle, not the shot. If green shows up later, the event
+    # re-produces with both. 0 disables the fallback.
+    camera_tee_only_fallback_seconds: int = 180
+
     # "Pull new from prod" — the DEV backend fetches new camera clips from a
     # source (prod) backend and imports them, replacing the manual mirror
     # script. Set these on the DEV deployment only.

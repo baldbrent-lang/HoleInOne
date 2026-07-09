@@ -279,6 +279,9 @@ def _startup() -> None:
     _remove_retired_courses()
     _seed_default_courses()
     _seed_showcase_slots()
+    # Produce tee-only when a paired event's green half never arrives, so a
+    # green cellular dropout doesn't cost the whole shot.
+    cameras.start_tee_only_fallback_sweeper()
 
 
 # Demo courses previously seeded into the DB that we no longer want shown

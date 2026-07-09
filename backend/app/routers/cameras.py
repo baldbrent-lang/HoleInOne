@@ -45,6 +45,7 @@ import asyncio
 import logging
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -640,6 +641,17 @@ def _process_camera_event_job(event_id: int) -> None:
             db.add(lvu)
             db.commit()
             db.refresh(lvu)
+        elif has_green and not lvu.green_filename:
+            # Re-processing an event that was produced TEE-ONLY (fallback)
+            # and whose green half has since arrived — backfill it so this
+            # run makes the paired composite instead of tee-only again.
+            lvu.green_filename = green_filename
+            lvu.green_original_filename = f"camera-event-{event.id}-green.mp4"
+            db.commit()
+            log.info(
+                "cameras: event %s — green arrived late, upgrading upload %s "
+                "to paired", event.id, lvu.id,
+            )
 
         log.info(
             "cameras: event %s -> long-upload %s (auto-detect swings)",
@@ -730,3 +742,84 @@ def _process_camera_event_job(event_id: int) -> None:
             pass
     finally:
         db.close()
+
+
+# Tee-only fallback ---------------------------------------------------------
+# Events currently being force-produced tee-only, so the periodic sweep
+# doesn't kick the same one twice while it's still running.
+_fallback_inflight: set[int] = set()
+_fallback_lock = threading.Lock()
+
+
+def _tee_only_fallback_sweep() -> None:
+    """Produce a TEE-ONLY clip for any paired event whose green half never
+    arrived within the fallback window. _process_camera_event_job already
+    handles a missing green (green_clip_filename is None -> tee-only), so we
+    just kick it. If green shows up later, upload_event flips the event back
+    to paired and re-produces with both."""
+    secs = int(settings.camera_tee_only_fallback_seconds or 0)
+    if secs <= 0:
+        return
+    cutoff = _utcnow_naive() - timedelta(seconds=secs)
+    db = SessionLocal()
+    try:
+        ids = [
+            e.id
+            for e in db.query(CameraEvent)
+            .filter(
+                CameraEvent.status == "tee_uploaded",
+                CameraEvent.tee_clip_filename.isnot(None),
+                CameraEvent.triggered_at < cutoff,
+            )
+            .all()
+        ]
+    finally:
+        db.close()
+
+    for eid in ids:
+        with _fallback_lock:
+            if eid in _fallback_inflight:
+                continue
+            _fallback_inflight.add(eid)
+
+        def _run(event_id: int = eid) -> None:
+            try:
+                log.info(
+                    "cameras: tee-only fallback — green never arrived for "
+                    "event %s, producing from tee alone", event_id,
+                )
+                _process_camera_event_job(event_id)
+            finally:
+                with _fallback_lock:
+                    _fallback_inflight.discard(event_id)
+
+        threading.Thread(
+            target=_run, daemon=True, name=f"tee-only-fallback-{eid}"
+        ).start()
+
+
+def start_tee_only_fallback_sweeper(interval_sec: float = 60.0) -> None:
+    """Periodically produce tee-only for events whose green half is overdue.
+    No-op when the fallback is disabled (camera_tee_only_fallback_seconds=0).
+    Idempotent to start."""
+    if int(settings.camera_tee_only_fallback_seconds or 0) <= 0:
+        return
+    if getattr(start_tee_only_fallback_sweeper, "_started", False):
+        return
+    start_tee_only_fallback_sweeper._started = True  # type: ignore[attr-defined]
+
+    def _loop() -> None:
+        log.info(
+            "cameras: tee-only fallback sweeper started (%ss window)",
+            settings.camera_tee_only_fallback_seconds,
+        )
+        while True:
+            try:
+                _tee_only_fallback_sweep()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("cameras: tee-only fallback sweep failed: %s", exc)
+            time.sleep(interval_sec)
+
+    threading.Thread(
+        target=_loop, daemon=True, name="tee-only-fallback-sweeper"
+    ).start()
