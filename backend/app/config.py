@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     # SCAN_NON_GOLF_ENABLED=1 on the DEV deployment to show the button.
     scan_non_golf_enabled: bool = False
 
+    # "Produce (debug)" — a dev course-testing tool. Alongside a normal
+    # produce, it runs a per-swing diagnostic that shows each step's result,
+    # the classical-CV tracer's motion heatmap + whether it found the ball,
+    # AND runs the AI tracer on the same swings so the two can be compared.
+    # The AI half needs ANTHROPIC_API_KEY set (else it reports unavailable).
+    # Set env PRODUCE_DEBUG_ENABLED=1 on the DEV deployment to show the button.
+    produce_debug_enabled: bool = False
+
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2

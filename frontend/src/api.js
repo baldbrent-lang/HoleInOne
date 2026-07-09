@@ -455,6 +455,15 @@ export const api = {
     request(`/api/admin/scan-non-golf`, { method: "POST", adminPassword: key }),
   scanNonGolfStatus: (key) =>
     request(`/api/admin/scan-non-golf/status`, { adminPassword: key }),
+  produceDebug: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/produce-debug`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  produceDebugStatus: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/produce-debug/status`, {
+      adminPassword: key,
+    }),
   processLongUploadSegment: (
     key,
     uploadId,

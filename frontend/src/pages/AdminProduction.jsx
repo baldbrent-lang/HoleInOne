@@ -3369,6 +3369,153 @@ function VideoLightbox({ url, title, startedAt, fps, onClose }) {
   );
 }
 
+// Dev-only diagnostic overlay. Shows, per detected swing, what the
+// classical-CV tracer found (motion heatmap + ball/candidate counts) next
+// to the AI tracer's result on the same swing, so the two can be compared.
+function ProduceDebugModal({ data, onClose }) {
+  const swings = data.swings || [];
+  const okBadge = (ok) => (
+    <span
+      style={{
+        fontWeight: 700,
+        color: ok ? "#1a9d55" : "#c0392b",
+      }}
+    >
+      {ok ? "✅ found ball" : "❌ no ball"}
+    </span>
+  );
+  const stat = (label, val) =>
+    val == null || val === "" ? null : (
+      <div className="small muted">
+        {label}: <span style={{ color: "inherit", fontWeight: 600 }}>{String(val)}</span>
+      </div>
+    );
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)",
+        zIndex: 1000, display: "flex", alignItems: "flex-start",
+        justifyContent: "center", overflow: "auto", padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "var(--card-bg, #1b1b1f)", color: "inherit",
+          borderRadius: 12, maxWidth: 1100, width: "100%", padding: 20,
+          boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+          <h2 style={{ margin: 0, flex: 1 }}>
+            🐞 Produce debug — upload #{data.uploadId}
+          </h2>
+          <button className="small ghost" onClick={onClose} style={{ width: "auto" }}>
+            Close
+          </button>
+        </div>
+        <p className="small muted" style={{ marginTop: 0 }}>
+          The clip is also being produced &amp; saved normally. Below: each
+          swing analyzed by the classical-CV tracer (motion heatmap) vs the AI
+          tracer, side by side.
+        </p>
+        <div className="small" style={{ marginBottom: 12 }}>
+          {data.running
+            ? `Analyzing… ${data.done}/${data.total || "?"} swings`
+            : `Done — ${swings.length} swing(s) analyzed`}
+          {" · "}
+          {data.ai_available
+            ? "AI tracer: on"
+            : "AI tracer: OFF (set ANTHROPIC_API_KEY on this deployment)"}
+          {data.error ? ` · error: ${data.error}` : ""}
+        </div>
+
+        {swings.length === 0 && !data.running && (
+          <div className="small muted">No swings detected in this clip.</div>
+        )}
+
+        {swings.map((s) => (
+          <div
+            key={s.idx}
+            style={{
+              border: "1px solid rgba(120,120,120,0.35)", borderRadius: 10,
+              padding: 12, marginBottom: 12,
+            }}
+          >
+            <div style={{ marginBottom: 8, fontWeight: 700 }}>
+              Swing {s.idx + 1}
+              {s.hole_number != null ? ` · hole ${s.hole_number}` : ""}
+              {s.peak_time_sec != null ? ` · impact ~${s.peak_time_sec}s` : ""}
+              {s.ball_verdict ? ` · ball: ${s.ball_verdict}` : ""}
+            </div>
+            <div
+              style={{
+                display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14,
+              }}
+            >
+              {/* Classical */}
+              <div>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>Classical CV</strong> — {okBadge(s.classical?.ok)}
+                </div>
+                {stat("candidates", s.classical?.n_candidates)}
+                {stat("tracer points", s.classical?.n_points)}
+                {s.classical?.error && (
+                  <div className="small" style={{ color: "#c0392b" }}>
+                    {s.classical.error}
+                  </div>
+                )}
+                {s.classical?.heatmap_url && (
+                  <div style={{ marginTop: 6 }}>
+                    <div className="small muted">motion heatmap + candidates:</div>
+                    <a href={s.classical.heatmap_url} target="_blank" rel="noreferrer">
+                      <img
+                        src={s.classical.heatmap_url}
+                        alt="classical heatmap"
+                        style={{ maxWidth: "100%", borderRadius: 6, marginTop: 4 }}
+                      />
+                    </a>
+                  </div>
+                )}
+                {s.classical?.traced_url && (
+                  <video
+                    src={s.classical.traced_url}
+                    controls
+                    style={{ width: "100%", borderRadius: 6, marginTop: 6 }}
+                  />
+                )}
+              </div>
+              {/* AI */}
+              <div>
+                <div style={{ marginBottom: 6 }}>
+                  <strong>AI tracer</strong> — {okBadge(s.ai?.ok)}
+                </div>
+                {stat("address frame", s.ai?.address_frame)}
+                {stat("impact frame", s.ai?.impact_frame)}
+                {stat("handedness", s.ai?.handedness)}
+                {stat("ball-track points", s.ai?.n_track)}
+                {s.ai?.error && (
+                  <div className="small" style={{ color: "#c0392b" }}>
+                    {s.ai.error}
+                  </div>
+                )}
+                {s.ai?.traced_url && (
+                  <video
+                    src={s.ai.traced_url}
+                    controls
+                    style={{ width: "100%", borderRadius: 6, marginTop: 6 }}
+                  />
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function AdminProduction() {
   const adminPassword =
     localStorage.getItem(ADMIN_PW_STORAGE) ||
@@ -3415,6 +3562,45 @@ export default function AdminProduction() {
   // clips that don't look like a real golf shot. Hidden unless the backend
   // enables it (SCAN_NON_GOLF_ENABLED on this deployment).
   const [scan, setScan] = useState({ enabled: false, running: false });
+  // "Produce (debug)" — dev tool. Produces normally AND opens a per-swing
+  // diagnostic comparing the classical-CV and AI tracers. Hidden unless the
+  // backend enables it (PRODUCE_DEBUG_ENABLED on this deployment).
+  const [produceDebug, setProduceDebug] = useState({ enabled: false });
+  const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
+
+  function pollDebug(uploadId) {
+    const tick = async () => {
+      try {
+        const s = await api.produceDebugStatus(adminPassword, uploadId);
+        setDebugModal((m) => (m && m.uploadId === uploadId ? { ...m, ...s } : m));
+        if (s.running) setTimeout(tick, 2500);
+      } catch {
+        /* transient — stop polling */
+      }
+    };
+    tick();
+  }
+
+  async function handleProduceDebug(row) {
+    setError(null);
+    setDebugModal({
+      uploadId: row.id, running: true, total: 0, done: 0, swings: [],
+      ai_available: false,
+    });
+    try {
+      const r = await api.produceDebug(adminPassword, row.id);
+      if (r && r.ok === false) {
+        setError(r.error || "Produce debug is not enabled.");
+        setDebugModal(null);
+        return;
+      }
+      pollDebug(row.id);
+      refreshAll(); // the normal produce is running in parallel
+    } catch (e) {
+      setError(e.message);
+      setDebugModal(null);
+    }
+  }
 
   function pollScan() {
     const tick = async () => {
@@ -3499,6 +3685,12 @@ export default function AdminProduction() {
         setScan(s);
         if (s.running) pollScan();
       })
+      .catch(() => {});
+    // upload_id 0 never exists — the status route still returns `enabled`
+    // with an empty report, which is all we need to show/hide the button.
+    api
+      .produceDebugStatus(adminPassword, 0)
+      .then((s) => setProduceDebug({ enabled: !!s.enabled }))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -4015,6 +4207,16 @@ export default function AdminProduction() {
                     </button>
                   )
                 )}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
+                    onClick={() => handleProduceDebug(row)}
+                    disabled={busy}
+                    title="Dev: produce AND run a per-swing diagnostic — classical-CV heatmap vs AI tracer"
+                  >
+                    🐞 Debug
+                  </button>
+                )}
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
@@ -4076,6 +4278,13 @@ export default function AdminProduction() {
         fps={viewer?.fps}
         onClose={() => setViewer(null)}
       />
+
+      {debugModal && (
+        <ProduceDebugModal
+          data={debugModal}
+          onClose={() => setDebugModal(null)}
+        />
+      )}
 
       {editingRow && (
         <EditWizard

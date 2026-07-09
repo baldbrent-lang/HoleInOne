@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -4585,6 +4586,195 @@ def _run_tracer(
         traced_path,
         debug_url,
     )
+
+
+# ── Produce debug (dev course-testing tool) ────────────────────────────
+# Per-upload diagnostic report. Runs ALONGSIDE a normal produce: for every
+# detected swing it shows the classical-CV tracer's motion heatmap + whether
+# it found the ball, and runs the AI tracer on the same swing so the two can
+# be compared. Report lives in memory (transient, dev-only); the images and
+# tracer videos it references are real files under uploads/clips.
+_produce_debug_state: dict[int, dict] = {}
+_produce_debug_lock = threading.Lock()
+
+
+def _produce_debug_report(upload_id: int) -> dict:
+    with _produce_debug_lock:
+        rep = _produce_debug_state.get(upload_id)
+        return dict(rep, swings=list(rep["swings"])) if rep else {
+            "running": False, "total": 0, "done": 0, "swings": [], "finished_at": None,
+        }
+
+
+def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
+    """Analyze each swing with BOTH tracers and record a debug report.
+    Read-only w.r.t. produced clips — the normal produce job (kicked
+    separately) is what actually saves them. Never raises."""
+    ai_available = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    with _produce_debug_lock:
+        _produce_debug_state[upload_id] = {
+            "running": True, "total": 0, "done": 0, "swings": [],
+            "finished_at": None, "ai_available": ai_available, "error": None,
+        }
+
+    def _pub(name: str | None) -> str | None:
+        if not name:
+            return None
+        p = CLIPS_DIR / Path(name).name
+        if not p.exists():
+            return None
+        return f"{settings.app_base_url}/uploads/clips/{p.name}?v={int(p.stat().st_mtime)}"
+
+    db = SessionLocal()
+    try:
+        row = db.get(LongVideoUpload, upload_id)
+        if not row or not row.tee_filename:
+            raise RuntimeError("upload has no tee video")
+        storage.ensure_local(CLIPS_DIR, row.tee_filename)
+        src_path = CLIPS_DIR / row.tee_filename
+        if not src_path.exists():
+            raise RuntimeError(f"tee source missing: {row.tee_filename}")
+
+        tee_fps = probe_fps(src_path) or 30.0
+        if motion_only:
+            detected = detect_swings_from_motion(src_path, fps=tee_fps)
+            detected = filter_swings_by_ball_departure(
+                src_path, detected, tee_fps,
+                keep_all=settings.camera_produce_unconfirmed_shots,
+                drop_garbage=settings.camera_drop_garbage_clips,
+            )
+        else:
+            detected = detect_swings_combined(src_path, fps=tee_fps)
+
+        with _produce_debug_lock:
+            _produce_debug_state[upload_id]["total"] = len(detected)
+
+        for i, d in enumerate(detected):
+            start_sec = float(d.get("start_sec") or 0.0)
+            peak = float(d.get("peak_time_sec") or (start_sec + CLIP_SECONDS_BEFORE_IMPACT))
+            cut_start = max(0.0, peak - CLIP_SECONDS_BEFORE_IMPACT)
+            cut_end = peak + CLIP_SECONDS_TEE_ONLY_AFTER_IMPACT
+            seg_name = f"debug-{upload_id}-s{i}-{secrets.token_hex(6)}.mp4"
+            seg_path = CLIPS_DIR / seg_name
+
+            classical = {"ok": False, "error": "cut failed"}
+            ai = {"ok": False, "error": "not run"}
+            if cut_segment(src_path, seg_path, cut_start, cut_end):
+                # Classical CV tracer — motion heatmap + candidate/ball viz.
+                try:
+                    c_url, c_info, _c_traced, c_debug_url = _run_tracer(seg_path)
+                    c_info = c_info or {}
+                    classical = {
+                        "ok": bool(c_info.get("ok")),
+                        "n_points": c_info.get("n_points"),
+                        "n_candidates": c_info.get("n_candidates"),
+                        "error": c_info.get("error"),
+                        "traced_url": c_url,
+                        "heatmap_url": c_debug_url,
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    classical = {"ok": False, "error": f"classical crashed: {exc}"}
+                # AI tracer — full pipeline on the same swing.
+                if ai_available:
+                    try:
+                        prefix = f"debug-ai-{upload_id}-s{i}-{secrets.token_hex(4)}"
+                        r = run_full_ai_tracer_pipeline(seg_path, CLIPS_DIR, prefix)
+                        ai_url = None
+                        tvp = r.get("tracer_video_path")
+                        if tvp and Path(tvp).exists():
+                            compress_for_email(Path(tvp))
+                            ai_url = _pub(Path(tvp).name)
+                        impact = r.get("impact") or {}
+                        addr = r.get("address") or {}
+                        ai = {
+                            "ok": bool(r.get("ok")),
+                            "error": r.get("error"),
+                            "address_frame": addr.get("address_frame"),
+                            "impact_frame": impact.get("impact_frame"),
+                            "handedness": (r.get("handedness") or {}).get("handedness"),
+                            "n_track": len(r.get("ball_track_frames") or []),
+                            "traced_url": ai_url,
+                        }
+                    except Exception as exc:  # noqa: BLE001
+                        ai = {"ok": False, "error": f"ai crashed: {exc}"}
+                else:
+                    ai = {"ok": False, "error": "ANTHROPIC_API_KEY not set on this deployment"}
+
+            entry = {
+                "idx": i,
+                "hole_number": d.get("hole_number"),
+                "peak_time_sec": round(peak, 2),
+                "ball_verdict": d.get("ball_verdict"),
+                "classical": classical,
+                "ai": ai,
+            }
+            with _produce_debug_lock:
+                st = _produce_debug_state[upload_id]
+                st["swings"].append(entry)
+                st["done"] = i + 1
+            log.info(
+                "produce-debug: upload=%s swing %d classical_ok=%s ai_ok=%s",
+                upload_id, i, classical.get("ok"), ai.get("ok"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("produce-debug %s failed: %s", upload_id, exc)
+        with _produce_debug_lock:
+            if upload_id in _produce_debug_state:
+                _produce_debug_state[upload_id]["error"] = str(exc)[:500]
+    finally:
+        db.close()
+        import time as _t
+        with _produce_debug_lock:
+            if upload_id in _produce_debug_state:
+                _produce_debug_state[upload_id]["running"] = False
+                _produce_debug_state[upload_id]["finished_at"] = _t.time()
+
+
+@router.post("/long-uploads/{upload_id}/produce-debug")
+def produce_debug(upload_id: int, db: Session = Depends(get_db)):
+    """Dev tool: kick a normal produce (saves clips) AND a per-swing
+    diagnostic that compares the classical-CV and AI tracers. Returns
+    immediately; poll the status route for the report."""
+    if not settings.produce_debug_enabled:
+        return {"ok": False, "error": "Produce debug is not enabled on this deployment."}
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    with _produce_debug_lock:
+        if (_produce_debug_state.get(upload_id) or {}).get("running"):
+            return {"ok": False, "error": "A debug run is already in progress."}
+    motion_only = bool(getattr(row, "camera_event_id", None))
+
+    # 1) Normal produce — saves the clips exactly like the Produce button.
+    if row.processing_status != "processing":
+        row.processing_status = "pending"
+        row.processing_started_at = None
+        row.processing_completed_at = None
+        row.last_error = None
+        db.commit()
+        threading.Thread(
+            target=_run_long_upload_job,
+            kwargs={
+                "upload_id": row.id, "seg_list": [], "auto_detect_swings": True,
+                "starting_hole": 1, "ai_tracer_model": None,
+            },
+            daemon=True, name=f"produce-debug-produce-{row.id}",
+        ).start()
+
+    # 2) Diagnostic analysis — classical vs AI per swing.
+    threading.Thread(
+        target=_run_produce_debug_job,
+        kwargs={"upload_id": row.id, "motion_only": motion_only},
+        daemon=True, name=f"produce-debug-analyze-{row.id}",
+    ).start()
+    return {"ok": True, "upload_id": row.id, "ai_available": bool(os.environ.get("ANTHROPIC_API_KEY"))}
+
+
+@router.get("/long-uploads/{upload_id}/produce-debug/status")
+def produce_debug_status(upload_id: int):
+    """Progress + report of the current/last produce-debug run for this
+    upload, plus whether the tool is enabled (so the UI can show the button)."""
+    return {"enabled": bool(settings.produce_debug_enabled), **_produce_debug_report(upload_id)}
 
 
 @router.post("/clips/upload")
