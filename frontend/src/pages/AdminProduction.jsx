@@ -3369,6 +3369,83 @@ function VideoLightbox({ url, title, startedAt, fps, onClose }) {
   );
 }
 
+// Plots the classical detector's per-frame motion signal (mean pixel
+// change over time). Each swing is a burst that rises above the red
+// threshold line; green dashed lines mark where a swing was detected.
+function MotionChart({ motion }) {
+  if (!motion || !Array.isArray(motion.series) || motion.series.length < 2) {
+    return (
+      <div className="small muted" style={{ marginBottom: 12 }}>
+        Motion signal unavailable (detector found no usable frames).
+      </div>
+    );
+  }
+  const series = motion.series;
+  const n = series.length;
+  const dur = motion.duration_sec || n - 1;
+  const W = 1000;
+  const H = 200;
+  const thr = motion.threshold || 0;
+  const maxV = Math.max(thr, ...series) * 1.05 || 1;
+  const xOf = (i) => (i / (n - 1)) * W;
+  const yOf = (v) => H - (v / maxV) * (H - 4);
+  const pts = series.map((v, i) => `${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ");
+  const thrY = yOf(thr);
+  const peaks = motion.swing_peaks || [];
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="small muted" style={{ marginBottom: 4 }}>
+        Motion signal — mean pixel change per frame
+        {motion.hz ? ` (~${Math.round(motion.hz)} Hz)` : ""}. Each swing is a
+        burst above the <span style={{ color: "#e74c3c" }}>red threshold</span>;{" "}
+        <span style={{ color: "#1a9d55" }}>green</span> marks detected swings.{" "}
+        median={motion.median != null ? motion.median.toFixed(3) : "?"} ·
+        threshold={thr.toFixed(3)} · raw bursts={motion.n_raw ?? "?"} · swings=
+        {peaks.length}
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        style={{
+          width: "100%", height: 200, borderRadius: 6,
+          background: "rgba(127,127,127,0.10)",
+        }}
+      >
+        {peaks.map((t, i) => (
+          <line
+            key={`p${i}`}
+            x1={(t / dur) * W}
+            x2={(t / dur) * W}
+            y1={0}
+            y2={H}
+            stroke="#1a9d55"
+            strokeWidth={2}
+            strokeDasharray="5 4"
+            opacity={0.75}
+          />
+        ))}
+        <line
+          x1={0}
+          x2={W}
+          y1={thrY}
+          y2={thrY}
+          stroke="#e74c3c"
+          strokeWidth={1.5}
+          strokeDasharray="7 5"
+        />
+        <polyline points={pts} fill="none" stroke="#3b82f6" strokeWidth={1.5} />
+      </svg>
+      <div
+        className="small muted"
+        style={{ display: "flex", justifyContent: "space-between" }}
+      >
+        <span>0s</span>
+        <span>{dur.toFixed(0)}s</span>
+      </div>
+    </div>
+  );
+}
+
 // Dev-only diagnostic overlay. Shows, per detected swing, what the
 // classical-CV tracer found (motion heatmap + ball/candidate counts) next
 // to the AI tracer's result on the same swing, so the two can be compared.
@@ -3430,6 +3507,8 @@ function ProduceDebugModal({ data, onClose }) {
             : "AI tracer: OFF (set ANTHROPIC_API_KEY on this deployment)"}
           {data.error ? ` · error: ${data.error}` : ""}
         </div>
+
+        {data.motion && <MotionChart motion={data.motion} />}
 
         {swings.length === 0 && !data.running && (
           <div className="small muted">No swings detected in this clip.</div>

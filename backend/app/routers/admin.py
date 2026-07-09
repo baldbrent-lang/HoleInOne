@@ -4636,10 +4636,16 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
             raise RuntimeError(f"tee source missing: {row.tee_filename}")
 
         tee_fps = probe_fps(src_path) or 30.0
+        # Always run the motion detector (with debug) so we can show the
+        # motion-burst waveform, regardless of which detector drives the
+        # actual swing list.
+        motion_debug: dict = {}
+        motion_swings = detect_swings_from_motion(
+            src_path, fps=tee_fps, debug=motion_debug,
+        )
         if motion_only:
-            detected = detect_swings_from_motion(src_path, fps=tee_fps)
             detected = filter_swings_by_ball_departure(
-                src_path, detected, tee_fps,
+                src_path, motion_swings, tee_fps,
                 keep_all=settings.camera_produce_unconfirmed_shots,
                 drop_garbage=settings.camera_drop_garbage_clips,
             )
@@ -4647,7 +4653,21 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
             detected = detect_swings_combined(src_path, fps=tee_fps)
 
         with _produce_debug_lock:
-            _produce_debug_state[upload_id]["total"] = len(detected)
+            st = _produce_debug_state[upload_id]
+            st["total"] = len(detected)
+            st["motion"] = {
+                "series": motion_debug.get("motion_series"),
+                "duration_sec": motion_debug.get("duration_sec"),
+                "median": motion_debug.get("median_motion"),
+                "threshold": motion_debug.get("threshold"),
+                "hz": motion_debug.get("effective_hz"),
+                "n_raw": motion_debug.get("n_raw_bursts"),
+                "n_final": motion_debug.get("n_final"),
+                "bursts": motion_debug.get("top_raw_bursts"),
+                "swing_peaks": [
+                    round(float(d.get("peak_time_sec") or 0.0), 2) for d in detected
+                ],
+            }
 
         for i, d in enumerate(detected):
             start_sec = float(d.get("start_sec") or 0.0)

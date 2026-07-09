@@ -3825,6 +3825,20 @@ def detect_swings_from_motion(
         if debug is None:
             return
         ranked = sorted(bursts, key=lambda t: -t[3])[:10]
+        # Downsample the motion waveform for plotting. Peak-preserving
+        # (max per bin) so a ~0.8s swing burst survives decimation to a
+        # few hundred points. Map index i -> t = i/(len-1) * duration_sec.
+        _series = motion
+        _max_pts = 600
+        if _series.size > _max_pts:
+            _bin = int(np.ceil(_series.size / _max_pts))
+            _pad = (-_series.size) % _bin
+            if _pad:
+                _series = np.concatenate(
+                    [_series, np.full(_pad, _series[-1], dtype=_series.dtype)]
+                )
+            _series = _series.reshape(-1, _bin).max(axis=1)
+        debug["motion_series"] = [round(float(v), 4) for v in _series]
         debug.update({
             "effective_hz": float(effective_hz),
             "duration_sec": float(duration_sec),
