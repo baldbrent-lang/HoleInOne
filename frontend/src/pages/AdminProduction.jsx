@@ -3372,7 +3372,7 @@ function VideoLightbox({ url, title, startedAt, fps, onClose }) {
 // Plots the classical detector's per-frame motion signal (mean pixel
 // change over time). Each swing is a burst that rises above the red
 // threshold line; green dashed lines mark where a swing was detected.
-function MotionChart({ motion }) {
+function MotionChart({ motion, ballPeaks }) {
   if (!motion || !Array.isArray(motion.series) || motion.series.length < 2) {
     return (
       <div className="small muted" style={{ marginBottom: 12 }}>
@@ -3392,16 +3392,18 @@ function MotionChart({ motion }) {
   const pts = series.map((v, i) => `${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ");
   const thrY = yOf(thr);
   const peaks = motion.swing_peaks || [];
+  const balls = ballPeaks || [];
   return (
     <div style={{ marginBottom: 16 }}>
       <div className="small muted" style={{ marginBottom: 4 }}>
         Motion signal — mean pixel change per frame
         {motion.hz ? ` (~${Math.round(motion.hz)} Hz)` : ""}. Each swing is a
-        burst above the <span style={{ color: "#e74c3c" }}>red threshold</span>;{" "}
-        <span style={{ color: "#1a9d55" }}>green</span> marks detected swings.{" "}
+        burst above the <span style={{ color: "#e74c3c" }}>red threshold</span>.{" "}
+        <span style={{ color: "#1a9d55" }}>Green</span> = motion-detector swings,{" "}
+        <span style={{ color: "#e67e22" }}>orange</span> = ball-departure swings.{" "}
         median={motion.median != null ? motion.median.toFixed(3) : "?"} ·
-        threshold={thr.toFixed(3)} · raw bursts={motion.n_raw ?? "?"} · swings=
-        {peaks.length}
+        threshold={thr.toFixed(3)} · motion swings={peaks.length} · ball swings=
+        {balls.length}
       </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
@@ -3422,6 +3424,18 @@ function MotionChart({ motion }) {
             strokeWidth={2}
             strokeDasharray="5 4"
             opacity={0.75}
+          />
+        ))}
+        {balls.map((t, i) => (
+          <line
+            key={`b${i}`}
+            x1={(t / dur) * W}
+            x2={(t / dur) * W}
+            y1={0}
+            y2={H}
+            stroke="#e67e22"
+            strokeWidth={2}
+            opacity={0.85}
           />
         ))}
         <line
@@ -3508,7 +3522,42 @@ function ProduceDebugModal({ data, onClose }) {
           {data.error ? ` · error: ${data.error}` : ""}
         </div>
 
-        {data.motion && <MotionChart motion={data.motion} />}
+        {data.motion && (
+          <MotionChart motion={data.motion} ballPeaks={data.ball?.peaks} />
+        )}
+
+        {data.ball && (
+          <div
+            style={{
+              border: "1px solid rgba(230,126,34,0.4)", borderRadius: 8,
+              padding: "8px 12px", marginBottom: 14,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>
+              🏌️ Ball-departure detector — {data.ball.n ?? 0} swing(s)
+            </div>
+            {data.ball.reason ? (
+              <div className="small" style={{ color: "#c0392b" }}>
+                {data.ball.reason}
+              </div>
+            ) : (
+              <div className="small muted">
+                {(data.ball.departures || []).length === 0
+                  ? "No resting-ball departures found."
+                  : (data.ball.departures || [])
+                      .map(
+                        (d) =>
+                          `${d.t}s (rested ${d.rest_sec ?? "?"}s @ ${d.x},${d.y})`,
+                      )
+                      .join("  ·  ")}
+              </div>
+            )}
+            <div className="small muted" style={{ marginTop: 4 }}>
+              A resting white ball that suddenly departs = one swing. Compare
+              the orange marks above against the green motion-detector marks.
+            </div>
+          </div>
+        )}
 
         {swings.length === 0 && !data.running && (
           <div className="small muted">No swings detected in this clip.</div>

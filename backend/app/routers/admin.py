@@ -67,6 +67,7 @@ from ..services.ai_tracer import (
     run_full_ai_tracer_pipeline,
     detect_swings_from_audio,
     detect_swings_from_motion,
+    detect_swings_from_ball,
     detect_swings_combined,
     filter_swings_by_ball_departure,
 )
@@ -4643,6 +4644,16 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         motion_swings = detect_swings_from_motion(
             src_path, fps=tee_fps, debug=motion_debug,
         )
+        # Ball-departure detector — an alternate approach shown alongside for
+        # comparison (a resting white ball that suddenly departs = one swing).
+        ball_debug: dict = {}
+        try:
+            ball_swings = detect_swings_from_ball(
+                src_path, fps=tee_fps, debug=ball_debug,
+            )
+        except Exception as exc:  # noqa: BLE001
+            ball_swings = []
+            ball_debug = {"reason": f"crashed: {exc}"}
         if motion_only:
             detected = filter_swings_by_ball_departure(
                 src_path, motion_swings, tee_fps,
@@ -4666,6 +4677,22 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 "bursts": motion_debug.get("top_raw_bursts"),
                 "swing_peaks": [
                     round(float(d.get("peak_time_sec") or 0.0), 2) for d in detected
+                ],
+            }
+            st["ball"] = {
+                "n": ball_debug.get("n_departures", len(ball_swings)),
+                "reason": ball_debug.get("reason"),
+                "departures": ball_debug.get("departures") or [
+                    {
+                        "t": round(float(s.get("peak_time_sec") or 0.0), 2),
+                        "x": round(float(s.get("ball_x") or 0)),
+                        "y": round(float(s.get("ball_y") or 0)),
+                        "rest_sec": s.get("rest_sec"),
+                    }
+                    for s in ball_swings
+                ],
+                "peaks": [
+                    round(float(s.get("peak_time_sec") or 0.0), 2) for s in ball_swings
                 ],
             }
 

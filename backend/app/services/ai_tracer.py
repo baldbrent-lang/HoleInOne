@@ -3919,6 +3919,196 @@ def detect_swings_from_motion(
     return segments
 
 
+def detect_swings_from_ball(
+    input_path: Path,
+    fps: float | None = None,
+    sample_hz: float = 15.0,
+    min_rest_sec: float = 1.0,
+    departure_confirm_sec: float = 0.4,
+    min_separation_sec: float = 4.0,
+    before_sec: float = 3.5,
+    after_sec: float = 5.0,
+    white_v_min: int = 170,
+    white_s_max: int = 90,
+    min_ball_frac: float = 0.00002,
+    max_ball_frac: float = 0.006,
+    circularity_min: float = 0.55,
+    stationary_tol_frac: float = 0.018,
+    debug: dict | None = None,
+) -> list[dict]:
+    """Find swings by tracking a resting white ball that suddenly departs.
+
+    A real golf shot is the one event that makes a stationary ball leave:
+    the ball sits still on the mat for a couple of seconds, then is struck
+    and vanishes from that spot. Practice swings, walk-bys and ball pickups
+    don't produce that signature, so counting ball departures gives the
+    correct swing count — and hands the ball position + impact frame to the
+    tracer for free.
+
+    Method: sample ~15 Hz, mask bright low-saturation (white) blobs, keep
+    ball-sized round ones, and track those that hold still. A track that
+    stayed put for >= min_rest_sec then disappears for
+    departure_confirm_sec is a departure = one swing (peak_time_sec = the
+    moment it left). Departures within min_separation_sec collapse to the
+    longer-rested one (address-time occlusion vs the real impact).
+
+    Returns the same segment shape as detect_swings_from_motion (plus
+    ball_x / ball_y / rest_sec). Empty + a debug reason on any failure;
+    never raises.
+    """
+    if debug is not None:
+        debug.update({"reason": None, "method": "ball_departure"})
+    if not HAS_CV or not HAS_NP:
+        if debug is not None:
+            debug["reason"] = "opencv or numpy not installed"
+        return []
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        if debug is not None:
+            debug["reason"] = "could not open video"
+        return []
+
+    samples: list[tuple[float, list[tuple[float, float, float]]]] = []
+    frame_shape: tuple[int, int] | None = None
+    try:
+        src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if src_fps <= 0:
+            src_fps = 30.0
+        step = max(1, int(round(src_fps / sample_hz)))
+        eff_hz = src_fps / step
+        idx = -1
+        while True:
+            idx += 1
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            if idx % step != 0:
+                continue
+            t = idx / src_fps
+            h, w = frame.shape[:2]
+            frame_shape = (h, w)
+            # Downscale to ~360p for speed; keep the scale to map back.
+            scale = 360.0 / h if h > 360 else 1.0
+            fr = (
+                cv2.resize(frame, (max(1, int(w * scale)), 360), interpolation=cv2.INTER_AREA)
+                if scale != 1.0
+                else frame
+            )
+            hs, ws = fr.shape[:2]
+            hsv = cv2.cvtColor(fr, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(
+                hsv, (0, 0, int(white_v_min)), (179, int(white_s_max), 255)
+            )
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            frame_area = float(hs * ws)
+            cands: list[tuple[float, float, float]] = []
+            for c in cnts:
+                a = cv2.contourArea(c)
+                if a < min_ball_frac * frame_area or a > max_ball_frac * frame_area:
+                    continue
+                (cx, cy), rad = cv2.minEnclosingCircle(c)
+                circ_area = np.pi * rad * rad
+                if circ_area <= 0 or (a / circ_area) < circularity_min:
+                    continue
+                cands.append((cx / scale, cy / scale, rad / scale))
+            samples.append((t, cands))
+    finally:
+        cap.release()
+
+    if not samples or frame_shape is None:
+        if debug is not None and not debug.get("reason"):
+            debug["reason"] = "no usable frames"
+        return []
+
+    h, w = frame_shape
+    tol = stationary_tol_frac * float((h * h + w * w) ** 0.5)
+    tracks: list[dict] = []
+    departures: list[tuple[float, float, float, float]] = []  # (t, x, y, rest_dur)
+
+    for t, cands in samples:
+        used: set[int] = set()
+        for tr in tracks:
+            if not tr["alive"]:
+                continue
+            best, bestd = None, tol
+            for ci, (cx, cy, _r) in enumerate(cands):
+                if ci in used:
+                    continue
+                d = ((cx - tr["x"]) ** 2 + (cy - tr["y"]) ** 2) ** 0.5
+                if d < bestd:
+                    bestd, best = d, ci
+            if best is not None:
+                cx, cy, _r = cands[best]
+                used.add(best)
+                tr["x"] = 0.7 * tr["x"] + 0.3 * cx
+                tr["y"] = 0.7 * tr["y"] + 0.3 * cy
+                tr["last_t"] = t
+                tr["hits"] += 1
+            elif t - tr["last_t"] >= departure_confirm_sec:
+                rest_dur = tr["last_t"] - tr["first_t"]
+                if rest_dur >= min_rest_sec:
+                    departures.append((tr["last_t"], tr["x"], tr["y"], rest_dur))
+                tr["alive"] = False
+        for ci, (cx, cy, _r) in enumerate(cands):
+            if ci in used:
+                continue
+            tracks.append(
+                {"x": cx, "y": cy, "first_t": t, "last_t": t, "hits": 1, "alive": True}
+            )
+
+    departures.sort(key=lambda d: d[0])
+    kept: list[tuple[float, float, float, float]] = []
+    for d in departures:
+        if kept and d[0] - kept[-1][0] < min_separation_sec:
+            if d[3] > kept[-1][3]:
+                kept[-1] = d
+            continue
+        kept.append(d)
+
+    duration = samples[-1][0]
+    segments: list[dict] = []
+    for t_dep, x, y, rest_dur in kept:
+        conf = "high" if rest_dur >= 1.5 else ("medium" if rest_dur >= 0.8 else "low")
+        segments.append(
+            {
+                "peak_time_sec": float(t_dep),
+                "start_sec": float(max(0.0, t_dep - before_sec)),
+                "end_sec": float(min(duration, t_dep + after_sec)),
+                "confidence": conf,
+                "ball_x": float(x),
+                "ball_y": float(y),
+                "rest_sec": round(float(rest_dur), 2),
+            }
+        )
+
+    log.info(
+        "ai_tracer: detect_swings_from_ball — %d departures (raw=%d) "
+        "duration=%.1fs hz=%.1f",
+        len(kept), len(departures), duration, eff_hz,
+    )
+    if debug is not None:
+        debug.update(
+            {
+                "eff_hz": float(eff_hz),
+                "duration_sec": float(duration),
+                "n_departures": len(kept),
+                "n_raw_departures": len(departures),
+                "departures": [
+                    {
+                        "t": round(float(t), 2),
+                        "x": round(float(x)),
+                        "y": round(float(y)),
+                        "rest_sec": round(float(rd), 2),
+                    }
+                    for t, x, y, rd in kept
+                ],
+            }
+        )
+    return segments
+
+
 def detect_swings_from_audio(
     input_path: Path,
     fps: float | None = None,
