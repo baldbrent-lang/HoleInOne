@@ -3424,10 +3424,12 @@ export default function AdminProduction() {
         if (s.running) {
           setTimeout(tick, 2000);
         } else {
-          // Pre-check every flagged upload that's currently loaded on the page.
-          const loaded = new Set((rows || []).map((r) => r.id));
-          const flagged = (s.flagged || []).filter((id) => loaded.has(id));
-          setSelectedIds(new Set(flagged));
+          // Pre-check EVERY flagged upload, not just the ones currently
+          // rendered. The queue is an infinite-scroll list, so intersecting
+          // with the loaded rows dropped everything below the fold; the
+          // per-row checkbox reads selectedIds, so ids for not-yet-loaded
+          // rows stay checked and simply light up as you scroll to them.
+          setSelectedIds(new Set(s.flagged || []));
         }
       } catch {
         /* transient — stop polling */
