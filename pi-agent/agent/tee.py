@@ -268,9 +268,14 @@ class TeeAgent:
         # Compress each clip to H.264 at this bitrate (kbps) before upload.
         # Makes clips play in any browser (mp4v won't play in desktop
         # Chrome) and lighter on a cellular SIM. Higher default than the
-        # green (5 Mbps vs 2.5) because the tee feeds the ball tracer and
-        # needs the extra detail. Set to 0 to disable.
-        self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 5000))
+        # green (3.5 Mbps vs 1.5) because the tee feeds the ball tracer and
+        # needs the extra detail. Dropped from 5 Mbps: measured cellular
+        # showed the tee is the flakier link (1.5% loss, 450 ms jitter vs
+        # green's 0%/204 ms), so the tee's oversized clip was landing last
+        # and stalling the pairing. 3.5 Mbps keeps ample tracer detail while
+        # cutting the file ~30% so it clears the tee's jittery link sooner.
+        # Set to 0 to disable.
+        self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 3500))
         self.upload_scale_height = cfg.get("upload_scale_height")
         self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-tee"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
