@@ -3934,6 +3934,7 @@ def detect_swings_from_ball(
     max_ball_frac: float = 0.006,
     circularity_min: float = 0.55,
     stationary_tol_frac: float = 0.018,
+    roi: dict | None = None,
     debug: dict | None = None,
 ) -> list[dict]:
     """Find swings by tracking a resting white ball that suddenly departs.
@@ -4012,7 +4013,17 @@ def detect_swings_from_ball(
                 circ_area = np.pi * rad * rad
                 if circ_area <= 0 or (a / circ_area) < circularity_min:
                     continue
-                cands.append((cx / scale, cy / scale, rad / scale))
+                nx, ny = cx / scale, cy / scale  # native-pixel centroid
+                # Tee-box ROI gate: drop candidates outside the drawn box
+                # (fractions of the frame), killing shoes/glints elsewhere.
+                if roi:
+                    rx0 = float(roi.get("x", 0.0)) * w
+                    ry0 = float(roi.get("y", 0.0)) * h
+                    rx1 = rx0 + float(roi.get("w", 1.0)) * w
+                    ry1 = ry0 + float(roi.get("h", 1.0)) * h
+                    if not (rx0 <= nx <= rx1 and ry0 <= ny <= ry1):
+                        continue
+                cands.append((nx, ny, rad / scale))
             samples.append((t, cands))
     finally:
         cap.release()

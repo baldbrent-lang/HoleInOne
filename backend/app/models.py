@@ -72,6 +72,11 @@ class Course(Base):
     tee_sheet_config: Mapped[dict] = mapped_column(JSON, default=dict)
     livestream_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     operator_password_hash: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Tee-box region of interest for ball detection: {"x","y","w","h"} as
+    # fractions (0–1) of the tee frame. When set, the ball-departure
+    # detector only looks inside this box, killing false positives (shoes,
+    # glints) elsewhere. The camera is fixed per course, so it's drawn once.
+    ball_roi: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tee_times: Mapped[list[TeeTime]] = relationship(back_populates="course", cascade="all, delete-orphan")

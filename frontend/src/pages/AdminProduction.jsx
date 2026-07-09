@@ -3460,10 +3460,134 @@ function MotionChart({ motion, ballPeaks }) {
   );
 }
 
+// Draw the tee-box ROI on a reference frame. The ball detector only looks
+// inside the box; drawn once per course (fixed camera). Fractions of the
+// displayed image map directly to fractions of the frame.
+function TeeBoxRoi({ refUrl, initialRoi, courseId, adminPassword, onSaved }) {
+  const boxRef = useRef(null);
+  const [rect, setRect] = useState(initialRoi || null);
+  const [drag, setDrag] = useState(null);
+  const [busy, setBusy] = useState(false);
+  if (!refUrl) return null;
+
+  const toFrac = (e) => {
+    const r = boxRef.current.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+    };
+  };
+  const onDown = (e) => {
+    e.preventDefault();
+    const p = toFrac(e);
+    setDrag(p);
+    setRect({ x: p.x, y: p.y, w: 0, h: 0 });
+  };
+  const onMove = (e) => {
+    if (!drag) return;
+    const p = toFrac(e);
+    setRect({
+      x: Math.min(drag.x, p.x),
+      y: Math.min(drag.y, p.y),
+      w: Math.abs(p.x - drag.x),
+      h: Math.abs(p.y - drag.y),
+    });
+  };
+  const onUp = () => setDrag(null);
+
+  async function save() {
+    if (!rect || rect.w < 0.01 || rect.h < 0.01 || !courseId) return;
+    setBusy(true);
+    try {
+      await api.setBallRoi(adminPassword, courseId, rect);
+      onSaved && onSaved();
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function clearRoi() {
+    if (!courseId) return;
+    setBusy(true);
+    try {
+      await api.setBallRoi(adminPassword, courseId, null);
+      setRect(null);
+      onSaved && onSaved();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div className="small muted" style={{ marginBottom: 4 }}>
+        <strong>Tee-box ROI</strong> — drag a box around where the ball rests.
+        The ball detector only looks inside it (kills shoes/glints elsewhere).
+        Saved for this course; drawn once.
+      </div>
+      <div
+        ref={boxRef}
+        onMouseDown={onDown}
+        onMouseMove={onMove}
+        onMouseUp={onUp}
+        onMouseLeave={onUp}
+        style={{
+          position: "relative", display: "inline-block", cursor: "crosshair",
+          userSelect: "none", maxWidth: "100%",
+        }}
+      >
+        <img
+          src={refUrl}
+          alt="tee frame"
+          draggable={false}
+          style={{ display: "block", maxWidth: "100%", borderRadius: 6 }}
+        />
+        {rect && (
+          <div
+            style={{
+              position: "absolute",
+              left: `${rect.x * 100}%`,
+              top: `${rect.y * 100}%`,
+              width: `${rect.w * 100}%`,
+              height: `${rect.h * 100}%`,
+              border: "2px solid #e67e22",
+              background: "rgba(230,126,34,0.15)",
+              pointerEvents: "none",
+            }}
+          />
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 6, alignItems: "center" }}>
+        <button
+          className="small"
+          onClick={save}
+          disabled={busy || !rect || rect.w < 0.01}
+          style={{ width: "auto" }}
+        >
+          {busy ? "Saving…" : "Save ROI & re-run"}
+        </button>
+        <button
+          className="small ghost"
+          onClick={clearRoi}
+          disabled={busy}
+          style={{ width: "auto" }}
+        >
+          Clear ROI
+        </button>
+        {rect && (
+          <span className="small muted">
+            box {(rect.w * 100).toFixed(0)}%×{(rect.h * 100).toFixed(0)}% @{" "}
+            {(rect.x * 100).toFixed(0)},{(rect.y * 100).toFixed(0)}%
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Dev-only diagnostic overlay. Shows, per detected swing, what the
 // classical-CV tracer found (motion heatmap + ball/candidate counts) next
 // to the AI tracer's result on the same swing, so the two can be compared.
-function ProduceDebugModal({ data, onClose }) {
+function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
   const swings = data.swings || [];
   const okBadge = (ok) => (
     <span
@@ -3525,6 +3649,16 @@ function ProduceDebugModal({ data, onClose }) {
         {data.motion && (
           <MotionChart motion={data.motion} ballPeaks={data.ball?.peaks} />
         )}
+
+        {data.ref_frame_url && data.course_id ? (
+          <TeeBoxRoi
+            refUrl={data.ref_frame_url}
+            initialRoi={data.ball_roi}
+            courseId={data.course_id}
+            adminPassword={adminPassword}
+            onSaved={onRerun}
+          />
+        ) : null}
 
         {data.ball && (
           <div
@@ -3754,6 +3888,27 @@ export default function AdminProduction() {
     } catch (e) {
       setError(e.message);
       setDebugModal(null);
+    }
+  }
+
+  // Re-run only the diagnostic (not the produce) — used after changing the
+  // tee-box ROI so you see the ball detector's new result immediately.
+  async function rerunDebugAnalyze(uploadId) {
+    setError(null);
+    setDebugModal((m) =>
+      m && m.uploadId === uploadId
+        ? { ...m, running: true, done: 0, swings: [] }
+        : m,
+    );
+    try {
+      const r = await api.produceDebug(adminPassword, uploadId, true);
+      if (r && r.ok === false) {
+        setError(r.error || "Re-run failed.");
+        return;
+      }
+      pollDebug(uploadId);
+    } catch (e) {
+      setError(e.message);
     }
   }
 
@@ -4437,6 +4592,8 @@ export default function AdminProduction() {
       {debugModal && (
         <ProduceDebugModal
           data={debugModal}
+          adminPassword={adminPassword}
+          onRerun={() => rerunDebugAnalyze(debugModal.uploadId)}
           onClose={() => setDebugModal(null)}
         />
       )}

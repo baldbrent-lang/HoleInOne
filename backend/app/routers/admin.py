@@ -208,6 +208,30 @@ def set_operator_password(course_id: int, payload: dict, db: Session = Depends(g
     return {"ok": True, "configured": course.operator_password_hash is not None}
 
 
+@router.post("/courses/{course_id}/ball-roi")
+def set_ball_roi(course_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Set or clear the tee-box ROI that restricts ball detection.
+    payload: {"roi": {"x","y","w","h"}} as fractions (0–1) of the frame, or
+    {"roi": null} to clear. Drawn once per course (fixed camera)."""
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "course not found")
+    roi = (payload or {}).get("roi")
+    if roi is None:
+        course.ball_roi = None
+    else:
+        try:
+            x = max(0.0, min(1.0, float(roi["x"])))
+            y = max(0.0, min(1.0, float(roi["y"])))
+            w = max(0.01, min(1.0 - x, float(roi["w"])))
+            h = max(0.01, min(1.0 - y, float(roi["h"])))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "roi must be {x,y,w,h} fractions")
+        course.ball_roi = {"x": x, "y": y, "w": w, "h": h}
+    db.commit()
+    return {"ok": True, "ball_roi": course.ball_roi}
+
+
 @router.get("/courses/{course_id}/qr.png")
 def course_qr_png(course_id: int, db: Session = Depends(get_db)):
     course = db.get(Course, course_id)
@@ -4638,6 +4662,34 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
             raise RuntimeError(f"tee source missing: {row.tee_filename}")
 
         tee_fps = probe_fps(src_path) or 30.0
+
+        # Tee-box ROI (drawn once per course) restricts ball detection.
+        course = db.get(Course, row.course_id)
+        ball_roi = course.ball_roi if course else None
+
+        # Save a clean reference frame (no overlays) for drawing the ROI on.
+        ref_frame_url = None
+        frame_w = frame_h = None
+        try:
+            import cv2  # type: ignore
+
+            _rc = cv2.VideoCapture(str(src_path))
+            _rc.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * tee_fps))
+            ok_ref, ref = _rc.read()
+            _rc.release()
+            if ok_ref and ref is not None:
+                frame_h, frame_w = ref.shape[:2]
+                rname = f"debug-ref-{upload_id}-{secrets.token_hex(4)}.jpg"
+                rpath = CLIPS_DIR / rname
+                cv2.imwrite(str(rpath), ref, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                if rpath.exists():
+                    ref_frame_url = (
+                        f"{settings.app_base_url}/uploads/clips/{rname}"
+                        f"?v={int(rpath.stat().st_mtime)}"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("produce-debug: ref frame failed: %s", exc)
+
         # Always run the motion detector (with debug) so we can show the
         # motion-burst waveform, regardless of which detector drives the
         # actual swing list.
@@ -4647,10 +4699,11 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         )
         # Ball-departure detector — an alternate approach shown alongside for
         # comparison (a resting white ball that suddenly departs = one swing).
+        # Restricted to the course's tee-box ROI when one has been drawn.
         ball_debug: dict = {}
         try:
             ball_swings = detect_swings_from_ball(
-                src_path, fps=tee_fps, debug=ball_debug,
+                src_path, fps=tee_fps, roi=ball_roi, debug=ball_debug,
             )
         except Exception as exc:  # noqa: BLE001
             ball_swings = []
@@ -4713,6 +4766,11 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         with _produce_debug_lock:
             st = _produce_debug_state[upload_id]
             st["total"] = len(detected)
+            st["course_id"] = row.course_id
+            st["ball_roi"] = ball_roi
+            st["ref_frame_url"] = ref_frame_url
+            st["frame_w"] = frame_w
+            st["frame_h"] = frame_h
             st["motion"] = {
                 "series": (trace or {}).get("series") or motion_debug.get("motion_series"),
                 "duration_sec": (trace or {}).get("duration_sec")
@@ -4828,10 +4886,15 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
 
 
 @router.post("/long-uploads/{upload_id}/produce-debug")
-def produce_debug(upload_id: int, db: Session = Depends(get_db)):
+def produce_debug(
+    upload_id: int, analyze_only: bool = False, db: Session = Depends(get_db)
+):
     """Dev tool: kick a normal produce (saves clips) AND a per-swing
     diagnostic that compares the classical-CV and AI tracers. Returns
-    immediately; poll the status route for the report."""
+    immediately; poll the status route for the report.
+
+    analyze_only=true re-runs ONLY the diagnostic (e.g. after changing the
+    tee-box ROI) without re-producing the clip."""
     if not settings.produce_debug_enabled:
         return {"ok": False, "error": "Produce debug is not enabled on this deployment."}
     row = db.get(LongVideoUpload, upload_id)
@@ -4843,7 +4906,7 @@ def produce_debug(upload_id: int, db: Session = Depends(get_db)):
     motion_only = bool(getattr(row, "camera_event_id", None))
 
     # 1) Normal produce — saves the clips exactly like the Produce button.
-    if row.processing_status != "processing":
+    if not analyze_only and row.processing_status != "processing":
         row.processing_status = "pending"
         row.processing_started_at = None
         row.processing_completed_at = None

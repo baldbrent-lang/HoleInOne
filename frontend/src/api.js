@@ -455,14 +455,22 @@ export const api = {
     request(`/api/admin/scan-non-golf`, { method: "POST", adminPassword: key }),
   scanNonGolfStatus: (key) =>
     request(`/api/admin/scan-non-golf/status`, { adminPassword: key }),
-  produceDebug: (key, uploadId) =>
-    request(`/api/admin/long-uploads/${uploadId}/produce-debug`, {
-      method: "POST",
-      adminPassword: key,
-    }),
+  produceDebug: (key, uploadId, analyzeOnly = false) =>
+    request(
+      `/api/admin/long-uploads/${uploadId}/produce-debug${
+        analyzeOnly ? "?analyze_only=true" : ""
+      }`,
+      { method: "POST", adminPassword: key },
+    ),
   produceDebugStatus: (key, uploadId) =>
     request(`/api/admin/long-uploads/${uploadId}/produce-debug/status`, {
       adminPassword: key,
+    }),
+  setBallRoi: (key, courseId, roi) =>
+    request(`/api/admin/courses/${courseId}/ball-roi`, {
+      method: "POST",
+      adminPassword: key,
+      body: { roi },
     }),
   processLongUploadSegment: (
     key,
