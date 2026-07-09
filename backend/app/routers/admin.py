@@ -4632,6 +4632,103 @@ def _produce_debug_report(upload_id: int) -> dict:
         }
 
 
+def _ball_debug_and_ref(src_path: Path, tee_fps: float, upload_id: int, roi):
+    """Run the ball-departure detector and produce the images the debug UI
+    needs: a clean reference frame (to draw the ROI on), a diagnostic overlay
+    (ROI box + every white candidate the detector saw, so you can tell WHY it
+    found nothing), and a ringed screenshot per departure. Returns
+    (ball_dict, ref_frame_url, frame_w, frame_h)."""
+    import cv2  # type: ignore
+
+    ball_debug: dict = {}
+    try:
+        ball_swings = detect_swings_from_ball(
+            src_path, fps=tee_fps, roi=roi, debug=ball_debug,
+        )
+    except Exception as exc:  # noqa: BLE001
+        ball_swings = []
+        ball_debug = {"reason": f"crashed: {exc}"}
+
+    def _url(name: str) -> str | None:
+        p = CLIPS_DIR / name
+        if not p.exists():
+            return None
+        return f"{settings.app_base_url}/uploads/clips/{name}?v={int(p.stat().st_mtime)}"
+
+    ref_frame_url = diag_url = None
+    frame_w = frame_h = None
+    ref = None
+    try:
+        _c = cv2.VideoCapture(str(src_path))
+        _c.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * tee_fps))
+        okr, ref = _c.read()
+        _c.release()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("produce-debug: ref grab failed: %s", exc)
+        ref = None
+
+    if ref is not None:
+        frame_h, frame_w = ref.shape[:2]
+        rname = f"debug-ref-{upload_id}-{secrets.token_hex(4)}.jpg"
+        cv2.imwrite(str(CLIPS_DIR / rname), ref, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        ref_frame_url = _url(rname)
+        # Diagnostic overlay: ROI box (orange) + every white candidate the
+        # detector matched across the clip (green dots).
+        diag = ref.copy()
+        if roi:
+            x0 = int(float(roi.get("x", 0)) * frame_w)
+            y0 = int(float(roi.get("y", 0)) * frame_h)
+            x1 = int((float(roi.get("x", 0)) + float(roi.get("w", 1))) * frame_w)
+            y1 = int((float(roi.get("y", 0)) + float(roi.get("h", 1))) * frame_h)
+            cv2.rectangle(diag, (x0, y0), (x1, y1), (0, 140, 255), 3)
+        for cx, cy in (ball_debug.get("sample_cands") or []):
+            cv2.circle(diag, (int(cx), int(cy)), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        dname = f"debug-balldiag-{upload_id}-{secrets.token_hex(4)}.jpg"
+        cv2.imwrite(str(CLIPS_DIR / dname), diag, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        diag_url = _url(dname)
+
+    # Ringed screenshot per departure.
+    ball_departures = ball_debug.get("departures") or []
+    if ball_departures:
+        try:
+            _c = cv2.VideoCapture(str(src_path))
+            for bi, dep in enumerate(ball_departures):
+                rest = float(dep.get("rest_sec") or 1.0)
+                snap_t = max(0.0, float(dep.get("t") or 0.0) - min(max(rest / 2.0, 0.3), 1.5))
+                _c.set(cv2.CAP_PROP_POS_FRAMES, int(snap_t * tee_fps))
+                okf, fr = _c.read()
+                if not okf or fr is None:
+                    continue
+                x, y = int(dep.get("x") or 0), int(dep.get("y") or 0)
+                rad = max(14, int(round(fr.shape[0] * 0.02)))
+                cv2.circle(fr, (x, y), rad, (0, 255, 255), 3, cv2.LINE_AA)
+                cv2.circle(fr, (x, y), 2, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.putText(
+                    fr, f"ball @ {snap_t:.1f}s", (max(0, x - 50), max(22, y - rad - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA,
+                )
+                iname = f"debug-ball-{upload_id}-{bi}-{secrets.token_hex(4)}.jpg"
+                cv2.imwrite(str(CLIPS_DIR / iname), fr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                dep["image_url"] = _url(iname)
+            _c.release()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("produce-debug: ball screenshot failed: %s", exc)
+
+    ball_dict = {
+        "n": ball_debug.get("n_departures", len(ball_swings)),
+        "reason": ball_debug.get("reason"),
+        "departures": ball_departures,
+        "peaks": [round(float(s.get("peak_time_sec") or 0.0), 2) for s in ball_swings],
+        "diag_url": diag_url,
+        "n_cand_total": ball_debug.get("n_cand_total"),
+        "n_cand_in_roi": ball_debug.get("n_cand_in_roi"),
+        "n_tracks": ball_debug.get("n_tracks"),
+        "n_rested": ball_debug.get("n_rested"),
+        "min_rest_sec": ball_debug.get("min_rest_sec"),
+    }
+    return ball_dict, ref_frame_url, frame_w, frame_h
+
+
 def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
     """Analyze each swing with BOTH tracers and record a debug report.
     Read-only w.r.t. produced clips — the normal produce job (kicked
@@ -4667,29 +4764,6 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         course = db.get(Course, row.course_id)
         ball_roi = course.ball_roi if course else None
 
-        # Save a clean reference frame (no overlays) for drawing the ROI on.
-        ref_frame_url = None
-        frame_w = frame_h = None
-        try:
-            import cv2  # type: ignore
-
-            _rc = cv2.VideoCapture(str(src_path))
-            _rc.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * tee_fps))
-            ok_ref, ref = _rc.read()
-            _rc.release()
-            if ok_ref and ref is not None:
-                frame_h, frame_w = ref.shape[:2]
-                rname = f"debug-ref-{upload_id}-{secrets.token_hex(4)}.jpg"
-                rpath = CLIPS_DIR / rname
-                cv2.imwrite(str(rpath), ref, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                if rpath.exists():
-                    ref_frame_url = (
-                        f"{settings.app_base_url}/uploads/clips/{rname}"
-                        f"?v={int(rpath.stat().st_mtime)}"
-                    )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("produce-debug: ref frame failed: %s", exc)
-
         # Always run the motion detector (with debug) so we can show the
         # motion-burst waveform, regardless of which detector drives the
         # actual swing list.
@@ -4697,53 +4771,10 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         motion_swings = detect_swings_from_motion(
             src_path, fps=tee_fps, debug=motion_debug,
         )
-        # Ball-departure detector — an alternate approach shown alongside for
-        # comparison (a resting white ball that suddenly departs = one swing).
-        # Restricted to the course's tee-box ROI when one has been drawn.
-        ball_debug: dict = {}
-        try:
-            ball_swings = detect_swings_from_ball(
-                src_path, fps=tee_fps, roi=ball_roi, debug=ball_debug,
-            )
-        except Exception as exc:  # noqa: BLE001
-            ball_swings = []
-            ball_debug = {"reason": f"crashed: {exc}"}
-
-        # Verification screenshot per resting ball: grab a frame mid-rest and
-        # ring the detected ball position so the operator can eyeball accuracy.
-        ball_departures = ball_debug.get("departures") or []
-        if ball_departures:
-            try:
-                import cv2  # type: ignore
-
-                _cap = cv2.VideoCapture(str(src_path))
-                for bi, dep in enumerate(ball_departures):
-                    rest = float(dep.get("rest_sec") or 1.0)
-                    snap_t = max(0.0, float(dep.get("t") or 0.0) - min(max(rest / 2.0, 0.3), 1.5))
-                    _cap.set(cv2.CAP_PROP_POS_FRAMES, int(snap_t * tee_fps))
-                    ok_read, fr = _cap.read()
-                    if not ok_read or fr is None:
-                        continue
-                    x, y = int(dep.get("x") or 0), int(dep.get("y") or 0)
-                    fh = fr.shape[0]
-                    rad = max(14, int(round(fh * 0.02)))
-                    cv2.circle(fr, (x, y), rad, (0, 255, 255), 3, cv2.LINE_AA)
-                    cv2.circle(fr, (x, y), 2, (0, 0, 255), -1, cv2.LINE_AA)
-                    cv2.putText(
-                        fr, f"ball @ {snap_t:.1f}s", (max(0, x - 50), max(22, y - rad - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA,
-                    )
-                    iname = f"debug-ball-{upload_id}-{bi}-{secrets.token_hex(4)}.jpg"
-                    ipath = CLIPS_DIR / iname
-                    cv2.imwrite(str(ipath), fr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                    if ipath.exists():
-                        dep["image_url"] = (
-                            f"{settings.app_base_url}/uploads/clips/{iname}"
-                            f"?v={int(ipath.stat().st_mtime)}"
-                        )
-                _cap.release()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("produce-debug: ball screenshot failed: %s", exc)
+        # Ball-departure detector + its reference/diagnostic/screenshot images.
+        ball_dict, ref_frame_url, frame_w, frame_h = _ball_debug_and_ref(
+            src_path, tee_fps, upload_id, ball_roi,
+        )
 
         if motion_only:
             detected = filter_swings_by_ball_departure(
@@ -4787,22 +4818,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                     round(float(d.get("peak_time_sec") or 0.0), 2) for d in motion_swings
                 ],
             }
-            st["ball"] = {
-                "n": ball_debug.get("n_departures", len(ball_swings)),
-                "reason": ball_debug.get("reason"),
-                "departures": ball_debug.get("departures") or [
-                    {
-                        "t": round(float(s.get("peak_time_sec") or 0.0), 2),
-                        "x": round(float(s.get("ball_x") or 0)),
-                        "y": round(float(s.get("ball_y") or 0)),
-                        "rest_sec": s.get("rest_sec"),
-                    }
-                    for s in ball_swings
-                ],
-                "peaks": [
-                    round(float(s.get("peak_time_sec") or 0.0), 2) for s in ball_swings
-                ],
-            }
+            st["ball"] = ball_dict
 
         for i, d in enumerate(detected):
             start_sec = float(d.get("start_sec") or 0.0)
@@ -4935,6 +4951,44 @@ def produce_debug_status(upload_id: int):
     """Progress + report of the current/last produce-debug run for this
     upload, plus whether the tool is enabled (so the UI can show the button)."""
     return {"enabled": bool(settings.produce_debug_enabled), **_produce_debug_report(upload_id)}
+
+
+@router.post("/long-uploads/{upload_id}/rescan-ball")
+def rescan_ball(upload_id: int, db: Session = Depends(get_db)):
+    """Re-run ONLY the ball detector with the course's current tee-box ROI —
+    fast + synchronous, used right after drawing/adjusting the ROI (the full
+    produce-debug re-run is slow and re-does the tracer comparison, which the
+    ROI doesn't affect). Returns the updated ball block + ref/diagnostic
+    frames so the modal can refresh in place."""
+    if not settings.produce_debug_enabled:
+        return {"ok": False, "error": "Produce debug is not enabled on this deployment."}
+    row = db.get(LongVideoUpload, upload_id)
+    if not row or not row.tee_filename:
+        raise HTTPException(404, "upload not found or has no tee video")
+    storage.ensure_local(CLIPS_DIR, row.tee_filename)
+    src_path = CLIPS_DIR / row.tee_filename
+    if not src_path.exists():
+        raise HTTPException(404, "tee source missing on disk")
+    tee_fps = probe_fps(src_path) or 30.0
+    course = db.get(Course, row.course_id)
+    ball_roi = course.ball_roi if course else None
+    ball_dict, ref_frame_url, frame_w, frame_h = _ball_debug_and_ref(
+        src_path, tee_fps, upload_id, ball_roi,
+    )
+    with _produce_debug_lock:
+        st = _produce_debug_state.get(upload_id)
+        if st is not None:
+            st["ball"] = ball_dict
+            st["ball_roi"] = ball_roi
+            st["ref_frame_url"] = ref_frame_url
+    return {
+        "ok": True,
+        "ball": ball_dict,
+        "ball_roi": ball_roi,
+        "ref_frame_url": ref_frame_url,
+        "frame_w": frame_w,
+        "frame_h": frame_h,
+    }
 
 
 @router.post("/clips/upload")

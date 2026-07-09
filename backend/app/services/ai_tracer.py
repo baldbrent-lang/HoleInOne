@@ -3972,6 +3972,9 @@ def detect_swings_from_ball(
 
     samples: list[tuple[float, list[tuple[float, float, float]]]] = []
     frame_shape: tuple[int, int] | None = None
+    n_cand_total = 0   # white/round/size-passing blobs before the ROI gate
+    n_cand_in_roi = 0  # ... that also fell inside the ROI
+    sample_cands: list[tuple[int, int]] = []  # native positions, for diagnostics
     try:
         src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if src_fps <= 0:
@@ -4014,6 +4017,9 @@ def detect_swings_from_ball(
                 if circ_area <= 0 or (a / circ_area) < circularity_min:
                     continue
                 nx, ny = cx / scale, cy / scale  # native-pixel centroid
+                n_cand_total += 1
+                if len(sample_cands) < 400:
+                    sample_cands.append((int(nx), int(ny)))
                 # Tee-box ROI gate: drop candidates outside the drawn box
                 # (fractions of the frame), killing shoes/glints elsewhere.
                 if roi:
@@ -4023,6 +4029,7 @@ def detect_swings_from_ball(
                     ry1 = ry0 + float(roi.get("h", 1.0)) * h
                     if not (rx0 <= nx <= rx1 and ry0 <= ny <= ry1):
                         continue
+                n_cand_in_roi += 1
                 cands.append((nx, ny, rad / scale))
             samples.append((t, cands))
     finally:
@@ -4099,6 +4106,9 @@ def detect_swings_from_ball(
         "duration=%.1fs hz=%.1f",
         len(kept), len(departures), duration, eff_hz,
     )
+    n_rested = sum(
+        1 for tr in tracks if (tr["last_t"] - tr["first_t"]) >= min_rest_sec
+    )
     if debug is not None:
         debug.update(
             {
@@ -4106,6 +4116,17 @@ def detect_swings_from_ball(
                 "duration_sec": float(duration),
                 "n_departures": len(kept),
                 "n_raw_departures": len(departures),
+                # Diagnostics — where detection fell down when nothing is found:
+                #   n_cand_total 0  -> ball not passing white/size filter
+                #   in_roi 0        -> ball outside the drawn box
+                #   n_rested 0      -> nothing held still >= min_rest_sec
+                "n_cand_total": n_cand_total,
+                "n_cand_in_roi": n_cand_in_roi,
+                "n_tracks": len(tracks),
+                "n_rested": n_rested,
+                "min_rest_sec": float(min_rest_sec),
+                "roi": roi,
+                "sample_cands": sample_cands,
                 "departures": [
                     {
                         "t": round(float(t), 2),

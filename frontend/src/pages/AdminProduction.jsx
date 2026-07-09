@@ -3500,7 +3500,7 @@ function TeeBoxRoi({ refUrl, initialRoi, courseId, adminPassword, onSaved }) {
     setBusy(true);
     try {
       await api.setBallRoi(adminPassword, courseId, rect);
-      onSaved && onSaved();
+      if (onSaved) await onSaved();
     } finally {
       setBusy(false);
     }
@@ -3511,7 +3511,7 @@ function TeeBoxRoi({ refUrl, initialRoi, courseId, adminPassword, onSaved }) {
     try {
       await api.setBallRoi(adminPassword, courseId, null);
       setRect(null);
-      onSaved && onSaved();
+      if (onSaved) await onSaved();
     } finally {
       setBusy(false);
     }
@@ -3670,6 +3670,41 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             <div style={{ fontWeight: 700, marginBottom: 2 }}>
               🏌️ Ball-departure detector — {data.ball.n ?? 0} swing(s)
             </div>
+            {/* Diagnostic counts — pinpoint why nothing was found. */}
+            {data.ball.n_cand_total != null && (
+              <div className="small muted" style={{ marginBottom: 4 }}>
+                white candidates seen: <b>{data.ball.n_cand_total}</b>
+                {data.ball_roi ? (
+                  <> · inside ROI: <b>{data.ball.n_cand_in_roi}</b></>
+                ) : (
+                  " · (no ROI set — whole frame)"
+                )}{" "}
+                · rested ≥{data.ball.min_rest_sec ?? 1}s: <b>{data.ball.n_rested}</b>
+                {data.ball.n_cand_total === 0
+                  ? " → ball isn't passing the white/size filter"
+                  : data.ball_roi && data.ball.n_cand_in_roi === 0
+                    ? " → ball is outside your box; move it"
+                    : data.ball.n_rested === 0
+                      ? " → nothing held still long enough"
+                      : ""}
+              </div>
+            )}
+            {data.ball.diag_url && (
+              <div style={{ marginBottom: 6 }}>
+                <div className="small muted">
+                  what the detector sees — <span style={{ color: "#2ecc71" }}>green
+                  dots</span> = white candidates,{" "}
+                  <span style={{ color: "#e67e22" }}>orange box</span> = your ROI:
+                </div>
+                <a href={data.ball.diag_url} target="_blank" rel="noreferrer">
+                  <img
+                    src={data.ball.diag_url}
+                    alt="ball detection diagnostic"
+                    style={{ maxWidth: "100%", borderRadius: 6, marginTop: 4 }}
+                  />
+                </a>
+              </div>
+            )}
             {data.ball.reason ? (
               <div className="small" style={{ color: "#c0392b" }}>
                 {data.ball.reason}
@@ -3891,22 +3926,27 @@ export default function AdminProduction() {
     }
   }
 
-  // Re-run only the diagnostic (not the produce) — used after changing the
-  // tee-box ROI so you see the ball detector's new result immediately.
-  async function rerunDebugAnalyze(uploadId) {
+  // Re-run ONLY the ball detector with the new ROI (fast, synchronous) and
+  // patch the modal in place — the tracer comparison is unaffected by ROI so
+  // there's no need to re-run the whole (slow) analysis.
+  async function rerunBallScan(uploadId) {
     setError(null);
-    setDebugModal((m) =>
-      m && m.uploadId === uploadId
-        ? { ...m, running: true, done: 0, swings: [] }
-        : m,
-    );
     try {
-      const r = await api.produceDebug(adminPassword, uploadId, true);
+      const r = await api.rescanBall(adminPassword, uploadId);
       if (r && r.ok === false) {
-        setError(r.error || "Re-run failed.");
+        setError(r.error || "Ball rescan failed.");
         return;
       }
-      pollDebug(uploadId);
+      setDebugModal((m) =>
+        m && m.uploadId === uploadId
+          ? {
+              ...m,
+              ball: r.ball,
+              ball_roi: r.ball_roi,
+              ref_frame_url: r.ref_frame_url || m.ref_frame_url,
+            }
+          : m,
+      );
     } catch (e) {
       setError(e.message);
     }
@@ -4593,7 +4633,7 @@ export default function AdminProduction() {
         <ProduceDebugModal
           data={debugModal}
           adminPassword={adminPassword}
-          onRerun={() => rerunDebugAnalyze(debugModal.uploadId)}
+          onRerun={() => rerunBallScan(debugModal.uploadId)}
           onClose={() => setDebugModal(null)}
         />
       )}

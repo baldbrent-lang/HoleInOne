@@ -472,6 +472,12 @@ export const api = {
       adminPassword: key,
       body: { roi },
     }),
+  rescanBall: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/rescan-ball`, {
+      method: "POST",
+      adminPassword: key,
+      timeoutMs: 120000,
+    }),
   processLongUploadSegment: (
     key,
     uploadId,
