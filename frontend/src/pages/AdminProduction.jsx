@@ -3540,21 +3540,48 @@ function ProduceDebugModal({ data, onClose }) {
               <div className="small" style={{ color: "#c0392b" }}>
                 {data.ball.reason}
               </div>
+            ) : (data.ball.departures || []).length === 0 ? (
+              <div className="small muted">No resting-ball departures found.</div>
             ) : (
-              <div className="small muted">
-                {(data.ball.departures || []).length === 0
-                  ? "No resting-ball departures found."
-                  : (data.ball.departures || [])
-                      .map(
-                        (d) =>
-                          `${d.t}s (rested ${d.rest_sec ?? "?"}s @ ${d.x},${d.y})`,
-                      )
-                      .join("  ·  ")}
+              <div
+                style={{
+                  display: "flex", flexWrap: "wrap", gap: 10, marginTop: 6,
+                }}
+              >
+                {(data.ball.departures || []).map((d, i) => (
+                  <div key={i} style={{ width: 220, maxWidth: "100%" }}>
+                    {d.image_url ? (
+                      <a href={d.image_url} target="_blank" rel="noreferrer">
+                        <img
+                          src={d.image_url}
+                          alt={`ball ${i + 1}`}
+                          style={{ width: "100%", borderRadius: 6, display: "block" }}
+                        />
+                      </a>
+                    ) : (
+                      <div
+                        className="small muted"
+                        style={{
+                          height: 120, display: "flex", alignItems: "center",
+                          justifyContent: "center",
+                          border: "1px dashed rgba(120,120,120,0.4)", borderRadius: 6,
+                        }}
+                      >
+                        (no screenshot)
+                      </div>
+                    )}
+                    <div className="small muted" style={{ marginTop: 2 }}>
+                      swing {i + 1}: departs {d.t}s · rested {d.rest_sec ?? "?"}s
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
-            <div className="small muted" style={{ marginTop: 4 }}>
-              A resting white ball that suddenly departs = one swing. Compare
-              the orange marks above against the green motion-detector marks.
+            <div className="small muted" style={{ marginTop: 6 }}>
+              Each screenshot is grabbed mid-rest with a ring at the detected
+              ball — check it's actually on the ball. A resting white ball that
+              suddenly departs = one swing (orange marks above vs green
+              motion-detector marks).
             </div>
           </div>
         )}

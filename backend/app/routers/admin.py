@@ -68,6 +68,7 @@ from ..services.ai_tracer import (
     detect_swings_from_audio,
     detect_swings_from_motion,
     detect_swings_from_ball,
+    compute_motion_trace,
     detect_swings_combined,
     filter_swings_by_ball_departure,
 )
@@ -4654,6 +4655,43 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         except Exception as exc:  # noqa: BLE001
             ball_swings = []
             ball_debug = {"reason": f"crashed: {exc}"}
+
+        # Verification screenshot per resting ball: grab a frame mid-rest and
+        # ring the detected ball position so the operator can eyeball accuracy.
+        ball_departures = ball_debug.get("departures") or []
+        if ball_departures:
+            try:
+                import cv2  # type: ignore
+
+                _cap = cv2.VideoCapture(str(src_path))
+                for bi, dep in enumerate(ball_departures):
+                    rest = float(dep.get("rest_sec") or 1.0)
+                    snap_t = max(0.0, float(dep.get("t") or 0.0) - min(max(rest / 2.0, 0.3), 1.5))
+                    _cap.set(cv2.CAP_PROP_POS_FRAMES, int(snap_t * tee_fps))
+                    ok_read, fr = _cap.read()
+                    if not ok_read or fr is None:
+                        continue
+                    x, y = int(dep.get("x") or 0), int(dep.get("y") or 0)
+                    fh = fr.shape[0]
+                    rad = max(14, int(round(fh * 0.02)))
+                    cv2.circle(fr, (x, y), rad, (0, 255, 255), 3, cv2.LINE_AA)
+                    cv2.circle(fr, (x, y), 2, (0, 0, 255), -1, cv2.LINE_AA)
+                    cv2.putText(
+                        fr, f"ball @ {snap_t:.1f}s", (max(0, x - 50), max(22, y - rad - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA,
+                    )
+                    iname = f"debug-ball-{upload_id}-{bi}-{secrets.token_hex(4)}.jpg"
+                    ipath = CLIPS_DIR / iname
+                    cv2.imwrite(str(ipath), fr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                    if ipath.exists():
+                        dep["image_url"] = (
+                            f"{settings.app_base_url}/uploads/clips/{iname}"
+                            f"?v={int(ipath.stat().st_mtime)}"
+                        )
+                _cap.release()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("produce-debug: ball screenshot failed: %s", exc)
+
         if motion_only:
             detected = filter_swings_by_ball_departure(
                 src_path, motion_swings, tee_fps,
@@ -4663,20 +4701,32 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         else:
             detected = detect_swings_combined(src_path, fps=tee_fps)
 
+        # Full-rate (30 Hz) motion trace for the chart — avoids the 10 Hz
+        # aliasing that made identical swings plot at different heights. Falls
+        # back to the detector's own 10 Hz series if it can't run.
+        trace = None
+        try:
+            trace = compute_motion_trace(src_path, fps=tee_fps)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("produce-debug: motion trace failed: %s", exc)
+
         with _produce_debug_lock:
             st = _produce_debug_state[upload_id]
             st["total"] = len(detected)
             st["motion"] = {
-                "series": motion_debug.get("motion_series"),
-                "duration_sec": motion_debug.get("duration_sec"),
-                "median": motion_debug.get("median_motion"),
-                "threshold": motion_debug.get("threshold"),
-                "hz": motion_debug.get("effective_hz"),
+                "series": (trace or {}).get("series") or motion_debug.get("motion_series"),
+                "duration_sec": (trace or {}).get("duration_sec")
+                or motion_debug.get("duration_sec"),
+                "median": (trace or {}).get("median", motion_debug.get("median_motion")),
+                "threshold": (trace or {}).get("threshold", motion_debug.get("threshold")),
+                "hz": (trace or {}).get("hz", motion_debug.get("effective_hz")),
                 "n_raw": motion_debug.get("n_raw_bursts"),
                 "n_final": motion_debug.get("n_final"),
                 "bursts": motion_debug.get("top_raw_bursts"),
+                # Green markers = the MOTION detector's own swings, so they
+                # line up with the blue motion line for a fair comparison.
                 "swing_peaks": [
-                    round(float(d.get("peak_time_sec") or 0.0), 2) for d in detected
+                    round(float(d.get("peak_time_sec") or 0.0), 2) for d in motion_swings
                 ],
             }
             st["ball"] = {

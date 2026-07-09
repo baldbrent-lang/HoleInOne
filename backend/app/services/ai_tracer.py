@@ -4109,6 +4109,84 @@ def detect_swings_from_ball(
     return segments
 
 
+def compute_motion_trace(
+    input_path: Path,
+    fps: float | None = None,
+    target_hz: float = 30.0,
+    sample_height: int = 180,
+    smooth_sec: float = 0.12,
+    motion_ratio: float = 4.0,
+    max_pts: int = 900,
+) -> dict | None:
+    """Full-rate motion trace for the DEBUG chart only.
+
+    Same mean-pixel-difference signal as detect_swings_from_motion, but
+    sampled at target_hz (default the full 30 Hz) instead of 10 Hz, so a
+    ~33 ms downswing peak can't fall between samples and get aliased away —
+    which made physically-identical swings plot at wildly different heights.
+    Returns {series, hz, duration_sec, median, threshold} for plotting, or
+    None if it can't run. Does not affect swing detection.
+    """
+    if not HAS_CV or not HAS_NP:
+        return None
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return None
+    try:
+        src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if src_fps <= 0:
+            src_fps = 30.0
+        step = max(1, int(round(src_fps / target_hz)))
+        eff_hz = src_fps / step
+        diffs: list[float] = []
+        prev = None
+        idx = -1
+        while True:
+            idx += 1
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            if idx % step != 0:
+                continue
+            h, w = frame.shape[:2]
+            if h > sample_height:
+                sc = sample_height / float(h)
+                frame = cv2.resize(
+                    frame, (max(1, int(w * sc)), sample_height),
+                    interpolation=cv2.INTER_AREA,
+                )
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if prev is not None:
+                diffs.append(float(cv2.absdiff(gray, prev).mean()))
+            prev = gray
+    finally:
+        cap.release()
+
+    if len(diffs) < 4:
+        return None
+    motion = np.asarray(diffs, dtype=np.float32)
+    win = max(1, int(round(smooth_sec * eff_hz)))
+    if 1 < win < motion.size:
+        motion = np.convolve(motion, np.ones(win, np.float32) / win, mode="same")
+    median = float(np.median(motion)) or 1e-6
+    threshold = median * motion_ratio
+    duration = (len(diffs) - 1) / eff_hz if eff_hz > 0 else 0.0
+    series = motion
+    if series.size > max_pts:
+        b = int(np.ceil(series.size / max_pts))
+        pad = (-series.size) % b
+        if pad:
+            series = np.concatenate([series, np.full(pad, series[-1], series.dtype)])
+        series = series.reshape(-1, b).max(axis=1)
+    return {
+        "series": [round(float(v), 4) for v in series],
+        "hz": float(eff_hz),
+        "duration_sec": float(duration),
+        "median": float(median),
+        "threshold": float(threshold),
+    }
+
+
 def detect_swings_from_audio(
     input_path: Path,
     fps: float | None = None,
