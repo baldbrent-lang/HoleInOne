@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import { fmtDateTime } from "../time.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -96,7 +97,7 @@ export default function AdminReview() {
                   <span className={`pill ${pillClass(e.status)}`}>{e.status}</span>
                 </div>
                 <div className="small muted" style={{ marginTop: 2 }}>
-                  participant #{e.participant_id} · {new Date(e.created_at).toLocaleString()}
+                  participant #{e.participant_id} · {fmtDateTime(e.created_at)}
                 </div>
               </button>
             ))}

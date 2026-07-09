@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import { fmtDateTime } from "../time.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -123,7 +124,7 @@ export default function AdminClips() {
                 <b>Clip #{c.id}</b>{" "}
                 <span className="muted small">
                   · {c.course_name || `course #${c.course_id}`} · hole {c.hole_number}{" "}
-                  · {c.captured_at ? new Date(c.captured_at).toLocaleString() : "—"}
+                  · {fmtDateTime(c.captured_at)}
                   {c.fps != null && (
                     <> · <code>{c.fps}</code> fps</>
                   )}

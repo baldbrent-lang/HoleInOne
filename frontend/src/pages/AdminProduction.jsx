@@ -20,18 +20,14 @@ import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
 import { useInfiniteList } from "../hooks/useInfiniteList.js";
+import { parseApiDate } from "../time.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
 
 function fmtDateTime(iso) {
-  if (!iso) return "—";
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString();
-  } catch {
-    return iso;
-  }
+  const d = parseApiDate(iso);
+  return d ? d.toLocaleString() : "—";
 }
 
 function fmtDuration(sec) {
@@ -44,11 +40,9 @@ function fmtDuration(sec) {
 
 function addSeconds(iso, sec) {
   if (!iso || sec == null) return null;
-  try {
-    return new Date(new Date(iso).getTime() + sec * 1000).toISOString();
-  } catch {
-    return null;
-  }
+  const d = parseApiDate(iso);
+  if (!d) return null;
+  return new Date(d.getTime() + sec * 1000).toISOString();
 }
 
 function uploadState(row) {
@@ -1265,7 +1259,7 @@ function WizardBody({
   // This is the same instant the green camera switches to, so the
   // operator can verify it against the clock overlay on each raw clip.
   const teeStartMs = row?.tee_recording_started_at
-    ? Date.parse(row.tee_recording_started_at)
+    ? parseApiDate(row.tee_recording_started_at)?.getTime() ?? null
     : null;
   const cutClockMs = (teeStartMs != null && effectiveCutFrame != null)
     ? teeStartMs + (effectiveCutFrame / fps) * 1000
@@ -3287,7 +3281,7 @@ function fmtClock(ms) {
 function VideoLightbox({ url, title, startedAt, fps, onClose }) {
   const videoRef = useRef(null);
   const [curTime, setCurTime] = useState(0);
-  const startMs = startedAt ? Date.parse(startedAt) : null;
+  const startMs = startedAt ? parseApiDate(startedAt)?.getTime() ?? null : null;
   const hasFps = !!(fps && fps > 0);
   const showOverlay = startMs != null || hasFps;
 

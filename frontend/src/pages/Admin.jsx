@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, API_BASE } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import { fmtDateTime } from "../time.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -185,7 +186,7 @@ export default function Admin() {
                 <span className={`pill ${c.status === "flagged" ? "err" : "warn"}`}>{c.status}</span>
               </div>
               <div className="small muted" style={{ marginTop: 4 }}>
-                {new Date(c.captured_at).toLocaleString()}{c.note ? ` · ${c.note}` : ""}
+                {fmtDateTime(c.captured_at)}{c.note ? ` · ${c.note}` : ""}
               </div>
               {c.candidates?.length > 0 && (
                 <div style={{ marginTop: 10 }}>

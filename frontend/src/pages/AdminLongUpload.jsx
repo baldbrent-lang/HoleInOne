@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import { fmtDateTime } from "../time.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -345,7 +346,7 @@ export default function AdminLongUpload() {
                       <span style={{ marginLeft: 4 }}>{statusPill}</span>{" "}
                       <span className="muted">
                         · {u.course_name || `course #${u.course_id}`}{" "}
-                        · {u.base_captured_at ? new Date(u.base_captured_at).toLocaleString() : "—"}
+                        · {fmtDateTime(u.base_captured_at)}
                         {u.dual_camera && <> · <span className="pill small">dual-cam</span></>}
                       </span>
                       <div className="tiny muted" style={{ marginTop: 2 }}>
