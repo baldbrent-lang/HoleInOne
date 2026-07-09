@@ -451,6 +451,10 @@ export const api = {
     request(`/api/admin/mirror-from-prod`, { method: "POST", adminPassword: key }),
   mirrorFromProdStatus: (key) =>
     request(`/api/admin/mirror-from-prod/status`, { adminPassword: key }),
+  scanNonGolf: (key) =>
+    request(`/api/admin/scan-non-golf`, { method: "POST", adminPassword: key }),
+  scanNonGolfStatus: (key) =>
+    request(`/api/admin/scan-non-golf/status`, { adminPassword: key }),
   processLongUploadSegment: (
     key,
     uploadId,

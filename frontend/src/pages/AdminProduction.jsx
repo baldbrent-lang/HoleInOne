@@ -3411,6 +3411,45 @@ export default function AdminProduction() {
   // "Pull new from prod" — server-side mirror. Hidden unless the backend
   // is configured (MIRROR_COURSE_ID set on this deployment).
   const [mirror, setMirror] = useState({ configured: false, running: false });
+  // "Scan for non-golf videos" — dev tool. Pre-checks the delete boxes on
+  // clips that don't look like a real golf shot. Hidden unless the backend
+  // enables it (SCAN_NON_GOLF_ENABLED on this deployment).
+  const [scan, setScan] = useState({ enabled: false, running: false });
+
+  function pollScan() {
+    const tick = async () => {
+      try {
+        const s = await api.scanNonGolfStatus(adminPassword);
+        setScan(s);
+        if (s.running) {
+          setTimeout(tick, 2000);
+        } else {
+          // Pre-check every flagged upload that's currently loaded on the page.
+          const loaded = new Set((rows || []).map((r) => r.id));
+          const flagged = (s.flagged || []).filter((id) => loaded.has(id));
+          setSelectedIds(new Set(flagged));
+        }
+      } catch {
+        /* transient — stop polling */
+      }
+    };
+    tick();
+  }
+
+  async function handleScanNonGolf() {
+    setError(null);
+    try {
+      const r = await api.scanNonGolf(adminPassword);
+      if (r && r.ok === false) {
+        setError(r.error || "Scan is not enabled.");
+        return;
+      }
+      setScan((s) => ({ ...s, running: true, done: 0, total: r.total || 0 }));
+      pollScan();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
 
   function pollMirror() {
     const tick = async () => {
@@ -3450,6 +3489,13 @@ export default function AdminProduction() {
       .then((s) => {
         setMirror(s);
         if (s.running) pollMirror();
+      })
+      .catch(() => {});
+    api
+      .scanNonGolfStatus(adminPassword)
+      .then((s) => {
+        setScan(s);
+        if (s.running) pollScan();
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3701,6 +3747,24 @@ export default function AdminProduction() {
             <span className="small muted">
               imported {mirror.done}
               {mirror.failed ? `, ${mirror.failed} failed` : ""}
+            </span>
+          ) : null}
+          {scan.enabled && (
+            <button
+              className="small"
+              onClick={handleScanNonGolf}
+              disabled={scan.running}
+              style={{ width: "auto" }}
+              title="Scan the loaded clips and pre-check the ones that aren't golf shots (no person / indoor). Nothing is deleted — review, then Delete."
+            >
+              {scan.running
+                ? `Scanning ${scan.done}/${scan.total || "?"}…`
+                : "🔍 Scan for non-golf videos"}
+            </button>
+          )}
+          {scan.enabled && !scan.running && scan.finished_at ? (
+            <span className="small muted">
+              flagged {(scan.flagged || []).length}
             </span>
           ) : null}
           <div style={{ flex: 1 }} />

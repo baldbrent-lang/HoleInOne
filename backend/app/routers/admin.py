@@ -115,6 +115,47 @@ def mirror_from_prod_status():
     return {"configured": bool(settings.mirror_course_id), **mirror.status()}
 
 
+@router.post("/scan-non-golf")
+def scan_non_golf(db: Session = Depends(get_db)):
+    """Scan the Production queue's clips and flag the ones that don't look
+    like a real golf shot (no person / indoor / no grass). Kicks a background
+    scan; poll the status route for progress + the flagged upload ids. The UI
+    only pre-checks those boxes — nothing is deleted. Dev-only tool."""
+    if not settings.scan_non_golf_enabled:
+        return {"ok": False, "error": "Scan is not enabled on this deployment."}
+    from ..services import golf_scene
+
+    # Scan the tee angle of every long-upload row (fall back to green), pulling
+    # the file back from object storage first if the ephemeral disk lost it.
+    rows = (
+        db.query(LongVideoUpload)
+        .order_by(LongVideoUpload.created_at.desc())
+        .all()
+    )
+    items: list[tuple[int, Path]] = []
+    for r in rows:
+        name = r.tee_filename or r.green_filename
+        if not name:
+            continue
+        storage.ensure_local(CLIPS_DIR, name)
+        path = CLIPS_DIR / name
+        if path.exists():
+            items.append((r.id, path))
+    if not golf_scene.start_scan(items):
+        return {"ok": False, "error": "A scan is already running."}
+    return {"ok": True, "total": len(items)}
+
+
+@router.get("/scan-non-golf/status")
+def scan_non_golf_status():
+    """Progress of the current/last non-golf scan + whether the tool is
+    enabled (so the UI can show/hide the button). `flagged` is the list of
+    upload ids the UI should pre-check."""
+    from ..services import golf_scene
+
+    return {"enabled": bool(settings.scan_non_golf_enabled), **golf_scene.status()}
+
+
 @router.post("/courses", response_model=CourseOut)
 def create_course(payload: CourseCreate, db: Session = Depends(get_db)):
     course = Course(

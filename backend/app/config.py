@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     mirror_source_password: str = ""
     mirror_course_id: int = 0
 
+    # "Scan for non-golf videos" — a dev course-testing tool that scans the
+    # Production queue's clips and pre-checks the ones that don't look like a
+    # real golf shot (no person, or an indoor/grass-less scene), so garbage
+    # can be bulk-deleted. Only CHECKS boxes; never deletes. Set env
+    # SCAN_NON_GOLF_ENABLED=1 on the DEV deployment to show the button.
+    scan_non_golf_enabled: bool = False
+
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2
