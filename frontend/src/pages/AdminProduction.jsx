@@ -3679,13 +3679,23 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                 ) : (
                   " · (no ROI set — whole frame)"
                 )}{" "}
-                · rested ≥{data.ball.min_rest_sec ?? 1}s: <b>{data.ball.n_rested}</b>
+                · rested ≥{data.ball.min_rest_sec ?? 0.8}s: <b>{data.ball.n_rested}</b>
+                {data.ball.n_departures_pre_gate != null && (
+                  <>
+                    {" "}· departures: <b>{data.ball.n_departures_pre_gate}</b>
+                    {data.ball.motion_gated ? (
+                      <> → motion-confirmed swings: <b>{data.ball.n ?? 0}</b></>
+                    ) : (
+                      " (motion gate unavailable)"
+                    )}
+                  </>
+                )}
                 {data.ball.n_cand_total === 0
                   ? " → ball isn't passing the white/size filter"
                   : data.ball_roi && data.ball.n_cand_in_roi === 0
                     ? " → ball is outside your box; move it"
                     : data.ball.n_rested === 0
-                      ? " → nothing held still long enough"
+                      ? " → nothing held still long enough (club may be hiding it)"
                       : ""}
               </div>
             )}

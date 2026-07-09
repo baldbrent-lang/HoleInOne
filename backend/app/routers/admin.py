@@ -4642,12 +4642,39 @@ def _ball_debug_and_ref(src_path: Path, tee_fps: float, upload_id: int, roi):
 
     ball_debug: dict = {}
     try:
-        ball_swings = detect_swings_from_ball(
-            src_path, fps=tee_fps, roi=roi, debug=ball_debug,
-        )
+        detect_swings_from_ball(src_path, fps=tee_fps, roi=roi, debug=ball_debug)
     except Exception as exc:  # noqa: BLE001
-        ball_swings = []
         ball_debug = {"reason": f"crashed: {exc}"}
+
+    # Motion-gate: a real impact departure coincides with a swing motion
+    # burst; the club settling at address does not. Using the FULL-RATE trace
+    # (no 10 Hz aliasing), keep only departures with a motion spike within
+    # motion_gate_sec, and snap the impact time to that local peak.
+    motion_gate_sec = 1.5
+    pre_gate = ball_debug.get("departures") or []
+    try:
+        _trace = compute_motion_trace(src_path, fps=tee_fps)
+    except Exception:  # noqa: BLE001
+        _trace = None
+    gated_departures = pre_gate
+    if _trace and _trace.get("series"):
+        _series = _trace["series"]
+        _n = len(_series)
+        _dur = float(_trace.get("duration_sec") or (_n - 1)) or 1.0
+        _thr = float(_trace.get("threshold") or 0.0)
+        _idx = lambda tt: max(0, min(_n - 1, int(tt / _dur * (_n - 1))))
+        _tof = lambda ii: (ii / (_n - 1)) * _dur if _n > 1 else 0.0
+        gated_departures = []
+        for dep in pre_gate:
+            t = float(dep.get("t") or 0.0)
+            lo, hi = _idx(t - motion_gate_sec), _idx(t + motion_gate_sec)
+            window = _series[lo:hi + 1] or [0.0]
+            peak_v = max(window)
+            if peak_v > _thr:
+                pk_i = lo + window.index(peak_v)
+                gated_departures.append(
+                    dict(dep, t=round(_tof(pk_i), 2), motion=round(peak_v, 3))
+                )
 
     def _url(name: str) -> str | None:
         p = CLIPS_DIR / name
@@ -4687,12 +4714,11 @@ def _ball_debug_and_ref(src_path: Path, tee_fps: float, upload_id: int, roi):
         cv2.imwrite(str(CLIPS_DIR / dname), diag, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         diag_url = _url(dname)
 
-    # Ringed screenshot per departure.
-    ball_departures = ball_debug.get("departures") or []
-    if ball_departures:
+    # Ringed screenshot per (motion-gated) departure = confirmed swing.
+    if gated_departures:
         try:
             _c = cv2.VideoCapture(str(src_path))
-            for bi, dep in enumerate(ball_departures):
+            for bi, dep in enumerate(gated_departures):
                 rest = float(dep.get("rest_sec") or 1.0)
                 snap_t = max(0.0, float(dep.get("t") or 0.0) - min(max(rest / 2.0, 0.3), 1.5))
                 _c.set(cv2.CAP_PROP_POS_FRAMES, int(snap_t * tee_fps))
@@ -4715,16 +4741,19 @@ def _ball_debug_and_ref(src_path: Path, tee_fps: float, upload_id: int, roi):
             log.warning("produce-debug: ball screenshot failed: %s", exc)
 
     ball_dict = {
-        "n": ball_debug.get("n_departures", len(ball_swings)),
+        "n": len(gated_departures),
         "reason": ball_debug.get("reason"),
-        "departures": ball_departures,
-        "peaks": [round(float(s.get("peak_time_sec") or 0.0), 2) for s in ball_swings],
+        "departures": gated_departures,
+        "peaks": [round(float(d.get("t") or 0.0), 2) for d in gated_departures],
         "diag_url": diag_url,
         "n_cand_total": ball_debug.get("n_cand_total"),
         "n_cand_in_roi": ball_debug.get("n_cand_in_roi"),
         "n_tracks": ball_debug.get("n_tracks"),
         "n_rested": ball_debug.get("n_rested"),
         "min_rest_sec": ball_debug.get("min_rest_sec"),
+        # v2: how many resting-ball departures the motion gate kept vs saw.
+        "n_departures_pre_gate": len(pre_gate),
+        "motion_gated": _trace is not None and bool(_trace.get("series")),
     }
     return ball_dict, ref_frame_url, frame_w, frame_h
 

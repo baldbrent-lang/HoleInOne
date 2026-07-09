@@ -3923,8 +3923,8 @@ def detect_swings_from_ball(
     input_path: Path,
     fps: float | None = None,
     sample_hz: float = 15.0,
-    min_rest_sec: float = 1.0,
-    departure_confirm_sec: float = 0.4,
+    min_rest_sec: float = 0.8,
+    occlusion_tol_sec: float = 1.5,
     min_separation_sec: float = 4.0,
     before_sec: float = 3.5,
     after_sec: float = 5.0,
@@ -3932,7 +3932,7 @@ def detect_swings_from_ball(
     white_s_max: int = 90,
     min_ball_frac: float = 0.00002,
     max_ball_frac: float = 0.006,
-    circularity_min: float = 0.55,
+    circularity_min: float = 0.45,
     stationary_tol_frac: float = 0.018,
     roi: dict | None = None,
     debug: dict | None = None,
@@ -3940,18 +3940,27 @@ def detect_swings_from_ball(
     """Find swings by tracking a resting white ball that suddenly departs.
 
     A real golf shot is the one event that makes a stationary ball leave:
-    the ball sits still on the mat for a couple of seconds, then is struck
-    and vanishes from that spot. Practice swings, walk-bys and ball pickups
-    don't produce that signature, so counting ball departures gives the
-    correct swing count — and hands the ball position + impact frame to the
-    tracer for free.
+    the ball sits still on the mat, then is struck and vanishes from that
+    spot. Practice swings, walk-bys and ball pickups don't produce that
+    signature, so counting ball departures gives the correct swing count —
+    and hands the ball position + impact frame to the tracer for free.
 
-    Method: sample ~15 Hz, mask bright low-saturation (white) blobs, keep
-    ball-sized round ones, and track those that hold still. A track that
-    stayed put for >= min_rest_sec then disappears for
-    departure_confirm_sec is a departure = one swing (peak_time_sec = the
-    moment it left). Departures within min_separation_sec collapse to the
-    longer-rested one (address-time occlusion vs the real impact).
+    v2 — occlusion-tolerant. From behind the golfer the club sole settles
+    behind the ball at address and partially (or briefly fully) hides it, so
+    the ball is rarely visible cleanly for a full second at a stretch. Two
+    changes handle that:
+      * circularity_min is relaxed so a partially-occluded *crescent* of the
+        ball still counts (the club covering part of it doesn't drop the
+        detection), and
+      * a track survives being unmatched for up to occlusion_tol_sec (the ball
+        flickering behind the moving club) and only DEPARTS after a sustained
+        absence longer than that — i.e. the real impact, when it's gone for
+        good. Rest is measured as the span (first→last sighting), tolerating
+        internal occlusion gaps.
+
+    The caller (produce-debug) then motion-gates departures: only a departure
+    that coincides with a swing motion burst counts, which separates "club
+    arrived at address" from "ball actually struck".
 
     Returns the same segment shape as detect_swings_from_motion (plus
     ball_x / ball_y / rest_sec). Empty + a debug reason on any failure;
@@ -4064,7 +4073,7 @@ def detect_swings_from_ball(
                 tr["y"] = 0.7 * tr["y"] + 0.3 * cy
                 tr["last_t"] = t
                 tr["hits"] += 1
-            elif t - tr["last_t"] >= departure_confirm_sec:
+            elif t - tr["last_t"] >= occlusion_tol_sec:
                 rest_dur = tr["last_t"] - tr["first_t"]
                 if rest_dur >= min_rest_sec:
                     departures.append((tr["last_t"], tr["x"], tr["y"], rest_dur))
