@@ -1276,6 +1276,23 @@ def _run_long_upload_job(
         row.last_error = None
         db.commit()
 
+        # Re-produce REPLACES, not accumulates: clear any clips from a prior
+        # run of this upload so a re-detect (e.g. motion's 3 → pose's 1)
+        # doesn't leave stale clips behind. Best-effort.
+        try:
+            _old = db.query(VideoClip).filter(VideoClip.long_upload_id == upload_id).all()
+            for _c in _old:
+                db.delete(_c)
+            if _old:
+                db.commit()
+                log.info(
+                    "long-upload worker: cleared %d prior clip(s) for upload %s",
+                    len(_old), upload_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log.warning("long-upload worker: could not clear prior clips: %s", exc)
+
         try:
             # Rehydrate the raw source(s) from object storage if the
             # ephemeral disk lost them (e.g. re-producing after a redeploy).
