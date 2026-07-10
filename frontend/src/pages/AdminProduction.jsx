@@ -3599,8 +3599,8 @@ function TeeBoxRoi({ refUrl, initialRoi, courseId, adminPassword, onSaved }) {
   );
 }
 
-// Pose wrist-HEIGHT waveform. Hands rise above the address level at the top
-// of the backswing; each peak above the threshold is a detected swing.
+// Pose wrist-SPEED waveform. A swing is a burst of fast wrist motion
+// (backswing + downswing); each burst above the threshold is a swing.
 function PoseChart({ pose }) {
   if (!pose || !Array.isArray(pose.series) || pose.series.length < 2) return null;
   const series = pose.series;
@@ -3620,8 +3620,8 @@ function PoseChart({ pose }) {
   return (
     <div style={{ marginTop: 6, marginBottom: 6 }}>
       <div className="small muted" style={{ marginBottom: 4 }}>
-        Wrist height above address — a swing is a peak (top of backswing) above
-        the <span style={{ color: "#e74c3c" }}>red threshold</span>;{" "}
+        Wrist speed — a swing is a burst above the{" "}
+        <span style={{ color: "#e74c3c" }}>red threshold</span>;{" "}
         <span style={{ color: "#9b59b6" }}>purple</span> marks detected swings.
       </div>
       <svg
@@ -3750,8 +3750,9 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             {data.pose.available ? (
               <>
                 <div className="small muted">
-                  wrist-height (top of backswing) · pose tracked{" "}
-                  {data.pose.n_pose_frames ?? 0}/{data.pose.n_samples ?? "?"} frames
+                  reads the golfer's wrist speed (immune to ball occlusion) ·
+                  pose tracked {data.pose.n_pose_frames ?? 0}/
+                  {data.pose.n_samples ?? "?"} frames
                   {data.pose.coverage != null
                     ? ` (${Math.round(data.pose.coverage * 100)}% coverage)`
                     : ""}

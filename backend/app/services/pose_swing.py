@@ -50,9 +50,7 @@ def _get_pose():
         _pose = mp.solutions.pose.Pose(
             static_image_mode=True,
             model_complexity=1,
-            # Low threshold so the fast, motion-blurred swing frames still
-            # register a pose (at 0.5 the golfer drops out mid-swing).
-            min_detection_confidence=0.3,
+            min_detection_confidence=0.5,
         )
         log.info("pose_swing: mediapipe Pose ready")
         return _pose
@@ -107,30 +105,20 @@ def annotate_frame(input_path, time_sec: float, fps: float, out_path) -> bool:
 def detect_swings_from_pose(
     input_path,
     fps: float | None = None,
-    sample_hz: float = 30.0,
+    sample_hz: float = 15.0,
     min_separation_sec: float = 4.0,
     before_sec: float = 3.5,
     after_sec: float = 5.0,
-    amp_thresh: float = 0.07,
-    min_burst_sec: float = 0.2,
+    speed_ratio: float = 4.0,
+    min_burst_sec: float = 0.25,
     max_burst_sec: float = 3.0,
     debug: dict | None = None,
 ) -> list[dict]:
-    """Find swings from the wrist-HEIGHT trajectory (top of backswing).
-
-    Behind the golfer the hands sit low at address (large y) and rise high
-    at the top of the backswing (small y). Wrist *speed* dies in the
-    motion-blurred downswing (pose drops out there), so we key on *height*
-    instead: a large upward excursion of the hands = one swing, and the
-    top-of-backswing is a clear, slow moment pose tracks reliably. The
-    returned peak_time_sec is that top-of-backswing (impact follows ~0.3-0.5s
-    later). Sampled at full rate with a low detection threshold so blurry
-    frames still register.
-
-    Same segment shape as the other detectors. Empty + a debug reason when
-    mediapipe is missing or nothing is found."""
+    """Find swings from wrist-speed bursts. Returns the same segment shape as
+    the other detectors (peak_time_sec / start_sec / end_sec / confidence).
+    Empty + a debug reason when mediapipe is missing or nothing is found."""
     if debug is not None:
-        debug.update({"reason": None, "method": "pose_wrist_height", "available": False})
+        debug.update({"reason": None, "method": "pose_wrist_speed", "available": False})
 
     pose = _get_pose()
     if pose is None:
@@ -200,25 +188,25 @@ def detect_swings_from_pose(
             debug["n_pose_frames"] = int(n_pose)
         return []
 
-    # Wrist HEIGHT signal (interp over pose-dropout gaps, then smooth).
-    y = np.array([w[1] if w is not None else np.nan for w in wrist], dtype=np.float32)
-    valid = ~np.isnan(y)
-    if int(valid.sum()) < 4:
-        if debug is not None:
-            debug["reason"] = f"pose found in only {int(valid.sum())} frame(s)"
-            debug["n_pose_frames"] = int(n_pose)
-        return []
-    xs = np.arange(y.size)
-    y_fill = np.interp(xs, xs[valid], y[valid]).astype(np.float32)
+    # Wrist speed between consecutive samples (0 when either endpoint missing).
+    speed = np.zeros(len(wrist), dtype=np.float32)
+    for i in range(1, len(wrist)):
+        a, b = wrist[i - 1], wrist[i]
+        if a is not None and b is not None:
+            speed[i] = float(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5)
+    # Smooth ~200 ms so one swing is one burst.
     win = max(1, int(round(0.2 * eff_hz)))
-    if 1 < win < y_fill.size:
-        y_fill = np.convolve(y_fill, np.ones(win, np.float32) / win, mode="same")
-    baseline = float(np.median(y[valid]))          # address (hands-low) level
-    height = (baseline - y_fill).astype(np.float32)  # + = hands above address
+    if 1 < win < speed.size:
+        speed = np.convolve(speed, np.ones(win, np.float32) / win, mode="same")
+
+    median = float(np.median(speed[speed > 0])) if np.any(speed > 0) else 0.0
+    if median <= 1e-6:
+        median = 1e-6
+    threshold = median * speed_ratio
+    above = speed > threshold
 
     duration = times[-1] if times else 0.0
-    above = height > amp_thresh
-    bursts = []  # (start_i, end_i, peak_i, peak_v) — one "hands up" region each
+    bursts = []  # (start_i, end_i, peak_i, peak_v)
     i, n = 0, above.size
     while i < n:
         if not above[i]:
@@ -227,7 +215,7 @@ def detect_swings_from_pose(
         j = i
         while j < n and above[j]:
             j += 1
-        seg = height[i:j]
+        seg = speed[i:j]
         pk = int(np.argmax(seg))
         bursts.append((i, j - 1, i + pk, float(seg[pk])))
         i = j
@@ -238,6 +226,7 @@ def detect_swings_from_pose(
         if min_burst_sec <= dur <= max_burst_sec:
             accepted.append((s_i, e_i, p_i, p_v))
 
+    # Non-max suppression by peak separation.
     accepted.sort(key=lambda t: -t[3])
     chosen, keep = [], []
     min_sep = int(min_separation_sec * eff_hz)
@@ -250,20 +239,19 @@ def detect_swings_from_pose(
 
     segments = []
     for s_i, e_i, p_i, p_v in keep:
-        top_t = times[p_i] if p_i < len(times) else (p_i / eff_hz)
-        conf = "high" if p_v >= 0.20 else ("medium" if p_v >= 0.12 else "low")
+        peak_t = times[p_i] if p_i < len(times) else (p_i / eff_hz)
+        ratio = p_v / median if median > 0 else 0.0
+        conf = "high" if ratio >= 10 else ("medium" if ratio >= 6 else "low")
         segments.append({
-            # Anchor at the top of the backswing — clean + reliably tracked;
-            # impact follows ~0.3-0.5s later.
-            "peak_time_sec": float(top_t),
-            "start_sec": float(max(0.0, top_t - before_sec)),
-            "end_sec": float(min(duration, top_t + after_sec)),
+            "peak_time_sec": float(peak_t),
+            "start_sec": float(max(0.0, peak_t - before_sec)),
+            "end_sec": float(min(duration, peak_t + after_sec)),
             "confidence": conf,
-            "height": round(float(p_v), 3),
+            "ratio": round(float(ratio), 1),
         })
 
-    # Decimate the height waveform for plotting (peak-preserving).
-    series = height
+    # Decimate the wrist-speed waveform for plotting (peak-preserving).
+    series = speed
     max_pts = 600
     if series.size > max_pts:
         b = int(np.ceil(series.size / max_pts))
@@ -271,11 +259,9 @@ def detect_swings_from_pose(
         if pad:
             series = np.concatenate([series, np.full(pad, series[-1], series.dtype)])
         series = series.reshape(-1, b).max(axis=1)
-    threshold = amp_thresh
-    median = baseline
 
     log.info(
-        "pose_swing: %d swings (raw regions=%d) pose_frames=%d hz=%.1f",
+        "pose_swing: %d swings (raw bursts=%d) pose_frames=%d hz=%.1f",
         len(keep), len(bursts), n_pose, eff_hz,
     )
     if debug is not None:
@@ -284,11 +270,11 @@ def detect_swings_from_pose(
             "n_pose_frames": int(n_pose),
             "n_samples": int(len(times)),
             "coverage": round(n_pose / len(times), 2) if times else 0.0,
-            "baseline": float(baseline),
+            "median": float(median),
             "threshold": float(threshold),
-            "n_raw_regions": len(bursts),
+            "n_raw_bursts": len(bursts),
             "n_swings": len(keep),
-            "series": [round(float(v), 4) for v in series],
+            "series": [round(float(v), 5) for v in series],
             "peaks": [round(float(s["peak_time_sec"]), 2) for s in segments],
         })
     return segments
