@@ -3599,6 +3599,74 @@ function TeeBoxRoi({ refUrl, initialRoi, courseId, adminPassword, onSaved }) {
   );
 }
 
+// Pose wrist-HEIGHT waveform. Hands rise above the address level at the top
+// of the backswing; each peak above the threshold is a detected swing.
+function PoseChart({ pose }) {
+  if (!pose || !Array.isArray(pose.series) || pose.series.length < 2) return null;
+  const series = pose.series;
+  const n = series.length;
+  const dur = pose.duration_sec || n - 1;
+  const W = 1000;
+  const H = 140;
+  const thr = pose.threshold || 0;
+  const maxV = Math.max(...series, thr, 0.01);
+  const minV = Math.min(...series, 0);
+  const range = maxV - minV || 1;
+  const xOf = (i) => (i / (n - 1)) * W;
+  const yOf = (v) => H - ((v - minV) / range) * (H - 4);
+  const pts = series.map((v, i) => `${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ");
+  const thrY = yOf(thr);
+  const peaks = pose.peaks || [];
+  return (
+    <div style={{ marginTop: 6, marginBottom: 6 }}>
+      <div className="small muted" style={{ marginBottom: 4 }}>
+        Wrist height above address — a swing is a peak (top of backswing) above
+        the <span style={{ color: "#e74c3c" }}>red threshold</span>;{" "}
+        <span style={{ color: "#9b59b6" }}>purple</span> marks detected swings.
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        style={{
+          width: "100%", height: 140, borderRadius: 6,
+          background: "rgba(155,89,182,0.10)",
+        }}
+      >
+        {peaks.map((t, i) => (
+          <line
+            key={`pp${i}`}
+            x1={(t / dur) * W}
+            x2={(t / dur) * W}
+            y1={0}
+            y2={H}
+            stroke="#9b59b6"
+            strokeWidth={2}
+            strokeDasharray="4 3"
+            opacity={0.8}
+          />
+        ))}
+        <line
+          x1={0}
+          x2={W}
+          y1={thrY}
+          y2={thrY}
+          stroke="#e74c3c"
+          strokeWidth={1.5}
+          strokeDasharray="7 5"
+        />
+        <polyline points={pts} fill="none" stroke="#9b59b6" strokeWidth={1.5} />
+      </svg>
+      <div
+        className="small muted"
+        style={{ display: "flex", justifyContent: "space-between" }}
+      >
+        <span>0s</span>
+        <span>{dur.toFixed(0)}s</span>
+      </div>
+    </div>
+  );
+}
+
 // Dev-only diagnostic overlay. Shows, per detected swing, what the
 // classical-CV tracer found (motion heatmap + ball/candidate counts) next
 // to the AI tracer's result on the same swing, so the two can be compared.
@@ -3682,10 +3750,16 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             {data.pose.available ? (
               <>
                 <div className="small muted">
-                  reads the golfer's wrists (immune to ball occlusion) ·
-                  pose found in {data.pose.n_pose_frames ?? 0} frames · purple
-                  marks above = detected swings
+                  wrist-height (top of backswing) · pose tracked{" "}
+                  {data.pose.n_pose_frames ?? 0}/{data.pose.n_samples ?? "?"} frames
+                  {data.pose.coverage != null
+                    ? ` (${Math.round(data.pose.coverage * 100)}% coverage)`
+                    : ""}
+                  {data.pose.coverage != null && data.pose.coverage < 0.5
+                    ? " — low; pose is dropping out"
+                    : ""}
                 </div>
+                <PoseChart pose={data.pose} />
                 {(data.pose.screenshots || []).length > 0 && (
                   <div
                     style={{
