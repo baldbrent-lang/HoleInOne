@@ -3522,12 +3522,27 @@ function PoseChart({ pose }) {
   const pts = series.map((v, i) => `${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`).join(" ");
   const thrY = yOf(thr);
   const peaks = pose.peaks || [];
+  const bursts = Array.isArray(pose.bursts_detail) ? pose.bursts_detail : [];
+  // Human-readable outcome per burst, for the markers + list below.
+  const BURST_META = {
+    swing: { color: "#9b59b6", label: "swing" },
+    upright: { color: "#e67e22", label: "upright — no forward tilt" },
+    bend_unknown_weak: { color: "#e67e22", label: "posture unclear, too weak" },
+    too_short: { color: "#7f8c8d", label: "burst too short" },
+    too_long: { color: "#7f8c8d", label: "burst too long" },
+    nms_suppressed: { color: "#7f8c8d", label: "merged with a nearer swing" },
+  };
+  const metaFor = (s) => BURST_META[s] || { color: "#7f8c8d", label: s || "?" };
+  const dropped = bursts.filter((b) => b.status !== "swing");
   return (
     <div style={{ marginTop: 6, marginBottom: 6 }}>
       <div className="small muted" style={{ marginBottom: 4 }}>
         Wrist speed — a swing is a burst above the{" "}
         <span style={{ color: "#e74c3c" }}>red threshold</span>;{" "}
-        <span style={{ color: "#9b59b6" }}>purple</span> marks detected swings.
+        <span style={{ color: "#9b59b6" }}>purple</span> marks detected swings,{" "}
+        <span style={{ color: "#e67e22" }}>orange</span>/{" "}
+        <span style={{ color: "#7f8c8d" }}>grey</span> mark bursts that were
+        dropped (hover for why).
       </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
@@ -3560,6 +3575,27 @@ function PoseChart({ pose }) {
           strokeDasharray="7 5"
         />
         <polyline points={pts} fill="none" stroke="#9b59b6" strokeWidth={1.5} />
+        {bursts.map((b, i) => {
+          const m = metaFor(b.status);
+          const isSwing = b.status === "swing";
+          return (
+            <g key={`b${i}`}>
+              <circle
+                cx={(b.t / dur) * W}
+                cy={8}
+                r={isSwing ? 5 : 4}
+                fill={m.color}
+                opacity={isSwing ? 1 : 0.85}
+              >
+                <title>
+                  {`${b.t}s · ratio ${b.ratio}× · ${b.dur}s · bend ${
+                    b.bend == null ? "n/a" : `${b.bend}°`
+                  } → ${m.label}`}
+                </title>
+              </circle>
+            </g>
+          );
+        })}
       </svg>
       <div
         className="small muted"
@@ -3568,6 +3604,32 @@ function PoseChart({ pose }) {
         <span>0s</span>
         <span>{dur.toFixed(0)}s</span>
       </div>
+      {dropped.length > 0 && (
+        <div className="tiny muted" style={{ marginTop: 6, lineHeight: 1.7 }}>
+          <b>Dropped bursts:</b>{" "}
+          {dropped.map((b, i) => {
+            const m = metaFor(b.status);
+            return (
+              <span
+                key={`d${i}`}
+                style={{
+                  display: "inline-block",
+                  marginRight: 8,
+                  padding: "1px 7px",
+                  borderRadius: 999,
+                  border: `1px solid ${m.color}`,
+                  color: m.color,
+                }}
+                title={`ratio ${b.ratio}× · ${b.dur}s · bend ${
+                  b.bend == null ? "n/a" : `${b.bend}°`
+                }`}
+              >
+                {b.t}s · {m.label}
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -5148,7 +5148,9 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 "n_swings": pose_debug.get("n_swings"),
                 "n_bend_rejected": pose_debug.get("n_bend_rejected"),
                 "back_bend_min_deg": pose_debug.get("back_bend_min_deg"),
+                "strong_ratio": pose_debug.get("strong_ratio"),
                 "peaks": pose_debug.get("peaks") or [],
+                "bursts_detail": pose_debug.get("bursts_detail") or [],
                 "screenshots": pose_shots,
             }
             st["ai_ball"] = ai_ball_dict

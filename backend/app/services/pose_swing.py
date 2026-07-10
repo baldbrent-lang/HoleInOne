@@ -141,6 +141,7 @@ def detect_swings_from_pose(
     min_burst_sec: float = 0.25,
     max_burst_sec: float = 3.0,
     back_bend_min_deg: float = 15.0,
+    strong_ratio: float = 6.0,
     start_sec: float = 0.0,
     max_scan_sec: float | None = None,
     debug: dict | None = None,
@@ -295,10 +296,17 @@ def detect_swings_from_pose(
         bursts.append((i, j - 1, i + pk, float(seg[pk])))
         i = j
 
+    # Duration-gate each raw burst; remember WHY each dropped one was dropped
+    # so the debug view can explain a missed swing instead of it vanishing.
     accepted = []
+    burst_status: dict[int, str] = {}  # peak sample index -> outcome
     for s_i, e_i, p_i, p_v in bursts:
         dur = (e_i - s_i) / eff_hz if eff_hz > 0 else 0.0
-        if min_burst_sec <= dur <= max_burst_sec:
+        if dur < min_burst_sec:
+            burst_status[p_i] = "too_short"
+        elif dur > max_burst_sec:
+            burst_status[p_i] = "too_long"
+        else:
             accepted.append((s_i, e_i, p_i, p_v))
 
     # Non-max suppression by peak separation.
@@ -307,6 +315,7 @@ def detect_swings_from_pose(
     min_sep = int(min_separation_sec * eff_hz)
     for s_i, e_i, p_i, p_v in accepted:
         if any(abs(p_i - c) < min_sep for c in chosen):
+            burst_status[p_i] = "nms_suppressed"
             continue
         chosen.append(p_i)
         keep.append((s_i, e_i, p_i, p_v))
@@ -332,15 +341,31 @@ def detect_swings_from_pose(
     n_bend_rejected = 0
     for s_i, e_i, p_i, p_v in keep:
         b = _bend_near(p_i)
-        # A swing requires BOTH a fast-hands burst AND a bent-over spine.
-        # Reject when the golfer is standing upright, AND when the spine bend
-        # can't be confirmed at all (pose lost the torso) — both conditions
-        # must be positively present, not merely "not disproven".
-        if b is None or b < back_bend_min_deg:
+        ratio = p_v / median if median > 0 else 0.0
+        # A swing needs a fast-hands burst AND a bent-over spine — but an
+        # UNKNOWN bend must not veto an obviously-real swing. During the fast,
+        # motion-blurred downswing MediaPipe routinely drops the torso, so the
+        # spine angle at the peak (and sometimes across the whole address→
+        # impact window) is unmeasurable and comes back None. Reject only when
+        # we can POSITIVELY see it's not a swing:
+        #   - a MEASURED-but-upright spine (b present, below the tilt floor):
+        #     fast hands with no forward bend — not a golf swing.
+        #   - a WEAK burst whose posture we couldn't confirm (b None and the
+        #     peak isn't far above baseline): could be someone walking through
+        #     frame or a stray landmark jump.
+        # Accept a bent spine at any strength, AND a burst far above baseline
+        # (>= strong_ratio) even when the spine couldn't be measured — a real
+        # impact towers over the resting-hands median, a trot/walk does not.
+        if b is not None and b < back_bend_min_deg:
+            burst_status[p_i] = "upright"
             n_bend_rejected += 1
             continue
+        if b is None and ratio < strong_ratio:
+            burst_status[p_i] = "bend_unknown_weak"
+            n_bend_rejected += 1
+            continue
+        burst_status[p_i] = "swing"
         peak_t = times[p_i] if p_i < len(times) else (p_i / eff_hz)
-        ratio = p_v / median if median > 0 else 0.0
         conf = "high" if ratio >= 10 else ("medium" if ratio >= 6 else "low")
         segments.append({
             "peak_time_sec": float(peak_t),
@@ -348,7 +373,7 @@ def detect_swings_from_pose(
             "end_sec": float(min(duration, peak_t + after_sec)),
             "confidence": conf,
             "ratio": round(float(ratio), 1),
-            "back_bend_deg": round(float(b), 1),
+            "back_bend_deg": (round(float(b), 1) if b is not None else None),
         })
 
     # Decimate the wrist-speed waveform for plotting (peak-preserving).
@@ -376,10 +401,26 @@ def detect_swings_from_pose(
             "n_raw_bursts": len(bursts),
             "n_bend_rejected": int(n_bend_rejected),
             "back_bend_min_deg": float(back_bend_min_deg),
+            "strong_ratio": float(strong_ratio),
             "n_swings": len(segments),
             "reached_eof": reached_eof,
             "series": [round(float(v), 5) for v in series],
             "peaks": [round(float(s["peak_time_sec"]), 2) for s in segments],
             "swing_bends": [s.get("back_bend_deg") for s in segments],
         })
+        # Per-burst breakdown: every candidate the detector saw, with why it
+        # was kept or dropped, so a missed swing is diagnosable at a glance.
+        detail = []
+        for s_i, e_i, p_i, p_v in bursts:
+            t = times[p_i] if p_i < len(times) else p_i / eff_hz
+            bd = _bend_near(p_i)
+            detail.append({
+                "t": round(float(t), 2),
+                "ratio": round(float(p_v / median) if median > 0 else 0.0, 1),
+                "dur": round((e_i - s_i) / eff_hz, 2) if eff_hz > 0 else 0.0,
+                "bend": (round(float(bd), 0) if bd is not None else None),
+                "status": burst_status.get(p_i, "?"),
+            })
+        detail.sort(key=lambda d: d["t"])
+        debug["bursts_detail"] = detail
     return segments
