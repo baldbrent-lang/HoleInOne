@@ -1408,6 +1408,9 @@ def _run_long_upload_job(
                             "end_sec": d["end_sec"],
                             "peak_time_sec": d.get("peak_time_sec"),
                             "ball_verdict": d.get("ball_verdict"),
+                            # Pose hands-at-impact position — the tracer's
+                            # start anchor when the ball can't be seen.
+                            "impact_wrist_xy": d.get("impact_wrist_xy"),
                         }
                     )
                 if not segs:
@@ -1832,7 +1835,9 @@ def _process_long_upload_segments(
             # Ball-flight tracer — AI by default (settings.tracer_engine),
             # classical fallback. The cut to green is driven by tee_video_dur,
             # not the tracer, so the engine choice doesn't affect the cut.
-            _tracer_url, tracer_info, traced_path, _debug_url = _trace_segment(seg_path)
+            _tracer_url, tracer_info, traced_path, _debug_url = _trace_segment(
+                seg_path, ball_at_rest_override=seg.get("impact_wrist_xy"),
+            )
             tracer_ok = bool(tracer_info and tracer_info.get("ok"))
 
             composite_url = None
@@ -1978,7 +1983,9 @@ def _process_long_upload_segments(
             if thumb_path
             else None
         )
-        tracer_url, tracer_info, _, _ = _trace_segment(seg_path)
+        tracer_url, tracer_info, _, _ = _trace_segment(
+            seg_path, ball_at_rest_override=seg.get("impact_wrist_xy"),
+        )
 
         captured_dt = base_dt + timedelta(seconds=tee_cut_start)
         clip = VideoClip(
@@ -4785,18 +4792,33 @@ def _run_tracer(
     )
 
 
-def _trace_segment(clip_path: Path):
+def _trace_segment(clip_path: Path, ball_at_rest_override=None):
     """Draw the ball-flight tracer on a cut segment for PRODUCTION.
 
     Uses the AI tracer by default (settings.tracer_engine == 'ai' and a key
     is set); falls back to the classical CV tracer when AI is unconfigured or
     fails. Same return shape as _run_tracer:
-    (tracer_url, info, traced_path, debug_url)."""
+    (tracer_url, info, traced_path, debug_url).
+
+    ball_at_rest_override (x, y in native pixels) is a FALLBACK anchor for
+    where the tracer line starts: the AI still tries to see the resting ball
+    first, but if it can't (backlit scene / dark ground) the line is anchored
+    here instead of picking up mid-flight. Used to pass the golfer's hands-at-
+    impact position from the pose detector."""
     use_ai = settings.tracer_engine == "ai" and bool(os.environ.get("ANTHROPIC_API_KEY"))
     if use_ai:
         try:
             prefix = f"{clip_path.stem}_ai-{secrets.token_hex(3)}"
-            r = run_full_ai_tracer_pipeline(clip_path, CLIPS_DIR, prefix)
+            _fallback = None
+            if ball_at_rest_override and len(ball_at_rest_override) == 2:
+                _fallback = (
+                    float(ball_at_rest_override[0]),
+                    float(ball_at_rest_override[1]),
+                )
+            r = run_full_ai_tracer_pipeline(
+                clip_path, CLIPS_DIR, prefix,
+                rest_anchor_fallback=_fallback,
+            )
             tvp = r.get("tracer_video_path")
             if r.get("ok") and tvp and Path(tvp).exists():
                 p = Path(tvp)

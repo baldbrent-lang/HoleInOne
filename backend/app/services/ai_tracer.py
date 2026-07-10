@@ -5366,6 +5366,7 @@ def run_full_ai_tracer_pipeline(
     manual_ball_positions: list[dict] | None = None,
     handedness_override: str | None = None,
     examples_by_kind: dict | None = None,
+    rest_anchor_fallback: tuple[float, float] | None = None,
 ) -> dict:
     """Run the complete AI tracer pipeline (address → handedness →
     impact → refine → ball-track → tracer render) on a single clip.
@@ -5837,6 +5838,19 @@ def run_full_ai_tracer_pipeline(
                 "ai_tracer: rest anchor via fallback find_resting_ball at "
                 "address frame %s → (%s,%s)",
                 addr_idx, rb["x"], rb["y"],
+            )
+        elif rest_anchor_fallback is not None:
+            # Vision couldn't see the ball (backlit / dark ground). Anchor
+            # the line at the caller-supplied point — the golfer's hands at
+            # impact from the pose detector — so it starts at the strike
+            # instead of picking up mid-flight.
+            ball_rest_xy_native = (
+                float(rest_anchor_fallback[0]), float(rest_anchor_fallback[1]),
+            )
+            result["ball_rest_source"] = "pose_wrist_fallback"
+            log.info(
+                "ai_tracer: rest anchor via pose-hands fallback → (%.0f,%.0f)",
+                rest_anchor_fallback[0], rest_anchor_fallback[1],
             )
     result["ball_rest_xy_native"] = ball_rest_xy_native
 

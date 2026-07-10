@@ -179,6 +179,8 @@ def detect_swings_from_pose(
         if debug is not None:
             debug["reason"] = "could not open video"
         return []
+    vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 0
+    vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
 
     wrist: list[tuple[float, float] | None] = []  # per sample: (x,y) normalized or None
     bend: list[float | None] = []  # per sample: spine angle from vertical (deg)
@@ -350,6 +352,23 @@ def detect_swings_from_pose(
         ]
         return max(vals) if vals else None
 
+    def _wrist_native(p_i):
+        """Mean-wrist position (native pixels) at/near the swing peak — the
+        golfer's hands where the ball is struck. Pose often drops out at the
+        exact peak (motion blur), so search outward up to ~0.5s for the
+        nearest tracked wrist. Returns [x, y] or None. Used as the tracer's
+        start anchor so the line begins at the strike point even when the
+        ball itself can't be seen (backlit / dark ground)."""
+        if not (vid_w and vid_h):
+            return None
+        span = int(round(0.5 * eff_hz)) + 1
+        for off in range(span):
+            for j in (p_i - off, p_i + off):
+                if 0 <= j < len(wrist) and wrist[j] is not None:
+                    wx, wy = wrist[j]
+                    return [int(round(wx * vid_w)), int(round(wy * vid_h))]
+        return None
+
     segments = []
     n_bend_rejected = 0
     for s_i, e_i, p_i, p_v in keep:
@@ -387,6 +406,8 @@ def detect_swings_from_pose(
             "confidence": conf,
             "ratio": round(float(ratio), 1),
             "back_bend_deg": (round(float(b), 1) if b is not None else None),
+            # Hands position at the strike — the tracer's start anchor.
+            "impact_wrist_xy": _wrist_native(p_i),
         })
 
     # Decimate the wrist-speed waveform for plotting (peak-preserving).
