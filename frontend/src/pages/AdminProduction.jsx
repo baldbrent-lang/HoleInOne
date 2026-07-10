@@ -762,26 +762,32 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       roi: draft.roi,
       target: draft.target,
     });
-    // Re-render when there's no tracer yet, or the operator switched
-    // engines since the last render (so the A/B actually re-runs on the
-    // same clip), OR the start / impact / end frames changed since the
-    // last render (the ball track is anchored to those frames, so a
-    // frame edit makes the cached tracer stale). Otherwise reuse it.
-    //
-    // If the operator has ANY manually-plotted points (saved in the
-    // tracer track or queued), don't auto-re-render just for an engine
-    // match — that would overwrite their work with a fresh AI detection.
-    // A frame change DOES still force a re-render: the plotted points are
-    // anchored to the old impact/window and are meaningless once it moves.
+    // NEVER re-render an unchanged swing. If it already has a rendered
+    // tracer OR plotted ball points, and nothing that affects the trace
+    // was edited on Step 1, just advance — re-rendering would wipe the
+    // existing points (the operator's plots AND the ones carried over
+    // from the original production). Only render when:
+    //   - there's no existing trace at all (first time through), or
+    //   - the start / impact / end frames changed (points are anchored to
+    //     the old window, so they're stale), or
+    //   - the operator switched tracer engines (A/B) — UNLESS they have
+    //     manual points we'd overwrite, in which case keep them.
+    // Crucially the reuse no longer requires a tracer_url: a swing can
+    // carry ball_track_frames without a (still-valid) rendered video, and
+    // those points must survive Next.
     const framesChanged =
       renderedFrameSig !== null && frameSig(draft) !== renderedFrameSig;
+    const engineChanged =
+      tracerEngineUsed !== null && tracerEngineUsed !== tracerEngine;
     const hasManualPoints =
       (tracer?.frames || []).some((f) => f && f.manual) ||
       Object.keys(manualPositions).length > 0;
+    const hasExistingTrace =
+      !!(tracer?.url) || (tracer?.frames?.length || 0) > 0;
     if (
-      tracer?.url &&
+      hasExistingTrace &&
       !framesChanged &&
-      (hasManualPoints || tracerEngineUsed === tracerEngine)
+      (!engineChanged || hasManualPoints)
     ) {
       setStep("tracer");
       return;
