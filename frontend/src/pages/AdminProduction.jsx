@@ -30,6 +30,14 @@ function fmtDateTime(iso) {
   return d ? d.toLocaleString() : "—";
 }
 
+// Signature of the three clip frames the tracer render depends on
+// (start / impact / end). When any of them changes on Step 1, the
+// cached Step-2 tracer is stale and must be re-rendered.
+function frameSig(d) {
+  if (!d) return "";
+  return `${d.startFrame ?? "s"}|${d.impactFrame ?? "i"}|${d.endFrame ?? "e"}`;
+}
+
 function fmtDuration(sec) {
   if (sec == null) return "—";
   const s = Math.round(sec);
@@ -305,6 +313,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   // current tracer so switching engines forces a fresh render.
   const [tracerEngine, setTracerEngine] = useState("ai");
   const [tracerEngineUsed, setTracerEngineUsed] = useState(null);
+  // start|impact|end signature the current tracer was rendered against.
+  // If Step 1 edits any of these frames, Next re-renders instead of
+  // reusing the now-stale ball track.
+  const [renderedFrameSig, setRenderedFrameSig] = useState(null);
   const [tracerStats, setTracerStats] = useState(null); // {engine,n_points,n_candidates}
   const [finalUrl, setFinalUrl] = useState(null);
   const [finalizing, setFinalizing] = useState(false);
@@ -372,6 +384,18 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     const eng = s.tracer_engine || "ai";
     setTracerEngine(eng);
     setTracerEngineUsed(hasSavedTracer ? eng : null);
+    // A saved tracer corresponds to the saved start/impact/end frames;
+    // seed the signature so Next only re-renders after a real edit. No
+    // saved tracer → null so the first Next renders fresh.
+    setRenderedFrameSig(
+      hasSavedTracer
+        ? frameSig({
+            startFrame: s.start_frame ?? null,
+            impactFrame: s.impact_frame ?? 0,
+            endFrame: s.end_frame ?? null,
+          })
+        : null,
+    );
     if (s.finalized_video_url) setFinalUrl(s.finalized_video_url);
     const hole = s.finalized_hole_number ?? 1;
     const courseYards = row?.course_hole_yardages?.[String(hole)];
@@ -693,6 +717,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       if (selectedSwingRef.current === swIndex) {
         setTracer({ url: out.tracer_url, frames });
         setTracerEngineUsed(out.engine || tracerEngine);
+        setRenderedFrameSig(frameSig(draft));
         setTracerStats({
           engine: out.engine || tracerEngine,
           n_points: out.n_points,
@@ -739,18 +764,32 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     });
     // Re-render when there's no tracer yet, or the operator switched
     // engines since the last render (so the A/B actually re-runs on the
-    // same clip). Otherwise reuse the cached tracer.
+    // same clip), OR the start / impact / end frames changed since the
+    // last render (the ball track is anchored to those frames, so a
+    // frame edit makes the cached tracer stale). Otherwise reuse it.
     //
-    // Crucially: if the operator has ANY manually-plotted points (saved
-    // in the tracer track or queued), NEVER auto-re-render on Next —
-    // that would overwrite their work with a fresh AI detection. They
-    // can still force a re-render from Step 2's "Re-render" button.
+    // If the operator has ANY manually-plotted points (saved in the
+    // tracer track or queued), don't auto-re-render just for an engine
+    // match — that would overwrite their work with a fresh AI detection.
+    // A frame change DOES still force a re-render: the plotted points are
+    // anchored to the old impact/window and are meaningless once it moves.
+    const framesChanged =
+      renderedFrameSig !== null && frameSig(draft) !== renderedFrameSig;
     const hasManualPoints =
       (tracer?.frames || []).some((f) => f && f.manual) ||
       Object.keys(manualPositions).length > 0;
-    if (tracer?.url && (hasManualPoints || tracerEngineUsed === tracerEngine)) {
+    if (
+      tracer?.url &&
+      !framesChanged &&
+      (hasManualPoints || tracerEngineUsed === tracerEngine)
+    ) {
       setStep("tracer");
       return;
+    }
+    // A frame edit invalidates any queued manual marks — clear them so
+    // they aren't baked into the fresh render at the wrong positions.
+    if (framesChanged && Object.keys(manualPositions).length > 0) {
+      setManualPositions({});
     }
     setRenderingTracer(true);
     setTracerError(null);
@@ -766,6 +805,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         frames: out.ball_track_frames || [],
       });
       setTracerEngineUsed(out.engine || tracerEngine);
+      setRenderedFrameSig(frameSig(draft));
       setTracerStats({
         engine: out.engine || tracerEngine,
         n_points: out.n_points,
