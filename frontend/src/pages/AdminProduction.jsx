@@ -3761,32 +3761,18 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             }}
           >
             <div style={{ fontWeight: 700, marginBottom: 2 }}>
-              🤖 AI resting-ball detector —{" "}
-              {data.ai_ball.available ? `${data.ai_ball.n_swings ?? 0} swing(s)` : "unavailable"}
+              🤖 AI resting-ball (per pose swing) —{" "}
+              {data.ai_ball.available
+                ? `found ${data.ai_ball.n_ball_seen ?? 0}/${data.ai_ball.n_swings ?? 0}`
+                : "unavailable"}
             </div>
             {data.ai_ball.available ? (
               <>
                 <div className="small muted">
-                  Claude recognizes the resting ball ·{" "}
-                  ball seen in {data.ai_ball.n_ball_seen ?? 0}/
-                  {data.ai_ball.n_samples ?? "?"} sampled frames · cyan marks
-                  above = detected swings
+                  Claude looks 1.5s before each pose swing and recognizes the
+                  resting ball — {data.ai_ball.n_ball_seen ?? 0} of{" "}
+                  {data.ai_ball.n_swings ?? 0} swings had a ball found.
                 </div>
-                {data.ai_ball.diag_url && (
-                  <div style={{ marginTop: 6 }}>
-                    <div className="small muted">
-                      every frame where Claude found the resting ball (cyan
-                      rings):
-                    </div>
-                    <a href={data.ai_ball.diag_url} target="_blank" rel="noreferrer">
-                      <img
-                        src={data.ai_ball.diag_url}
-                        alt="AI resting-ball diagnostic"
-                        style={{ maxWidth: "100%", borderRadius: 6, marginTop: 4 }}
-                      />
-                    </a>
-                  </div>
-                )}
                 {(data.ai_ball.screenshots || []).length > 0 && (
                   <div
                     style={{
@@ -3798,12 +3784,18 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                         <a href={s.image_url} target="_blank" rel="noreferrer">
                           <img
                             src={s.image_url}
-                            alt={`ai ball ${i + 1}`}
-                            style={{ width: "100%", borderRadius: 6, display: "block" }}
+                            alt={`ai ball swing ${s.swing}`}
+                            style={{
+                              width: "100%", borderRadius: 6, display: "block",
+                              outline: s.present
+                                ? "2px solid #00b8d4"
+                                : "2px solid #c0392b",
+                            }}
                           />
                         </a>
                         <div className="small muted" style={{ marginTop: 2 }}>
-                          swing {i + 1}: departs {s.t}s
+                          swing {s.swing}: {s.present ? "ball found" : "no ball"} @{" "}
+                          {s.t}s
                         </div>
                       </div>
                     ))}

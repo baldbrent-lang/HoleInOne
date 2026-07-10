@@ -4837,6 +4837,71 @@ def _ai_ball_report(src_path: Path, tee_fps: float, upload_id: int, aib: dict) -
     }
 
 
+def _ai_resting_ball_for_pose(
+    src_path: Path, tee_fps: float, upload_id: int, pose_peaks: list, lead_sec: float = 1.5,
+) -> dict:
+    """For each POSE swing, ask Claude to recognize the resting ball
+    `lead_sec` before the swing (the ball is sitting still before the
+    downswing). One Claude call per swing. Returns a screenshot per swing
+    with the recognized ball ringed."""
+    import cv2  # type: ignore
+
+    from ..services.ai_tracer import find_resting_ball
+
+    def _url(name: str):
+        p = CLIPS_DIR / name
+        return (
+            f"{settings.app_base_url}/uploads/clips/{name}?v={int(p.stat().st_mtime)}"
+            if p.exists() else None
+        )
+
+    shots = []
+    seen = 0
+    check_times = []
+    c = cv2.VideoCapture(str(src_path))
+    try:
+        for i, pk in enumerate(pose_peaks):
+            t_ball = max(0.0, float(pk) - lead_sec)
+            check_times.append(round(t_ball, 2))
+            fi = int(t_ball * tee_fps)
+            r = find_resting_ball(src_path, fi)
+            c.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, fr = c.read()
+            if not ok or fr is None:
+                continue
+            present = bool(r.get("present")) and r.get("x") is not None
+            if present:
+                seen += 1
+                rad = max(12, int(fr.shape[0] * 0.02))
+                cv2.circle(fr, (int(r["x"]), int(r["y"])), rad, (255, 255, 0), 3, cv2.LINE_AA)
+                cv2.circle(fr, (int(r["x"]), int(r["y"])), 3, (0, 0, 255), -1, cv2.LINE_AA)
+                label = f"resting ball @ {t_ball:.1f}s ({lead_sec:.1f}s before swing {i + 1})"
+                color = (255, 255, 0)
+            else:
+                label = f"NO resting ball found @ {t_ball:.1f}s (swing {i + 1})"
+                color = (0, 0, 255)
+            cv2.putText(fr, label, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
+            iname = f"debug-aiball-{upload_id}-s{i}-{secrets.token_hex(3)}.jpg"
+            cv2.imwrite(str(CLIPS_DIR / iname), fr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            u = _url(iname)
+            if u:
+                shots.append({
+                    "swing": i + 1, "t": round(t_ball, 2), "present": present,
+                    "confidence": r.get("confidence"), "image_url": u,
+                })
+    finally:
+        c.release()
+
+    return {
+        "available": True,
+        "pose_anchored": True,
+        "n_swings": len(pose_peaks),
+        "n_ball_seen": seen,
+        "peaks": check_times,
+        "screenshots": shots,
+    }
+
+
 def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
     """Analyze each swing with BOTH tracers and record a debug report.
     Read-only w.r.t. produced clips — the normal produce job (kicked
@@ -4919,16 +4984,14 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         except Exception as exc:  # noqa: BLE001
             pose_debug = {"reason": f"crashed: {exc}", "available": False}
 
-        # AI resting-ball detector (dev-only, needs ANTHROPIC_API_KEY) —
-        # uses Claude to recognize the resting ball where classical white-blob
-        # detection fails. One Claude call per sampled frame.
+        # AI resting-ball, anchored to the pose swings: recognize the resting
+        # ball ~1.5s before each pose spike (one Claude call per swing).
+        # Dev-only, needs ANTHROPIC_API_KEY.
         if os.environ.get("ANTHROPIC_API_KEY"):
             try:
-                aib_debug: dict = {}
-                detect_swings_from_ai_ball(
-                    src_path, fps=tee_fps, roi=ball_roi, debug=aib_debug,
+                ai_ball_dict = _ai_resting_ball_for_pose(
+                    src_path, tee_fps, upload_id, pose_debug.get("peaks") or [],
                 )
-                ai_ball_dict = _ai_ball_report(src_path, tee_fps, upload_id, aib_debug)
             except Exception as exc:  # noqa: BLE001
                 ai_ball_dict = {"available": False, "reason": f"crashed: {exc}"}
         else:
