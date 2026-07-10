@@ -313,10 +313,18 @@ def detect_swings_from_pose(
     keep.sort(key=lambda t: t[2])
 
     def _bend_near(p_i):
-        """Max spine bend within the burst around p_i (the golfer is bent over
-        somewhere in the swing even if the exact peak frame lost the pose).
-        None if no pose landmarks nearby."""
-        lo, hi = max(0, p_i - int(round(0.4 * eff_hz))), min(len(bend), p_i + int(round(0.4 * eff_hz)) + 1)
+        """Max spine bend from ~1.5s BEFORE the peak through 0.4s after.
+
+        The wrist-speed peak is the downswing — fast motion blurs the torso
+        and pose often drops out there, so the bend is frequently unknown at
+        the exact peak. But ~1-1.5s earlier the golfer is at address: set up
+        over the ball, stationary, clearly bent, and reliably tracked. Look
+        back to catch that address bend so a real swing isn't rejected just
+        because the downswing frame lost the pose. A trotting/upright false
+        positive is never bent anywhere in the window, so it stays rejected.
+        None if no pose landmarks in the window at all."""
+        lo = max(0, p_i - int(round(1.5 * eff_hz)))
+        hi = min(len(bend), p_i + int(round(0.4 * eff_hz)) + 1)
         vals = [bend[i] for i in range(lo, hi) if bend[i] is not None]
         return max(vals) if vals else None
 
