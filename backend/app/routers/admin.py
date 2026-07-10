@@ -1729,14 +1729,10 @@ def _process_long_upload_segments(
                 )
                 green_seg_path = None  # splice_impact_clip handles the fallback
 
-            # Classical CV tracer (primary): detect the ball by motion +
-            # fit the parabola, no AI calls. Audio-impact anchoring lives
-            # inside _run_tracer. The AI pipeline stays available as a
-            # manual fallback via the /clips ai-trace endpoint. The cut
-            # to green here is driven by tee_video_dur (audio impact +
-            # fixed offset), not by the tracer, so dropping the AI
-            # doesn't affect the cut point.
-            _tracer_url, tracer_info, traced_path, _debug_url = _run_tracer(seg_path)
+            # Ball-flight tracer — AI by default (settings.tracer_engine),
+            # classical fallback. The cut to green is driven by tee_video_dur,
+            # not the tracer, so the engine choice doesn't affect the cut.
+            _tracer_url, tracer_info, traced_path, _debug_url = _trace_segment(seg_path)
             tracer_ok = bool(tracer_info and tracer_info.get("ok"))
 
             composite_url = None
@@ -1880,7 +1876,7 @@ def _process_long_upload_segments(
             if thumb_path
             else None
         )
-        tracer_url, _, _, _ = _run_tracer(seg_path)
+        tracer_url, _, _, _ = _trace_segment(seg_path)
 
         captured_dt = base_dt + timedelta(seconds=tee_cut_start)
         clip = VideoClip(
@@ -4647,6 +4643,45 @@ def _run_tracer(
         traced_path,
         debug_url,
     )
+
+
+def _trace_segment(clip_path: Path):
+    """Draw the ball-flight tracer on a cut segment for PRODUCTION.
+
+    Uses the AI tracer by default (settings.tracer_engine == 'ai' and a key
+    is set); falls back to the classical CV tracer when AI is unconfigured or
+    fails. Same return shape as _run_tracer:
+    (tracer_url, info, traced_path, debug_url)."""
+    use_ai = settings.tracer_engine == "ai" and bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if use_ai:
+        try:
+            prefix = f"{clip_path.stem}_ai-{secrets.token_hex(3)}"
+            r = run_full_ai_tracer_pipeline(clip_path, CLIPS_DIR, prefix)
+            tvp = r.get("tracer_video_path")
+            if r.get("ok") and tvp and Path(tvp).exists():
+                p = Path(tvp)
+                compress_for_email(p)  # transcode mp4v → H.264 for browsers
+                if p.exists() and p.stat().st_size > 0:
+                    url = (
+                        f"{settings.app_base_url}/uploads/clips/{p.name}"
+                        f"?v={int(p.stat().st_mtime)}"
+                    )
+                    info = {
+                        "ok": True, "engine": "ai",
+                        "n_points": len(r.get("ball_track_frames") or []),
+                    }
+                    log.info("produce: AI tracer ok for %s", clip_path.name)
+                    return url, info, p, None
+            log.warning(
+                "produce: AI tracer empty/failed for %s (%s) — classical fallback",
+                clip_path.name, r.get("error"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "produce: AI tracer crashed for %s (%s) — classical fallback",
+                clip_path.name, exc,
+            )
+    return _run_tracer(clip_path)
 
 
 # ── Produce debug (dev course-testing tool) ────────────────────────────

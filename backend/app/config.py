@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     pose_clip_before_sec: float = 2.0
     pose_clip_after_sec: float = 7.0
 
+    # Ball-flight tracer engine for produced clips. "ai" (default) uses the
+    # Claude vision tracer; "classical" uses the motion/parabola CV tracer.
+    # AI needs ANTHROPIC_API_KEY — without a key (or on any AI failure) the
+    # pipeline automatically falls back to the classical tracer, so a produce
+    # never fails for lack of a key. Set TRACER_ENGINE=classical to force it.
+    tracer_engine: str = "ai"  # "ai" | "classical"
+
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2
