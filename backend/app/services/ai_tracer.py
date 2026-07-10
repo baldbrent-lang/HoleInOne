@@ -2797,16 +2797,22 @@ def track_ball_after_impact(
     return info
 
 
-# Visual style for the final tracer-overlay render. Mirrors the
-# classical tracer in services/tracer.py so the two outputs look at
-# home next to each other.
-TRACER_LINE_COLOR = (35, 35, 175)        # dark red (BGR)
-TRACER_LINE_HALO = (15, 15, 80)          # deep maroon halo behind
+# Visual style for the final tracer-overlay render. Emulates the blue
+# TV broadcast shot-tracer (Toptracer / ProTracer): a bright azure core
+# stroke wrapped in a soft, blurred outer glow, tapering slightly toward
+# the apex. Colors are BGR (OpenCV order).
+TRACER_CORE_BGR = (255, 110, 40)         # bright broadcast blue (RGB 40,110,255)
+TRACER_GLOW_BGR = (255, 170, 95)         # lighter blue, feeds the soft glow
+TRACER_INNER_BGR = (255, 205, 150)       # pale-azure hot inner highlight
+# Legacy aliases (kept so any external reference still resolves). The
+# broadcast renderer no longer uses these directly.
+TRACER_LINE_COLOR = TRACER_CORE_BGR
+TRACER_LINE_HALO = (120, 40, 10)
 # Tapered thickness: thicker at the resting-ball end of the line,
 # narrower toward the apex / end-of-flight, so the line visually
 # narrows as the ball flies away from the camera (broadcast tracer
-# convention). Bumped to a sharper ratio so the "ball getting
-# smaller" cue reads from a glance.
+# convention). Now scaled to frame height inside the renderer; these
+# remain as the default taper ratio anchors.
 TRACER_LINE_THICKNESS_START = 10
 TRACER_LINE_THICKNESS_END = 1
 TRACER_LINE_THICKNESS = TRACER_LINE_THICKNESS_START  # legacy alias
@@ -2937,34 +2943,77 @@ def _draw_dashed_tracer(
     """
     if len(points) < 2:
         return
+    h, w = img.shape[:2]
     full_n = total_points if (total_points and total_points > 1) else len(points)
-    tapered = start_thickness != end_thickness
 
-    def _thickness_at(i: int) -> int:
-        """Thickness for the segment whose head is the i-th point."""
-        if not tapered:
-            return start_thickness
+    # Core stroke weight scales with frame height so the tracer reads the
+    # same bold width at any resolution (broadcast lines are heavy). It
+    # tapers from ~1.35x near the ball to ~0.5x at the apex so the line
+    # thins as the ball flies away — the classic TV-tracer cue.
+    base = max(3.5, h * 0.008)
+
+    def _core_t(i: int) -> int:
         frac = max(0.0, min(1.0, i / float(full_n - 1)))
-        return max(1, int(round(
-            start_thickness + (end_thickness - start_thickness) * frac
-        )))
+        return max(2, int(round(base * (1.50 + (0.50 - 1.50) * frac))))
 
-    # Halo behind the line: draw per-segment so each segment's halo
-    # matches the segment's tapered thickness. (Single polylines call
-    # would force a constant thickness across the whole stroke.)
-    for i in range(1, len(points)):
-        t = _thickness_at(i)
+    pts_i = [(int(round(px)), int(round(py))) for px, py in points]
+    xs = [p[0] for p in pts_i]
+    ys = [p[1] for p in pts_i]
+
+    # --- Soft outer glow ---------------------------------------------------
+    # Draw the stroke thick on a padded ROI layer, Gaussian-blur it, then
+    # screen-blend it back onto the frame. Screen (rather than a straight
+    # add) keeps a bright sky from blowing out to white while still laying
+    # a luminous blue halo over darker trees / grandstands. Working on a
+    # cropped ROI keeps the per-frame blur cheap.
+    if HAS_NP:
+        glow_pad = int(base * 8) + 12
+        x0 = max(0, min(xs) - glow_pad)
+        y0 = max(0, min(ys) - glow_pad)
+        x1 = min(w, max(xs) + glow_pad)
+        y1 = min(h, max(ys) + glow_pad)
+        if x1 > x0 and y1 > y0:
+            roi = img[y0:y1, x0:x1]
+            glow = np.zeros_like(roi)
+            shifted = [(p[0] - x0, p[1] - y0) for p in pts_i]
+            for i in range(1, len(shifted)):
+                cv2.line(
+                    glow, shifted[i - 1], shifted[i],
+                    TRACER_GLOW_BGR, max(4, int(round(_core_t(i) * 2.8))),
+                    cv2.LINE_AA,
+                )
+            k = max(5, (int(base * 4) | 1))  # odd kernel for GaussianBlur
+            glow = cv2.GaussianBlur(glow, (k, k), 0)
+            # Screen blend: out = 255 - (255-roi)(255-glow)/255. Done with
+            # cv2 ops (bitwise_not = 255-x for uint8) so it's dtype-safe
+            # regardless of numpy's scalar-casting rules.
+            inv = cv2.multiply(
+                cv2.bitwise_not(roi), cv2.bitwise_not(glow),
+                scale=1.0 / 255.0,
+            )
+            cv2.bitwise_not(inv, dst=roi)
+    else:
+        # numpy-less fallback: a couple of translucent-looking passes so
+        # the line still gets a halo, just without the blurred glow.
+        for i in range(1, len(pts_i)):
+            cv2.line(
+                img, pts_i[i - 1], pts_i[i],
+                TRACER_GLOW_BGR, _core_t(i) + 6, cv2.LINE_AA,
+            )
+
+    # --- Crisp core on top -------------------------------------------------
+    # Bright blue body, then a thin pale-azure highlight down the centre so
+    # the stroke reads as a rounded glossy tube rather than a flat band.
+    for i in range(1, len(pts_i)):
         cv2.line(
-            img, points[i - 1], points[i],
-            TRACER_LINE_HALO, t + 4, cv2.LINE_AA,
+            img, pts_i[i - 1], pts_i[i],
+            TRACER_CORE_BGR, _core_t(i), cv2.LINE_AA,
         )
-
-    # Solid foreground line on top of the halo.
-    for i in range(1, len(points)):
-        t = _thickness_at(i)
+    for i in range(1, len(pts_i)):
+        it = max(1, int(round(_core_t(i) * 0.4)))
         cv2.line(
-            img, points[i - 1], points[i],
-            TRACER_LINE_COLOR, t, cv2.LINE_AA,
+            img, pts_i[i - 1], pts_i[i],
+            TRACER_INNER_BGR, it, cv2.LINE_AA,
         )
 
 
