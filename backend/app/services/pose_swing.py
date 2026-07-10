@@ -318,10 +318,11 @@ def detect_swings_from_pose(
     n_bend_rejected = 0
     for s_i, e_i, p_i, p_v in keep:
         b = _bend_near(p_i)
-        # Back-bend gate: reject a fast-hands burst where the golfer is
-        # standing upright (a real swing bends the torso over the ball). Keep
-        # when bend is unknown (pose lost) so we never drop on missing data.
-        if b is not None and b < back_bend_min_deg:
+        # A swing requires BOTH a fast-hands burst AND a bent-over spine.
+        # Reject when the golfer is standing upright, AND when the spine bend
+        # can't be confirmed at all (pose lost the torso) — both conditions
+        # must be positively present, not merely "not disproven".
+        if b is None or b < back_bend_min_deg:
             n_bend_rejected += 1
             continue
         peak_t = times[p_i] if p_i < len(times) else (p_i / eff_hz)
@@ -333,7 +334,7 @@ def detect_swings_from_pose(
             "end_sec": float(min(duration, peak_t + after_sec)),
             "confidence": conf,
             "ratio": round(float(ratio), 1),
-            "back_bend_deg": round(float(b), 1) if b is not None else None,
+            "back_bend_deg": round(float(b), 1),
         })
 
     # Decimate the wrist-speed waveform for plotting (peak-preserving).
