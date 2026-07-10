@@ -68,6 +68,7 @@ from ..services.ai_tracer import (
     detect_swings_from_audio,
     detect_swings_from_motion,
     detect_swings_from_ball,
+    detect_swings_from_ai_ball,
     compute_motion_trace,
     detect_swings_combined,
     filter_swings_by_ball_departure,
@@ -4758,6 +4759,84 @@ def _ball_debug_and_ref(src_path: Path, tee_fps: float, upload_id: int, roi):
     return ball_dict, ref_frame_url, frame_w, frame_h
 
 
+def _ai_ball_report(src_path: Path, tee_fps: float, upload_id: int, aib: dict) -> dict:
+    """Build the AI-resting-ball debug block: a diagnostic frame with every
+    Claude-detected ball position ringed, plus a screenshot per departure."""
+    import cv2  # type: ignore
+
+    def _url(name: str):
+        p = CLIPS_DIR / name
+        return (
+            f"{settings.app_base_url}/uploads/clips/{name}?v={int(p.stat().st_mtime)}"
+            if p.exists() else None
+        )
+
+    samples = aib.get("samples") or []
+    peaks = aib.get("peaks") or []
+    diag_url = None
+    try:
+        c = cv2.VideoCapture(str(src_path))
+        c.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * tee_fps))
+        ok, ref = c.read()
+        c.release()
+        if ok and ref is not None:
+            for s in samples:
+                if s.get("present") and s.get("x") is not None:
+                    cv2.circle(
+                        ref, (int(s["x"]), int(s["y"])),
+                        max(10, int(ref.shape[0] * 0.02)), (255, 255, 0), 3, cv2.LINE_AA,
+                    )
+            dname = f"debug-aiball-diag-{upload_id}-{secrets.token_hex(4)}.jpg"
+            cv2.imwrite(str(CLIPS_DIR / dname), ref, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            diag_url = _url(dname)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("produce-debug: ai-ball diag failed: %s", exc)
+
+    shots = []
+    try:
+        c = cv2.VideoCapture(str(src_path))
+        for bi, pk in enumerate(peaks):
+            pos = next(
+                (
+                    (s["x"], s["y"]) for s in samples
+                    if abs(s["t"] - pk) < 0.01 and s.get("x") is not None
+                ),
+                None,
+            )
+            c.set(cv2.CAP_PROP_POS_FRAMES, int(pk * tee_fps))
+            ok, fr = c.read()
+            if not ok or fr is None:
+                continue
+            if pos:
+                cv2.circle(
+                    fr, (int(pos[0]), int(pos[1])),
+                    max(14, int(fr.shape[0] * 0.02)), (255, 255, 0), 3, cv2.LINE_AA,
+                )
+            cv2.putText(
+                fr, f"AI ball @ {pk:.1f}s", (12, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA,
+            )
+            iname = f"debug-aiball-{upload_id}-{bi}-{secrets.token_hex(3)}.jpg"
+            cv2.imwrite(str(CLIPS_DIR / iname), fr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            u = _url(iname)
+            if u:
+                shots.append({"t": pk, "image_url": u})
+        c.release()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("produce-debug: ai-ball shots failed: %s", exc)
+
+    return {
+        "available": True,
+        "reason": aib.get("reason"),
+        "n_swings": aib.get("n_departures"),
+        "n_ball_seen": aib.get("n_ball_seen"),
+        "n_samples": aib.get("n_samples"),
+        "peaks": peaks,
+        "diag_url": diag_url,
+        "screenshots": shots,
+    }
+
+
 def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
     """Analyze each swing with BOTH tracers and record a debug report.
     Read-only w.r.t. produced clips — the normal produce job (kicked
@@ -4840,6 +4919,24 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         except Exception as exc:  # noqa: BLE001
             pose_debug = {"reason": f"crashed: {exc}", "available": False}
 
+        # AI resting-ball detector (dev-only, needs ANTHROPIC_API_KEY) —
+        # uses Claude to recognize the resting ball where classical white-blob
+        # detection fails. One Claude call per sampled frame.
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            try:
+                aib_debug: dict = {}
+                detect_swings_from_ai_ball(
+                    src_path, fps=tee_fps, roi=ball_roi, debug=aib_debug,
+                )
+                ai_ball_dict = _ai_ball_report(src_path, tee_fps, upload_id, aib_debug)
+            except Exception as exc:  # noqa: BLE001
+                ai_ball_dict = {"available": False, "reason": f"crashed: {exc}"}
+        else:
+            ai_ball_dict = {
+                "available": False,
+                "reason": "ANTHROPIC_API_KEY not set on this deployment",
+            }
+
         # Full-rate (30 Hz) motion trace for the chart — avoids the 10 Hz
         # aliasing that made identical swings plot at different heights. Falls
         # back to the detector's own 10 Hz series if it can't run.
@@ -4887,6 +4984,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 "peaks": pose_debug.get("peaks") or [],
                 "screenshots": pose_shots,
             }
+            st["ai_ball"] = ai_ball_dict
 
         for i, d in enumerate(detected):
             start_sec = float(d.get("start_sec") or 0.0)

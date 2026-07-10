@@ -3919,6 +3919,219 @@ def detect_swings_from_motion(
     return segments
 
 
+_FIND_RESTING_BALL_PROMPT = (
+    "You are looking at ONE frame from a golf tee camera positioned behind "
+    "the golfer. Decide whether a golf ball is sitting AT REST on the "
+    "ground / mat / tee — a small, roughly round, usually white ball that is "
+    "stationary and ready to be hit. It may be partially hidden by the club "
+    "head resting behind it. Do NOT count a ball in flight, balls in a "
+    "bucket, distant range balls, or the hole. Reply with JSON only:\n"
+    '{"present": true|false, "x": <int pixel x or null>, '
+    '"y": <int pixel y or null>, "confidence": "high"|"medium"|"low"}\n'
+    "Coordinates are pixels in THIS image (top-left = 0,0)."
+)
+
+
+def find_resting_ball(
+    input_path: Path,
+    frame_idx: int,
+    frame_w: int = 1024,
+    model: str | None = None,
+) -> dict:
+    """Single-frame Claude vision call: is there a golf ball AT REST, and
+    where? Returns {present, x, y, confidence, error} with x/y in NATIVE
+    pixels. Never raises. This is the same 'Claude can see the ball'
+    capability the tracer uses in flight, pointed at the resting ball."""
+    out = {"present": False, "x": None, "y": None, "confidence": None, "error": None}
+    if not HAS_CV:
+        out["error"] = "opencv not installed"
+        return out
+    if not HAS_ANTHROPIC or not os.environ.get("ANTHROPIC_API_KEY"):
+        out["error"] = "ANTHROPIC_API_KEY not set"
+        return out
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        out["error"] = "could not open video"
+        return out
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+        ok, raw = cap.read()
+    finally:
+        cap.release()
+    if not ok or raw is None:
+        out["error"] = f"could not read frame {frame_idx}"
+        return out
+    h, w = raw.shape[:2]
+    scale = frame_w / float(w) if w > frame_w else 1.0
+    if scale != 1.0:
+        raw = cv2.resize(raw, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", raw, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        out["error"] = "jpeg encode failed"
+        return out
+    client = _anthropic_client()
+    try:
+        resp = client.messages.create(
+            model=_resolve_frame_picker_model(model),
+            max_tokens=150,
+            system=[{
+                "type": "text",
+                "text": _FIND_RESTING_BALL_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": f"Frame {frame_idx}. JSON only."},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg",
+                    "data": base64.standard_b64encode(bytes(buf)).decode("ascii"),
+                }},
+            ]}],
+        )
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"api_failed: {exc}"
+        return out
+    text = "".join(
+        c.text for c in resp.content if getattr(c, "type", None) == "text"
+    )
+    data = _extract_json(text) or {}
+    out["present"] = bool(data.get("present"))
+    out["confidence"] = data.get("confidence")
+    if out["present"] and data.get("x") is not None and data.get("y") is not None:
+        try:
+            out["x"] = int(round(float(data["x"]) / scale))
+            out["y"] = int(round(float(data["y"]) / scale))
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def detect_swings_from_ai_ball(
+    input_path: Path,
+    fps: float | None = None,
+    roi: dict | None = None,
+    sample_every_sec: float = 1.3,
+    max_frames: int = 20,
+    min_rest_sec: float = 1.0,
+    min_separation_sec: float = 4.0,
+    before_sec: float = 3.5,
+    after_sec: float = 5.0,
+    model: str | None = None,
+    debug: dict | None = None,
+) -> list[dict]:
+    """Find swings by using Claude to recognize the RESTING ball, then
+    detecting when it departs. Samples the clip every ~sample_every_sec (cap
+    max_frames Claude calls), asks Claude for the resting ball per frame,
+    builds a presence timeline, and calls a swing where the ball was present
+    (in the ROI) then vanished. Coarse in time but robust where classical
+    white-blob detection fails (club occlusion, lighting). Costs one Claude
+    call per sampled frame. Never raises."""
+    if debug is not None:
+        debug.update({"reason": None, "method": "ai_resting_ball", "available": False})
+    if not HAS_CV:
+        if debug is not None:
+            debug["reason"] = "opencv not installed"
+        return []
+    if not HAS_ANTHROPIC or not os.environ.get("ANTHROPIC_API_KEY"):
+        if debug is not None:
+            debug["reason"] = "ANTHROPIC_API_KEY not set on this deployment"
+        return []
+    if debug is not None:
+        debug["available"] = True
+
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        if debug is not None:
+            debug["reason"] = "could not open video"
+        return []
+    try:
+        src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    finally:
+        cap.release()
+    if total <= 1 or src_fps <= 0:
+        if debug is not None:
+            debug["reason"] = "video too short"
+        return []
+    duration = total / src_fps
+
+    # Evenly spaced sample frame indices, capped at max_frames.
+    n = min(max_frames, max(2, int(duration / max(0.3, sample_every_sec)) + 1))
+    idxs = [int(round(k * (total - 1) / (n - 1))) for k in range(n)]
+
+    def _in_roi(x, y):
+        if not roi or x is None or y is None or not fw or not fh:
+            return True
+        rx0 = float(roi.get("x", 0.0)) * fw
+        ry0 = float(roi.get("y", 0.0)) * fh
+        rx1 = rx0 + float(roi.get("w", 1.0)) * fw
+        ry1 = ry0 + float(roi.get("h", 1.0)) * fh
+        return rx0 <= x <= rx1 and ry0 <= y <= ry1
+
+    samples = []  # (t, present_in_roi, x, y)
+    for fi in idxs:
+        r = find_resting_ball(input_path, fi, model=model)
+        present = bool(r.get("present")) and _in_roi(r.get("x"), r.get("y"))
+        samples.append((fi / src_fps, present, r.get("x"), r.get("y")))
+
+    # Departures: a present run (>= min_rest) that ends with the ball gone.
+    departures = []  # (t_departure, x, y)
+    run_start = None
+    last_pos = (None, None)
+    for k, (t, present, x, y) in enumerate(samples):
+        if present:
+            if run_start is None:
+                run_start = t
+            last_pos = (x, y)
+        else:
+            if run_start is not None and (t - run_start) >= min_rest_sec:
+                # ball was resting, now gone → departure at previous sample
+                dep_t = samples[k - 1][0] if k > 0 else t
+                departures.append((dep_t, last_pos[0], last_pos[1]))
+            run_start = None
+
+    departures.sort(key=lambda d: d[0])
+    kept = []
+    for d in departures:
+        if kept and d[0] - kept[-1][0] < min_separation_sec:
+            continue
+        kept.append(d)
+
+    segments = []
+    for t_dep, x, y in kept:
+        segments.append({
+            "peak_time_sec": float(t_dep),
+            "start_sec": float(max(0.0, t_dep - before_sec)),
+            "end_sec": float(min(duration, t_dep + after_sec)),
+            "confidence": "medium",
+            "ball_x": x,
+            "ball_y": y,
+        })
+
+    n_present = sum(1 for _t, p, _x, _y in samples if p)
+    log.info(
+        "ai_tracer: detect_swings_from_ai_ball — %d swings, ball seen in %d/%d "
+        "sampled frames",
+        len(kept), n_present, len(samples),
+    )
+    if debug is not None:
+        debug.update({
+            "duration_sec": float(duration),
+            "n_samples": len(samples),
+            "n_ball_seen": n_present,
+            "n_departures": len(kept),
+            "samples": [
+                {"t": round(t, 2), "present": bool(p),
+                 "x": (int(x) if x is not None else None),
+                 "y": (int(y) if y is not None else None)}
+                for t, p, x, y in samples
+            ],
+            "peaks": [round(float(t), 2) for t, _x, _y in kept],
+        })
+    return segments
+
+
 def detect_swings_from_ball(
     input_path: Path,
     fps: float | None = None,

@@ -3372,7 +3372,7 @@ function VideoLightbox({ url, title, startedAt, fps, onClose }) {
 // Plots the classical detector's per-frame motion signal (mean pixel
 // change over time). Each swing is a burst that rises above the red
 // threshold line; green dashed lines mark where a swing was detected.
-function MotionChart({ motion, ballPeaks, posePeaks }) {
+function MotionChart({ motion, ballPeaks, posePeaks, aiBallPeaks }) {
   if (!motion || !Array.isArray(motion.series) || motion.series.length < 2) {
     return (
       <div className="small muted" style={{ marginBottom: 12 }}>
@@ -3394,6 +3394,7 @@ function MotionChart({ motion, ballPeaks, posePeaks }) {
   const peaks = motion.swing_peaks || [];
   const balls = ballPeaks || [];
   const poses = posePeaks || [];
+  const aiBalls = aiBallPeaks || [];
   return (
     <div style={{ marginBottom: 16 }}>
       <div className="small muted" style={{ marginBottom: 4 }}>
@@ -3402,10 +3403,11 @@ function MotionChart({ motion, ballPeaks, posePeaks }) {
         burst above the <span style={{ color: "#e74c3c" }}>red threshold</span>.{" "}
         <span style={{ color: "#1a9d55" }}>Green</span> = motion,{" "}
         <span style={{ color: "#e67e22" }}>orange</span> = ball,{" "}
-        <span style={{ color: "#9b59b6" }}>purple</span> = pose swings.{" "}
+        <span style={{ color: "#9b59b6" }}>purple</span> = pose,{" "}
+        <span style={{ color: "#00b8d4" }}>cyan</span> = AI ball.{" "}
         median={motion.median != null ? motion.median.toFixed(3) : "?"} ·
         threshold={thr.toFixed(3)} · motion={peaks.length} · ball={balls.length} ·
-        pose={poses.length}
+        pose={poses.length} · ai={aiBalls.length}
       </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
@@ -3451,6 +3453,19 @@ function MotionChart({ motion, ballPeaks, posePeaks }) {
             strokeWidth={2}
             strokeDasharray="2 3"
             opacity={0.85}
+          />
+        ))}
+        {aiBalls.map((t, i) => (
+          <line
+            key={`ai${i}`}
+            x1={(t / dur) * W}
+            x2={(t / dur) * W}
+            y1={0}
+            y2={H}
+            stroke="#00b8d4"
+            strokeWidth={2}
+            strokeDasharray="6 2"
+            opacity={0.9}
           />
         ))}
         <line
@@ -3734,7 +3749,73 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             motion={data.motion}
             ballPeaks={data.ball?.peaks}
             posePeaks={data.pose?.peaks}
+            aiBallPeaks={data.ai_ball?.peaks}
           />
+        )}
+
+        {data.ai_ball && (
+          <div
+            style={{
+              border: "1px solid rgba(0,184,212,0.4)", borderRadius: 8,
+              padding: "8px 12px", marginBottom: 14,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>
+              🤖 AI resting-ball detector —{" "}
+              {data.ai_ball.available ? `${data.ai_ball.n_swings ?? 0} swing(s)` : "unavailable"}
+            </div>
+            {data.ai_ball.available ? (
+              <>
+                <div className="small muted">
+                  Claude recognizes the resting ball ·{" "}
+                  ball seen in {data.ai_ball.n_ball_seen ?? 0}/
+                  {data.ai_ball.n_samples ?? "?"} sampled frames · cyan marks
+                  above = detected swings
+                </div>
+                {data.ai_ball.diag_url && (
+                  <div style={{ marginTop: 6 }}>
+                    <div className="small muted">
+                      every frame where Claude found the resting ball (cyan
+                      rings):
+                    </div>
+                    <a href={data.ai_ball.diag_url} target="_blank" rel="noreferrer">
+                      <img
+                        src={data.ai_ball.diag_url}
+                        alt="AI resting-ball diagnostic"
+                        style={{ maxWidth: "100%", borderRadius: 6, marginTop: 4 }}
+                      />
+                    </a>
+                  </div>
+                )}
+                {(data.ai_ball.screenshots || []).length > 0 && (
+                  <div
+                    style={{
+                      display: "flex", flexWrap: "wrap", gap: 10, marginTop: 6,
+                    }}
+                  >
+                    {data.ai_ball.screenshots.map((s, i) => (
+                      <div key={i} style={{ width: 220, maxWidth: "100%" }}>
+                        <a href={s.image_url} target="_blank" rel="noreferrer">
+                          <img
+                            src={s.image_url}
+                            alt={`ai ball ${i + 1}`}
+                            style={{ width: "100%", borderRadius: 6, display: "block" }}
+                          />
+                        </a>
+                        <div className="small muted" style={{ marginTop: 2 }}>
+                          swing {i + 1}: departs {s.t}s
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="small muted">
+                {data.ai_ball.reason || "needs ANTHROPIC_API_KEY"}
+              </div>
+            )}
+          </div>
         )}
 
         {data.pose && (
