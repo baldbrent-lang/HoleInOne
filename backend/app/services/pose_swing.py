@@ -80,10 +80,13 @@ def _get_pose():
         return None
 
 
-def annotate_frame(input_path, time_sec: float, fps: float, out_path) -> bool:
+def annotate_frame(
+    input_path, time_sec: float, fps: float, out_path, bend_deg=None,
+) -> bool:
     """Grab the frame at time_sec, draw the detected pose skeleton on it, and
-    write it to out_path (for a per-swing verification screenshot). Returns
-    True on success. No-op / False when mediapipe is unavailable."""
+    write it to out_path (for a per-swing verification screenshot). When
+    bend_deg is given, it's shown in the label. Returns True on success.
+    No-op / False when mediapipe is unavailable."""
     pose = _get_pose()
     if pose is None:
         return False
@@ -113,8 +116,11 @@ def annotate_frame(input_path, time_sec: float, fps: float, out_path) -> bool:
                         frame, (int(p.x * w), int(p.y * h)),
                         max(10, int(h * 0.02)), (155, 89, 182), 3, cv2.LINE_AA,
                     )
+        _lbl = f"pose swing @ {time_sec:.1f}s"
+        if bend_deg is not None:
+            _lbl += f"  ·  back bend {bend_deg:.0f}deg"
         cv2.putText(
-            frame, f"pose swing @ {time_sec:.1f}s", (12, 30),
+            frame, _lbl, (12, 30),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (155, 89, 182), 2, cv2.LINE_AA,
         )
         cv2.imwrite(str(out_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
@@ -366,5 +372,6 @@ def detect_swings_from_pose(
             "reached_eof": reached_eof,
             "series": [round(float(v), 5) for v in series],
             "peaks": [round(float(s["peak_time_sec"]), 2) for s in segments],
+            "swing_bends": [s.get("back_bend_deg") for s in segments],
         })
     return segments

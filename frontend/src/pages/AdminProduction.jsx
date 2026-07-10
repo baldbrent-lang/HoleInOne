@@ -3852,6 +3852,9 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                         </a>
                         <div className="small muted" style={{ marginTop: 2 }}>
                           swing {i + 1}: {s.t}s
+                          {s.back_bend_deg != null
+                            ? ` · bend ${Math.round(s.back_bend_deg)}°`
+                            : " · bend n/a"}
                         </div>
                       </div>
                     ))}

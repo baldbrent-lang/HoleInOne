@@ -5004,12 +5004,18 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
             # One skeleton-overlay screenshot per pose swing, to verify it
             # locked onto the golfer.
             if pose_debug.get("available"):
-                for pk in (pose_debug.get("peaks") or []):
+                _pk_list = pose_debug.get("peaks") or []
+                _bend_list = pose_debug.get("swing_bends") or []
+                for _pi, pk in enumerate(_pk_list):
+                    _bd = _bend_list[_pi] if _pi < len(_bend_list) else None
                     pname = f"debug-pose-{upload_id}-{int(float(pk) * 100)}-{secrets.token_hex(3)}.jpg"
-                    if pose_swing.annotate_frame(src_path, float(pk), tee_fps, CLIPS_DIR / pname):
+                    if pose_swing.annotate_frame(
+                        src_path, float(pk), tee_fps, CLIPS_DIR / pname, bend_deg=_bd,
+                    ):
                         pp = CLIPS_DIR / pname
                         pose_shots.append({
                             "t": pk,
+                            "back_bend_deg": _bd,
                             "image_url": (
                                 f"{settings.app_base_url}/uploads/clips/{pname}"
                                 f"?v={int(pp.stat().st_mtime)}"
