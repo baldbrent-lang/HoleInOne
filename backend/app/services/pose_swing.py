@@ -20,9 +20,16 @@ every function is a no-op that reports the reason, so nothing else breaks.
 from __future__ import annotations
 
 import logging
+import threading
 import warnings
 
 log = logging.getLogger("golfreelz.pose_swing")
+
+# MediaPipe's Pose object is NOT thread-safe, but we cache a single global
+# instance. Produce + debug + the non-golf scan can each run pose on their
+# own thread at the same time; concurrent .process() calls on the shared
+# instance deadlock MediaPipe. Serialize every .process() with this lock.
+_pose_lock = threading.Lock()
 
 # MediaPipe's bundled protobuf emits this UserWarning on every frame it
 # processes, which floods the console during a scan. It's a harmless
@@ -90,7 +97,8 @@ def annotate_frame(input_path, time_sec: float, fps: float, out_path) -> bool:
         cap.release()
         if not ok or frame is None:
             return False
-        res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        with _pose_lock:
+            res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         lm = getattr(res, "pose_landmarks", None)
         if lm is not None:
             mp.solutions.drawing_utils.draw_landmarks(
@@ -206,7 +214,8 @@ def detect_swings_from_pose(
                 continue
             times.append(idx / src_fps)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            res = pose.process(rgb)
+            with _pose_lock:
+                res = pose.process(rgb)
             lm = getattr(res, "pose_landmarks", None)
             if lm is None:
                 wrist.append(None)
