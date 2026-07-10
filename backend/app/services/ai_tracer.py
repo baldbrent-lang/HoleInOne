@@ -211,6 +211,8 @@ BALL_TRACK_MAX_FRAMES_HIGH_FPS = 40
 BALL_TRACK_HIGH_FPS_THRESHOLD = 50.0
 BALL_TRACK_VHIGH_FPS_THRESHOLD = 100.0
 BALL_TRACK_VHIGH_FPS_STRIDE = 5
+# <50 fps: 12 points every other frame → 24-frame span (~0.8s at 30fps).
+BALL_TRACK_LOW_FPS_STRIDE = 2
 BALL_TRACK_CONCURRENCY = 8
 
 # Phase-2 retry sends a crop. Crop size is in NATIVE pixels (how much
@@ -2110,7 +2112,11 @@ def track_ball_after_impact(
         elif clip_fps >= BALL_TRACK_HIGH_FPS_THRESHOLD:
             max_frames = BALL_TRACK_MAX_FRAMES_HIGH_FPS
         else:
+            # <50 fps: 12 data points sampled EVERY OTHER frame (stride 2),
+            # so the same 12 Claude calls span 24 frames (~0.8s at 30fps),
+            # covering more of the ball flight than every-consecutive-frame.
             max_frames = BALL_TRACK_MAX_FRAMES
+            stride = BALL_TRACK_LOW_FPS_STRIDE
         log.info(
             "ai_tracer: ball_track — fps=%.1f → max_frames=%d, stride=%d "
             "(spanning %d frames)",
