@@ -272,10 +272,43 @@ def _migrate() -> None:
         mlog.info("migrate: applied %d statement(s); connection pool reset", ran)
 
 
+def _reap_orphaned_jobs() -> None:
+    """A backend restart kills any in-flight produce thread, but the
+    LongVideoUpload row stays stuck at 'processing'/'pending' (the dead thread
+    never flipped it) — so the UI shows "Production in Progress" forever and
+    the Produce endpoint refuses to re-run it. On startup nothing is actually
+    running, so mark any such row failed to clear the state."""
+    from datetime import datetime
+
+    from .database import SessionLocal
+    from .models import LongVideoUpload
+
+    db = SessionLocal()
+    try:
+        stuck = (
+            db.query(LongVideoUpload)
+            .filter(LongVideoUpload.processing_status.in_(["processing", "pending"]))
+            .all()
+        )
+        for row in stuck:
+            row.processing_status = "failed"
+            row.processing_completed_at = datetime.utcnow()
+            row.last_error = "interrupted (backend restarted)"
+        if stuck:
+            db.commit()
+            _glog.info("startup: reaped %d orphaned in-progress upload(s)", len(stuck))
+    except Exception as exc:  # noqa: BLE001
+        _glog.warning("startup: reap orphaned jobs failed: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate()
+    _reap_orphaned_jobs()
     _remove_retired_courses()
     _seed_default_courses()
     _seed_showcase_slots()
