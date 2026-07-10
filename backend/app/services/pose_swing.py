@@ -135,6 +135,8 @@ def detect_swings_from_pose(
     min_burst_sec: float = 0.25,
     max_burst_sec: float = 3.0,
     back_bend_min_deg: float = 15.0,
+    start_sec: float = 0.0,
+    max_scan_sec: float | None = None,
     debug: dict | None = None,
 ) -> list[dict]:
     """Find swings from wrist-speed bursts, gated by back bend.
@@ -198,15 +200,25 @@ def detect_swings_from_pose(
         cos = max(-1.0, min(1.0, -vy / mag))
         return math.degrees(math.acos(cos))
 
+    reached_eof = True
     try:
         src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if src_fps <= 0:
             src_fps = 30.0
         step = max(1, int(round(src_fps / sample_hz)))
         eff_hz = src_fps / step
-        idx = -1
+        # Optional time window (chunked early-exit scanning). Seek to start,
+        # stop after max_scan_sec; reached_eof tells the caller if there's more.
+        start_frame = int(max(0.0, start_sec) * src_fps)
+        if start_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        max_scan_frames = int(max_scan_sec * src_fps) if max_scan_sec else None
+        idx = start_frame - 1
         while True:
             idx += 1
+            if max_scan_frames is not None and (idx - start_frame) >= max_scan_frames:
+                reached_eof = False  # stopped at the chunk limit, not EOF
+                break
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
@@ -242,6 +254,7 @@ def detect_swings_from_pose(
         if debug is not None:
             debug["reason"] = f"pose found in only {n_pose} frame(s)"
             debug["n_pose_frames"] = int(n_pose)
+            debug["reached_eof"] = reached_eof
         return []
 
     # Wrist speed between consecutive samples (0 when either endpoint missing).
@@ -349,6 +362,7 @@ def detect_swings_from_pose(
             "n_bend_rejected": int(n_bend_rejected),
             "back_bend_min_deg": float(back_bend_min_deg),
             "n_swings": len(segments),
+            "reached_eof": reached_eof,
             "series": [round(float(v), 5) for v in series],
             "peaks": [round(float(s["peak_time_sec"]), 2) for s in segments],
         })

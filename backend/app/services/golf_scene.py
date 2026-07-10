@@ -21,22 +21,40 @@ from pathlib import Path
 log = logging.getLogger("golfreelz.golf_scene")
 
 
+# Scan the clip in chunks and STOP at the first real swing — a golf clip
+# rarely needs the whole video read, and we only need "is there a swing".
+# A non-golf clip (no swing) still gets fully scanned (that's unavoidable —
+# you can't prove absence early). Lower sample rate than production since we
+# don't need precise timing here.
+_SCAN_CHUNK_SEC = 20.0
+_SCAN_SAMPLE_HZ = 10.0
+
+
 def classify_clip(path: Path) -> dict:
     """Return {"is_golf": bool, "reason": str} for one clip.
 
-    A clip is non-golf when the pose detector finds no swing in it. Fail-safe:
-    when pose is unavailable or anything errors, return is_golf=True so a real
-    shot is never dropped and the queue is never mass-flagged."""
+    A clip is non-golf when the pose detector finds no swing in it. Scans in
+    chunks and returns GOLF as soon as one swing is found. Fail-safe: when
+    pose is unavailable or anything errors, return is_golf=True so a real shot
+    is never dropped and the queue is never mass-flagged."""
     try:
         from . import pose_swing
 
         if not pose_swing.available():
             return {"is_golf": True, "reason": "pose unavailable (mediapipe not installed)"}
-        dbg: dict = {}
-        swings = pose_swing.detect_swings_from_pose(path, debug=dbg)
-        if swings:
-            return {"is_golf": True, "reason": f"{len(swings)} swing(s)"}
-        return {"is_golf": False, "reason": dbg.get("reason") or "no golf swing detected"}
+        t = 0.0
+        for _ in range(200):  # safety bound
+            dbg: dict = {}
+            swings = pose_swing.detect_swings_from_pose(
+                path, sample_hz=_SCAN_SAMPLE_HZ,
+                start_sec=t, max_scan_sec=_SCAN_CHUNK_SEC, debug=dbg,
+            )
+            if swings:
+                return {"is_golf": True, "reason": f"swing ~{swings[0]['peak_time_sec']:.0f}s"}
+            if dbg.get("reached_eof", True):
+                break  # scanned to the end with no swing
+            t += _SCAN_CHUNK_SEC
+        return {"is_golf": False, "reason": "no golf swing detected"}
     except Exception as exc:  # noqa: BLE001
         log.warning("golf_scene: classify failed for %s: %s", path, exc)
         return {"is_golf": True, "reason": "error"}
