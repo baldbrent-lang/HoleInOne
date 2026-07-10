@@ -4872,12 +4872,15 @@ def _ai_ball_report(src_path: Path, tee_fps: float, upload_id: int, aib: dict) -
 
 
 def _ai_resting_ball_for_pose(
-    src_path: Path, tee_fps: float, upload_id: int, pose_peaks: list, lead_sec: float = 1.5,
+    src_path: Path, tee_fps: float, upload_id: int, pose_peaks: list,
+    leads: tuple = (1.5, 1.0, 0.5),
 ) -> dict:
-    """For each POSE swing, ask Claude to recognize the resting ball
-    `lead_sec` before the swing (the ball is sitting still before the
-    downswing). One Claude call per swing. Returns a screenshot per swing
-    with the recognized ball ringed."""
+    """For each POSE swing, ask Claude to recognize the resting ball before
+    the swing. Tries each lead in `leads` in order (1.5s, then 1.0s, then
+    0.5s) and uses the first frame where a ball is found — the club head can
+    hide the ball at 1.5s but not at, say, 0.5s (top of backswing, club
+    lifted away). Returns a screenshot per swing with the recognized ball
+    ringed."""
     import cv2  # type: ignore
 
     from ..services.ai_tracer import find_resting_ball
@@ -4891,28 +4894,36 @@ def _ai_resting_ball_for_pose(
 
     shots = []
     seen = 0
-    check_times = []
     c = cv2.VideoCapture(str(src_path))
     try:
         for i, pk in enumerate(pose_peaks):
-            t_ball = max(0.0, float(pk) - lead_sec)
-            check_times.append(round(t_ball, 2))
-            fi = int(t_ball * tee_fps)
-            r = find_resting_ball(src_path, fi)
-            c.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            hit = None
+            for lead in leads:
+                t_ball = max(0.0, float(pk) - lead)
+                r = find_resting_ball(src_path, int(t_ball * tee_fps))
+                if r.get("present") and r.get("x") is not None:
+                    hit = (lead, t_ball, r)
+                    break
+            if hit is not None:
+                lead, t_ball, r = hit
+                seen += 1
+                present = True
+            else:
+                lead, t_ball, r = leads[0], max(0.0, float(pk) - leads[0]), {}
+                present = False
+            c.set(cv2.CAP_PROP_POS_FRAMES, int(t_ball * tee_fps))
             ok, fr = c.read()
             if not ok or fr is None:
                 continue
-            present = bool(r.get("present")) and r.get("x") is not None
             if present:
-                seen += 1
                 rad = max(12, int(fr.shape[0] * 0.02))
                 cv2.circle(fr, (int(r["x"]), int(r["y"])), rad, (255, 255, 0), 3, cv2.LINE_AA)
                 cv2.circle(fr, (int(r["x"]), int(r["y"])), 3, (0, 0, 255), -1, cv2.LINE_AA)
-                label = f"resting ball @ {t_ball:.1f}s ({lead_sec:.1f}s before swing {i + 1})"
+                label = f"resting ball @ {t_ball:.1f}s ({lead:.1f}s before swing {i + 1})"
                 color = (255, 255, 0)
             else:
-                label = f"NO resting ball found @ {t_ball:.1f}s (swing {i + 1})"
+                _tried = "/".join(f"{x:.1f}" for x in leads)
+                label = f"NO ball (tried {_tried}s before swing {i + 1})"
                 color = (0, 0, 255)
             cv2.putText(fr, label, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
             iname = f"debug-aiball-{upload_id}-s{i}-{secrets.token_hex(3)}.jpg"
@@ -4920,7 +4931,8 @@ def _ai_resting_ball_for_pose(
             u = _url(iname)
             if u:
                 shots.append({
-                    "swing": i + 1, "t": round(t_ball, 2), "present": present,
+                    "swing": i + 1, "t": round(t_ball, 2),
+                    "lead": lead if present else None, "present": present,
                     "confidence": r.get("confidence"), "image_url": u,
                 })
     finally:
@@ -4931,7 +4943,6 @@ def _ai_resting_ball_for_pose(
         "pose_anchored": True,
         "n_swings": len(pose_peaks),
         "n_ball_seen": seen,
-        "peaks": check_times,
         "screenshots": shots,
     }
 
@@ -4967,40 +4978,17 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
 
         tee_fps = probe_fps(src_path) or 30.0
 
-        # Tee-box ROI (drawn once per course) restricts ball detection.
-        course = db.get(Course, row.course_id)
-        ball_roi = course.ball_roi if course else None
-
-        # Always run the motion detector (with debug) so we can show the
-        # motion-burst waveform, regardless of which detector drives the
-        # actual swing list.
-        motion_debug: dict = {}
-        motion_swings = detect_swings_from_motion(
-            src_path, fps=tee_fps, debug=motion_debug,
-        )
-        # Ball-departure detector + its reference/diagnostic/screenshot images.
-        ball_dict, ref_frame_url, frame_w, frame_h = _ball_debug_and_ref(
-            src_path, tee_fps, upload_id, ball_roi,
-        )
-
-        if motion_only:
-            detected = filter_swings_by_ball_departure(
-                src_path, motion_swings, tee_fps,
-                keep_all=settings.camera_produce_unconfirmed_shots,
-                drop_garbage=settings.camera_drop_garbage_clips,
-            )
-        else:
-            detected = detect_swings_combined(src_path, fps=tee_fps)
-
-        # Pose detector (dev-only, needs mediapipe) — reads the golfer's
-        # wrists, immune to ball occlusion. No-op with a reason when
-        # mediapipe isn't installed on this deployment.
+        # Pose is the only swing detector now (motion + classical ball removed
+        # per operator: motion signal not wanted, classical ball didn't work).
         pose_debug: dict = {}
+        pose_segments: list[dict] = []
         pose_shots: list[dict] = []
         try:
             from ..services import pose_swing
 
-            pose_swing.detect_swings_from_pose(src_path, fps=tee_fps, debug=pose_debug)
+            pose_segments = pose_swing.detect_swings_from_pose(
+                src_path, fps=tee_fps, debug=pose_debug,
+            ) or []
             # One skeleton-overlay screenshot per pose swing, to verify it
             # locked onto the golfer.
             if pose_debug.get("available"):
@@ -5024,9 +5012,12 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         except Exception as exc:  # noqa: BLE001
             pose_debug = {"reason": f"crashed: {exc}", "available": False}
 
-        # AI resting-ball, anchored to the pose swings: recognize the resting
-        # ball ~1.5s before each pose spike (one Claude call per swing).
-        # Dev-only, needs ANTHROPIC_API_KEY.
+        # Per-swing tracer comparison runs on the pose swings.
+        detected = pose_segments
+
+        # AI resting-ball, anchored to the pose swings: try 1.5s, then 1.0s,
+        # then 0.5s before each pose spike (the club can hide the ball at 1.5s
+        # but not nearer the top of the backswing). Dev-only, needs a key.
         if os.environ.get("ANTHROPIC_API_KEY"):
             try:
                 ai_ball_dict = _ai_resting_ball_for_pose(
@@ -5040,40 +5031,9 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 "reason": "ANTHROPIC_API_KEY not set on this deployment",
             }
 
-        # Full-rate (30 Hz) motion trace for the chart — avoids the 10 Hz
-        # aliasing that made identical swings plot at different heights. Falls
-        # back to the detector's own 10 Hz series if it can't run.
-        trace = None
-        try:
-            trace = compute_motion_trace(src_path, fps=tee_fps)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("produce-debug: motion trace failed: %s", exc)
-
         with _produce_debug_lock:
             st = _produce_debug_state[upload_id]
             st["total"] = len(detected)
-            st["course_id"] = row.course_id
-            st["ball_roi"] = ball_roi
-            st["ref_frame_url"] = ref_frame_url
-            st["frame_w"] = frame_w
-            st["frame_h"] = frame_h
-            st["motion"] = {
-                "series": (trace or {}).get("series") or motion_debug.get("motion_series"),
-                "duration_sec": (trace or {}).get("duration_sec")
-                or motion_debug.get("duration_sec"),
-                "median": (trace or {}).get("median", motion_debug.get("median_motion")),
-                "threshold": (trace or {}).get("threshold", motion_debug.get("threshold")),
-                "hz": (trace or {}).get("hz", motion_debug.get("effective_hz")),
-                "n_raw": motion_debug.get("n_raw_bursts"),
-                "n_final": motion_debug.get("n_final"),
-                "bursts": motion_debug.get("top_raw_bursts"),
-                # Green markers = the MOTION detector's own swings, so they
-                # line up with the blue motion line for a fair comparison.
-                "swing_peaks": [
-                    round(float(d.get("peak_time_sec") or 0.0), 2) for d in motion_swings
-                ],
-            }
-            st["ball"] = ball_dict
             st["pose"] = {
                 "available": bool(pose_debug.get("available")),
                 "reason": pose_debug.get("reason"),

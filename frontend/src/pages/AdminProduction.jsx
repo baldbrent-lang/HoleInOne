@@ -3744,15 +3744,6 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
           {data.error ? ` · error: ${data.error}` : ""}
         </div>
 
-        {data.motion && (
-          <MotionChart
-            motion={data.motion}
-            ballPeaks={data.ball?.peaks}
-            posePeaks={data.pose?.peaks}
-            aiBallPeaks={data.ai_ball?.peaks}
-          />
-        )}
-
         {data.ai_ball && (
           <div
             style={{
@@ -3769,8 +3760,9 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             {data.ai_ball.available ? (
               <>
                 <div className="small muted">
-                  Claude looks 1.5s before each pose swing and recognizes the
-                  resting ball — {data.ai_ball.n_ball_seen ?? 0} of{" "}
+                  Claude looks for the resting ball 1.5s → 1.0s → 0.5s before
+                  each pose swing (first hit wins; the club can hide it at
+                  1.5s) — {data.ai_ball.n_ball_seen ?? 0} of{" "}
                   {data.ai_ball.n_swings ?? 0} swings had a ball found.
                 </div>
                 {(data.ai_ball.screenshots || []).length > 0 && (
@@ -3794,8 +3786,10 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                           />
                         </a>
                         <div className="small muted" style={{ marginTop: 2 }}>
-                          swing {s.swing}: {s.present ? "ball found" : "no ball"} @{" "}
-                          {s.t}s
+                          swing {s.swing}:{" "}
+                          {s.present
+                            ? `ball found @ ${s.t}s (${s.lead}s before)`
+                            : "no ball found"}
                         </div>
                       </div>
                     ))}
@@ -3870,120 +3864,6 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
           </div>
         )}
 
-        {data.ref_frame_url && data.course_id ? (
-          <TeeBoxRoi
-            refUrl={data.ref_frame_url}
-            initialRoi={data.ball_roi}
-            courseId={data.course_id}
-            adminPassword={adminPassword}
-            onSaved={onRerun}
-          />
-        ) : null}
-
-        {data.ball && (
-          <div
-            style={{
-              border: "1px solid rgba(230,126,34,0.4)", borderRadius: 8,
-              padding: "8px 12px", marginBottom: 14,
-            }}
-          >
-            <div style={{ fontWeight: 700, marginBottom: 2 }}>
-              🏌️ Ball-departure detector — {data.ball.n ?? 0} swing(s)
-            </div>
-            {/* Diagnostic counts — pinpoint why nothing was found. */}
-            {data.ball.n_cand_total != null && (
-              <div className="small muted" style={{ marginBottom: 4 }}>
-                white candidates seen: <b>{data.ball.n_cand_total}</b>
-                {data.ball_roi ? (
-                  <> · inside ROI: <b>{data.ball.n_cand_in_roi}</b></>
-                ) : (
-                  " · (no ROI set — whole frame)"
-                )}{" "}
-                · rested ≥{data.ball.min_rest_sec ?? 0.8}s: <b>{data.ball.n_rested}</b>
-                {data.ball.n_departures_pre_gate != null && (
-                  <>
-                    {" "}· departures: <b>{data.ball.n_departures_pre_gate}</b>
-                    {data.ball.motion_gated ? (
-                      <> → motion-confirmed swings: <b>{data.ball.n ?? 0}</b></>
-                    ) : (
-                      " (motion gate unavailable)"
-                    )}
-                  </>
-                )}
-                {data.ball.n_cand_total === 0
-                  ? " → ball isn't passing the white/size filter"
-                  : data.ball_roi && data.ball.n_cand_in_roi === 0
-                    ? " → ball is outside your box; move it"
-                    : data.ball.n_rested === 0
-                      ? " → nothing held still long enough (club may be hiding it)"
-                      : ""}
-              </div>
-            )}
-            {data.ball.diag_url && (
-              <div style={{ marginBottom: 6 }}>
-                <div className="small muted">
-                  what the detector sees — <span style={{ color: "#2ecc71" }}>green
-                  dots</span> = white candidates,{" "}
-                  <span style={{ color: "#e67e22" }}>orange box</span> = your ROI:
-                </div>
-                <a href={data.ball.diag_url} target="_blank" rel="noreferrer">
-                  <img
-                    src={data.ball.diag_url}
-                    alt="ball detection diagnostic"
-                    style={{ maxWidth: "100%", borderRadius: 6, marginTop: 4 }}
-                  />
-                </a>
-              </div>
-            )}
-            {data.ball.reason ? (
-              <div className="small" style={{ color: "#c0392b" }}>
-                {data.ball.reason}
-              </div>
-            ) : (data.ball.departures || []).length === 0 ? (
-              <div className="small muted">No resting-ball departures found.</div>
-            ) : (
-              <div
-                style={{
-                  display: "flex", flexWrap: "wrap", gap: 10, marginTop: 6,
-                }}
-              >
-                {(data.ball.departures || []).map((d, i) => (
-                  <div key={i} style={{ width: 220, maxWidth: "100%" }}>
-                    {d.image_url ? (
-                      <a href={d.image_url} target="_blank" rel="noreferrer">
-                        <img
-                          src={d.image_url}
-                          alt={`ball ${i + 1}`}
-                          style={{ width: "100%", borderRadius: 6, display: "block" }}
-                        />
-                      </a>
-                    ) : (
-                      <div
-                        className="small muted"
-                        style={{
-                          height: 120, display: "flex", alignItems: "center",
-                          justifyContent: "center",
-                          border: "1px dashed rgba(120,120,120,0.4)", borderRadius: 6,
-                        }}
-                      >
-                        (no screenshot)
-                      </div>
-                    )}
-                    <div className="small muted" style={{ marginTop: 2 }}>
-                      swing {i + 1}: departs {d.t}s · rested {d.rest_sec ?? "?"}s
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="small muted" style={{ marginTop: 6 }}>
-              Each screenshot is grabbed mid-rest with a ring at the detected
-              ball — check it's actually on the ball. A resting white ball that
-              suddenly departs = one swing (orange marks above vs green
-              motion-detector marks).
-            </div>
-          </div>
-        )}
 
         {swings.length === 0 && !data.running && (
           <div className="small muted">No swings detected in this clip.</div>
