@@ -271,11 +271,16 @@ export const api = {
       method: "DELETE",
       adminPassword: key,
     }),
-  listLongUploads: (key, limit = 100, offset = 0) =>
-    request(
-      `/api/admin/long-uploads?limit=${limit}&offset=${offset}`,
+  listLongUploads: (key, limit = 100, offset = 0, opts = {}) => {
+    const params = new URLSearchParams({ limit, offset });
+    if (opts.course) params.set("course", opts.course);
+    if (opts.sort) params.set("sort", opts.sort);
+    if (opts.order) params.set("order", opts.order);
+    return request(
+      `/api/admin/long-uploads?${params.toString()}`,
       { adminPassword: key },
-    ),
+    );
+  },
 
   // ---- Camera-event production queue ----
   listCameraEvents: (key, limit = 100, offset = 0) =>

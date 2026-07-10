@@ -2414,14 +2414,50 @@ async def upload_long_video(
 
 @router.get("/long-uploads")
 def list_long_uploads(
-    limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
+    limit: int = 100,
+    offset: int = 0,
+    course: str = "",
+    sort: str = "created",
+    order: str = "desc",
+    db: Session = Depends(get_db),
 ):
     """List previously-uploaded long videos so the operator can re-edit /
-    reprocess them without re-uploading. Newest first."""
+    reprocess them without re-uploading.
+
+    Query params:
+      course  case-insensitive substring match on the course name
+              (blank = all courses).
+      sort    "created" (upload date, default) or "course" (course name).
+      order   "desc" (default) or "asc". For a course sort, "asc" is A→Z.
+    """
+    q = db.query(LongVideoUpload)
+
+    # Search by course name — keep rows whose course name contains the
+    # query (case-insensitive). Blank keeps everything.
+    course_q = (course or "").strip()
+    if course_q:
+        q = q.join(Course, Course.id == LongVideoUpload.course_id).filter(
+            Course.name.ilike(f"%{course_q}%")
+        )
+
+    descending = (order or "desc").lower() != "asc"
+    if sort == "course":
+        # Order alphabetically by course name; within a course, newest
+        # upload first. Needs Course joined — reuse the search join when
+        # present, else outer-join so course-less rows still appear.
+        if not course_q:
+            q = q.outerjoin(Course, Course.id == LongVideoUpload.course_id)
+        name_col = Course.name
+        q = q.order_by(
+            name_col.desc() if descending else name_col.asc(),
+            LongVideoUpload.created_at.desc(),
+        )
+    else:
+        created_col = LongVideoUpload.created_at
+        q = q.order_by(created_col.desc() if descending else created_col.asc())
+
     rows = (
-        db.query(LongVideoUpload)
-        .order_by(LongVideoUpload.created_at.desc())
-        .offset(max(0, offset))
+        q.offset(max(0, offset))
         .limit(max(1, min(500, limit)))
         .all()
     )

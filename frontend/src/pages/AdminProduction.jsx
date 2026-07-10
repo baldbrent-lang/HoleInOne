@@ -3860,9 +3860,34 @@ export default function AdminProduction() {
     localStorage.getItem(LEGACY_ADMIN_PW_STORAGE) ||
     "";
 
+  // Search + sort for the production queue. `courseSearch` is the live
+  // text input; `courseQuery` is the debounced value actually sent to the
+  // backend so typing doesn't refetch on every keystroke. `sortKey`
+  // combines the sort field and direction into one dropdown value.
+  const [courseSearch, setCourseSearch] = useState("");
+  const [courseQuery, setCourseQuery] = useState("");
+  const [sortKey, setSortKey] = useState("created_desc");
+  useEffect(() => {
+    const t = setTimeout(() => setCourseQuery(courseSearch.trim()), 350);
+    return () => clearTimeout(t);
+  }, [courseSearch]);
+  const [sortField, sortOrder] =
+    sortKey === "created_asc"
+      ? ["created", "asc"]
+      : sortKey === "course_asc"
+        ? ["course", "asc"]
+        : sortKey === "course_desc"
+          ? ["course", "desc"]
+          : ["created", "desc"];
+
   const fetchUploads = useCallback(
-    (limit, offset) => api.listLongUploads(adminPassword, limit, offset),
-    [adminPassword],
+    (limit, offset) =>
+      api.listLongUploads(adminPassword, limit, offset, {
+        course: courseQuery,
+        sort: sortField,
+        order: sortOrder,
+      }),
+    [adminPassword, courseQuery, sortField, sortOrder],
   );
   const fetchEvents = useCallback(
     (limit, offset) => api.listCameraEvents(adminPassword, limit, offset),
@@ -3870,7 +3895,7 @@ export default function AdminProduction() {
   );
   const uploadsList = useInfiniteList(fetchUploads, {
     pageSize: 25,
-    deps: [adminPassword],
+    deps: [adminPassword, courseQuery, sortField, sortOrder],
   });
   const eventsList = useInfiniteList(fetchEvents, {
     pageSize: 25,
@@ -3881,6 +3906,14 @@ export default function AdminProduction() {
   // [...] lifecycle.
   const rows = uploadsList.items;
   const events = eventsList.items;
+  // Hide uploads whose raw source is gone (e.g. a dev deployment that
+  // lost its ephemeral files) — a "File missing" card can't be edited,
+  // produced, or replayed, so it's pure clutter. The tee is the primary
+  // source; when it's missing the whole row is dead. Raw list still
+  // drives pagination (hasMore reads the unfiltered batch length).
+  const visibleRows = rows ? rows.filter((r) => !r.tee_missing) : rows;
+  const allHidden =
+    rows !== null && rows.length > 0 && visibleRows.length === 0;
 
   const [actionError, setActionError] = useState(null);
   const error = actionError || uploadsList.error || eventsList.error;
@@ -4071,7 +4104,7 @@ export default function AdminProduction() {
     setSelectedIds(new Set());
   }
   function selectAllVisible() {
-    setSelectedIds(new Set((rows || []).map((r) => r.id)));
+    setSelectedIds(new Set((visibleRows || []).map((r) => r.id)));
   }
 
   async function handleBulkDelete() {
@@ -4261,7 +4294,41 @@ export default function AdminProduction() {
 
       {error && <div className="card err-text small">{error}</div>}
 
-      {rows && rows.length > 0 && (
+      <div
+        className="card"
+        style={{
+          display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+          padding: "10px 14px", marginBottom: 12,
+        }}
+      >
+        <input
+          type="search"
+          value={courseSearch}
+          onChange={(e) => setCourseSearch(e.target.value)}
+          placeholder="Search by course…"
+          className="small"
+          style={{ width: "auto", flex: "1 1 220px", maxWidth: 320 }}
+        />
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span className="tiny upper muted">Sort</span>
+          <select
+            value={sortKey}
+            onChange={(e) => setSortKey(e.target.value)}
+            className="small"
+            style={{ width: "auto" }}
+          >
+            <option value="created_desc">Upload date — newest</option>
+            <option value="created_asc">Upload date — oldest</option>
+            <option value="course_asc">Course — A→Z</option>
+            <option value="course_desc">Course — Z→A</option>
+          </select>
+        </label>
+        {courseQuery ? (
+          <span className="tiny muted">filtering “{courseQuery}”</span>
+        ) : null}
+      </div>
+
+      {visibleRows && visibleRows.length > 0 && (
         <div
           className="card"
           style={{
@@ -4275,11 +4342,14 @@ export default function AdminProduction() {
           >
             <input
               type="checkbox"
-              checked={selectedIds.size > 0 && selectedIds.size === rows.length}
+              checked={
+                selectedIds.size > 0 && selectedIds.size === visibleRows.length
+              }
               ref={(el) => {
                 if (el) {
                   el.indeterminate =
-                    selectedIds.size > 0 && selectedIds.size < rows.length;
+                    selectedIds.size > 0 &&
+                    selectedIds.size < visibleRows.length;
                 }
               }}
               onChange={(e) => (e.target.checked ? selectAllVisible() : clearSelection())}
@@ -4355,9 +4425,22 @@ export default function AdminProduction() {
 
       {(rows !== null) && (rows?.length || 0) === 0 && (
         <div className="card muted center" style={{ padding: 40 }}>
-          Nothing in the production queue yet. Either{" "}
-          <Link to="/admin/upload-videos">upload a video</Link> or wait for
-          the on-course cameras to capture a swing.
+          {courseQuery ? (
+            <>No uploads match “{courseQuery}”.</>
+          ) : (
+            <>
+              Nothing in the production queue yet. Either{" "}
+              <Link to="/admin/upload-videos">upload a video</Link> or wait for
+              the on-course cameras to capture a swing.
+            </>
+          )}
+        </div>
+      )}
+
+      {allHidden && (
+        <div className="card muted center" style={{ padding: 40 }}>
+          {rows.length} upload{rows.length === 1 ? "" : "s"} loaded, but their
+          source files are missing — hidden. Scroll for more.
         </div>
       )}
 
@@ -4367,7 +4450,7 @@ export default function AdminProduction() {
         </div>
       )}
 
-      {rows?.map((row) => {
+      {visibleRows?.map((row) => {
         const state = uploadState(row);
         const greyed = state === "processing";
         const busy = busyId === row.id;
