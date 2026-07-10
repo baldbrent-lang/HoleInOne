@@ -69,6 +69,7 @@ from ..services.ai_tracer import (
     detect_swings_from_motion,
     detect_swings_from_ball,
     detect_swings_from_ai_ball,
+    classify_swing_shot,
     compute_motion_trace,
     detect_swings_combined,
     filter_swings_by_ball_departure,
@@ -1376,6 +1377,27 @@ def _run_long_upload_job(
                         pair_window_sec=float(combined_pair_window_sec),
                         debug=_detect_debug,
                     )
+
+                # Practice-swing filter (pose mode): only produce swings where
+                # a ball was at rest before and gone after — drop practice
+                # swings and whiffs. Needs a key; unknown/no-key keeps the
+                # swing so a real shot is never dropped for lack of a key.
+                if used_pose and detected and os.environ.get("ANTHROPIC_API_KEY"):
+                    _real = []
+                    for d in detected:
+                        v = classify_swing_shot(
+                            src_path, float(d.get("peak_time_sec") or 0.0), tee_fps,
+                        )
+                        if v.get("verdict") == "practice":
+                            log.info(
+                                "long-upload worker: upload=%s dropping practice "
+                                "swing @ %.1fs (%s)", upload_id,
+                                float(d.get("peak_time_sec") or 0.0), v.get("reason"),
+                            )
+                        else:
+                            _real.append(d)
+                    detected = _real
+
                 for i, d in enumerate(detected):
                     segs.append(
                         {
@@ -4925,17 +4947,11 @@ def _ai_ball_report(src_path: Path, tee_fps: float, upload_id: int, aib: dict) -
 
 def _ai_resting_ball_for_pose(
     src_path: Path, tee_fps: float, upload_id: int, pose_peaks: list,
-    leads: tuple = (1.5, 1.0, 0.5),
 ) -> dict:
-    """For each POSE swing, ask Claude to recognize the resting ball before
-    the swing. Tries each lead in `leads` in order (1.5s, then 1.0s, then
-    0.5s) and uses the first frame where a ball is found — the club head can
-    hide the ball at 1.5s but not at, say, 0.5s (top of backswing, club
-    lifted away). Returns a screenshot per swing with the recognized ball
-    ringed."""
+    """Classify each POSE swing as a REAL shot vs a practice swing by ball
+    departure (ball present before the swing → gone after). Produces a
+    before + after screenshot per swing with the recognized ball ringed."""
     import cv2  # type: ignore
-
-    from ..services.ai_tracer import find_resting_ball
 
     def _url(name: str):
         p = CLIPS_DIR / name
@@ -4944,49 +4960,47 @@ def _ai_resting_ball_for_pose(
             if p.exists() else None
         )
 
-    shots = []
-    seen = 0
     c = cv2.VideoCapture(str(src_path))
+
+    def _shot(ball, tag, i):
+        """Grab the frame at ball['t'], ring the ball if present, save, and
+        return {t, present, image_url}."""
+        if not ball:
+            return None
+        t = float(ball.get("t") or 0.0)
+        c.set(cv2.CAP_PROP_POS_FRAMES, int(t * tee_fps))
+        ok, fr = c.read()
+        if not ok or fr is None:
+            return None
+        present = bool(ball.get("present") and ball.get("x") is not None)
+        if present:
+            rad = max(12, int(fr.shape[0] * 0.02))
+            cv2.circle(fr, (int(ball["x"]), int(ball["y"])), rad, (255, 255, 0), 3, cv2.LINE_AA)
+            cv2.circle(fr, (int(ball["x"]), int(ball["y"])), 3, (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.putText(
+            fr, f"{tag} @ {t:.1f}s: {'ball' if present else 'no ball'}",
+            (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+            (255, 255, 0) if present else (0, 0, 255), 2, cv2.LINE_AA,
+        )
+        iname = f"debug-aiball-{upload_id}-s{i}-{tag}-{secrets.token_hex(3)}.jpg"
+        cv2.imwrite(str(CLIPS_DIR / iname), fr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        u = _url(iname)
+        return {"t": round(t, 2), "present": present, "image_url": u} if u else None
+
+    swings = []
+    n_real = 0
     try:
         for i, pk in enumerate(pose_peaks):
-            hit = None
-            for lead in leads:
-                t_ball = max(0.0, float(pk) - lead)
-                r = find_resting_ball(src_path, int(t_ball * tee_fps))
-                if r.get("present") and r.get("x") is not None:
-                    hit = (lead, t_ball, r)
-                    break
-            if hit is not None:
-                lead, t_ball, r = hit
-                seen += 1
-                present = True
-            else:
-                lead, t_ball, r = leads[0], max(0.0, float(pk) - leads[0]), {}
-                present = False
-            c.set(cv2.CAP_PROP_POS_FRAMES, int(t_ball * tee_fps))
-            ok, fr = c.read()
-            if not ok or fr is None:
-                continue
-            if present:
-                rad = max(12, int(fr.shape[0] * 0.02))
-                cv2.circle(fr, (int(r["x"]), int(r["y"])), rad, (255, 255, 0), 3, cv2.LINE_AA)
-                cv2.circle(fr, (int(r["x"]), int(r["y"])), 3, (0, 0, 255), -1, cv2.LINE_AA)
-                label = f"resting ball @ {t_ball:.1f}s ({lead:.1f}s before swing {i + 1})"
-                color = (255, 255, 0)
-            else:
-                _tried = "/".join(f"{x:.1f}" for x in leads)
-                label = f"NO ball (tried {_tried}s before swing {i + 1})"
-                color = (0, 0, 255)
-            cv2.putText(fr, label, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2, cv2.LINE_AA)
-            iname = f"debug-aiball-{upload_id}-s{i}-{secrets.token_hex(3)}.jpg"
-            cv2.imwrite(str(CLIPS_DIR / iname), fr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-            u = _url(iname)
-            if u:
-                shots.append({
-                    "swing": i + 1, "t": round(t_ball, 2),
-                    "lead": lead if present else None, "present": present,
-                    "confidence": r.get("confidence"), "image_url": u,
-                })
+            v = classify_swing_shot(src_path, float(pk), tee_fps)
+            if v.get("verdict") == "real":
+                n_real += 1
+            swings.append({
+                "swing": i + 1,
+                "verdict": v.get("verdict"),
+                "reason": v.get("reason"),
+                "before": _shot(v.get("before"), "before", i),
+                "after": _shot(v.get("after"), "after", i),
+            })
     finally:
         c.release()
 
@@ -4994,8 +5008,8 @@ def _ai_resting_ball_for_pose(
         "available": True,
         "pose_anchored": True,
         "n_swings": len(pose_peaks),
-        "n_ball_seen": seen,
-        "screenshots": shots,
+        "n_real": n_real,
+        "swings": swings,
     }
 
 

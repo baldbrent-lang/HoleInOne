@@ -3752,49 +3752,63 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             }}
           >
             <div style={{ fontWeight: 700, marginBottom: 2 }}>
-              🤖 AI resting-ball (per pose swing) —{" "}
+              🤖 Real vs practice (ball departure) —{" "}
               {data.ai_ball.available
-                ? `found ${data.ai_ball.n_ball_seen ?? 0}/${data.ai_ball.n_swings ?? 0}`
+                ? `${data.ai_ball.n_real ?? 0}/${data.ai_ball.n_swings ?? 0} real`
                 : "unavailable"}
             </div>
             {data.ai_ball.available ? (
               <>
                 <div className="small muted">
-                  Claude looks for the resting ball 1.5s → 1.0s → 0.5s before
-                  each pose swing (first hit wins; the club can hide it at
-                  1.5s) — {data.ai_ball.n_ball_seen ?? 0} of{" "}
-                  {data.ai_ball.n_swings ?? 0} swings had a ball found.
+                  ball at rest before the swing → gone after = a real shot;
+                  no ball, or still there after = practice / whiff. Only{" "}
+                  <b>real</b> swings get produced.
                 </div>
-                {(data.ai_ball.screenshots || []).length > 0 && (
-                  <div
-                    style={{
-                      display: "flex", flexWrap: "wrap", gap: 10, marginTop: 6,
-                    }}
-                  >
-                    {data.ai_ball.screenshots.map((s, i) => (
-                      <div key={i} style={{ width: 220, maxWidth: "100%" }}>
-                        <a href={s.image_url} target="_blank" rel="noreferrer">
-                          <img
-                            src={s.image_url}
-                            alt={`ai ball swing ${s.swing}`}
-                            style={{
-                              width: "100%", borderRadius: 6, display: "block",
-                              outline: s.present
-                                ? "2px solid #00b8d4"
-                                : "2px solid #c0392b",
-                            }}
-                          />
-                        </a>
-                        <div className="small muted" style={{ marginTop: 2 }}>
-                          swing {s.swing}:{" "}
-                          {s.present
-                            ? `ball found @ ${s.t}s (${s.lead}s before)`
-                            : "no ball found"}
-                        </div>
+                {(data.ai_ball.swings || []).map((s, i) => {
+                  const real = s.verdict === "real";
+                  const unknown = s.verdict === "unknown";
+                  const col = real ? "#1a9d55" : unknown ? "#888" : "#c0392b";
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        marginTop: 8, paddingTop: 6,
+                        borderTop: "1px solid rgba(120,120,120,0.25)",
+                      }}
+                    >
+                      <div className="small" style={{ fontWeight: 700, color: col }}>
+                        swing {s.swing}: {real ? "✅ REAL" : unknown ? "? unknown" : "❌ practice"}
+                        <span className="small muted" style={{ fontWeight: 400 }}>
+                          {" "}· {s.reason}
+                        </span>
                       </div>
-                    ))}
-                  </div>
-                )}
+                      <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                        {[["before", s.before], ["after", s.after]].map(
+                          ([tag, sh]) =>
+                            sh && sh.image_url ? (
+                              <div key={tag} style={{ width: 200, maxWidth: "100%" }}>
+                                <a href={sh.image_url} target="_blank" rel="noreferrer">
+                                  <img
+                                    src={sh.image_url}
+                                    alt={`${tag} swing ${s.swing}`}
+                                    style={{
+                                      width: "100%", borderRadius: 6, display: "block",
+                                      outline: sh.present
+                                        ? "2px solid #00b8d4"
+                                        : "2px solid #c0392b",
+                                    }}
+                                  />
+                                </a>
+                                <div className="small muted">
+                                  {tag}: {sh.present ? "ball" : "no ball"} @ {sh.t}s
+                                </div>
+                              </div>
+                            ) : null,
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </>
             ) : (
               <div className="small muted">

@@ -4011,6 +4011,74 @@ def find_resting_ball(
     return out
 
 
+def classify_swing_shot(
+    input_path: Path,
+    peak_time_sec: float,
+    fps: float,
+    leads: tuple = (1.5, 1.0, 0.5),
+    after_sec: float = 1.5,
+    move_tol_frac: float = 0.06,
+) -> dict:
+    """Real shot vs practice swing, by ball departure.
+
+    A real swing makes a resting ball leave; a practice/air swing / whiff
+    does not. Find the resting ball BEFORE the swing (trying each lead in
+    turn — the club can hide it at 1.5s but not nearer the top) and check
+    whether it's gone AFTER (club has followed through, so the spot is
+    clear). Verdict:
+      * no ball before        -> practice (air swing)
+      * ball before, gone after -> real (ball departed)
+      * ball before, still there after (same spot) -> practice (not struck)
+
+    Returns {verdict: 'real'|'practice'|'unknown', reason, before, after}.
+    'unknown' when the AI ball isn't available (no key) — callers should
+    treat unknown as keep, never drop a real swing on a missing key."""
+    if not (HAS_CV and HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY")):
+        return {"verdict": "unknown", "reason": "AI ball unavailable",
+                "before": None, "after": None}
+
+    before = None
+    for lead in leads:
+        t_b = max(0.0, float(peak_time_sec) - lead)
+        r = find_resting_ball(input_path, int(t_b * fps))
+        if r.get("present") and r.get("x") is not None:
+            before = {
+                "present": True, "x": r["x"], "y": r["y"],
+                "t": round(t_b, 2), "lead": lead, "confidence": r.get("confidence"),
+            }
+            break
+    if before is None:
+        return {"verdict": "practice", "reason": "no ball at address (air swing)",
+                "before": None, "after": None}
+
+    t_a = float(peak_time_sec) + after_sec
+    ra = find_resting_ball(input_path, int(t_a * fps))
+    after = {
+        "present": bool(ra.get("present") and ra.get("x") is not None),
+        "x": ra.get("x"), "y": ra.get("y"), "t": round(t_a, 2),
+        "confidence": ra.get("confidence"),
+    }
+    if not after["present"]:
+        return {"verdict": "real", "reason": "ball departed", "before": before, "after": after}
+
+    # Ball still resting after the swing — is it the SAME ball at the same
+    # spot (not struck), or did it move (departed/rolled)? Compare positions.
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        w = float(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0)
+        h = float(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080.0)
+        cap.release()
+    except Exception:  # noqa: BLE001
+        w, h = 1920.0, 1080.0
+    diag = (w * w + h * h) ** 0.5
+    dist = ((before["x"] - after["x"]) ** 2 + (before["y"] - after["y"]) ** 2) ** 0.5
+    if dist <= move_tol_frac * diag:
+        return {"verdict": "practice", "reason": "ball still at rest (not struck)",
+                "before": before, "after": after}
+    return {"verdict": "real", "reason": "ball moved from rest",
+            "before": before, "after": after}
+
+
 def detect_swings_from_ai_ball(
     input_path: Path,
     fps: float | None = None,
