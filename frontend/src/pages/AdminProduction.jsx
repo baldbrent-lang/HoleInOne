@@ -1378,38 +1378,6 @@ function WizardBody({
         }}
       >
         <EditableRow
-          label="Handedness"
-          value={draft.handedness === "left" ? "Left" : "Right"}
-          active={editing === "handedness"}
-          onActivate={() => setEditing(editing === "handedness" ? null : "handedness")}
-        >
-          <div className="row" style={{ gap: 6 }}>
-            <button
-              type="button"
-              className={draft.handedness === "right" ? "" : "ghost"}
-              style={{ width: "auto", flex: 1 }}
-              onClick={() => {
-                setDraft((d) => ({ ...d, handedness: "right" }));
-                persistPatch({ handedness: "right" });
-              }}
-            >
-              Right
-            </button>
-            <button
-              type="button"
-              className={draft.handedness === "left" ? "" : "ghost"}
-              style={{ width: "auto", flex: 1 }}
-              onClick={() => {
-                setDraft((d) => ({ ...d, handedness: "left" }));
-                persistPatch({ handedness: "left" });
-              }}
-            >
-              Left
-            </button>
-          </div>
-        </EditableRow>
-
-        <EditableRow
           label="Start frame"
           value={draft.startFrame != null
             ? `Frame ${draft.startFrame}`
@@ -1461,30 +1429,6 @@ function WizardBody({
         </EditableRow>
 
         <EditableRow
-          label="Address frame"
-          value={`Frame ${draft.addressFrame}`}
-          active={editing === "address"}
-          onActivate={() => setEditing(editing === "address" ? null : "address")}
-        >
-          <FrameStepper
-            current={navFrame}
-            total={navTotal}
-            loading={navLoading}
-            onStep={(delta) => loadFrame(clampedStep(delta))}
-            onJump={(n) => loadFrame(clampedJump(n))}
-            onApply={() => {
-              if (navFrame == null) return;
-              const url = navUrl || draft.addressImageUrl;
-              setDraft((d) => ({
-                ...d, addressFrame: navFrame, addressImageUrl: url,
-              }));
-              persistPatch({ address_frame: navFrame, address_image_url: url });
-              setEditing(null);
-            }}
-          />
-        </EditableRow>
-
-        <EditableRow
           label="Impact frame"
           value={`Frame ${draft.impactFrame}`}
           active={editing === "impact"}
@@ -1504,58 +1448,6 @@ function WizardBody({
             }}
           />
         </EditableRow>
-
-        {row.dual_camera && (
-          <EditableRow
-            label="Cut frame (→ green camera)"
-            value={draft.cutFrame != null
-              ? `Frame ${draft.cutFrame}`
-              : (autoCutFrame != null
-                ? `Frame ${autoCutFrame} (auto: 2.5s after impact)`
-                : "Auto: 2.5s after impact")}
-            active={editing === "cut"}
-            onActivate={() => setEditing(editing === "cut" ? null : "cut")}
-          >
-            <div className="tiny muted" style={{ marginBottom: 6 }}>
-              The produced clip plays the tee tracer up to this frame,
-              then cuts to the green camera (which plays to the End
-              frame). Defaults to 2.5s after impact until you set it.
-            </div>
-            {cutClockMs != null && (
-              <div className="tiny" style={{ marginBottom: 6, color: "#1f9d57" }}>
-                Cut timestamp: {fmtClock(cutClockMs)} CT — the green
-                camera switches at this same instant.
-              </div>
-            )}
-            <FrameStepper
-              current={navFrame}
-              total={navTotal}
-              loading={navLoading}
-              onStep={(delta) => loadFrame(clampedStep(delta))}
-              onJump={(n) => loadFrame(clampedJump(n))}
-              onApply={() => {
-                if (navFrame == null) return;
-                setDraft((d) => ({ ...d, cutFrame: navFrame }));
-                persistPatch({ cut_frame: navFrame });
-                setEditing(null);
-              }}
-            />
-            {draft.cutFrame != null && (
-              <button
-                type="button"
-                className="ghost small"
-                style={{ width: "auto", marginTop: 6 }}
-                onClick={() => {
-                  setDraft((d) => ({ ...d, cutFrame: null }));
-                  persistPatch({ cut_frame: null });
-                  setEditing(null);
-                }}
-              >
-                Reset to auto (2.5s after impact)
-              </button>
-            )}
-          </EditableRow>
-        )}
 
         <EditableRow
           label="End frame"
@@ -1584,28 +1476,6 @@ function WizardBody({
               setEditing(null);
             }}
           />
-        </EditableRow>
-
-        <EditableRow
-          label="Resting ball"
-          value={draft.ball ? `${draft.ball.x}, ${draft.ball.y} px` : "Not set"}
-          active={editing === "ball"}
-          onActivate={() => setEditing(editing === "ball" ? null : "ball")}
-        >
-          <div className="tiny muted">
-            Drag the green dot on the left to set the ball-at-rest
-            position. Address frame is shown.
-          </div>
-          <button
-            type="button"
-            style={{ width: "auto", marginTop: 6 }}
-            onClick={() => {
-              if (draft.ball) persistPatch({ ball: draft.ball });
-              setEditing(null);
-            }}
-          >
-            Done
-          </button>
         </EditableRow>
 
         <EditableRow
