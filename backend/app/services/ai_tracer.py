@@ -3114,15 +3114,49 @@ def render_tracer_video(
     anchors: list[tuple[int, int, int]] = []  # (frame, x, y)
     manual_anchor_idxs: set[int] = set()
     rest_anchor_frame: int | None = None
+    rest_added = False
     if ball_rest_xy_native is not None:
         rest_anchor_frame = max(
             0, int(impact_frame_idx) - REST_ANCHOR_FRAMES_BEFORE_IMPACT,
         )
-        anchors.append((
-            rest_anchor_frame,
-            int(round(float(ball_rest_xy_native[0]))),
-            int(round(float(ball_rest_xy_native[1]))),
-        ))
+        rx = int(round(float(ball_rest_xy_native[0])))
+        ry = int(round(float(ball_rest_xy_native[1])))
+        # Guard: the resting-ball anchor is pinned, weighted 10x, and the
+        # rendered curve is forced to START exactly on it — so a mis-
+        # detected rest (the AI latching onto a bright object off to the
+        # side, e.g. a white sign / backboard / reflection) drags the whole
+        # tracer origin there, with no per-frame card to reveal it. Only
+        # trust the rest when it's spatially consistent with the real ball
+        # track: the ball starts AT rest and the first captured detection is
+        # right after impact, so rest should sit near the track. If it's far
+        # from EVERY detected position, it's almost certainly wrong — drop it
+        # and let the line begin at the first real detection instead.
+        manual_pts = [(x, y) for (x, y, m) in points_by_frame.values() if m]
+        ref_pts = manual_pts or [
+            (x, y) for (x, y, _m) in points_by_frame.values()
+        ]
+        drop_rest = False
+        if len(ref_pts) >= 2:
+            diag = math.hypot(width, height) or 1.0
+            nearest = min(math.hypot(rx - dx, ry - dy) for dx, dy in ref_pts)
+            if nearest > 0.20 * diag:
+                drop_rest = True
+                info["rest_anchor_dropped"] = {
+                    "xy": [rx, ry],
+                    "nearest_detection_px": round(float(nearest), 1),
+                    "threshold_px": round(0.20 * diag, 1),
+                }
+                log.info(
+                    "ai_tracer: dropped resting-ball anchor at (%d,%d) — "
+                    "%.0fpx from nearest ball detection (> %.0f) — starting "
+                    "line at first real detection instead",
+                    rx, ry, nearest, 0.20 * diag,
+                )
+        if drop_rest:
+            rest_anchor_frame = None  # no longer a valid anchor-0 rest
+        else:
+            anchors.append((rest_anchor_frame, rx, ry))
+            rest_added = True
     # If the operator has manually plotted ANY ball positions, their
     # clicks are the ground-truth trajectory: drop the AI's auto-detected
     # points so they can't pull the fitted line off the plotted path.
@@ -3235,7 +3269,7 @@ def render_tracer_video(
     # rejection — the operator's plotted points are ground truth, so the
     # fitted curve is forced to keep (and hug) them instead of tossing
     # them as "outliers" relative to a fit the AI points had skewed.
-    rest_is_anchor_zero = ball_rest_xy_native is not None
+    rest_is_anchor_zero = rest_added
     pinned_set: set[int] = set(manual_anchor_idxs)
     if rest_is_anchor_zero:
         pinned_set.add(0)
