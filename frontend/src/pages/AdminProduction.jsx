@@ -3831,14 +3831,15 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             {data.pose.available ? (
               <>
                 <div className="small muted">
-                  reads the golfer's wrist speed (immune to ball occlusion) ·
+                  wrist speed gated by back bend (≥
+                  {data.pose.back_bend_min_deg ?? 15}° spine tilt) ·
                   pose tracked {data.pose.n_pose_frames ?? 0}/
                   {data.pose.n_samples ?? "?"} frames
                   {data.pose.coverage != null
-                    ? ` (${Math.round(data.pose.coverage * 100)}% coverage)`
+                    ? ` (${Math.round(data.pose.coverage * 100)}%)`
                     : ""}
-                  {data.pose.coverage != null && data.pose.coverage < 0.5
-                    ? " — low; pose is dropping out"
+                  {data.pose.n_bend_rejected
+                    ? ` · rejected ${data.pose.n_bend_rejected} upright (fast hands, no swing posture)`
                     : ""}
                 </div>
                 <PoseChart pose={data.pose} />

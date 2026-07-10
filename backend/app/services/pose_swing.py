@@ -26,6 +26,10 @@ log = logging.getLogger("golfreelz.pose_swing")
 # MediaPipe pose landmark indices.
 _LEFT_WRIST = 15
 _RIGHT_WRIST = 16
+_LEFT_SHOULDER = 11
+_RIGHT_SHOULDER = 12
+_LEFT_HIP = 23
+_RIGHT_HIP = 24
 
 _pose = None
 _pose_tried = False
@@ -109,14 +113,20 @@ def detect_swings_from_pose(
     min_separation_sec: float = 4.0,
     before_sec: float = 3.5,
     after_sec: float = 5.0,
-    speed_ratio: float = 4.0,
+    speed_ratio: float = 3.0,
     min_burst_sec: float = 0.25,
     max_burst_sec: float = 3.0,
+    back_bend_min_deg: float = 15.0,
     debug: dict | None = None,
 ) -> list[dict]:
-    """Find swings from wrist-speed bursts. Returns the same segment shape as
-    the other detectors (peak_time_sec / start_sec / end_sec / confidence).
-    Empty + a debug reason when mediapipe is missing or nothing is found."""
+    """Find swings from wrist-speed bursts, gated by back bend.
+
+    A wrist-speed burst only counts as a swing if the golfer's spine is bent
+    over at the peak (a real swing has the torso tilted toward the ball;
+    someone standing straight who just moves their hands does not). Rejects
+    fast-hands-but-upright false positives. Returns the same segment shape as
+    the other detectors. Empty + a debug reason when mediapipe is missing or
+    nothing is found."""
     if debug is not None:
         debug.update({"reason": None, "method": "pose_wrist_speed", "available": False})
 
@@ -143,8 +153,33 @@ def detect_swings_from_pose(
         return []
 
     wrist: list[tuple[float, float] | None] = []  # per sample: (x,y) normalized or None
+    bend: list[float | None] = []  # per sample: spine angle from vertical (deg)
     times: list[float] = []
     n_pose = 0
+
+    def _spine_deg(pts) -> float | None:
+        """Angle (deg) of the hip→shoulder spine from vertical. ~0 standing
+        straight; larger when bent over the ball. None if hips/shoulders
+        aren't confidently visible."""
+        def _mid(a, b):
+            pa, pb = pts[a], pts[b]
+            if getattr(pa, "visibility", 0.0) < 0.3 or getattr(pb, "visibility", 0.0) < 0.3:
+                return None
+            return ((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0)
+
+        sh = _mid(_LEFT_SHOULDER, _RIGHT_SHOULDER)
+        hp = _mid(_LEFT_HIP, _RIGHT_HIP)
+        if sh is None or hp is None:
+            return None
+        vx, vy = sh[0] - hp[0], sh[1] - hp[1]  # points toward the shoulders
+        mag = (vx * vx + vy * vy) ** 0.5
+        if mag < 1e-6:
+            return None
+        import math
+        # vertical-up is (0,-1); cos = (-vy)/mag
+        cos = max(-1.0, min(1.0, -vy / mag))
+        return math.degrees(math.acos(cos))
+
     try:
         src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if src_fps <= 0:
@@ -165,8 +200,10 @@ def detect_swings_from_pose(
             lm = getattr(res, "pose_landmarks", None)
             if lm is None:
                 wrist.append(None)
+                bend.append(None)
                 continue
             pts = lm.landmark
+            bend.append(_spine_deg(pts))
             cands = []
             for wi in (_LEFT_WRIST, _RIGHT_WRIST):
                 p = pts[wi]
@@ -237,8 +274,24 @@ def detect_swings_from_pose(
         keep.append((s_i, e_i, p_i, p_v))
     keep.sort(key=lambda t: t[2])
 
+    def _bend_near(p_i):
+        """Max spine bend within the burst around p_i (the golfer is bent over
+        somewhere in the swing even if the exact peak frame lost the pose).
+        None if no pose landmarks nearby."""
+        lo, hi = max(0, p_i - int(round(0.4 * eff_hz))), min(len(bend), p_i + int(round(0.4 * eff_hz)) + 1)
+        vals = [bend[i] for i in range(lo, hi) if bend[i] is not None]
+        return max(vals) if vals else None
+
     segments = []
+    n_bend_rejected = 0
     for s_i, e_i, p_i, p_v in keep:
+        b = _bend_near(p_i)
+        # Back-bend gate: reject a fast-hands burst where the golfer is
+        # standing upright (a real swing bends the torso over the ball). Keep
+        # when bend is unknown (pose lost) so we never drop on missing data.
+        if b is not None and b < back_bend_min_deg:
+            n_bend_rejected += 1
+            continue
         peak_t = times[p_i] if p_i < len(times) else (p_i / eff_hz)
         ratio = p_v / median if median > 0 else 0.0
         conf = "high" if ratio >= 10 else ("medium" if ratio >= 6 else "low")
@@ -248,6 +301,7 @@ def detect_swings_from_pose(
             "end_sec": float(min(duration, peak_t + after_sec)),
             "confidence": conf,
             "ratio": round(float(ratio), 1),
+            "back_bend_deg": round(float(b), 1) if b is not None else None,
         })
 
     # Decimate the wrist-speed waveform for plotting (peak-preserving).
@@ -261,8 +315,8 @@ def detect_swings_from_pose(
         series = series.reshape(-1, b).max(axis=1)
 
     log.info(
-        "pose_swing: %d swings (raw bursts=%d) pose_frames=%d hz=%.1f",
-        len(keep), len(bursts), n_pose, eff_hz,
+        "pose_swing: %d swings (bursts=%d, bend-rejected=%d) pose_frames=%d hz=%.1f",
+        len(segments), len(bursts), n_bend_rejected, n_pose, eff_hz,
     )
     if debug is not None:
         debug.update({
@@ -273,7 +327,9 @@ def detect_swings_from_pose(
             "median": float(median),
             "threshold": float(threshold),
             "n_raw_bursts": len(bursts),
-            "n_swings": len(keep),
+            "n_bend_rejected": int(n_bend_rejected),
+            "back_bend_min_deg": float(back_bend_min_deg),
+            "n_swings": len(segments),
             "series": [round(float(v), 5) for v in series],
             "peaks": [round(float(s["peak_time_sec"]), 2) for s in segments],
         })
