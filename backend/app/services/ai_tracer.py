@@ -3138,19 +3138,23 @@ def render_tracer_video(
         drop_rest = False
         if len(ref_pts) >= 2:
             diag = math.hypot(width, height) or 1.0
+            # Generous threshold: a real ball can rise a long way before the
+            # tracker first locks on, so only reject a rest that's WILDLY off
+            # (a bright sign / backboard / reflection halfway across frame).
+            max_off = 0.33 * diag
             nearest = min(math.hypot(rx - dx, ry - dy) for dx, dy in ref_pts)
-            if nearest > 0.20 * diag:
+            if nearest > max_off:
                 drop_rest = True
                 info["rest_anchor_dropped"] = {
                     "xy": [rx, ry],
                     "nearest_detection_px": round(float(nearest), 1),
-                    "threshold_px": round(0.20 * diag, 1),
+                    "threshold_px": round(max_off, 1),
                 }
                 log.info(
                     "ai_tracer: dropped resting-ball anchor at (%d,%d) — "
                     "%.0fpx from nearest ball detection (> %.0f) — starting "
-                    "line at first real detection instead",
-                    rx, ry, nearest, 0.20 * diag,
+                    "line at the ball's launch point instead",
+                    rx, ry, nearest, max_off,
                 )
         if drop_rest:
             rest_anchor_frame = None  # no longer a valid anchor-0 rest
@@ -3362,6 +3366,18 @@ def render_tracer_video(
         if kept:
             first_frame = kept[0][0]
             last_kept_frame = kept[-1][0]
+            # Always originate the drawn line at the struck ball. When the
+            # rest anchor was missing or dropped (or the AI's first ball
+            # detection is already well into the flight), kept[0] sits up in
+            # the air — extend the sampled range back to just before impact
+            # so the fitted parabola is drawn from the ball's launch point on
+            # the ground, not from wherever tracking first locked on. With a
+            # valid rest anchor this is a no-op (kept[0] already sits there).
+            launch_frame = max(
+                0, int(impact_frame_idx) - REST_ANCHOR_FRAMES_BEFORE_IMPACT,
+            )
+            if not manual_render and launch_frame < first_frame:
+                first_frame = launch_frame
             # Apex truncation: stop the line at the parabola's vertex
             # unless the operator marked CLEAR descent past it. In
             # image coords y grows downward, so the vertex of a > 0
@@ -5807,6 +5823,21 @@ def run_full_ai_tracer_pipeline(
                     )
         finally:
             cap.release()
+    # The tracer must ALWAYS start from where the ball is struck. When the
+    # handedness call didn't hand back a ball position, fall back to a
+    # dedicated resting-ball vision call on the address frame so we still
+    # get a ground anchor instead of the line starting mid-flight at the
+    # first tracked point. (Uses the operator override when one was given.)
+    if ball_rest_xy_native is None and ball_at_rest_override is None:
+        rb = find_resting_ball(input_path, int(addr_idx), model=model)
+        if rb.get("present") and rb.get("x") is not None and rb.get("y") is not None:
+            ball_rest_xy_native = (float(rb["x"]), float(rb["y"]))
+            result["ball_rest_source"] = "find_resting_ball_fallback"
+            log.info(
+                "ai_tracer: rest anchor via fallback find_resting_ball at "
+                "address frame %s → (%s,%s)",
+                addr_idx, rb["x"], rb["y"],
+            )
     result["ball_rest_xy_native"] = ball_rest_xy_native
 
     tracer_path = output_dir / f"{output_prefix}_ai_tracer.mp4"
