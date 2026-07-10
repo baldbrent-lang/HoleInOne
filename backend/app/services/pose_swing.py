@@ -20,8 +20,18 @@ every function is a no-op that reports the reason, so nothing else breaks.
 from __future__ import annotations
 
 import logging
+import warnings
 
 log = logging.getLogger("golfreelz.pose_swing")
+
+# MediaPipe's bundled protobuf emits this UserWarning on every frame it
+# processes, which floods the console during a scan. It's a harmless
+# deprecation notice inside a dependency — silence just that one.
+warnings.filterwarnings(
+    "ignore",
+    message=r"SymbolDatabase\.GetPrototype\(\) is deprecated",
+    category=UserWarning,
+)
 
 # MediaPipe pose landmark indices.
 _LEFT_WRIST = 15
