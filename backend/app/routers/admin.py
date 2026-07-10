@@ -1666,6 +1666,67 @@ def _process_long_upload_segments(
         _tee_only_after = CLIP_SECONDS_TEE_ONLY_AFTER_IMPACT
         _green_after = CLIP_SECONDS_GREEN_AFTER_CUT
 
+    # Source fps, probed once — used to map each swing's segment-relative
+    # ball track back into full-clip frame indices for the Edit wizard.
+    _src_fps = probe_fps(src_path) or 30.0
+
+    def _persist_swing_track(swing_idx, tracer_info, tracer_url, cut_start_sec):
+        """Save this swing's production ball track into edit_metrics.swings so
+        the Edit wizard hydrates the found points (and the rendered tracer)
+        instead of re-running the AI pipeline on the whole multi-swing source
+        — which tracks the wrong window and comes back "no ball".
+
+        The pipeline runs on the CUT segment (frame 0 = the cut's start), so
+        every frame index is shifted by the cut's start offset to land in the
+        full-clip frame space the wizard works in."""
+        if progress_upload_id is None or not tracer_info:
+            return
+        seg_frames = tracer_info.get("ball_track_frames") or []
+        if not seg_frames:
+            return
+        offset = int(round((cut_start_sec or 0.0) * _src_fps))
+        mapped = []
+        for rec in seg_frames:
+            f = rec.get("frame")
+            if f is None:
+                continue
+            mapped.append({
+                "frame": int(f) + offset,
+                "found": bool(rec.get("found")),
+                "x": rec.get("x"),
+                "y": rec.get("y"),
+                "confidence": rec.get("confidence"),
+                "manual": bool(rec.get("manual", False)),
+                "image_url": None,
+            })
+        if not mapped:
+            return
+        try:
+            row = db.get(LongVideoUpload, progress_upload_id)
+            if row is None:
+                return
+            em = dict(row.edit_metrics or {})
+            swings = list(em.get("swings") or [])
+            for i, sw in enumerate(swings):
+                if isinstance(sw, dict) and int(sw.get("idx", -1)) == swing_idx:
+                    nsw = dict(sw)
+                    nsw["ball_track_frames"] = mapped
+                    if tracer_url:
+                        nsw["tracer_url"] = tracer_url
+                    nsw["tracer_engine"] = tracer_info.get("engine") or "ai"
+                    swings[i] = nsw
+                    break
+            em["swings"] = swings
+            row.edit_metrics = em
+            db.commit()
+            log.info(
+                "long-upload: persisted %d ball-track points into swing idx=%s "
+                "(offset=%d frames)",
+                len(mapped), swing_idx, offset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("persist swing track failed (idx=%s): %s", swing_idx, exc)
+
     n_done = 0
     results: list[dict] = []
     for idx, seg in enumerate(seg_list):
@@ -1883,6 +1944,8 @@ def _process_long_upload_segments(
                 )
             _intro_overlay_for_clip(clip, participant)
             db.commit()
+            # Save the ball track for the Edit wizard (see helper).
+            _persist_swing_track(idx, tracer_info, _tracer_url, tee_cut_start)
 
             results.append(
                 {
@@ -1915,7 +1978,7 @@ def _process_long_upload_segments(
             if thumb_path
             else None
         )
-        tracer_url, _, _, _ = _trace_segment(seg_path)
+        tracer_url, tracer_info, _, _ = _trace_segment(seg_path)
 
         captured_dt = base_dt + timedelta(seconds=tee_cut_start)
         clip = VideoClip(
@@ -1947,6 +2010,8 @@ def _process_long_upload_segments(
             )
         _intro_overlay_for_clip(clip, participant)
         db.commit()
+        # Save the ball track for the Edit wizard (see helper).
+        _persist_swing_track(idx, tracer_info, tracer_url, tee_cut_start)
 
         results.append(
             {
@@ -4744,6 +4809,15 @@ def _trace_segment(clip_path: Path):
                     info = {
                         "ok": True, "engine": "ai",
                         "n_points": len(r.get("ball_track_frames") or []),
+                        # Carry the per-frame ball track (segment-relative
+                        # frame indices) so the caller can persist it into
+                        # edit_metrics.swings — that lets the Edit wizard
+                        # hydrate the found points instead of re-running the
+                        # AI tracer on the whole multi-swing source.
+                        "ball_track_frames": r.get("ball_track_frames") or [],
+                        "impact_frame": (
+                            (r.get("impact_refined") or {}).get("impact_frame")
+                        ),
                     }
                     log.info("produce: AI tracer ok for %s", clip_path.name)
                     return url, info, p, None
