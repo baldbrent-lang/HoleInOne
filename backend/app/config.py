@@ -110,6 +110,19 @@ class Settings(BaseSettings):
     # Set env PRODUCE_DEBUG_ENABLED=1 on the DEV deployment to show the button.
     produce_debug_enabled: bool = False
 
+    # Swing detector for the produce pipeline. "motion" = the audio/motion
+    # burst detector (default, works everywhere). "pose" = the MediaPipe
+    # wrist-speed + back-bend detector — needs mediapipe installed (dev only;
+    # it bumps OpenCV to 5.0, so keep it off prod). When "pose" is selected
+    # but mediapipe isn't available, the pipeline falls back to motion so it
+    # never produces nothing. Set env SWING_DETECTOR=pose on the DEV deploy.
+    swing_detector: str = "motion"  # "motion" | "pose"
+    # Produced-clip window around the detected swing (pose mode). The pose
+    # spike sits at the downswing, so 2s before / 7s after captures setup
+    # through ball flight + landing.
+    pose_clip_before_sec: float = 2.0
+    pose_clip_after_sec: float = 7.0
+
     # Appearance matching
     embedding_provider: str = "stub"  # "stub" | "clip" | "replicate" | "fal"
     embedding_min_margin: float = 0.05  # min cosine margin between top-1 and top-2

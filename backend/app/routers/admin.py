@@ -1299,11 +1299,39 @@ def _run_long_upload_job(
 
             segs = list(seg_list or [])
             auto_used = False
+            used_pose = False
             if not segs and auto_detect_swings:
                 auto_used = True
                 tee_fps = probe_fps(src_path) or 30.0
                 _detect_debug: dict = {}
-                if motion_only:
+                detected = None
+                # Pose swing detector (dev, needs mediapipe). Falls back to
+                # the motion/combined path when unavailable so we never
+                # produce nothing.
+                if settings.swing_detector == "pose":
+                    try:
+                        from ..services import pose_swing
+
+                        if pose_swing.available():
+                            detected = pose_swing.detect_swings_from_pose(
+                                src_path, fps=tee_fps, debug=_detect_debug,
+                            )
+                            used_pose = True
+                            log.info(
+                                "long-upload worker: upload=%s pose detector -> "
+                                "%d swing(s)", upload_id, len(detected),
+                            )
+                        else:
+                            log.info(
+                                "long-upload worker: swing_detector=pose but "
+                                "mediapipe unavailable — falling back to motion",
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("pose detector failed (%s) — using motion", exc)
+                        detected = None
+                if detected is not None:
+                    pass  # pose produced the swing list
+                elif motion_only:
                     # Vision-only: key on the swing's motion burst (the
                     # downswing-through-impact + ball launch), then classify
                     # each by whether a ball was on the tee and left it.
@@ -1344,18 +1372,14 @@ def _run_long_upload_job(
                         }
                     )
                 if not segs:
-                    if motion_only:
-                        # Camera session with nothing to produce: no motion
-                        # burst detected at all, every burst weeded as garbage
-                        # (no ball ever — kitchen walk-by, etc.), or no
-                        # confirmed golf shot (in strict mode). Either way a
-                        # valid outcome — produce nothing, don't fail. Fall
-                        # through with empty segs → 0 produced clips.
+                    if motion_only or used_pose:
+                        # Nothing to produce (no motion burst / no ball / no
+                        # pose swing). A valid outcome — produce nothing, don't
+                        # fail. Fall through with empty segs → 0 produced clips.
                         log.info(
                             "long-upload worker: upload=%s nothing to produce "
-                            "— 0 clips (keep_all=%s drop_garbage=%s)", upload_id,
-                            settings.camera_produce_unconfirmed_shots,
-                            settings.camera_drop_garbage_clips,
+                            "— 0 clips (detector=%s)", upload_id,
+                            "pose" if used_pose else "motion",
                         )
                     else:
                         _comb = _detect_debug.get("combined") or {}
@@ -1438,6 +1462,9 @@ def _run_long_upload_job(
                 ai_tracer_model=ai_tracer_model,
                 progress_upload_id=upload_id,
                 tee_green_delta_sec=float(tee_green_delta_sec),
+                # Pose mode uses a wider, fixed window around the swing.
+                clip_before=(settings.pose_clip_before_sec if used_pose else None),
+                clip_after=(settings.pose_clip_after_sec if used_pose else None),
             )
 
             # Re-fetch in case the session was rolled back during segment work.
@@ -1517,6 +1544,8 @@ def _process_long_upload_segments(
     ai_tracer_model: str | None,
     progress_upload_id: int | None = None,
     tee_green_delta_sec: float = 0.0,
+    clip_before: float | None = None,
+    clip_after: float | None = None,
 ) -> list[dict]:
     """Cut + process each swing segment from one (or two) source video(s).
 
@@ -1586,6 +1615,18 @@ def _process_long_upload_segments(
         except Exception as exc:  # pragma: no cover
             log.warning("intro overlay failed for clip %s: %s", clip.id, exc)
 
+    # Effective clip window. clip_before/clip_after (pose mode) override the
+    # defaults; the tee→green cutover (_tee_after) stays put and the green
+    # portion is stretched/shrunk so the total post-swing coverage == after.
+    _before = clip_before if clip_before is not None else CLIP_SECONDS_BEFORE_IMPACT
+    _tee_after = CLIP_SECONDS_TEE_AFTER_IMPACT
+    if clip_after is not None:
+        _tee_only_after = float(clip_after)
+        _green_after = max(0.5, float(clip_after) - _tee_after)
+    else:
+        _tee_only_after = CLIP_SECONDS_TEE_ONLY_AFTER_IMPACT
+        _green_after = CLIP_SECONDS_GREEN_AFTER_CUT
+
     n_done = 0
     results: list[dict] = []
     for idx, seg in enumerate(seg_list):
@@ -1614,25 +1655,20 @@ def _process_long_upload_segments(
         _raw_peak = seg.get("peak_time_sec")
         peak_time_sec = (
             float(_raw_peak) if _raw_peak is not None
-            else start_sec + CLIP_SECONDS_BEFORE_IMPACT
+            else start_sec + _before
         )
 
         # ── Tee cut bounds ───────────────────────────────────────────────────
-        # Dual-camera: cover 12 s so the tee audio can run uninterrupted
-        # through the full composite (tee video + green video halves).
-        # Single-camera: cover 9 s (BEFORE + TEE_ONLY_AFTER).
-        tee_cut_start = max(0.0, peak_time_sec - CLIP_SECONDS_BEFORE_IMPACT)
+        tee_cut_start = max(0.0, peak_time_sec - _before)
         if dual_camera and green_src_path is not None:
-            tee_cut_end = (
-                peak_time_sec + CLIP_SECONDS_TEE_AFTER_IMPACT + CLIP_SECONDS_GREEN_AFTER_CUT
-            )
+            tee_cut_end = peak_time_sec + _tee_after + _green_after
         else:
-            tee_cut_end = peak_time_sec + CLIP_SECONDS_TEE_ONLY_AFTER_IMPACT
-        # Within-segment offset to the impact moment (≤ CLIP_SECONDS_BEFORE_IMPACT
-        # when the impact is very close to the start of the recording).
+            tee_cut_end = peak_time_sec + _tee_only_after
+        # Within-segment offset to the impact moment (≤ _before when the
+        # impact is very close to the start of the recording).
         actual_before_sec = peak_time_sec - tee_cut_start
         # TEE video duration in the composite (before the hard cut to green).
-        tee_video_dur = actual_before_sec + CLIP_SECONDS_TEE_AFTER_IMPACT
+        tee_video_dur = actual_before_sec + _tee_after
         log.info(
             "long-upload seg %d: peak_time=%.2fs tee cut [%.2f, %.2f] "
             "tee_video_dur=%.2fs dual_camera=%s",
@@ -1671,15 +1707,13 @@ def _process_long_upload_segments(
             # (green_impact + TEE_AFTER + GREEN_AFTER).
             green_impact_offset = peak_time_sec - tee_green_delta_sec
             green_cut_start = max(
-                0.0, green_impact_offset + CLIP_SECONDS_TEE_AFTER_IMPACT
+                0.0, green_impact_offset + _tee_after
             )
             green_cut_end = (
-                green_impact_offset
-                + CLIP_SECONDS_TEE_AFTER_IMPACT
-                + CLIP_SECONDS_GREEN_AFTER_CUT
+                green_impact_offset + _tee_after + _green_after
             )
             if green_cut_end <= green_cut_start:
-                green_cut_end = green_cut_start + CLIP_SECONDS_GREEN_AFTER_CUT
+                green_cut_end = green_cut_start + _green_after
             log.info(
                 "long-upload seg %d: green cut [%.2f, %.2f] (delta=%.3fs)",
                 idx, green_cut_start, green_cut_end, tee_green_delta_sec,
@@ -1720,12 +1754,12 @@ def _process_long_upload_segments(
             )
             # Clamp the green video window to the clip's actual duration so we
             # never ask ffmpeg to trim past EOF.
-            green_video_dur = CLIP_SECONDS_GREEN_AFTER_CUT
+            green_video_dur = _green_after
             if green_seg_path is not None and green_seg_path.exists():
                 _ginfo = probe_video_info(green_seg_path)
                 _gdur = float(_ginfo.get("duration") or 0.0)
                 if _gdur > 0.1:
-                    green_video_dur = min(CLIP_SECONDS_GREEN_AFTER_CUT, _gdur)
+                    green_video_dur = min(_green_after, _gdur)
             composite_name = f"{seg_path.stem}_composite.mp4"
             composite_path = CLIPS_DIR / composite_name
             if splice_impact_clip(
