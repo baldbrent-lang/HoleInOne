@@ -141,6 +141,7 @@ def detect_swings_from_pose(
     min_burst_sec: float = 0.25,
     max_burst_sec: float = 3.0,
     back_bend_min_deg: float = 15.0,
+    back_bend_max_deg: float = 70.0,
     strong_ratio: float = 6.0,
     start_sec: float = 0.0,
     max_scan_sec: float | None = None,
@@ -331,10 +332,22 @@ def detect_swings_from_pose(
         back to catch that address bend so a real swing isn't rejected just
         because the downswing frame lost the pose. A trotting/upright false
         positive is never bent anywhere in the window, so it stays rejected.
-        None if no pose landmarks in the window at all."""
+        None if no pose landmarks in the window at all.
+
+        Bends above back_bend_max_deg (~70°) are ignored: a real golf address
+        tops out well under that, so a larger value means the golfer is bent
+        fully over (picking up / placing a ball) OR — commonly — MediaPipe
+        flipped the torso and put the shoulders below the hips (e.g. a bogus
+        177°). Either way it's not a swing posture, so it must not count as a
+        valid bend. Filtering per-frame (not just the max) means a real ~30°
+        address bend is still used even if a garbage 177° sits in the same
+        window."""
         lo = max(0, p_i - int(round(1.5 * eff_hz)))
         hi = min(len(bend), p_i + int(round(0.4 * eff_hz)) + 1)
-        vals = [bend[i] for i in range(lo, hi) if bend[i] is not None]
+        vals = [
+            bend[i] for i in range(lo, hi)
+            if bend[i] is not None and bend[i] <= back_bend_max_deg
+        ]
         return max(vals) if vals else None
 
     segments = []
@@ -401,6 +414,7 @@ def detect_swings_from_pose(
             "n_raw_bursts": len(bursts),
             "n_bend_rejected": int(n_bend_rejected),
             "back_bend_min_deg": float(back_bend_min_deg),
+            "back_bend_max_deg": float(back_bend_max_deg),
             "strong_ratio": float(strong_ratio),
             "n_swings": len(segments),
             "reached_eof": reached_eof,
