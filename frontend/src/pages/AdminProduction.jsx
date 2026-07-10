@@ -189,54 +189,74 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
 
 function ProducedTile({ clips, onOpenViewer }) {
   // Right-most tile on the Production card: thumbnail + summary of every
-  // produced clip cut from this upload. Falls back to a "Not produced"
-  // placeholder when the worker hasn't emitted anything.
+  // produced clip cut from this upload. With multiple swings, toggle
+  // through each produced clip (◀/▶); the thumbnail + play follow the
+  // selection. Falls back to a "Not produced" placeholder when empty.
   const has = clips && clips.length > 0;
-  const first = has ? clips[0] : null;
+  const [sel, setSel] = useState(0);
+  const idx = has ? Math.min(sel, clips.length - 1) : 0;
+  const cur = has ? clips[idx] : null;
   const aces = has ? clips.filter((c) => c.ball_in_cup).length : 0;
   const holes = has
     ? clips.map((c) => c.hole_number).filter((h, i, a) => h != null && a.indexOf(h) === i)
     : [];
+  const play = (c) =>
+    c?.video_url &&
+    onOpenViewer(
+      c.video_url,
+      c.hole_number != null ? `Produced — hole ${c.hole_number}` : "Produced Video",
+    );
+  const nav = (delta) =>
+    setSel((s) => {
+      const n = clips.length;
+      return ((Math.min(s, n - 1) + delta) % n + n) % n;
+    });
   return (
     <div style={{ flex: "1 1 0", minWidth: 200, maxWidth: 340 }}>
       <div className="tiny upper muted" style={{ marginBottom: 4 }}>
         Produced Video
       </div>
       <Thumb
-        src={first?.thumbnail_url}
+        src={cur?.thumbnail_url}
         alt="Produced clip thumbnail"
         placeholder={has ? "No preview" : "Not produced"}
-        onClick={first?.video_url ? () => onOpenViewer(first.video_url, "Produced Video") : undefined}
+        onClick={cur?.video_url ? () => play(cur) : undefined}
       />
-      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {has && clips.length > 1 && (
+        <div
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center",
+            gap: 8, marginTop: 4,
+          }}
+        >
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
+            onClick={() => nav(-1)}
+            title="Previous clip"
+          >
+            ◀
+          </button>
+          <span className="tiny">
+            clip {idx + 1}/{clips.length}
+            {cur?.hole_number != null ? ` · hole ${cur.hole_number}` : ""}
+          </span>
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
+            onClick={() => nav(1)}
+            title="Next clip"
+          >
+            ▶
+          </button>
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
         <MetaRow k="Clips" v={has ? clips.length : ""} />
         <MetaRow k="Aces" v={has ? aces : ""} />
         <MetaRow k="Holes" v={holes.length ? holes.join(", ") : ""} />
-        {has && clips.length > 1 && (
-          <div style={{ marginTop: 4 }}>
-            <div className="tiny upper muted" style={{ marginBottom: 2 }}>
-              Open clip
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-              {clips.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  className="ghost"
-                  onClick={() => onOpenViewer(c.video_url, `Produced — hole ${c.hole_number}`)}
-                  style={{
-                    fontSize: "0.7rem",
-                    padding: "2px 8px",
-                    width: "auto",
-                  }}
-                  title={`Play produced clip for hole ${c.hole_number}`}
-                >
-                  #{c.id}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
