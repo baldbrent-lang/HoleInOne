@@ -4056,7 +4056,10 @@ def find_resting_ball(
     routinely invisible to the model even when it's plainly in the picture.
     Cropping to the golfer makes the ball several times larger. Returned
     coords are mapped back to full-frame native pixels."""
-    out = {"present": False, "x": None, "y": None, "confidence": None, "error": None}
+    out = {
+        "present": False, "x": None, "y": None, "confidence": None,
+        "error": None, "crop_box": None,
+    }
     if not HAS_CV:
         out["error"] = "opencv not installed"
         return out
@@ -4088,6 +4091,7 @@ def find_resting_ball(
         crop_y0 = max(0, min(h - ch, cy - ch // 2))
         raw = raw[crop_y0:crop_y0 + ch, crop_x0:crop_x0 + cw]
         h, w = raw.shape[:2]
+        out["crop_box"] = [crop_x0, crop_y0, w, h]
     scale = frame_w / float(w) if w > frame_w else 1.0
     if scale != 1.0:
         raw = cv2.resize(raw, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
@@ -4209,6 +4213,7 @@ def classify_swing_shot(
     # course tee shot the ball is otherwise a ~4px dot the model misses.
     _hint = tuple(hint_xy) if hint_xy else None
     before = None
+    probe = None  # last absent look-up, kept so the debug UI can show it
     for lead in leads:
         t_b = max(0.0, float(peak_time_sec) - lead)
         r = find_resting_ball(input_path, int(t_b * fps), crop_center=_hint)
@@ -4216,24 +4221,80 @@ def classify_swing_shot(
             before = {
                 "present": True, "x": r["x"], "y": r["y"],
                 "t": round(t_b, 2), "lead": lead, "confidence": r.get("confidence"),
+                "crop_box": r.get("crop_box"),
             }
             break
-    if before is None:
-        return {"verdict": "practice", "reason": "no ball at address (air swing)",
-                "before": None, "after": None}
+        probe = {
+            "present": False, "x": None, "y": None,
+            "t": round(t_b, 2), "lead": lead, "crop_box": r.get("crop_box"),
+        }
+    # Every zoomed look missed. The zoom crop is aimed at the pose wrist
+    # point — if that point was garbled (pose dropout near the blurred
+    # peak), the crop may not even contain the ball. One full-frame retry
+    # at the nearest lead so a bad hint can't guarantee a miss.
+    if before is None and _hint is not None:
+        t_b = max(0.0, float(peak_time_sec) - leads[-1])
+        r = find_resting_ball(input_path, int(t_b * fps))
+        if r.get("present") and r.get("x") is not None:
+            before = {
+                "present": True, "x": r["x"], "y": r["y"],
+                "t": round(t_b, 2), "lead": leads[-1],
+                "confidence": r.get("confidence"), "crop_box": None,
+            }
+    before_out = before or probe
 
     t_a = float(peak_time_sec) + after_sec
     ra = find_resting_ball(input_path, int(t_a * fps), crop_center=_hint)
     after = {
         "present": bool(ra.get("present") and ra.get("x") is not None),
         "x": ra.get("x"), "y": ra.get("y"), "t": round(t_a, 2),
-        "confidence": ra.get("confidence"),
+        "confidence": ra.get("confidence"), "crop_box": ra.get("crop_box"),
     }
-    if not after["present"]:
-        return {"verdict": "real", "reason": "ball departed", "before": before, "after": after}
 
-    # Ball still resting after the swing — is it the SAME ball at the same
-    # spot (not struck), or did it move (departed/rolled)? Compare positions.
+    # Decision matrix, biased so a DETECTION FAILURE can never kill a real
+    # shot — "practice" (the verdict that drops the swing from production)
+    # requires positive evidence: a credible resting ball still sitting
+    # there after the swing.
+    #
+    #   before found + after gone            -> real (ball departed)
+    #   before found + after same spot       -> practice (not struck)
+    #   before found + after different spot  -> unknown (re-teed ball vs a
+    #        spare ball lying nearby — ambiguous either way, keep). NOTE:
+    #        this used to say REAL ("ball moved"), which mislabelled
+    #        placing/teeing the ball as a shot.
+    #   before missed + after found          -> practice (a ball sat there
+    #        through the swing; the address look-up just missed it)
+    #   before missed + after gone           -> unknown (we never saw a
+    #        ball at all — can't judge; used to say practice, which
+    #        dropped real swings whenever the address probe failed)
+    #
+    # Any "practice" additionally pixel-verifies the marked point actually
+    # looks like a white ball; a non-ball latch (tee marker / leaf) would
+    # sit "unmoved" across every swing and silently kill real shots.
+    if before is None and not after["present"]:
+        return {
+            "verdict": "unknown",
+            "reason": "couldn't find a ball before or after — can't judge, keeping",
+            "before": before_out, "after": after,
+        }
+    if before is None and after["present"]:
+        a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
+        if a_ok is False:
+            return {
+                "verdict": "unknown",
+                "reason": "marked point doesn't look like a ball — not trusting it",
+                "before": before_out, "after": after,
+            }
+        return {
+            "verdict": "practice",
+            "reason": "ball still resting after the swing (not struck)",
+            "before": before_out, "after": after,
+        }
+    if not after["present"]:
+        return {"verdict": "real", "reason": "ball departed",
+                "before": before_out, "after": after}
+
+    # Ball found both before and after — same spot means not struck.
     try:
         cap = cv2.VideoCapture(str(input_path))
         w = float(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920.0)
@@ -4244,24 +4305,22 @@ def classify_swing_shot(
     diag = (w * w + h * h) ** 0.5
     dist = ((before["x"] - after["x"]) ** 2 + (before["y"] - after["y"]) ** 2) ** 0.5
     if dist <= move_tol_frac * diag:
-        # "Unmoved ball" is the verdict that DROPS a swing from production —
-        # so before trusting it, pixel-verify that both marked points really
-        # look like a white ball. If the vision call latched onto a static
-        # non-ball object (tee marker, leaf, sprinkler head), it would sit
-        # "unmoved" across every swing and silently kill real shots. When the
-        # check fails, downgrade to unknown (kept), never practice.
         b_ok = _white_blob_at(input_path, int(before["t"] * fps), before["x"], before["y"])
         a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
         if b_ok is False or a_ok is False:
             return {
                 "verdict": "unknown",
                 "reason": "marked point doesn't look like a ball — not trusting 'unmoved' verdict",
-                "before": before, "after": after,
+                "before": before_out, "after": after,
             }
         return {"verdict": "practice", "reason": "ball still at rest (not struck)",
-                "before": before, "after": after}
-    return {"verdict": "real", "reason": "ball moved from rest",
-            "before": before, "after": after}
+                "before": before_out, "after": after}
+    return {
+        "verdict": "unknown",
+        "reason": "resting ball visible after the swing at a different spot "
+                  "(re-teed vs spare ball — ambiguous), keeping",
+        "before": before_out, "after": after,
+    }
 
 
 def detect_swings_from_ai_ball(

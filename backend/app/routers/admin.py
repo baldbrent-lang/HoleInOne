@@ -5106,6 +5106,15 @@ def _ai_resting_ball_for_pose(
         if not ok or fr is None:
             return None
         present = bool(ball.get("present") and ball.get("x") is not None)
+        # Show the zoom crop that was actually sent to the vision call, so a
+        # "no ball" that's really a mis-aimed crop is visible at a glance.
+        cb = ball.get("crop_box")
+        if cb and len(cb) == 4:
+            cv2.rectangle(
+                fr, (int(cb[0]), int(cb[1])),
+                (int(cb[0] + cb[2]), int(cb[1] + cb[3])),
+                (255, 200, 0), 2, cv2.LINE_AA,
+            )
         if present:
             rad = max(12, int(fr.shape[0] * 0.02))
             cv2.circle(fr, (int(ball["x"]), int(ball["y"])), rad, (255, 255, 0), 3, cv2.LINE_AA)
