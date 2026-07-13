@@ -5144,7 +5144,7 @@ def _ai_resting_ball_for_pose(
     return {
         "available": True,
         "pose_anchored": True,
-        "n_swings": len(pose_peaks),
+        "n_swings": len(pose_swings),
         "n_real": n_real,
         "swings": swings,
     }
