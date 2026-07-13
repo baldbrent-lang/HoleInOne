@@ -50,16 +50,26 @@ _RIGHT_HIP = 24
 
 _pose = None
 _pose_tried = False
+# The actual import/construction error, surfaced to the debug UI so
+# "mediapipe not installed" isn't reported when the real problem is a
+# missing system lib (libGL), a numpy ABI clash, etc.
+_pose_error: str | None = None
 
 
 def available() -> bool:
     return _get_pose() is not None
 
 
+def unavailable_reason() -> str | None:
+    """Why mediapipe couldn't be loaded (None when it loaded fine)."""
+    _get_pose()
+    return _pose_error
+
+
 def _get_pose():
     """Lazily construct a MediaPipe Pose. Returns None if mediapipe isn't
-    installed on this deployment (dev-only)."""
-    global _pose, _pose_tried
+    importable on this deployment; the error is kept in _pose_error."""
+    global _pose, _pose_tried, _pose_error
     if _pose is not None:
         return _pose
     if _pose_tried:
@@ -76,7 +86,8 @@ def _get_pose():
         log.info("pose_swing: mediapipe Pose ready")
         return _pose
     except Exception as exc:  # noqa: BLE001
-        log.info("pose_swing: mediapipe unavailable (%s)", exc)
+        _pose_error = f"{type(exc).__name__}: {exc}"
+        log.warning("pose_swing: mediapipe unavailable — %s", _pose_error)
         return None
 
 
@@ -161,7 +172,11 @@ def detect_swings_from_pose(
     pose = _get_pose()
     if pose is None:
         if debug is not None:
-            debug["reason"] = "mediapipe not installed on this deployment"
+            debug["reason"] = (
+                f"mediapipe failed to load: {_pose_error}"
+                if _pose_error
+                else "mediapipe not installed on this deployment"
+            )
         return []
     if debug is not None:
         debug["available"] = True
