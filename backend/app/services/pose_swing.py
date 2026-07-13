@@ -267,6 +267,31 @@ def detect_swings_from_pose(
             debug["reached_eof"] = reached_eof
         return []
 
+    # Bridge short tracking dropouts by linear interpolation (up to ~0.6s).
+    # MediaPipe routinely loses the wrists for a few samples during the
+    # motion-blurred downswing; without bridging, the speed signal zeroes
+    # out mid-swing and one real swing fragments into slivers that each
+    # fail the min-burst-duration gate ("burst too short"). Long gaps
+    # (golfer walked off / pose fully lost) are left as None — inventing
+    # motion across those would fabricate bursts.
+    max_gap = max(1, int(round(0.6 * eff_hz)))
+    n_bridged = 0
+    last_known = None  # (index, (x, y))
+    for i in range(len(wrist)):
+        if wrist[i] is None:
+            continue
+        if last_known is not None:
+            gap = i - last_known[0]
+            if 1 < gap <= max_gap:
+                (x0, y0), (x1, y1) = last_known[1], wrist[i]
+                for k in range(1, gap):
+                    t = k / gap
+                    wrist[last_known[0] + k] = (
+                        x0 + (x1 - x0) * t, y0 + (y1 - y0) * t,
+                    )
+                    n_bridged += 1
+        last_known = (i, wrist[i])
+
     # Wrist speed between consecutive samples (0 when either endpoint missing).
     speed = np.zeros(len(wrist), dtype=np.float32)
     for i in range(1, len(wrist)):
@@ -299,31 +324,6 @@ def detect_swings_from_pose(
         bursts.append((i, j - 1, i + pk, float(seg[pk])))
         i = j
 
-    # Duration-gate each raw burst; remember WHY each dropped one was dropped
-    # so the debug view can explain a missed swing instead of it vanishing.
-    accepted = []
-    burst_status: dict[int, str] = {}  # peak sample index -> outcome
-    for s_i, e_i, p_i, p_v in bursts:
-        dur = (e_i - s_i) / eff_hz if eff_hz > 0 else 0.0
-        if dur < min_burst_sec:
-            burst_status[p_i] = "too_short"
-        elif dur > max_burst_sec:
-            burst_status[p_i] = "too_long"
-        else:
-            accepted.append((s_i, e_i, p_i, p_v))
-
-    # Non-max suppression by peak separation.
-    accepted.sort(key=lambda t: -t[3])
-    chosen, keep = [], []
-    min_sep = int(min_separation_sec * eff_hz)
-    for s_i, e_i, p_i, p_v in accepted:
-        if any(abs(p_i - c) < min_sep for c in chosen):
-            burst_status[p_i] = "nms_suppressed"
-            continue
-        chosen.append(p_i)
-        keep.append((s_i, e_i, p_i, p_v))
-    keep.sort(key=lambda t: t[2])
-
     def _bend_near(p_i):
         """Max spine bend from ~1.5s BEFORE the peak through 0.4s after.
 
@@ -351,6 +351,43 @@ def detect_swings_from_pose(
             if bend[i] is not None and bend[i] <= back_bend_max_deg
         ]
         return max(vals) if vals else None
+
+    # Duration-gate each raw burst; remember WHY each dropped one was dropped
+    # so the debug view can explain a missed swing instead of it vanishing.
+    #
+    # Short-burst RESCUE: when pose coverage is poor, even the bridged burst
+    # can come out a sample or two long — killing a real swing on duration
+    # alone. A burst that's too short but (a) towers over baseline
+    # (>= strong_ratio) AND (b) has a confirmed swing-posture bend is a real
+    # swing whose neighbours got dropped, not noise — keep it. Weak or
+    # posture-less slivers still die here.
+    accepted = []
+    burst_status: dict[int, str] = {}  # peak sample index -> outcome
+    for s_i, e_i, p_i, p_v in bursts:
+        dur = (e_i - s_i) / eff_hz if eff_hz > 0 else 0.0
+        if dur < min_burst_sec:
+            ratio_pk = (p_v / median) if median > 0 else 0.0
+            b_pk = _bend_near(p_i)
+            if ratio_pk >= strong_ratio and b_pk is not None and b_pk >= back_bend_min_deg:
+                accepted.append((s_i, e_i, p_i, p_v))
+            else:
+                burst_status[p_i] = "too_short"
+        elif dur > max_burst_sec:
+            burst_status[p_i] = "too_long"
+        else:
+            accepted.append((s_i, e_i, p_i, p_v))
+
+    # Non-max suppression by peak separation.
+    accepted.sort(key=lambda t: -t[3])
+    chosen, keep = [], []
+    min_sep = int(min_separation_sec * eff_hz)
+    for s_i, e_i, p_i, p_v in accepted:
+        if any(abs(p_i - c) < min_sep for c in chosen):
+            burst_status[p_i] = "nms_suppressed"
+            continue
+        chosen.append(p_i)
+        keep.append((s_i, e_i, p_i, p_v))
+    keep.sort(key=lambda t: t[2])
 
     def _wrist_native(p_i):
         """Mean-wrist position (native pixels) at/near the swing peak — the
@@ -430,6 +467,7 @@ def detect_swings_from_pose(
             "n_pose_frames": int(n_pose),
             "n_samples": int(len(times)),
             "coverage": round(n_pose / len(times), 2) if times else 0.0,
+            "n_bridged": int(n_bridged),
             "median": float(median),
             "threshold": float(threshold),
             "n_raw_bursts": len(bursts),

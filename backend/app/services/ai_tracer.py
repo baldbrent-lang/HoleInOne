@@ -4110,6 +4110,52 @@ def find_resting_ball(
     return out
 
 
+def _white_blob_at(input_path: Path, frame_idx: int, x: int, y: int) -> bool | None:
+    """Cheap pixel check: does the marked point actually look like a golf
+    ball — a small cluster of notably-bright pixels near (x, y)? Guards the
+    practice-swing verdict against the vision call latching onto a tee
+    marker / leaf / shadow: a misdetected static object would otherwise sit
+    "unmoved" across the swing and wrongly classify a real shot as practice.
+    Returns True/False, or None when the frame can't be read (no opinion)."""
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0, frame_idx)))
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if not ok or frame is None:
+            return None
+        h, w = frame.shape[:2]
+        r = max(12, int(0.015 * ((w * w + h * h) ** 0.5)))
+        x0, x1 = max(0, int(x) - r), min(w, int(x) + r + 1)
+        y0, y1 = max(0, int(y) - r), min(h, int(y) + r + 1)
+        if x1 - x0 < 6 or y1 - y0 < 6:
+            return None
+        gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        if not HAS_NP:
+            return None
+        mean = float(gray.mean())
+        # "Bright" relative to the local patch — works in shade and sun.
+        thr = max(mean + 25.0, float(np.percentile(gray, 92)))
+        mask = gray >= thr
+        n_bright = int(mask.sum())
+        area = gray.shape[0] * gray.shape[1]
+        # A ball is a small bright cluster: some bright pixels, but not the
+        # whole patch (that'd be a bright surface, not a ball on it).
+        if n_bright < 4 or n_bright > 0.4 * area:
+            return False
+        ys, xs = np.nonzero(mask)
+        cy, cx = float(ys.mean()), float(xs.mean())
+        # Cluster centred reasonably near the marked point.
+        return (
+            abs(cx - (gray.shape[1] / 2.0)) <= r * 0.8
+            and abs(cy - (gray.shape[0] / 2.0)) <= r * 0.8
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def classify_swing_shot(
     input_path: Path,
     peak_time_sec: float,
@@ -4172,6 +4218,20 @@ def classify_swing_shot(
     diag = (w * w + h * h) ** 0.5
     dist = ((before["x"] - after["x"]) ** 2 + (before["y"] - after["y"]) ** 2) ** 0.5
     if dist <= move_tol_frac * diag:
+        # "Unmoved ball" is the verdict that DROPS a swing from production —
+        # so before trusting it, pixel-verify that both marked points really
+        # look like a white ball. If the vision call latched onto a static
+        # non-ball object (tee marker, leaf, sprinkler head), it would sit
+        # "unmoved" across every swing and silently kill real shots. When the
+        # check fails, downgrade to unknown (kept), never practice.
+        b_ok = _white_blob_at(input_path, int(before["t"] * fps), before["x"], before["y"])
+        a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
+        if b_ok is False or a_ok is False:
+            return {
+                "verdict": "unknown",
+                "reason": "marked point doesn't look like a ball — not trusting 'unmoved' verdict",
+                "before": before, "after": after,
+            }
         return {"verdict": "practice", "reason": "ball still at rest (not struck)",
                 "before": before, "after": after}
     return {"verdict": "real", "reason": "ball moved from rest",
