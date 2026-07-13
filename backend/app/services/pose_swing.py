@@ -152,7 +152,7 @@ def detect_swings_from_pose(
     min_burst_sec: float = 0.25,
     max_burst_sec: float = 3.0,
     back_bend_min_deg: float = 15.0,
-    back_bend_max_deg: float = 70.0,
+    back_bend_max_deg: float = 40.0,
     strong_ratio: float = 6.0,
     start_sec: float = 0.0,
     max_scan_sec: float | None = None,
@@ -351,14 +351,14 @@ def detect_swings_from_pose(
         positive is never bent anywhere in the window, so it stays rejected.
         None if no pose landmarks in the window at all.
 
-        Bends above back_bend_max_deg (~70°) are ignored: a real golf address
-        tops out well under that, so a larger value means the golfer is bent
-        fully over (picking up / placing a ball) OR — commonly — MediaPipe
+        Bends above back_bend_max_deg (40°) are ignored: a real golf address
+        sits in the ~15–40° band. Larger means the golfer is bent fully over
+        (planting a tee / picking up a ball) OR — commonly — MediaPipe
         flipped the torso and put the shoulders below the hips (e.g. a bogus
         177°). Either way it's not a swing posture, so it must not count as a
         valid bend. Filtering per-frame (not just the max) means a real ~30°
-        address bend is still used even if a garbage 177° sits in the same
-        window."""
+        address bend is still used even if a garbage 61° or 177° sits in the
+        same window."""
         lo = max(0, p_i - int(round(1.5 * eff_hz)))
         hi = min(len(bend), p_i + int(round(0.4 * eff_hz)) + 1)
         vals = [
@@ -392,16 +392,39 @@ def detect_swings_from_pose(
         else:
             accepted.append((s_i, e_i, p_i, p_v))
 
-    # Non-max suppression by peak separation.
-    accepted.sort(key=lambda t: -t[3])
+    # Posture gate BEFORE non-max suppression. A swing needs a fast-hands
+    # burst AND a bent-over spine — but an UNKNOWN bend must not veto an
+    # obviously-real swing (pose routinely drops the torso during the
+    # blurred downswing). Reject only when we can POSITIVELY see it's not a
+    # swing: a measured-but-upright spine, or a weak burst whose posture we
+    # couldn't confirm. Order matters: gating first means a rejected burst
+    # (e.g. a taller-but-upright spike 3s away) can no longer win the NMS
+    # merge and then die, silently taking the real swing down with it.
+    n_bend_rejected = 0
+    gated = []  # (s_i, e_i, p_i, p_v, bend, ratio)
+    for s_i, e_i, p_i, p_v in accepted:
+        b = _bend_near(p_i)
+        ratio = p_v / median if median > 0 else 0.0
+        if b is not None and b < back_bend_min_deg:
+            burst_status[p_i] = "upright"
+            n_bend_rejected += 1
+            continue
+        if b is None and ratio < strong_ratio:
+            burst_status[p_i] = "bend_unknown_weak"
+            n_bend_rejected += 1
+            continue
+        gated.append((s_i, e_i, p_i, p_v, b, ratio))
+
+    # Non-max suppression by peak separation — among gate-passing bursts only.
+    gated.sort(key=lambda t: -t[3])
     chosen, keep = [], []
     min_sep = int(min_separation_sec * eff_hz)
-    for s_i, e_i, p_i, p_v in accepted:
+    for s_i, e_i, p_i, p_v, b, ratio in gated:
         if any(abs(p_i - c) < min_sep for c in chosen):
             burst_status[p_i] = "nms_suppressed"
             continue
         chosen.append(p_i)
-        keep.append((s_i, e_i, p_i, p_v))
+        keep.append((s_i, e_i, p_i, p_v, b, ratio))
     keep.sort(key=lambda t: t[2])
 
     def _wrist_native(p_i):
@@ -422,32 +445,7 @@ def detect_swings_from_pose(
         return None
 
     segments = []
-    n_bend_rejected = 0
-    for s_i, e_i, p_i, p_v in keep:
-        b = _bend_near(p_i)
-        ratio = p_v / median if median > 0 else 0.0
-        # A swing needs a fast-hands burst AND a bent-over spine — but an
-        # UNKNOWN bend must not veto an obviously-real swing. During the fast,
-        # motion-blurred downswing MediaPipe routinely drops the torso, so the
-        # spine angle at the peak (and sometimes across the whole address→
-        # impact window) is unmeasurable and comes back None. Reject only when
-        # we can POSITIVELY see it's not a swing:
-        #   - a MEASURED-but-upright spine (b present, below the tilt floor):
-        #     fast hands with no forward bend — not a golf swing.
-        #   - a WEAK burst whose posture we couldn't confirm (b None and the
-        #     peak isn't far above baseline): could be someone walking through
-        #     frame or a stray landmark jump.
-        # Accept a bent spine at any strength, AND a burst far above baseline
-        # (>= strong_ratio) even when the spine couldn't be measured — a real
-        # impact towers over the resting-hands median, a trot/walk does not.
-        if b is not None and b < back_bend_min_deg:
-            burst_status[p_i] = "upright"
-            n_bend_rejected += 1
-            continue
-        if b is None and ratio < strong_ratio:
-            burst_status[p_i] = "bend_unknown_weak"
-            n_bend_rejected += 1
-            continue
+    for s_i, e_i, p_i, p_v, b, ratio in keep:
         burst_status[p_i] = "swing"
         peak_t = times[p_i] if p_i < len(times) else (p_i / eff_hz)
         conf = "high" if ratio >= 10 else ("medium" if ratio >= 6 else "low")

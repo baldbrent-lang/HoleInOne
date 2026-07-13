@@ -4042,11 +4042,20 @@ def find_resting_ball(
     frame_idx: int,
     frame_w: int = 1024,
     model: str | None = None,
+    crop_center: tuple[float, float] | None = None,
+    crop_frac: float = 0.45,
 ) -> dict:
     """Single-frame Claude vision call: is there a golf ball AT REST, and
     where? Returns {present, x, y, confidence, error} with x/y in NATIVE
     pixels. Never raises. This is the same 'Claude can see the ball'
-    capability the tracer uses in flight, pointed at the resting ball."""
+    capability the tracer uses in flight, pointed at the resting ball.
+
+    crop_center (native px, e.g. the golfer's hands from the pose detector)
+    zooms the call in: only a crop_frac-sized box around that point is sent.
+    On a wide tee shot the ball is ~4px in the downscaled full frame —
+    routinely invisible to the model even when it's plainly in the picture.
+    Cropping to the golfer makes the ball several times larger. Returned
+    coords are mapped back to full-frame native pixels."""
     out = {"present": False, "x": None, "y": None, "confidence": None, "error": None}
     if not HAS_CV:
         out["error"] = "opencv not installed"
@@ -4067,6 +4076,18 @@ def find_resting_ball(
         out["error"] = f"could not read frame {frame_idx}"
         return out
     h, w = raw.shape[:2]
+    crop_x0 = crop_y0 = 0
+    if crop_center is not None and w > 0 and h > 0:
+        cw = max(64, int(round(w * crop_frac)))
+        ch = max(64, int(round(h * crop_frac)))
+        # Bias the box slightly downward: the hands sit at waist height and
+        # the ball is on the ground below them.
+        cx = int(round(float(crop_center[0])))
+        cy = int(round(float(crop_center[1]) + 0.08 * h))
+        crop_x0 = max(0, min(w - cw, cx - cw // 2))
+        crop_y0 = max(0, min(h - ch, cy - ch // 2))
+        raw = raw[crop_y0:crop_y0 + ch, crop_x0:crop_x0 + cw]
+        h, w = raw.shape[:2]
     scale = frame_w / float(w) if w > frame_w else 1.0
     if scale != 1.0:
         raw = cv2.resize(raw, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
@@ -4103,8 +4124,8 @@ def find_resting_ball(
     out["confidence"] = data.get("confidence")
     if out["present"] and data.get("x") is not None and data.get("y") is not None:
         try:
-            out["x"] = int(round(float(data["x"]) / scale))
-            out["y"] = int(round(float(data["y"]) / scale))
+            out["x"] = int(round(float(data["x"]) / scale)) + crop_x0
+            out["y"] = int(round(float(data["y"]) / scale)) + crop_y0
         except (TypeError, ValueError):
             pass
     return out
@@ -4163,6 +4184,7 @@ def classify_swing_shot(
     leads: tuple = (1.5, 1.0, 0.5),
     after_sec: float = 1.5,
     move_tol_frac: float = 0.06,
+    hint_xy: tuple[float, float] | None = None,
 ) -> dict:
     """Real shot vs practice swing, by ball departure.
 
@@ -4182,10 +4204,14 @@ def classify_swing_shot(
         return {"verdict": "unknown", "reason": "AI ball unavailable",
                 "before": None, "after": None}
 
+    # hint_xy (the golfer's hands from the pose detector) zooms every ball
+    # look-up to the golfer instead of scanning the full wide frame — on a
+    # course tee shot the ball is otherwise a ~4px dot the model misses.
+    _hint = tuple(hint_xy) if hint_xy else None
     before = None
     for lead in leads:
         t_b = max(0.0, float(peak_time_sec) - lead)
-        r = find_resting_ball(input_path, int(t_b * fps))
+        r = find_resting_ball(input_path, int(t_b * fps), crop_center=_hint)
         if r.get("present") and r.get("x") is not None:
             before = {
                 "present": True, "x": r["x"], "y": r["y"],
@@ -4197,7 +4223,7 @@ def classify_swing_shot(
                 "before": None, "after": None}
 
     t_a = float(peak_time_sec) + after_sec
-    ra = find_resting_ball(input_path, int(t_a * fps))
+    ra = find_resting_ball(input_path, int(t_a * fps), crop_center=_hint)
     after = {
         "present": bool(ra.get("present") and ra.get("x") is not None),
         "x": ra.get("x"), "y": ra.get("y"), "t": round(t_a, 2),

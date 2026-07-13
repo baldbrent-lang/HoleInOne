@@ -1387,6 +1387,7 @@ def _run_long_upload_job(
                     for d in detected:
                         v = classify_swing_shot(
                             src_path, float(d.get("peak_time_sec") or 0.0), tee_fps,
+                            hint_xy=d.get("impact_wrist_xy"),
                         )
                         if v.get("verdict") == "practice":
                             log.info(
@@ -5078,7 +5079,7 @@ def _ai_ball_report(src_path: Path, tee_fps: float, upload_id: int, aib: dict) -
 
 
 def _ai_resting_ball_for_pose(
-    src_path: Path, tee_fps: float, upload_id: int, pose_peaks: list,
+    src_path: Path, tee_fps: float, upload_id: int, pose_swings: list,
 ) -> dict:
     """Classify each POSE swing as a REAL shot vs a practice swing by ball
     departure (ball present before the swing → gone after). Produces a
@@ -5122,8 +5123,12 @@ def _ai_resting_ball_for_pose(
     swings = []
     n_real = 0
     try:
-        for i, pk in enumerate(pose_peaks):
-            v = classify_swing_shot(src_path, float(pk), tee_fps)
+        for i, sw in enumerate(pose_swings):
+            pk = sw.get("peak_time_sec") if isinstance(sw, dict) else sw
+            hint = sw.get("impact_wrist_xy") if isinstance(sw, dict) else None
+            v = classify_swing_shot(
+                src_path, float(pk or 0.0), tee_fps, hint_xy=hint,
+            )
             if v.get("verdict") == "real":
                 n_real += 1
             swings.append({
@@ -5219,7 +5224,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         if os.environ.get("ANTHROPIC_API_KEY"):
             try:
                 ai_ball_dict = _ai_resting_ball_for_pose(
-                    src_path, tee_fps, upload_id, pose_debug.get("peaks") or [],
+                    src_path, tee_fps, upload_id, pose_segments or [],
                 )
             except Exception as exc:  # noqa: BLE001
                 ai_ball_dict = {"available": False, "reason": f"crashed: {exc}"}
