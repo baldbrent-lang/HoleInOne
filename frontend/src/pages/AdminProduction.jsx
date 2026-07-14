@@ -397,6 +397,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       debugUrl: s.tracer_debug_url || null,
       // Raw-motion heatmap — total unfiltered motion (body/clouds/ball).
       rawMotionUrl: s.tracer_raw_motion_url || null,
+      rawMotionArcUrl: s.tracer_raw_motion_arc_url || null,
     });
     // Remember which engine produced the saved tracer so clicking "Next"
     // on Step 1 reuses it instead of re-rendering (which would wipe the
@@ -743,6 +744,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           url: out.tracer_url, frames,
           debugUrl: out.debug_url || null,
           rawMotionUrl: out.raw_motion_url || null,
+          rawMotionArcUrl: out.raw_motion_arc_url || null,
         });
         setTracerEngineUsed(out.engine || tracerEngine);
         setRenderedFrameSig(frameSig(draft));
@@ -764,6 +766,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 tracer_engine: out.engine || tracerEngine,
                 tracer_debug_url: out.debug_url || null,
                 tracer_raw_motion_url: out.raw_motion_url || null,
+                tracer_raw_motion_arc_url: out.raw_motion_arc_url || null,
                 ...(out.ball_at_rest && !out.ball_manual
                   ? { ball: out.ball_at_rest }
                   : {}),
@@ -847,6 +850,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         frames: out.ball_track_frames || [],
         debugUrl: out.debug_url || null,
         rawMotionUrl: out.raw_motion_url || null,
+        rawMotionArcUrl: out.raw_motion_arc_url || null,
       });
       // Adopt the flight-derived rest position (never over an operator-set
       // one) so the Step-2 rest card starts where the render anchored.
@@ -871,6 +875,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         tracer_engine: out.engine || tracerEngine,
         tracer_debug_url: out.debug_url || null,
         tracer_raw_motion_url: out.raw_motion_url || null,
+        tracer_raw_motion_arc_url: out.raw_motion_arc_url || null,
         ...(out.ball_at_rest && !out.ball_manual
           ? { ball: out.ball_at_rest }
           : {}),
@@ -961,6 +966,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             frames: fast.ball_track_frames || [],
             debugUrl: t?.debugUrl || null,
             rawMotionUrl: t?.rawMotionUrl || null,
+            rawMotionArcUrl: t?.rawMotionArcUrl || null,
           }));
           setManualPositions({});
           // Persist the merged tracer (operator marks baked in) per
@@ -2499,6 +2505,7 @@ function TracerStep({
         frames: out.ball_track_frames || [],
         debugUrl: t?.debugUrl || null,
             rawMotionUrl: t?.rawMotionUrl || null,
+            rawMotionArcUrl: t?.rawMotionArcUrl || null,
       }));
       setManualPositions({});
       setClearedFrames(new Set());
@@ -2956,6 +2963,25 @@ function TracerStep({
               title="Accumulated per-pixel motion from the background subtractor (MOG2/KNN), before any ball filtering — shows everything that moved, including body and swing."
             >
               🌡 Raw motion
+            </button>
+          )}
+          {tracer?.rawMotionArcUrl && (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto", padding: "1px 8px" }}
+              onClick={() =>
+                setImgView({
+                  url: tracer.rawMotionArcUrl,
+                  title:
+                    "Detected ball path over raw motion — red curve = the " +
+                    "fit the tracer rendered, white dots = tracked points. " +
+                    "Compare against the heatmap's blue arc.",
+                })
+              }
+              title="The raw-motion heatmap with the detected ball path drawn on top — eyeball the detection against the visible arc."
+            >
+              🎯 Path on heat
             </button>
           )}
         </div>

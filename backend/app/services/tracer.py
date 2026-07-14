@@ -1173,6 +1173,56 @@ def _render(
     # Per-frame debug images for the FINAL track points: zoomed crop around
     # the chosen ball position, MOG2 motion mask in red, nearby surviving
     # candidates in yellow, chosen point ringed green. Best-effort.
+    # Raw-motion + detected-path overlay: the final track (heatmap-arc /
+    # chained points + corridor backfill) and its fitted curve drawn in
+    # red over the raw-motion composite — so the operator can eyeball the
+    # detected path against the heatmap's blue arc directly.
+    raw_motion_arc_name: str | None = None
+    if raw_motion_name and frame_debug_dir is not None and len(track) >= 3:
+        try:
+            img = cv2.imread(str(Path(frame_debug_dir) / raw_motion_name))
+            if img is not None:
+                fr = np.array([d.frame for d in track], float)
+                xs = np.array([d.x for d in track], float)
+                ys = np.array([d.y for d in track], float)
+                ycf = np.polyfit(fr, ys, 2)
+                xcf = np.polyfit(fr, xs, 2 if len(track) >= 8 else 1)
+                ih, iw = img.shape[:2]
+                poly = []
+                for f in range(int(fr.min()), int(fr.max()) + 1):
+                    px = int(round(float(np.polyval(xcf, f))))
+                    py = int(round(float(np.polyval(ycf, f))))
+                    if 0 <= px < iw and 0 <= py < ih:
+                        poly.append((px, py))
+                if len(poly) >= 2:
+                    cv2.polylines(
+                        img, [np.array(poly, np.int32)], False,
+                        (0, 0, 255), 6, cv2.LINE_AA,
+                    )
+                for d in track:
+                    cv2.circle(img, (int(d.x), int(d.y)), 5, (255, 255, 255), -1, cv2.LINE_AA)
+                    cv2.circle(img, (int(d.x), int(d.y)), 6, (0, 0, 255), 2, cv2.LINE_AA)
+                _lbl2 = (
+                    f"detected ball path ({len(track)} pts) over raw motion "
+                    f"- red curve = fit, white dots = tracked points"
+                )
+                cv2.putText(
+                    img, _lbl2, (12, 56),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 3, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    img, _lbl2, (12, 56),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                raw_motion_arc_name = raw_motion_name.replace(".jpg", "-arc.jpg")
+                cv2.imwrite(
+                    str(Path(frame_debug_dir) / raw_motion_arc_name), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tracer: raw-motion arc overlay failed: %s", exc)
+            raw_motion_arc_name = None
+
     debug_frame_images: dict[str, str] = {}
     debug_frame_full_images: dict[str, str] = {}
     if frame_debug_dir is not None and track:
@@ -1216,6 +1266,7 @@ def _render(
         "debug_frame_images": debug_frame_images,
         "debug_frame_full_images": debug_frame_full_images,
         "raw_motion_image": raw_motion_name,
+        "raw_motion_arc_image": raw_motion_arc_name,
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's
