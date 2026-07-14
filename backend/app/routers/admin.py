@@ -3702,12 +3702,27 @@ def render_wizard_tracer(
                         if impact_override is not None
                         else int(track[0]["frame"])
                     )
+                    # Seed the AI tracker with CV's launch point (first CV
+                    # track point) so its crops hunt in the right region
+                    # instead of scanning whole frames for a tiny sky ball.
+                    _seed_xy = _seed_dims = None
+                    try:
+                        _vinfo = probe_video_info(src_for_trace)
+                        if _vinfo.get("width") and _vinfo.get("height"):
+                            _seed_dims = (int(_vinfo["width"]), int(_vinfo["height"]))
+                            _seed_xy = (
+                                float(track[0]["x"]), float(track[0]["y"]),
+                            )
+                    except Exception:  # noqa: BLE001
+                        _seed_xy = _seed_dims = None
                     ai_info = track_ball_after_impact(
                         src_for_trace,
                         max(0, _imp_cut),
                         output_dir=CLIPS_DIR,
                         output_prefix=f"hybrid-{upload_id}-{secrets.token_hex(3)}",
-                        max_frames=10,
+                        ball_xy_sent=_seed_xy,
+                        ball_sent_dims=_seed_dims,
+                        max_frames=12,
                     )
                     ai_pts = [
                         {
@@ -3720,7 +3735,33 @@ def render_wizard_tracer(
                         if r.get("found") and r.get("x") is not None
                     ]
                     n_ai_anchors = len(ai_pts)
-                    if len(ai_pts) >= 3:
+                    # Anchor SELF-consistency before the anchors may judge
+                    # CV: fit the anchors alone, iteratively drop the worst
+                    # outlier while it's >25px off, and require >=4
+                    # survivors. A parabola through 3 unvalidated points has
+                    # zero redundancy — one bad AI fix made the curve
+                    # garbage, which then rejected CV's CORRECT points and
+                    # kept noise riding the bad curve.
+                    while len(ai_pts) > 4:
+                        _fr = _np.array([p["frame"] for p in ai_pts], float)
+                        _xs = _np.array([p["x"] for p in ai_pts], float)
+                        _ys = _np.array([p["y"] for p in ai_pts], float)
+                        _ycf = _np.polyfit(_fr, _ys, 2)
+                        _xcf = _np.polyfit(_fr, _xs, 1 if len(ai_pts) < 6 else 2)
+                        _res = _np.sqrt(
+                            (_xs - _np.polyval(_xcf, _fr)) ** 2
+                            + (_ys - _np.polyval(_ycf, _fr)) ** 2
+                        )
+                        _worst = int(_np.argmax(_res))
+                        if float(_res[_worst]) <= 25.0:
+                            break
+                        log.info(
+                            "wizard hybrid: dropped inconsistent AI anchor "
+                            "f=%s (%.0fpx off the anchor fit)",
+                            ai_pts[_worst]["frame"], float(_res[_worst]),
+                        )
+                        ai_pts.pop(_worst)
+                    if len(ai_pts) >= 4:
                         _fr = _np.array([p["frame"] for p in ai_pts], float)
                         _xs = _np.array([p["x"] for p in ai_pts], float)
                         _ys = _np.array([p["y"] for p in ai_pts], float)
@@ -3788,8 +3829,9 @@ def render_wizard_tracer(
                                 log.warning("wizard hybrid: arc redraw failed: %s", exc)
                     else:
                         log.info(
-                            "wizard hybrid: only %d AI anchors — CV track kept",
-                            n_ai_anchors,
+                            "wizard hybrid: only %d self-consistent AI "
+                            "anchors (need 4) — CV track kept unchanged",
+                            len(ai_pts),
                         )
                 except Exception as exc:  # noqa: BLE001
                     log.warning(
