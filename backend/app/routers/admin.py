@@ -3705,6 +3705,63 @@ def render_wizard_tracer(
             if audio_impact.get("ok") and audio_impact.get("impact_frame") is not None
             else saved.get("impact_frame")
         )
+
+        # Re-render the overlay with the MODERN renderer (robust parabola
+        # fit with outlier rejection + rest-constrained start + broadcast-
+        # blue style) on the classical/KNN detections. The legacy dashed
+        # renderer pins the first point to the ball and bridges to the fit
+        # with a single straight segment — when the fit doesn't extrapolate
+        # down to ball height, that bridge draws as a long straight
+        # diagonal with a visible kink. The modern renderer constrains the
+        # curve THROUGH the rest point instead, and its outlier rejection
+        # also drops any bad backfilled points before they can bend the
+        # line. Classical stays the detector; only the drawing changes.
+        if track:
+            try:
+                _render_track = [
+                    {
+                        "frame": int(p["frame"]),
+                        "found": True,
+                        "x": int(round(p["x"])),
+                        "y": int(round(p["y"])),
+                    }
+                    for p in track
+                ]
+                _rt_name = (
+                    f"wizard-{engine}-{upload_id}-{secrets.token_hex(3)}_tracer.mp4"
+                )
+                _rt_path = CLIPS_DIR / _rt_name
+                _rt_info = render_tracer_video(
+                    src_for_trace,
+                    _rt_path,
+                    ball_rest_xy_native=ball_at_rest_override,
+                    impact_frame_idx=(
+                        int(impact_override) - offset_frames
+                        if impact_override is not None
+                        else int(_render_track[0]["frame"])
+                    ),
+                    track_frames=_render_track,
+                )
+                if (
+                    _rt_info.get("ok")
+                    and _rt_path.exists()
+                    and _rt_path.stat().st_size > 0
+                ):
+                    compress_for_email(_rt_path)
+                    tracer_url_c = (
+                        f"{settings.app_base_url}/uploads/clips/{_rt_name}"
+                        f"?v={int(_rt_path.stat().st_mtime)}"
+                    )
+                else:
+                    log.warning(
+                        "wizard %s: modern re-render not ok (%s) — keeping "
+                        "classical render", engine, _rt_info.get("error"),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "wizard %s: modern re-render failed (%s) — keeping "
+                    "classical render", engine, exc,
+                )
         raw_motion_url = _named_url(info_c.get("raw_motion_image"))
         saved.update(
             {
