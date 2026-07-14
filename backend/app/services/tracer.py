@@ -951,12 +951,39 @@ def _render(
             tracker_stop_reason=direct_info.get("stop_reason") if direct_info else None,
         )
 
+    def _fallback_debug_images() -> dict[str, str]:
+        """0-points fallback: emit full-frame detector views for ~12 frames
+        (from the impact hint forward when we have one) so the wizard can
+        still show WHAT the detector saw instead of an empty, unexplained
+        Step 2 — the operator plots points manually on these frames."""
+        if frame_debug_dir is None or not _mask_png_store:
+            return {}
+        try:
+            keys = sorted(_mask_png_store)
+            window = keys
+            if impact_frame_hint is not None:
+                lo = int(impact_frame_hint)
+                hi = lo + int(round(2.0 * fps))
+                window = [k for k in keys if lo <= k <= hi] or keys
+            step = max(1, len(window) // 12)
+            fallback = window[::step][:12]
+            _zoomed, full = _write_frame_debug_images(
+                input_path, frame_debug_dir, frame_debug_prefix,
+                [], detections, _mask_png_store,
+                width, height, det_scale, fallback_frames=fallback,
+            )
+            return full
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tracer: fallback debug images failed: %s", exc)
+            return {}
+
     if aborting_noise:
         return {
             "ok": False,
             "error": f"noise overwhelming ({len(raw_cands_det)}+ candidates pre-mask) — check the debug image for the source (rain on lens, camera shake, etc.)",
             "n_candidates": len(detections),
             "n_points": 0,
+            "debug_frame_full_images": _fallback_debug_images(),
         }
     if not seed_track:
         return {
@@ -964,6 +991,7 @@ def _render(
             "error": "no usable trajectory",
             "n_candidates": len(detections),
             "n_points": 0,
+            "debug_frame_full_images": _fallback_debug_images(),
         }
     if len(track) > len(seed_track):
         log.info(
@@ -983,6 +1011,7 @@ def _render(
                 "error": "no track points after audio impact frame",
                 "n_candidates": len(detections),
                 "n_points": 0,
+                "debug_frame_full_images": _fallback_debug_images(),
             }
 
     # Predict-then-search backfill: fit the parabola from the confident
@@ -1037,9 +1066,10 @@ def _render(
     # the chosen ball position, MOG2 motion mask in red, nearby surviving
     # candidates in yellow, chosen point ringed green. Best-effort.
     debug_frame_images: dict[str, str] = {}
+    debug_frame_full_images: dict[str, str] = {}
     if frame_debug_dir is not None and track:
         try:
-            debug_frame_images = _write_frame_debug_images(
+            debug_frame_images, debug_frame_full_images = _write_frame_debug_images(
                 input_path, frame_debug_dir, frame_debug_prefix,
                 track, detections, _mask_png_store,
                 width, height, det_scale,
@@ -1057,6 +1087,7 @@ def _render(
         "fps": float(fps),
         "error": None,
         "debug_frame_images": debug_frame_images,
+        "debug_frame_full_images": debug_frame_full_images,
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's
@@ -1075,8 +1106,8 @@ def _render(
 
 def _write_frame_debug_images(
     input_path, out_dir, prefix, track, detections, mask_png_store,
-    width, height, det_scale,
-) -> dict[str, str]:
+    width, height, det_scale, fallback_frames=None,
+) -> tuple[dict[str, str], dict[str, str]]:
     """One JPG per final track point: a zoomed crop centred on the chosen
     ball position with the MOG2 foreground mask tinted red, surviving
     candidate detections within ±1 frame in yellow, and the chosen point
@@ -1084,14 +1115,26 @@ def _write_frame_debug_images(
 
     Note: the mask lives in motion-compensated reference coords while the
     frame/points are in current-frame coords — identical for a fixed
-    camera, near enough for a debug view otherwise."""
+    camera, near enough for a debug view otherwise.
+
+    Returns (zoomed, full): two {frame(str): filename} dicts. `zoomed` is
+    the card-sized crop centred on the chosen point; `full` is the whole
+    annotated frame (same coordinate space as the source, so the wizard
+    editor can show it as a click-to-mark background and zoom at will)."""
     out: dict[str, str] = {}
+    out_full: dict[str, str] = {}
+    # When the detector found NO track at all (0 points), fall back to a
+    # caller-supplied sample of frames so the operator can still SEE what
+    # the detector was looking at (and plot points manually on those
+    # frames) instead of getting an empty, unexplained Step 2.
+    items = [(int(d.frame), (int(round(d.x)), int(round(d.y)))) for d in track]
+    if not items and fallback_frames:
+        items = [(int(f), None) for f in fallback_frames]
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
-        return out
+        return out, out_full
     try:
-        for d in track:
-            f = int(d.frame)
+        for f, chosen in items:
             cap.set(cv2.CAP_PROP_POS_FRAMES, f)
             ok, fr = cap.read()
             if not ok or fr is None:
@@ -1114,9 +1157,24 @@ def _write_frame_debug_images(
                         fr, (int(det.x), int(det.y)), 7,
                         (0, 255, 255), 2, cv2.LINE_AA,
                     )
-            bx, by = int(round(d.x)), int(round(d.y))
-            cv2.circle(fr, (bx, by), 15, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.circle(fr, (bx, by), 13, (80, 220, 80), 3, cv2.LINE_AA)
+            if chosen is not None:
+                bx, by = chosen
+                cv2.circle(fr, (bx, by), 15, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.circle(fr, (bx, by), 13, (80, 220, 80), 3, cv2.LINE_AA)
+            # FULL annotated frame (same coordinate space as the source) —
+            # the wizard editor shows this as a zoomable background so the
+            # operator sees the whole scene's motion evidence at once.
+            full_name = f"{prefix}-f{f}-full.jpg"
+            cv2.imwrite(
+                str(Path(out_dir) / full_name), fr,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 80],
+            )
+            out_full[str(f)] = full_name
+            if chosen is None:
+                # No chosen point (fallback diagnostics for an empty
+                # track) — there's nothing to zoom to, so the full image
+                # doubles as the card image.
+                continue
             # Zoom crop centred on the chosen point so the (tiny) ball and
             # the motion evidence around it actually read on a small card.
             cw = max(360, width // 3)
@@ -1144,7 +1202,7 @@ def _write_frame_debug_images(
             out[str(f)] = name
     finally:
         cap.release()
-    return out
+    return out, out_full
 
 
 def _detect_club_candidates_in_frame(det_frame):

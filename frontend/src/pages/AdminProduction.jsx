@@ -2174,6 +2174,10 @@ function TracerStep({
   const [zoom, setZoom] = useState(1);
   // Full-screen zoomable viewer for a card's detector-view image.
   const [imgView, setImgView] = useState(null); // {url, title}
+  // Editor background: raw frame vs the full-frame detector view (MOG2
+  // mask + candidates baked in). Defaults ON so clicking a card lands on
+  // the evidence; the 🔥 toolbar button toggles back to the clean frame.
+  const [detectorView, setDetectorView] = useState(true);
   // Frames the operator explicitly cleared. Sent to the backend so
   // the renderer drops them from the ball track entirely (AI marks
   // included). Reset after a successful re-render.
@@ -2327,8 +2331,16 @@ function TracerStep({
     }
     try {
       const data = await api.getLongUploadFrame(adminPassword, row.id, frameIdx);
-      setEditorBg({ url: data.image_url, frame: data.frame });
-      const existing = (tracer?.frames || []).find((f) => f.frame === frameIdx);
+      // Full-frame detector-view overlay (MOG2 mask + candidates baked
+      // in, same coordinate space as the raw frame) when the classical
+      // engine produced one for this frame — the editor can toggle it.
+      const trackEntry = (tracer?.frames || []).find((f) => f.frame === frameIdx);
+      setEditorBg({
+        url: data.image_url,
+        frame: data.frame,
+        overlayUrl: trackEntry?.overlay_image_url || null,
+      });
+      const existing = trackEntry;
       const m = manualPositions[frameIdx];
       if (m) setEditorBall({ x: m.x, y: m.y });
       else if (!clearedFrames.has(frameIdx) && existing?.found && existing.x != null) {
@@ -2547,7 +2559,11 @@ function TracerStep({
               >
                 {editorBg?.url ? (
                   <img
-                    src={editorBg.url}
+                    src={
+                      detectorView && editorBg.overlayUrl
+                        ? editorBg.overlayUrl
+                        : editorBg.url
+                    }
                     alt={`Frame ${selectedFrame}`}
                     draggable={false}
                     style={{
@@ -2627,6 +2643,21 @@ function TracerStep({
                   onClick={() => { setZoom(1); setFocusOverride(null); }}
                   title="Fit full frame"
                 >Fit</button>
+                {editorBg?.overlayUrl && (
+                  <button
+                    type="button"
+                    style={{
+                      ...zoomBtn, width: 44,
+                      background: detectorView
+                        ? "rgba(220,60,60,0.85)"
+                        : zoomBtn.background,
+                    }}
+                    onClick={() => setDetectorView((v) => !v)}
+                    title="Toggle the detector view — the full frame with the MOG2 motion mask in red, candidates in yellow, chosen point ringed green. Zoom/pan/click work the same in both views."
+                  >
+                    {detectorView ? "🔥 on" : "🔥 off"}
+                  </button>
+                )}
                 {/* Pan controls — only useful when zoomed past 1×.
                     Each press shifts the viewable area by ~30% of
                     the visible region in that direction. */}

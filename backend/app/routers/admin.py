@@ -3604,12 +3604,14 @@ def render_wizard_tracer(
         )
         info_c = info_c or {}
         track = info_c.get("track") or []
-        # Per-frame MOG2 debug crops (zoomed on each chosen point, motion
-        # mask tinted red, candidates yellow) — keyed by CUT-relative frame.
+        # Per-frame MOG2 debug images — keyed by CUT-relative frame.
+        # `debug_frame_images` = card crops zoomed on each chosen point;
+        # `debug_frame_full_images` = whole annotated frames (source
+        # coordinate space) for the editor's detector-view background.
         _dbg_imgs = info_c.get("debug_frame_images") or {}
+        _dbg_full_imgs = info_c.get("debug_frame_full_images") or {}
 
-        def _dbg_url(seg_frame: int) -> str | None:
-            name = _dbg_imgs.get(str(int(seg_frame)))
+        def _named_url(name: str | None) -> str | None:
             if not name:
                 return None
             p = CLIPS_DIR / name
@@ -3620,6 +3622,12 @@ def render_wizard_tracer(
                 f"?v={int(p.stat().st_mtime)}"
             )
 
+        def _dbg_url(seg_frame: int) -> str | None:
+            return _named_url(_dbg_imgs.get(str(int(seg_frame))))
+
+        def _dbg_full_url(seg_frame: int) -> str | None:
+            return _named_url(_dbg_full_imgs.get(str(int(seg_frame))))
+
         ball_track_frames_out = [
             {
                 "frame": int(p["frame"]) + offset_frames,
@@ -3629,6 +3637,9 @@ def render_wizard_tracer(
                 "confidence": None,
                 "manual": False,
                 "image_url": _dbg_url(int(p["frame"])),
+                # Whole annotated frame (same coords as the source) — the
+                # editor shows it as a zoomable detector-view background.
+                "overlay_image_url": _dbg_full_url(int(p["frame"])),
                 # The debug crop is ZOOMED on the ball with the ring baked
                 # in — tells the frontend card not to overlay its own dot
                 # (which is positioned in full-frame coords).
@@ -3636,6 +3647,28 @@ def render_wizard_tracer(
             }
             for p in track
         ]
+        # 0 track points: the tracer couldn't chain any ball-like flight.
+        # Surface the fallback detector-view frames (sampled after impact)
+        # as found=False cards so the operator can SEE what the detector
+        # saw and click points onto those exact frames, instead of landing
+        # on an empty, unexplained Step 2.
+        if not ball_track_frames_out and _dbg_full_imgs:
+            ball_track_frames_out = [
+                {
+                    "frame": int(k) + offset_frames,
+                    "found": False,
+                    "x": None,
+                    "y": None,
+                    "confidence": None,
+                    "manual": False,
+                    "image_url": _named_url(v),
+                    "overlay_image_url": _named_url(v),
+                    "zoomed": False,
+                }
+                for k, v in sorted(
+                    _dbg_full_imgs.items(), key=lambda kv: int(kv[0]),
+                )
+            ]
         audio_impact = info_c.get("audio_impact") or {}
         classical_impact = (
             int(audio_impact["impact_frame"]) + offset_frames
