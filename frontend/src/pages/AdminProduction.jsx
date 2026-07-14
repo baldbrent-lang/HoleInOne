@@ -376,6 +376,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     setTracer({
       url: s.tracer_url || null,
       frames: s.ball_track_frames || [],
+      // Classical engine's all-detections composite (green = rising-arc
+      // chain, yellow = other motion candidates) — shown on Step 2.
+      debugUrl: s.tracer_debug_url || null,
     });
     // Remember which engine produced the saved tracer so clicking "Next"
     // on Step 1 reuses it instead of re-rendering (which would wipe the
@@ -715,7 +718,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       const frames = out.ball_track_frames || [];
       // Only reflect into the visible tracer if we're still on this swing.
       if (selectedSwingRef.current === swIndex) {
-        setTracer({ url: out.tracer_url, frames });
+        setTracer({ url: out.tracer_url, frames, debugUrl: out.debug_url || null });
         setTracerEngineUsed(out.engine || tracerEngine);
         setRenderedFrameSig(frameSig(draft));
         setTracerStats({
@@ -734,6 +737,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 tracer_url: out.tracer_url,
                 ball_track_frames: frames,
                 tracer_engine: out.engine || tracerEngine,
+                tracer_debug_url: out.debug_url || null,
               }
             : s
         );
@@ -809,6 +813,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       setTracer({
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
+        debugUrl: out.debug_url || null,
       });
       setTracerEngineUsed(out.engine || tracerEngine);
       setRenderedFrameSig(frameSig(draft));
@@ -826,6 +831,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         tracer_url: out.tracer_url,
         ball_track_frames: out.ball_track_frames || [],
         tracer_engine: out.engine || tracerEngine,
+        tracer_debug_url: out.debug_url || null,
       });
       onSaved?.();
       setStep("tracer");
@@ -908,10 +914,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           const fast = await api.renderWizardTracerFast(adminPassword, row.id, {
             manual_positions: overrides,
           });
-          setTracer({
+          setTracer((t) => ({
             url: fast.tracer_url,
             frames: fast.ball_track_frames || [],
-          });
+            debugUrl: t?.debugUrl || null,
+          }));
           setManualPositions({});
           // Persist the merged tracer (operator marks baked in) per
           // swing so re-opens skip the AI re-run AND keep the manual
@@ -2426,10 +2433,11 @@ function TracerStep({
           ? { start_frame: draft.startFrame, end_frame: draft.endFrame }
           : null,
       });
-      setTracer({
+      setTracer((t) => ({
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
-      });
+        debugUrl: t?.debugUrl || null,
+      }));
       setManualPositions({});
       setClearedFrames(new Set());
       setSelectedFrame(null);
@@ -2836,9 +2844,32 @@ function TracerStep({
           </button>
         </div>
 
-        <div className="tiny upper muted" style={{ marginTop: 4 }}>
-          Per-frame ball-track ({displayFrames.length}
-          {restEntry ? " · incl. rest" : ""})
+        <div
+          className="row"
+          style={{ alignItems: "center", gap: 8, marginTop: 4 }}
+        >
+          <div className="tiny upper muted">
+            Per-frame ball-track ({displayFrames.length}
+            {restEntry ? " · incl. rest" : ""})
+          </div>
+          {tracer?.debugUrl && (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto", padding: "1px 8px" }}
+              onClick={() =>
+                setImgView({
+                  url: tracer.debugUrl,
+                  title:
+                    "All detections (whole clip) — green = rising-arc chain, " +
+                    "yellow = other motion candidates",
+                })
+              }
+              title="One image with every motion detection from the clip — the ball's arc reads as a chain of green dots turning yellow past the apex. Zoom/pan inside."
+            >
+              🗺 All-detections map
+            </button>
+          )}
         </div>
         <div
           style={{
