@@ -1060,6 +1060,35 @@ def _render(
             "debug_frame_full_images": _fallback_debug_images(),
             "raw_motion_image": raw_motion_name,
         }
+    # Heatmap-arc recovery (operator insight: the flight is an obvious
+    # dotted arc in the accumulated motion heatmap even when per-frame
+    # gates lose the ball). Try it whenever masks were stored; use it as
+    # a RESCUE when chaining found nothing, or REPLACE the chained track
+    # when it covers clearly more of the flight.
+    arc_track: list = []
+    if _mask_png_store:
+        try:
+            arc_track = _arc_track_from_heatmap(
+                heatmap, _mask_png_store, det_scale, counted_frames,
+                impact_frame_hint=impact_frame_hint,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tracer: heatmap-arc recovery failed: %s", exc)
+    if arc_track:
+        if not seed_track:
+            log.info(
+                "tracer: heatmap-arc RESCUE — %d points (chaining found none)",
+                len(arc_track),
+            )
+            seed_track = arc_track
+            track = arc_track
+        elif len(arc_track) >= max(6, int(1.3 * len(track))):
+            log.info(
+                "tracer: heatmap-arc track (%d pts) beats chained (%d) — using it",
+                len(arc_track), len(track),
+            )
+            track = arc_track
+
     if not seed_track:
         return {
             "ok": False,
@@ -2390,6 +2419,115 @@ def _fit_motion(track):
     ys_pred = np.polyval(y_coef, frames)
     rms = float(np.sqrt(np.mean((xs - xs_pred) ** 2 + (ys - ys_pred) ** 2)))
     return y_coef, x_coef, rms
+
+
+def _arc_track_from_heatmap(
+    heatmap, mask_png_store, det_scale, counted_frames,
+    impact_frame_hint=None, max_hits=3,
+):
+    """Recover the ball track straight from the accumulated motion
+    heatmap (operator insight: the flight reads as an obvious dotted arc
+    of BRIEF pixels there, even where per-frame candidate gates lose the
+    ball against a busy background).
+
+    1. Transient mask: pixels hit 1..max_hits times — the blue dots.
+    2. Drop constant motion (body, club-fan core, foliage): pixels above
+       ~15% of counted frames, dilated.
+    3. Blob the remainder; keep small compact dots (ball-sized), drop
+       long streaks (club fan) and big patches.
+    4. TIME LOOKUP — the step the composite image can't do: for each dot,
+       find which frame's stored mask fired at that spot. That converts
+       the spatial arc into real (frame, x, y) points.
+    5. Robust parametric fit (x and y quadratic in frame) with iterative
+       outlier rejection; require enough points/span and a convex y
+       (up-then-down in image coords) so only a genuine ballistic arc
+       survives. Temporal consistency IS the confirmation: noise dots
+       don't line up in both space and time.
+
+    Returns a list of _Det (native coords) or [].
+    """
+    if not HAS_CV or heatmap is None or not mask_png_store:
+        return []
+    transient = ((heatmap > 0) & (heatmap <= max_hits)).astype(np.uint8)
+    const_thr = max(5, int(0.15 * max(1, counted_frames)))
+    constant = (heatmap >= const_thr).astype(np.uint8)
+    if constant.any():
+        constant = cv2.dilate(constant, np.ones((31, 31), np.uint8))
+        transient &= 1 - constant
+    n, _labels, stats, centroids = cv2.connectedComponentsWithStats(transient, 8)
+    blobs: list[tuple[float, float]] = []
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if not (2 <= area <= 250):
+            continue
+        w_ = int(stats[i, cv2.CC_STAT_WIDTH])
+        h_ = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if max(w_, h_) > 40:  # long streak = club fan / edge flicker
+            continue
+        blobs.append((float(centroids[i][0]), float(centroids[i][1])))
+    if len(blobs) < 6:
+        return []
+
+    # Time lookup: one decode pass over the stored masks, checking a 3x3
+    # neighbourhood at each dot. A ball dot fires in 1-2 (maybe 3) frames;
+    # dots that fire in many frames are flicker, not the ball.
+    blob_frames: list[list[int]] = [[] for _ in blobs]
+    for f in sorted(mask_png_store):
+        m = cv2.imdecode(mask_png_store[f], cv2.IMREAD_GRAYSCALE)
+        if m is None:
+            continue
+        H, W = m.shape[:2]
+        for bi, (cx, cy) in enumerate(blobs):
+            x0, y0 = int(cx), int(cy)
+            if 0 <= y0 < H and 0 <= x0 < W:
+                if m[max(0, y0 - 1):y0 + 2, max(0, x0 - 1):x0 + 2].any():
+                    blob_frames[bi].append(f)
+
+    inv = (1.0 / det_scale) if det_scale else 1.0
+    pts: list[_Det] = []
+    for (cx, cy), fl in zip(blobs, blob_frames):
+        if not (1 <= len(fl) <= 4):
+            continue
+        f = int(np.median(fl))
+        if impact_frame_hint is not None and f < int(impact_frame_hint) - 3:
+            continue
+        pts.append(_Det(f, cx * inv, cy * inv, 3.0 * inv))
+    if len(pts) < 6:
+        return []
+    pts.sort(key=lambda d: d.frame)
+
+    # Robust parametric fit with iterative outlier rejection. x is
+    # quadratic too — heatmap arcs often curve back in x near the apex.
+    work = list(pts)
+    ycf = xcf = None
+    for _ in range(10):
+        if len(work) < 6:
+            return []
+        fr = np.array([d.frame for d in work], float)
+        if fr.max() - fr.min() < 6:
+            return []
+        xs = np.array([d.x for d in work], float)
+        ys = np.array([d.y for d in work], float)
+        ycf = np.polyfit(fr, ys, 2)
+        xcf = np.polyfit(fr, xs, 2)
+        res = np.sqrt(
+            (xs - np.polyval(xcf, fr)) ** 2 + (ys - np.polyval(ycf, fr)) ** 2
+        )
+        worst = int(np.argmax(res))
+        if float(res[worst]) > 45.0:
+            work.pop(worst)
+            continue
+        break
+    if ycf is None or len(work) < 6:
+        return []
+    # Ballistic sanity: y(frame) convex in image coords (up then down).
+    if float(ycf[0]) <= 0:
+        return []
+    log.info(
+        "tracer: heatmap-arc — %d dots -> %d timed pts -> %d on arc",
+        len(blobs), len(pts), len(work),
+    )
+    return work
 
 
 # Corridor backfill tuning. Half-box (det px) searched around each
