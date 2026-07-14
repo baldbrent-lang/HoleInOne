@@ -1032,13 +1032,15 @@ def _render(
             return {}
         try:
             keys = sorted(_mask_png_store)
-            window = keys
+            # Every frame from impact through impact+40 (fixed count,
+            # fps-independent) — same coverage as the success path, so
+            # the operator can plot the ball frame-by-frame even when
+            # the detector chained nothing.
             if impact_frame_hint is not None:
                 lo = int(impact_frame_hint)
-                hi = lo + int(round(2.0 * fps))
-                window = [k for k in keys if lo <= k <= hi] or keys
-            step = max(1, len(window) // 12)
-            fallback = window[::step][:12]
+                fallback = [k for k in keys if lo <= k < lo + 40] or keys[:40]
+            else:
+                fallback = keys[:40]
             _zoomed, full = _write_frame_debug_images(
                 input_path, frame_debug_dir, frame_debug_prefix,
                 [], detections, _mask_png_store,
@@ -1145,9 +1147,12 @@ def _render(
     if frame_debug_dir is not None and track:
         try:
             # Also emit detector views for the flight-window frames where
-            # NO ball was detected (impact onward, strided to ~36 total),
-            # so the wizard shows clickable "no ball" cards the operator
-            # can plot on — parity with the AI engine's card behaviour.
+            # NO ball was detected — EVERY frame from impact through
+            # impact+40, a fixed count regardless of fps — so the wizard
+            # shows a clickable "no ball" card for each one and the
+            # operator can plot the ball frame-by-frame where detection
+            # missed. (Detection itself already scans every frame; this
+            # governs card/debug-image coverage.)
             extra: list[int] | None = None
             if _mask_png_store:
                 lo = (
@@ -1155,11 +1160,11 @@ def _render(
                     if impact_frame_hint is not None
                     else int(track[0].frame)
                 )
-                keys = [k for k in sorted(_mask_png_store) if k >= lo]
-                if keys:
-                    stride = max(1, -(-len(keys) // 36))  # ceil-div cap ~36
-                    track_set = {int(d.frame) for d in track}
-                    extra = [k for k in keys[::stride] if k not in track_set]
+                track_set = {int(d.frame) for d in track}
+                extra = [
+                    k for k in sorted(_mask_png_store)
+                    if lo <= k < lo + 40 and k not in track_set
+                ]
             debug_frame_images, debug_frame_full_images = _write_frame_debug_images(
                 input_path, frame_debug_dir, frame_debug_prefix,
                 track, detections, _mask_png_store,
