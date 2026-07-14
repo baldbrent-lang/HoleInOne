@@ -753,6 +753,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           n_points: out.n_points,
           n_candidates: out.n_candidates,
           n_backfilled: out.n_backfilled,
+          n_ai_anchors: out.n_ai_anchors ?? null,
         });
       }
       // Persist to the captured swing index regardless of current tab.
@@ -864,6 +865,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         n_points: out.n_points,
         n_candidates: out.n_candidates,
         n_backfilled: out.n_backfilled,
+        n_ai_anchors: out.n_ai_anchors ?? null,
       });
       // Cache the run into the swing so re-opens hydrate the tracer
       // instead of re-running. Records which engine produced it. The
@@ -1147,8 +1149,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                   ? "Classical CV (MOG2)"
                   : tracerStats.engine === "knn"
                     ? "Classical CV (KNN)"
-                    : "AI"}
+                    : tracerStats.engine === "hybrid"
+                      ? "MOG2 + AI verify"
+                      : "AI"}
               </b>
+              {tracerStats.n_ai_anchors != null && (
+                <> · {tracerStats.n_ai_anchors} AI anchors</>
+              )}
               {" · "}{tracerStats.n_points ?? "—"} points plotted
               {tracerStats.n_candidates != null && (
                 <> · {tracerStats.n_candidates} candidates</>
@@ -1243,6 +1250,16 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 title="Classical CV tracer with the KNN background subtractor — same pipeline as Classical, different motion detector; often cleaner against drifting clouds / rippling water"
               >
                 KNN
+              </button>
+              <button
+                type="button"
+                className={tracerEngine === "hybrid" ? "small" : "ghost small"}
+                style={{ width: "auto" }}
+                onClick={() => setTracerEngine("hybrid")}
+                disabled={renderingTracer}
+                title="MOG2 detections cross-validated with ~10 AI ball fixes: only CV points that agree with the AI-anchored curve survive. CV = density, AI = truth. Needs ANTHROPIC_API_KEY."
+              >
+                MOG2+AI
               </button>
             </div>
           )}

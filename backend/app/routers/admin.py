@@ -3577,8 +3577,11 @@ def render_wizard_tracer(
     engine = str(payload.get("engine") or saved.get("tracer_engine") or "ai").lower()
     # "classical" = the CV pipeline on MOG2 background subtraction;
     # "knn" = the SAME CV pipeline on the KNN subtractor (often separates
-    # a small fast ball from drifting clouds / rippling water better).
-    if engine in ("classical", "knn"):
+    # a small fast ball from drifting clouds / rippling water better);
+    # "hybrid" = MOG2 detections cross-validated against a handful of AI
+    # ball fixes — CV supplies density, AI supplies ground truth, and only
+    # CV points that agree with the AI-anchored curve survive.
+    if engine in ("classical", "knn", "hybrid"):
         # The classical tracer processes EVERY frame of its input. Running
         # it on the full multi-swing source (often minutes of video) blocked
         # this request past the HTTP proxy timeout — the wizard sat on
@@ -3679,6 +3682,120 @@ def render_wizard_tracer(
 
         def _dbg_full_url(seg_frame: int) -> str | None:
             return _named_url(_dbg_full_imgs.get(str(int(seg_frame))))
+
+        # ── Hybrid: cross-validate the CV track with a few AI ball fixes ──
+        # The CV picker sometimes latches onto a plausible-but-wrong point
+        # cluster (tree noise chained into an "arc"). A handful of Claude
+        # ball locations are sparse but trustworthy: fit a curve through
+        # them, keep only CV points that agree with it, and pin the AI
+        # anchors into the merged track. CV = density, AI = truth.
+        n_ai_anchors = None
+        if engine == "hybrid" and track:
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                log.info("wizard hybrid: no ANTHROPIC_API_KEY — CV track kept")
+            else:
+                try:
+                    import numpy as _np
+
+                    _imp_cut = (
+                        int(impact_override) - offset_frames
+                        if impact_override is not None
+                        else int(track[0]["frame"])
+                    )
+                    ai_info = track_ball_after_impact(
+                        src_for_trace,
+                        max(0, _imp_cut),
+                        output_dir=CLIPS_DIR,
+                        output_prefix=f"hybrid-{upload_id}-{secrets.token_hex(3)}",
+                        max_frames=10,
+                    )
+                    ai_pts = [
+                        {
+                            "frame": int(r["frame"]),
+                            "x": float(r["x"]),
+                            "y": float(r["y"]),
+                            "ai_anchor": True,
+                        }
+                        for r in (ai_info.get("frames") or [])
+                        if r.get("found") and r.get("x") is not None
+                    ]
+                    n_ai_anchors = len(ai_pts)
+                    if len(ai_pts) >= 3:
+                        _fr = _np.array([p["frame"] for p in ai_pts], float)
+                        _xs = _np.array([p["x"] for p in ai_pts], float)
+                        _ys = _np.array([p["y"] for p in ai_pts], float)
+                        _ycf = _np.polyfit(_fr, _ys, 2)
+                        _xcf = _np.polyfit(_fr, _xs, 1 if len(ai_pts) < 6 else 2)
+
+                        def _agrees(p) -> bool:
+                            px = float(_np.polyval(_xcf, p["frame"]))
+                            py = float(_np.polyval(_ycf, p["frame"]))
+                            return (
+                                (p["x"] - px) ** 2 + (p["y"] - py) ** 2
+                            ) ** 0.5 <= 45.0
+
+                        agree = [p for p in track if _agrees(p)]
+                        _have = {p["frame"] for p in ai_pts}
+                        merged = ai_pts + [
+                            p for p in agree if int(p["frame"]) not in _have
+                        ]
+                        merged.sort(key=lambda p: int(p["frame"]))
+                        log.info(
+                            "wizard hybrid: %d AI anchors; %d/%d CV points "
+                            "agree -> merged track %d pts",
+                            len(ai_pts), len(agree), len(track), len(merged),
+                        )
+                        track = merged
+                        # Re-draw the path-on-heat overlay from the MERGED
+                        # track so the 🎯 view shows what actually renders.
+                        _rm_name = info_c.get("raw_motion_image")
+                        if _rm_name and len(track) >= 3:
+                            try:
+                                import cv2 as _cv2
+
+                                _img = _cv2.imread(str(CLIPS_DIR / _rm_name))
+                                if _img is not None:
+                                    _f2 = _np.array([p["frame"] for p in track], float)
+                                    _x2 = _np.array([p["x"] for p in track], float)
+                                    _y2 = _np.array([p["y"] for p in track], float)
+                                    _yc2 = _np.polyfit(_f2, _y2, 2)
+                                    _xc2 = _np.polyfit(
+                                        _f2, _x2, 1 if len(track) < 8 else 2
+                                    )
+                                    _ih, _iw = _img.shape[:2]
+                                    _poly = []
+                                    for _f in range(int(_f2.min()), int(_f2.max()) + 1):
+                                        _px = int(round(float(_np.polyval(_xc2, _f))))
+                                        _py = int(round(float(_np.polyval(_yc2, _f))))
+                                        if 0 <= _px < _iw and 0 <= _py < _ih:
+                                            _poly.append((_px, _py))
+                                    if len(_poly) >= 2:
+                                        _cv2.polylines(
+                                            _img, [_np.array(_poly, _np.int32)],
+                                            False, (0, 0, 255), 6, _cv2.LINE_AA,
+                                        )
+                                    for p in track:
+                                        _c = (255, 200, 0) if p.get("ai_anchor") else (255, 255, 255)
+                                        _cv2.circle(_img, (int(p["x"]), int(p["y"])), 5, _c, -1, _cv2.LINE_AA)
+                                        _cv2.circle(_img, (int(p["x"]), int(p["y"])), 6, (0, 0, 255), 2, _cv2.LINE_AA)
+                                    _arc_name = _rm_name.replace(".jpg", "-arc.jpg")
+                                    _cv2.imwrite(
+                                        str(CLIPS_DIR / _arc_name), _img,
+                                        [int(_cv2.IMWRITE_JPEG_QUALITY), 85],
+                                    )
+                                    info_c["raw_motion_arc_image"] = _arc_name
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning("wizard hybrid: arc redraw failed: %s", exc)
+                    else:
+                        log.info(
+                            "wizard hybrid: only %d AI anchors — CV track kept",
+                            n_ai_anchors,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "wizard hybrid: AI verification failed (%s) — CV track kept",
+                        exc,
+                    )
 
         # Cards = the UNION of detected track points and the no-ball
         # flight-window frames the tracer emitted detector views for —
@@ -3877,6 +3994,7 @@ def render_wizard_tracer(
             "n_points": info_c.get("n_points"),
             "n_candidates": info_c.get("n_candidates"),
             "n_backfilled": info_c.get("n_backfilled"),
+            "n_ai_anchors": n_ai_anchors,
             "debug_url": debug_url_c,
             "raw_motion_url": raw_motion_url,
             "raw_motion_arc_url": raw_motion_arc_url,
