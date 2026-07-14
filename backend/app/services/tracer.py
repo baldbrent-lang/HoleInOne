@@ -1144,10 +1144,26 @@ def _render(
     debug_frame_full_images: dict[str, str] = {}
     if frame_debug_dir is not None and track:
         try:
+            # Also emit detector views for the flight-window frames where
+            # NO ball was detected (impact onward, strided to ~36 total),
+            # so the wizard shows clickable "no ball" cards the operator
+            # can plot on — parity with the AI engine's card behaviour.
+            extra: list[int] | None = None
+            if _mask_png_store:
+                lo = (
+                    int(impact_frame_hint)
+                    if impact_frame_hint is not None
+                    else int(track[0].frame)
+                )
+                keys = [k for k in sorted(_mask_png_store) if k >= lo]
+                if keys:
+                    stride = max(1, -(-len(keys) // 36))  # ceil-div cap ~36
+                    track_set = {int(d.frame) for d in track}
+                    extra = [k for k in keys[::stride] if k not in track_set]
             debug_frame_images, debug_frame_full_images = _write_frame_debug_images(
                 input_path, frame_debug_dir, frame_debug_prefix,
                 track, detections, _mask_png_store,
-                width, height, det_scale,
+                width, height, det_scale, fallback_frames=extra,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("tracer: per-frame debug images failed: %s", exc)
@@ -1199,13 +1215,16 @@ def _write_frame_debug_images(
     editor can show it as a click-to-mark background and zoom at will)."""
     out: dict[str, str] = {}
     out_full: dict[str, str] = {}
-    # When the detector found NO track at all (0 points), fall back to a
-    # caller-supplied sample of frames so the operator can still SEE what
-    # the detector was looking at (and plot points manually on those
-    # frames) instead of getting an empty, unexplained Step 2.
+    # `fallback_frames` are extra frames WITHOUT a chosen point — frames
+    # the detector scanned but found no ball in. They get a full detector-
+    # view image (no green ring, no zoom crop) so the wizard can show a
+    # clickable "no ball" card for every flight frame and the operator can
+    # plot the ball manually, exactly like the AI engine's cards.
     items = [(int(d.frame), (int(round(d.x)), int(round(d.y)))) for d in track]
-    if not items and fallback_frames:
-        items = [(int(f), None) for f in fallback_frames]
+    if fallback_frames:
+        have = {f for f, _pt in items}
+        items += [(int(f), None) for f in fallback_frames if int(f) not in have]
+    items.sort(key=lambda it: it[0])
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         return out, out_full

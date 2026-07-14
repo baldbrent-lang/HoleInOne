@@ -3659,47 +3659,46 @@ def render_wizard_tracer(
         def _dbg_full_url(seg_frame: int) -> str | None:
             return _named_url(_dbg_full_imgs.get(str(int(seg_frame))))
 
-        ball_track_frames_out = [
-            {
-                "frame": int(p["frame"]) + offset_frames,
-                "found": True,
-                "x": int(round(p["x"])),
-                "y": int(round(p["y"])),
-                "confidence": None,
-                "manual": False,
-                "image_url": _dbg_url(int(p["frame"])),
-                # Whole annotated frame (same coords as the source) — the
-                # editor shows it as a zoomable detector-view background.
-                "overlay_image_url": _dbg_full_url(int(p["frame"])),
-                # The debug crop is ZOOMED on the ball with the ring baked
-                # in — tells the frontend card not to overlay its own dot
-                # (which is positioned in full-frame coords).
-                "zoomed": True,
-            }
-            for p in track
-        ]
-        # 0 track points: the tracer couldn't chain any ball-like flight.
-        # Surface the fallback detector-view frames (sampled after impact)
-        # as found=False cards so the operator can SEE what the detector
-        # saw and click points onto those exact frames, instead of landing
-        # on an empty, unexplained Step 2.
-        if not ball_track_frames_out and _dbg_full_imgs:
-            ball_track_frames_out = [
-                {
-                    "frame": int(k) + offset_frames,
+        # Cards = the UNION of detected track points and the no-ball
+        # flight-window frames the tracer emitted detector views for —
+        # so the operator gets a clickable card for every flight frame
+        # (found or not) and can plot the ball manually where detection
+        # missed, exactly like the AI engine's cards.
+        _track_by_frame = {int(p["frame"]): p for p in track}
+        _all_card_frames = sorted(
+            set(_track_by_frame) | {int(k) for k in _dbg_full_imgs}
+        )
+        ball_track_frames_out = []
+        for _f in _all_card_frames:
+            p = _track_by_frame.get(_f)
+            if p is not None:
+                ball_track_frames_out.append({
+                    "frame": _f + offset_frames,
+                    "found": True,
+                    "x": int(round(p["x"])),
+                    "y": int(round(p["y"])),
+                    "confidence": None,
+                    "manual": False,
+                    "image_url": _dbg_url(_f),
+                    # Whole annotated frame (same coords as the source) —
+                    # the editor's zoomable detector-view background.
+                    "overlay_image_url": _dbg_full_url(_f),
+                    # Card image is ZOOMED on the ball with the ring baked
+                    # in — the frontend skips its own full-frame-coord dot.
+                    "zoomed": True,
+                })
+            else:
+                ball_track_frames_out.append({
+                    "frame": _f + offset_frames,
                     "found": False,
                     "x": None,
                     "y": None,
                     "confidence": None,
                     "manual": False,
-                    "image_url": _named_url(v),
-                    "overlay_image_url": _named_url(v),
+                    "image_url": _dbg_full_url(_f),
+                    "overlay_image_url": _dbg_full_url(_f),
                     "zoomed": False,
-                }
-                for k, v in sorted(
-                    _dbg_full_imgs.items(), key=lambda kv: int(kv[0]),
-                )
-            ]
+                })
         audio_impact = info_c.get("audio_impact") or {}
         classical_impact = (
             int(audio_impact["impact_frame"]) + offset_frames
