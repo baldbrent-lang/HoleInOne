@@ -1092,7 +1092,14 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 border: "1px solid var(--border, #2a2a2a)",
               }}
             >
-              Engine: <b>{tracerStats.engine === "classical" ? "Classical CV" : "AI"}</b>
+              Engine:{" "}
+              <b>
+                {tracerStats.engine === "classical"
+                  ? "Classical CV (MOG2)"
+                  : tracerStats.engine === "knn"
+                    ? "Classical CV (KNN)"
+                    : "AI"}
+              </b>
               {" · "}{tracerStats.n_points ?? "—"} points plotted
               {tracerStats.n_candidates != null && (
                 <> · {tracerStats.n_candidates} candidates</>
@@ -1173,9 +1180,19 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 style={{ width: "auto" }}
                 onClick={() => setTracerEngine("classical")}
                 disabled={renderingTracer}
-                title="Classical CV tracer (motion + parabola, no API)"
+                title="Classical CV tracer — MOG2 background subtraction (motion + parabola, no API)"
               >
                 Classical
+              </button>
+              <button
+                type="button"
+                className={tracerEngine === "knn" ? "small" : "ghost small"}
+                style={{ width: "auto" }}
+                onClick={() => setTracerEngine("knn")}
+                disabled={renderingTracer}
+                title="Classical CV tracer with the KNN background subtractor — same pipeline as Classical, different motion detector; often cleaner against drifting clouds / rippling water"
+              >
+                KNN
               </button>
             </div>
           )}

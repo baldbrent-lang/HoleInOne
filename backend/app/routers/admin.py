@@ -3571,7 +3571,10 @@ def render_wizard_tracer(
     # produce the same ball_track_frames shape. Lets the operator run
     # both on the same clip and compare traces + point counts.
     engine = str(payload.get("engine") or saved.get("tracer_engine") or "ai").lower()
-    if engine == "classical":
+    # "classical" = the CV pipeline on MOG2 background subtraction;
+    # "knn" = the SAME CV pipeline on the KNN subtractor (often separates
+    # a small fast ball from drifting clouds / rippling water better).
+    if engine in ("classical", "knn"):
         # The classical tracer processes EVERY frame of its input. Running
         # it on the full multi-swing source (often minutes of video) blocked
         # this request past the HTTP proxy timeout — the wizard sat on
@@ -3601,6 +3604,7 @@ def render_wizard_tracer(
             src_for_trace,
             frame_debug_dir=CLIPS_DIR,
             frame_debug_prefix=_dbg_prefix,
+            bg_algo=("knn" if engine == "knn" else "mog2"),
         )
         info_c = info_c or {}
         track = info_c.get("track") or []
@@ -3677,10 +3681,11 @@ def render_wizard_tracer(
         )
         saved.update(
             {
-                "tracer_engine": "classical",
+                "tracer_engine": engine,
                 "tracer_url": tracer_url_c,
+                "tracer_debug_url": debug_url_c,
                 "tracer_info": {
-                    "engine": "classical",
+                    "engine": engine,
                     "ok": bool(info_c.get("ok")),
                     "n_points": info_c.get("n_points"),
                     "n_candidates": info_c.get("n_candidates"),
@@ -3713,7 +3718,7 @@ def render_wizard_tracer(
         db.refresh(row)
         return {
             "upload_id": upload_id,
-            "engine": "classical",
+            "engine": engine,
             "tracer_url": tracer_url_c,
             "ball_track_frames": ball_track_frames_out,
             "n_points": info_c.get("n_points"),
@@ -4775,6 +4780,7 @@ def _run_tracer(
     sensitivity: float = 1.0,
     frame_debug_dir: Path | None = None,
     frame_debug_prefix: str = "tracerdbg",
+    bg_algo: str = "mog2",
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -4820,6 +4826,7 @@ def _run_tracer(
         sensitivity=float(sensitivity),
         frame_debug_dir=frame_debug_dir,
         frame_debug_prefix=frame_debug_prefix,
+        bg_algo=bg_algo,
     )
     info["audio_impact"] = audio_impact
     info["sensitivity"] = float(sensitivity)

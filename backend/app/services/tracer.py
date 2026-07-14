@@ -56,6 +56,13 @@ except Exception:  # pragma: no cover
 # background there is mostly uniform sky / grass).
 BG_VAR_THRESHOLD = 30
 
+# KNN background-subtractor squared-distance threshold (used when the
+# caller picks bg_algo="knn" instead of MOG2). KNN keeps a sample set per
+# pixel rather than a Gaussian mixture — it often separates a small fast
+# mover from slow textured backgrounds (drifting clouds, rippling water)
+# more cleanly than MOG2, at slightly higher CPU. 400 is OpenCV's default.
+KNN_DIST2_THRESHOLD = 400.0
+
 # Skip the first N frames of candidate extraction so the background
 # model has time to converge. The frames are still fed to the
 # subtractor (to build the model), just not searched for candidates.
@@ -326,8 +333,13 @@ def render_tracer(
     sensitivity: float = 1.0,
     frame_debug_dir: Path | None = None,
     frame_debug_prefix: str = "tracerdbg",
+    bg_algo: str = "mog2",
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
+
+    `bg_algo`: "mog2" (default) or "knn" — which OpenCV background
+    subtractor feeds candidate extraction. Everything downstream (hot
+    mask, upward-streak chaining, parabola fit, render) is identical.
 
     `sensitivity` (default 1.0) scales the four candidate-count knobs:
     BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_UPWARD_CHAIN_LEN, and
@@ -353,6 +365,7 @@ def render_tracer(
                 impact_frame_hint=impact_frame_hint,
                 frame_debug_dir=frame_debug_dir,
                 frame_debug_prefix=frame_debug_prefix,
+                bg_algo=bg_algo,
             )
         with _SENSITIVITY_LOCK:
             global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
@@ -377,6 +390,7 @@ def render_tracer(
                     impact_frame_hint=impact_frame_hint,
                     frame_debug_dir=frame_debug_dir,
                     frame_debug_prefix=frame_debug_prefix,
+                    bg_algo=bg_algo,
                 )
             finally:
                 (
@@ -401,6 +415,7 @@ def _render(
     impact_frame_hint: int | None = None,
     frame_debug_dir: Path | None = None,
     frame_debug_prefix: str = "tracerdbg",
+    bg_algo: str = "mog2",
 ) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -419,9 +434,16 @@ def _render(
     det_h = max(1, int(round(height * det_scale)))
     log.info("tracer: %s %dx%d @ %.1ffps  detect@%dx%d", input_path.name, width, height, fps, det_w, det_h)
 
-    bg = cv2.createBackgroundSubtractorMOG2(
-        history=300, varThreshold=BG_VAR_THRESHOLD, detectShadows=False,
-    )
+    if str(bg_algo).lower() == "knn":
+        bg = cv2.createBackgroundSubtractorKNN(
+            history=300, dist2Threshold=KNN_DIST2_THRESHOLD,
+            detectShadows=False,
+        )
+        log.info("tracer: using KNN background subtractor")
+    else:
+        bg = cv2.createBackgroundSubtractorMOG2(
+            history=300, varThreshold=BG_VAR_THRESHOLD, detectShadows=False,
+        )
 
     # Per-pixel foreground-hit count at detection resolution. After the
     # scan finishes we threshold this to a binary "hot mask" of regions
