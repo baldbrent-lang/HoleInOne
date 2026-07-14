@@ -3572,12 +3572,36 @@ def render_wizard_tracer(
     # both on the same clip and compare traces + point counts.
     engine = str(payload.get("engine") or saved.get("tracer_engine") or "ai").lower()
     if engine == "classical":
-        tracer_url_c, info_c, _traced_c, debug_url_c = _run_tracer(src_path)
+        # The classical tracer processes EVERY frame of its input. Running
+        # it on the full multi-swing source (often minutes of video) blocked
+        # this request past the HTTP proxy timeout — the wizard sat on
+        # "Rendering tracer…" and then silently stopped. Cut a short window
+        # around the swing's impact frame and trace just that; all frame
+        # indices are shifted back into full-source coordinates so the
+        # Step-2 ball editor still lines up with the source frames.
+        src_for_trace = src_path
+        offset_frames = 0
+        fps_c = probe_fps(src_path) or 30.0
+        if impact_override is not None:
+            _pre_s, _post_s = 3.0, 9.0
+            _start_s = max(0.0, int(impact_override) / fps_c - _pre_s)
+            _end_s = int(impact_override) / fps_c + _post_s
+            _cut_name = f"wizard-classical-{upload_id}-{secrets.token_hex(4)}.mp4"
+            _cut_path = CLIPS_DIR / _cut_name
+            if cut_segment(src_path, _cut_path, _start_s, _end_s):
+                src_for_trace = _cut_path
+                offset_frames = int(round(_start_s * fps_c))
+            else:
+                log.warning(
+                    "wizard classical render: cut failed — tracing full "
+                    "source for upload %s (slow)", upload_id,
+                )
+        tracer_url_c, info_c, _traced_c, debug_url_c = _run_tracer(src_for_trace)
         info_c = info_c or {}
         track = info_c.get("track") or []
         ball_track_frames_out = [
             {
-                "frame": int(p["frame"]),
+                "frame": int(p["frame"]) + offset_frames,
                 "found": True,
                 "x": int(round(p["x"])),
                 "y": int(round(p["y"])),
@@ -3589,7 +3613,7 @@ def render_wizard_tracer(
         ]
         audio_impact = info_c.get("audio_impact") or {}
         classical_impact = (
-            int(audio_impact["impact_frame"])
+            int(audio_impact["impact_frame"]) + offset_frames
             if audio_impact.get("ok") and audio_impact.get("impact_frame") is not None
             else saved.get("impact_frame")
         )

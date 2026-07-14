@@ -1047,6 +1047,12 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           {error && (
             <div className="err-text small">{error}</div>
           )}
+          {tracerError && step === "metrics" && (
+            <div className="err-text small" style={{ marginBottom: 8 }}>
+              Tracer render failed: {tracerError} — hit Next to retry, or
+              switch the Tracer engine below.
+            </div>
+          )}
           {isMulti && !detectingSwings && swings.length > 0 && (
             <SwingSelectorBar
               swings={swings}
