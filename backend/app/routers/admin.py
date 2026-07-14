@@ -3679,11 +3679,13 @@ def render_wizard_tracer(
             if audio_impact.get("ok") and audio_impact.get("impact_frame") is not None
             else saved.get("impact_frame")
         )
+        raw_motion_url = _named_url(info_c.get("raw_motion_image"))
         saved.update(
             {
                 "tracer_engine": engine,
                 "tracer_url": tracer_url_c,
                 "tracer_debug_url": debug_url_c,
+                "tracer_raw_motion_url": raw_motion_url,
                 "tracer_info": {
                     "engine": engine,
                     "ok": bool(info_c.get("ok")),
@@ -3725,6 +3727,7 @@ def render_wizard_tracer(
             "n_candidates": info_c.get("n_candidates"),
             "n_backfilled": info_c.get("n_backfilled"),
             "debug_url": debug_url_c,
+            "raw_motion_url": raw_motion_url,
             "edit_metrics": row.edit_metrics,
         }
 

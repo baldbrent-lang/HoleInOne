@@ -631,6 +631,49 @@ def _render(
         100.0 * hot_pixels / max(1, det_w * det_h),
     )
 
+    # Raw-motion composite (debug): the accumulated per-pixel foreground-
+    # hit count over the whole window, colormapped and blended onto the
+    # first frame — TOTAL unfiltered motion (body, club, clouds, water,
+    # ball, everything), before any of the candidate gates. Written even
+    # when detection later fails, since "what moved at all" is exactly the
+    # question on a 0-point run.
+    raw_motion_name: str | None = None
+    if frame_debug_dir is not None and counted_frames > 0 and first_frame_snapshot is not None:
+        try:
+            _hm = heatmap.astype(np.float32)
+            _peak = float(_hm.max())
+            if _peak > 0:
+                hm8 = np.clip(_hm / _peak * 255.0, 0, 255).astype(np.uint8)
+                hm_native = cv2.resize(
+                    hm8, (width, height), interpolation=cv2.INTER_LINEAR,
+                )
+                color = cv2.applyColorMap(hm_native, cv2.COLORMAP_TURBO)
+                base_img = first_frame_snapshot.copy()
+                blend = cv2.addWeighted(base_img, 0.45, color, 0.55, 0)
+                on = hm_native > 0
+                base_img[on] = blend[on]
+                _lbl = (
+                    f"raw motion heat [{str(bg_algo).upper()}] - unfiltered "
+                    f"foreground hits over {counted_frames} frames "
+                    f"(blue=rare, red=constant)"
+                )
+                cv2.putText(
+                    base_img, _lbl, (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 3, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    base_img, _lbl, (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                raw_motion_name = f"{frame_debug_prefix}-rawmotion.jpg"
+                cv2.imwrite(
+                    str(Path(frame_debug_dir) / raw_motion_name), base_img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tracer: raw-motion composite failed: %s", exc)
+            raw_motion_name = None
+
     # Ball address (detection-coord) + body bbox → kept for display
     # and as fallback signals. The primary handedness signal now comes
     # from the club shaft's slope, which is robust to stray practice
@@ -1006,6 +1049,7 @@ def _render(
             "n_candidates": len(detections),
             "n_points": 0,
             "debug_frame_full_images": _fallback_debug_images(),
+            "raw_motion_image": raw_motion_name,
         }
     if not seed_track:
         return {
@@ -1014,6 +1058,7 @@ def _render(
             "n_candidates": len(detections),
             "n_points": 0,
             "debug_frame_full_images": _fallback_debug_images(),
+            "raw_motion_image": raw_motion_name,
         }
     if len(track) > len(seed_track):
         log.info(
@@ -1034,6 +1079,7 @@ def _render(
                 "n_candidates": len(detections),
                 "n_points": 0,
                 "debug_frame_full_images": _fallback_debug_images(),
+                "raw_motion_image": raw_motion_name,
             }
 
     # Predict-then-search backfill: fit the parabola from the confident
@@ -1110,6 +1156,7 @@ def _render(
         "error": None,
         "debug_frame_images": debug_frame_images,
         "debug_frame_full_images": debug_frame_full_images,
+        "raw_motion_image": raw_motion_name,
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's

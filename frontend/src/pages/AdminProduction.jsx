@@ -379,6 +379,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       // Classical engine's all-detections composite (green = rising-arc
       // chain, yellow = other motion candidates) — shown on Step 2.
       debugUrl: s.tracer_debug_url || null,
+      // Raw-motion heatmap — total unfiltered motion (body/clouds/ball).
+      rawMotionUrl: s.tracer_raw_motion_url || null,
     });
     // Remember which engine produced the saved tracer so clicking "Next"
     // on Step 1 reuses it instead of re-rendering (which would wipe the
@@ -718,7 +720,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       const frames = out.ball_track_frames || [];
       // Only reflect into the visible tracer if we're still on this swing.
       if (selectedSwingRef.current === swIndex) {
-        setTracer({ url: out.tracer_url, frames, debugUrl: out.debug_url || null });
+        setTracer({
+          url: out.tracer_url, frames,
+          debugUrl: out.debug_url || null,
+          rawMotionUrl: out.raw_motion_url || null,
+        });
         setTracerEngineUsed(out.engine || tracerEngine);
         setRenderedFrameSig(frameSig(draft));
         setTracerStats({
@@ -738,6 +744,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 ball_track_frames: frames,
                 tracer_engine: out.engine || tracerEngine,
                 tracer_debug_url: out.debug_url || null,
+                tracer_raw_motion_url: out.raw_motion_url || null,
               }
             : s
         );
@@ -814,6 +821,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
         debugUrl: out.debug_url || null,
+        rawMotionUrl: out.raw_motion_url || null,
       });
       setTracerEngineUsed(out.engine || tracerEngine);
       setRenderedFrameSig(frameSig(draft));
@@ -832,6 +840,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         ball_track_frames: out.ball_track_frames || [],
         tracer_engine: out.engine || tracerEngine,
         tracer_debug_url: out.debug_url || null,
+        tracer_raw_motion_url: out.raw_motion_url || null,
       });
       onSaved?.();
       setStep("tracer");
@@ -918,6 +927,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             url: fast.tracer_url,
             frames: fast.ball_track_frames || [],
             debugUrl: t?.debugUrl || null,
+            rawMotionUrl: t?.rawMotionUrl || null,
           }));
           setManualPositions({});
           // Persist the merged tracer (operator marks baked in) per
@@ -2454,6 +2464,7 @@ function TracerStep({
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
         debugUrl: t?.debugUrl || null,
+            rawMotionUrl: t?.rawMotionUrl || null,
       }));
       setManualPositions({});
       setClearedFrames(new Set());
@@ -2885,6 +2896,25 @@ function TracerStep({
               title="One image with every motion detection from the clip — the ball's arc reads as a chain of green dots turning yellow past the apex. Zoom/pan inside."
             >
               🗺 All-detections map
+            </button>
+          )}
+          {tracer?.rawMotionUrl && (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto", padding: "1px 8px" }}
+              onClick={() =>
+                setImgView({
+                  url: tracer.rawMotionUrl,
+                  title:
+                    "Raw motion heat — TOTAL unfiltered motion over the " +
+                    "window (body, club, clouds, water, ball). Blue = moved " +
+                    "rarely, red = moved constantly.",
+                })
+              }
+              title="Accumulated per-pixel motion from the background subtractor (MOG2/KNN), before any ball filtering — shows everything that moved, including body and swing."
+            >
+              🌡 Raw motion
             </button>
           )}
         </div>
