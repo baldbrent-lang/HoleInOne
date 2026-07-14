@@ -3585,10 +3585,30 @@ def render_wizard_tracer(
         src_for_trace = src_path
         offset_frames = 0
         fps_c = probe_fps(src_path) or 30.0
-        if impact_override is not None:
-            _pre_s, _post_s = 3.0, 9.0
-            _start_s = max(0.0, int(impact_override) / fps_c - _pre_s)
-            _end_s = int(impact_override) / fps_c + _post_s
+        start_override = payload.get("start_frame")
+        end_override = payload.get("end_frame")
+        _start_s = _end_s = None
+        if (
+            start_override is not None
+            and end_override is not None
+            and int(end_override) > int(start_override)
+        ):
+            # Operator-defined swing window from Step 1 — trace exactly
+            # this. Extend the cut BACKWARD if needed so the background
+            # subtractor still gets ~2.5s of pre-impact warmup (it needs
+            # settled background + the address ball before flight starts);
+            # frames before the operator's impact are dropped from the
+            # track anyway via the impact cutoff, so the early extension
+            # never adds points.
+            _start_s = max(0.0, int(start_override) / fps_c)
+            _end_s = int(end_override) / fps_c
+            if impact_override is not None:
+                _warm_s = max(0.0, int(impact_override) / fps_c - 2.5)
+                _start_s = min(_start_s, _warm_s)
+        elif impact_override is not None:
+            _start_s = max(0.0, int(impact_override) / fps_c - 3.0)
+            _end_s = int(impact_override) / fps_c + 9.0
+        if _start_s is not None and _end_s is not None and _end_s > _start_s:
             _cut_name = f"wizard-classical-{upload_id}-{secrets.token_hex(4)}.mp4"
             _cut_path = CLIPS_DIR / _cut_name
             if cut_segment(src_path, _cut_path, _start_s, _end_s):

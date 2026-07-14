@@ -714,6 +714,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       const out = await api.renderWizardTracer(adminPassword, row.id, {
         handedness: sw.handedness || draft.handedness || "right",
         impact_frame: sw.impact_frame,
+        start_frame: sw.start_frame ?? null,
+        end_frame: sw.end_frame ?? null,
         ball_at_rest: sw.ball || null,
         engine: tracerEngine,
       });
@@ -814,6 +816,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       const out = await api.renderWizardTracer(adminPassword, row.id, {
         handedness: draft.handedness,
         impact_frame: draft.impactFrame,
+        start_frame: draft.startFrame ?? null,
+        end_frame: draft.endFrame ?? null,
         ball_at_rest: draft.ball,
         engine: tracerEngine,
       });
