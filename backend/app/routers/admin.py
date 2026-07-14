@@ -3605,6 +3605,23 @@ def render_wizard_tracer(
             if impact_override is not None:
                 _warm_s = max(0.0, int(impact_override) / fps_c - 2.5)
                 _start_s = min(_start_s, _warm_s)
+            # Clamp the render window to 30s. A wide Step-1 window (e.g.
+            # end frame accidentally set 50s out) made the classical scan
+            # process ~1700 frames and the trajectory scorer choke on the
+            # noise — the request then died on the proxy timeout (502).
+            # 30s comfortably covers any single swing + full ball flight.
+            _MAX_WIN_S = 30.0
+            if _end_s - _start_s > _MAX_WIN_S:
+                _anchor_s = (
+                    int(impact_override) / fps_c
+                    if impact_override is not None else _start_s
+                )
+                _new_end = min(_end_s, max(_anchor_s + 27.0, _start_s + _MAX_WIN_S))
+                log.info(
+                    "wizard %s render: clamping window %.1fs-%.1fs -> end %.1fs "
+                    "(30s cap)", engine, _start_s, _end_s, _new_end,
+                )
+                _end_s = _new_end
         elif impact_override is not None:
             _start_s = max(0.0, int(impact_override) / fps_c - 3.0)
             _end_s = int(impact_override) / fps_c + 9.0

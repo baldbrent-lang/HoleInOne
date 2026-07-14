@@ -30,6 +30,21 @@ function fmtDateTime(iso) {
   return d ? d.toLocaleString() : "—";
 }
 
+// Server errors sometimes carry a whole HTML page (Replit's proxy 502
+// when a render outlives the request timeout). Strip markup and shorten
+// so the wizard shows a readable one-liner instead of a wall of HTML.
+function sanitizeErr(msg) {
+  const s = String(msg || "");
+  if (/<!DOCTYPE|<html|couldn&#39;t reach|couldn't reach/i.test(s)) {
+    return (
+      "the server took too long and the connection timed out (502). " +
+      "Try a tighter start/end window on Step 1, then re-run."
+    );
+  }
+  const plain = s.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return plain.length > 220 ? `${plain.slice(0, 220)}…` : plain;
+}
+
 // Signature of the three clip frames the tracer render depends on
 // (start / impact / end). When any of them changes on Step 1, the
 // cached Step-2 tracer is stale and must be re-rendered.
@@ -757,7 +772,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         return next;
       });
     } catch (e) {
-      setTracerError(e.message);
+      setTracerError(sanitizeErr(e.message));
     } finally {
       setRenderingTracer(false);
     }
@@ -849,7 +864,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       onSaved?.();
       setStep("tracer");
     } catch (e) {
-      setTracerError(e.message);
+      setTracerError(sanitizeErr(e.message));
     } finally {
       setRenderingTracer(false);
     }

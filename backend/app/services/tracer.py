@@ -2855,6 +2855,22 @@ def _pick_best(trajectories, ball_addr_native=None, body_mask_det=None,
     rejected_blob = 0
     if body_mask_det is not None:
         bm_h, bm_w = body_mask_det.shape[:2]
+    # Cost cap on the alignment bonus. It's O(trajectories × detections)
+    # in Python — a noisy scene (10k chains × 15k detections ≈ 150M ops)
+    # ran for minutes and blew the request past the proxy timeout.
+    # Subsample the detection list so the total work stays ~10M ops; the
+    # bonus is a relative ranking signal, so a uniform subsample keeps
+    # the ranking while bounding the cost.
+    if all_detections is not None and trajectories:
+        _budget = 10_000_000
+        _per_traj = max(1, _budget // max(1, len(trajectories)))
+        if len(all_detections) > _per_traj:
+            _step = max(1, -(-len(all_detections) // _per_traj))
+            all_detections = all_detections[::_step]
+            log.info(
+                "tracer: _pick_best subsampled detections for alignment "
+                "bonus (every %dth, %d kept)", _step, len(all_detections),
+            )
     for t in trajectories:
         r = _residual(t)
         if r > MAX_PARABOLA_RESIDUAL:
