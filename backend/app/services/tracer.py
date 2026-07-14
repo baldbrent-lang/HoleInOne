@@ -324,6 +324,8 @@ def render_tracer(
     debug_path: Path | None = None,
     impact_frame_hint: int | None = None,
     sensitivity: float = 1.0,
+    frame_debug_dir: Path | None = None,
+    frame_debug_prefix: str = "tracerdbg",
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
 
@@ -333,12 +335,25 @@ def render_tracer(
     noise looser (more dots), values < 1 make it stricter. We patch the
     module constants for the duration of the call under a lock so two
     concurrent renders don't trample each other.
+
+    `frame_debug_dir`: when set, writes one JPG per FINAL track point — a
+    zoomed crop around the chosen ball position with the MOG2 foreground
+    (motion) mask highlighted in red, every surviving candidate near that
+    frame in yellow, and the chosen point ringed green. The Edit wizard
+    shows these on the per-frame ball cards so the operator can see WHY
+    the classical detector picked each point. info gains
+    `debug_frame_images` ({frame: filename}).
     """
     if not HAS_CV:
         return {"ok": False, "error": "opencv not installed", "n_points": 0, "n_candidates": 0}
     try:
         if sensitivity == 1.0:
-            return _render(input_path, output_path, debug_path, impact_frame_hint=impact_frame_hint)
+            return _render(
+                input_path, output_path, debug_path,
+                impact_frame_hint=impact_frame_hint,
+                frame_debug_dir=frame_debug_dir,
+                frame_debug_prefix=frame_debug_prefix,
+            )
         with _SENSITIVITY_LOCK:
             global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
             originals = (
@@ -357,7 +372,12 @@ def render_tracer(
                     sensitivity, BG_VAR_THRESHOLD, MIN_CIRCULARITY,
                     MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME,
                 )
-                return _render(input_path, output_path, debug_path, impact_frame_hint=impact_frame_hint)
+                return _render(
+                    input_path, output_path, debug_path,
+                    impact_frame_hint=impact_frame_hint,
+                    frame_debug_dir=frame_debug_dir,
+                    frame_debug_prefix=frame_debug_prefix,
+                )
             finally:
                 (
                     BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA,
@@ -379,6 +399,8 @@ def _render(
     output_path: Path,
     debug_path: Path | None = None,
     impact_frame_hint: int | None = None,
+    frame_debug_dir: Path | None = None,
+    frame_debug_prefix: str = "tracerdbg",
 ) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -410,6 +432,9 @@ def _render(
     # Raw candidates are stored at DETECTION resolution so we can index
     # them into the heatmap before scaling survivors back to native.
     raw_cands_det: list[tuple[int, float, float, float]] = []
+    # PNG-compressed MOG2 masks per frame, kept only when the caller asked
+    # for per-frame debug images (Edit wizard). ~5-20 KB per frame.
+    _mask_png_store: dict[int, "np.ndarray"] = {}
     first_frame_snapshot = None
 
     # Motion compensation state. Reference frame is the first frame we
@@ -505,6 +530,18 @@ def _render(
             bg_input = det_frame
 
         fg_mask = bg.apply(bg_input)
+        # Per-frame debug: keep the raw MOG2 mask (PNG-compressed — binary
+        # masks squeeze to a few KB) so the post-loop debug-image writer can
+        # show exactly what the detector saw at each FINAL track frame.
+        # Only when a debug dir was requested (Edit wizard), never in
+        # production produce runs.
+        if frame_debug_dir is not None and idx >= WARMUP_FRAMES:
+            try:
+                _okp, _png = cv2.imencode(".png", fg_mask)
+                if _okp:
+                    _mask_png_store[idx] = _png
+            except Exception:  # noqa: BLE001
+                pass
         # Snapshot caching for the disappearance-based ball detector.
         # We cache the raw det_frame at the pre-computed sample indices
         # so the post-loop detector can scan early-vs-late without
@@ -996,6 +1033,20 @@ def _render(
     cap2.release()
     writer.release()
 
+    # Per-frame debug images for the FINAL track points: zoomed crop around
+    # the chosen ball position, MOG2 motion mask in red, nearby surviving
+    # candidates in yellow, chosen point ringed green. Best-effort.
+    debug_frame_images: dict[str, str] = {}
+    if frame_debug_dir is not None and track:
+        try:
+            debug_frame_images = _write_frame_debug_images(
+                input_path, frame_debug_dir, frame_debug_prefix,
+                track, detections, _mask_png_store,
+                width, height, det_scale,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tracer: per-frame debug images failed: %s", exc)
+
     return {
         "ok": True,
         "residual_px": _residual(track),
@@ -1005,6 +1056,7 @@ def _render(
         "frame_range": [track[0].frame, track[-1].frame],
         "fps": float(fps),
         "error": None,
+        "debug_frame_images": debug_frame_images,
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's
@@ -1019,6 +1071,80 @@ def _render(
             for (f, x, y) in smoothed
         ],
     }
+
+
+def _write_frame_debug_images(
+    input_path, out_dir, prefix, track, detections, mask_png_store,
+    width, height, det_scale,
+) -> dict[str, str]:
+    """One JPG per final track point: a zoomed crop centred on the chosen
+    ball position with the MOG2 foreground mask tinted red, surviving
+    candidate detections within ±1 frame in yellow, and the chosen point
+    ringed green. Returns {frame(str): filename}.
+
+    Note: the mask lives in motion-compensated reference coords while the
+    frame/points are in current-frame coords — identical for a fixed
+    camera, near enough for a debug view otherwise."""
+    out: dict[str, str] = {}
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        return out
+    try:
+        for d in track:
+            f = int(d.frame)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                continue
+            png = mask_png_store.get(f)
+            if png is not None:
+                m = cv2.imdecode(png, cv2.IMREAD_GRAYSCALE)
+                if m is not None:
+                    m_full = cv2.resize(
+                        m, (width, height), interpolation=cv2.INTER_NEAREST,
+                    )
+                    on = m_full > 0
+                    red = np.zeros_like(fr)
+                    red[:, :] = (0, 0, 255)
+                    blend = cv2.addWeighted(fr, 0.45, red, 0.55, 0)
+                    fr[on] = blend[on]
+            for det in detections:
+                if abs(int(det.frame) - f) <= 1:
+                    cv2.circle(
+                        fr, (int(det.x), int(det.y)), 7,
+                        (0, 255, 255), 2, cv2.LINE_AA,
+                    )
+            bx, by = int(round(d.x)), int(round(d.y))
+            cv2.circle(fr, (bx, by), 15, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.circle(fr, (bx, by), 13, (80, 220, 80), 3, cv2.LINE_AA)
+            # Zoom crop centred on the chosen point so the (tiny) ball and
+            # the motion evidence around it actually read on a small card.
+            cw = max(360, width // 3)
+            ch = max(200, int(round(cw * height / max(1, width))))
+            x0 = max(0, min(width - cw, bx - cw // 2))
+            y0 = max(0, min(height - ch, by - ch // 2))
+            crop = fr[y0:y0 + ch, x0:x0 + cw]
+            out_w = 640
+            out_h = max(1, int(round(out_w * ch / max(1, cw))))
+            crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_AREA)
+            label = f"f{f}  red=motion  yellow=cands  green=chosen"
+            cv2.putText(
+                crop, label, (8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 0, 0), 3, cv2.LINE_AA,
+            )
+            cv2.putText(
+                crop, label, (8, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA,
+            )
+            name = f"{prefix}-f{f}.jpg"
+            cv2.imwrite(
+                str(Path(out_dir) / name), crop,
+                [int(cv2.IMWRITE_JPEG_QUALITY), 82],
+            )
+            out[str(f)] = name
+    finally:
+        cap.release()
+    return out
 
 
 def _detect_club_candidates_in_frame(det_frame):

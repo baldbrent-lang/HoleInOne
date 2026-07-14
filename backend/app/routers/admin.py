@@ -3596,9 +3596,30 @@ def render_wizard_tracer(
                     "wizard classical render: cut failed — tracing full "
                     "source for upload %s (slow)", upload_id,
                 )
-        tracer_url_c, info_c, _traced_c, debug_url_c = _run_tracer(src_for_trace)
+        _dbg_prefix = f"wizdbg-{upload_id}-{secrets.token_hex(3)}"
+        tracer_url_c, info_c, _traced_c, debug_url_c = _run_tracer(
+            src_for_trace,
+            frame_debug_dir=CLIPS_DIR,
+            frame_debug_prefix=_dbg_prefix,
+        )
         info_c = info_c or {}
         track = info_c.get("track") or []
+        # Per-frame MOG2 debug crops (zoomed on each chosen point, motion
+        # mask tinted red, candidates yellow) — keyed by CUT-relative frame.
+        _dbg_imgs = info_c.get("debug_frame_images") or {}
+
+        def _dbg_url(seg_frame: int) -> str | None:
+            name = _dbg_imgs.get(str(int(seg_frame)))
+            if not name:
+                return None
+            p = CLIPS_DIR / name
+            if not p.exists():
+                return None
+            return (
+                f"{settings.app_base_url}/uploads/clips/{name}"
+                f"?v={int(p.stat().st_mtime)}"
+            )
+
         ball_track_frames_out = [
             {
                 "frame": int(p["frame"]) + offset_frames,
@@ -3607,7 +3628,11 @@ def render_wizard_tracer(
                 "y": int(round(p["y"])),
                 "confidence": None,
                 "manual": False,
-                "image_url": None,
+                "image_url": _dbg_url(int(p["frame"])),
+                # The debug crop is ZOOMED on the ball with the ring baked
+                # in — tells the frontend card not to overlay its own dot
+                # (which is positioned in full-frame coords).
+                "zoomed": True,
             }
             for p in track
         ]
@@ -4715,6 +4740,8 @@ def _optional_int(v):
 def _run_tracer(
     clip_path: Path,
     sensitivity: float = 1.0,
+    frame_debug_dir: Path | None = None,
+    frame_debug_prefix: str = "tracerdbg",
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -4758,6 +4785,8 @@ def _run_tracer(
         debug_path,
         impact_frame_hint=impact_hint,
         sensitivity=float(sensitivity),
+        frame_debug_dir=frame_debug_dir,
+        frame_debug_prefix=frame_debug_prefix,
     )
     info["audio_impact"] = audio_impact
     info["sensitivity"] = float(sensitivity)

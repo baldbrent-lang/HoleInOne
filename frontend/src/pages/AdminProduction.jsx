@@ -2735,7 +2735,7 @@ function TracerStep({
                       style={{ width: "100%", height: "100%", objectFit: "cover" }}
                     />
                   )}
-                  {hasDims && ball && (
+                  {hasDims && ball && !(f.zoomed && f.image_url) && (
                     <div
                       style={{
                         position: "absolute",
