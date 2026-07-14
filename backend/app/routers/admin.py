@@ -3563,6 +3563,10 @@ def render_wizard_tracer(
     ball_at_rest_override = None
     if isinstance(ball_pt, dict) and ball_pt.get("x") is not None:
         ball_at_rest_override = (float(ball_pt["x"]), float(ball_pt["y"]))
+    # True when the operator explicitly placed the resting ball (rest card
+    # click on Step 2). An operator-set rest always beats the auto-derived
+    # one on later renders.
+    ball_manual = bool(_pick("ball_manual"))
 
     # Engine selector (A/B). "classical" runs the CV tracer (motion
     # detection + parabola fit, no API calls); default "ai" keeps the
@@ -3723,6 +3727,40 @@ def render_wizard_tracer(
             else saved.get("impact_frame")
         )
 
+        # Rest position derived from the FLIGHT ITSELF: fit the recovered
+        # track and evaluate at the operator's impact frame — the launch
+        # point is where the ball sat. Replaces the old address-blob /
+        # disappearance guess, which routinely latched onto non-ball
+        # objects (trees, markers) and couldn't be corrected. The result
+        # is returned as ball_at_rest so the wizard can show it on the
+        # Step-2 rest card, where the operator can now click to move it.
+        derived_rest = None
+        if len(track) >= 3 and not ball_manual:
+            try:
+                import numpy as _np
+
+                _fr = _np.array([p["frame"] for p in track], float)
+                _xs = _np.array([p["x"] for p in track], float)
+                _ys = _np.array([p["y"] for p in track], float)
+                _imp = (
+                    float(int(impact_override) - offset_frames)
+                    if impact_override is not None
+                    else float(_fr.min())
+                )
+                _ycf = _np.polyfit(_fr, _ys, 2)
+                _xcf = _np.polyfit(_fr, _xs, 1 if len(track) < 8 else 2)
+                derived_rest = (
+                    float(_np.polyval(_xcf, _imp)),
+                    float(_np.polyval(_ycf, _imp)),
+                )
+                log.info(
+                    "wizard %s: rest derived from flight fit @ impact -> "
+                    "(%.0f, %.0f)", engine, derived_rest[0], derived_rest[1],
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("wizard %s: rest derivation failed: %s", engine, exc)
+                derived_rest = None
+
         # Re-render the overlay with the MODERN renderer (robust parabola
         # fit with outlier rejection + rest-constrained start + broadcast-
         # blue style) on the classical/KNN detections. The legacy dashed
@@ -3751,7 +3789,7 @@ def render_wizard_tracer(
                 _rt_info = render_tracer_video(
                     src_for_trace,
                     _rt_path,
-                    ball_rest_xy_native=ball_at_rest_override,
+                    ball_rest_xy_native=(derived_rest or ball_at_rest_override),
                     impact_frame_idx=(
                         int(impact_override) - offset_frames
                         if impact_override is not None
@@ -3804,6 +3842,13 @@ def render_wizard_tracer(
         # render's own audio opinion.
         if classical_impact is not None and payload.get("impact_frame") is None:
             saved["impact_frame"] = int(classical_impact)
+        # Persist the flight-derived rest (never over an operator-set one).
+        rest_used = derived_rest or ball_at_rest_override
+        if derived_rest is not None:
+            saved["ball"] = {
+                "x": int(round(derived_rest[0])),
+                "y": int(round(derived_rest[1])),
+            }
         row.edit_metrics = saved
         db.add(row)
         db.add(
@@ -3832,6 +3877,12 @@ def render_wizard_tracer(
             "n_backfilled": info_c.get("n_backfilled"),
             "debug_url": debug_url_c,
             "raw_motion_url": raw_motion_url,
+            "ball_at_rest": (
+                {"x": int(round(rest_used[0])), "y": int(round(rest_used[1]))}
+                if rest_used is not None
+                else None
+            ),
+            "ball_manual": ball_manual,
             "edit_metrics": row.edit_metrics,
         }
 

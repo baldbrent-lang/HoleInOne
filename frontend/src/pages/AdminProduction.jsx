@@ -378,6 +378,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       endFrame: s.end_frame ?? null,
       cutFrame: s.cut_frame ?? null,
       ball: s.ball || null,
+      ballManual: !!s.ball_manual,
       roi: s.roi || null,
       target: s.target || null,
     });
@@ -732,6 +733,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         start_frame: sw.start_frame ?? null,
         end_frame: sw.end_frame ?? null,
         ball_at_rest: sw.ball || null,
+        ball_manual: !!sw.ball_manual,
         engine: tracerEngine,
       });
       const frames = out.ball_track_frames || [];
@@ -762,6 +764,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 tracer_engine: out.engine || tracerEngine,
                 tracer_debug_url: out.debug_url || null,
                 tracer_raw_motion_url: out.raw_motion_url || null,
+                ...(out.ball_at_rest && !out.ball_manual
+                  ? { ball: out.ball_at_rest }
+                  : {}),
               }
             : s
         );
@@ -834,6 +839,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         start_frame: draft.startFrame ?? null,
         end_frame: draft.endFrame ?? null,
         ball_at_rest: draft.ball,
+        ball_manual: !!draft.ballManual,
         engine: tracerEngine,
       });
       setTracer({
@@ -842,6 +848,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         debugUrl: out.debug_url || null,
         rawMotionUrl: out.raw_motion_url || null,
       });
+      // Adopt the flight-derived rest position (never over an operator-set
+      // one) so the Step-2 rest card starts where the render anchored.
+      if (out.ball_at_rest && !out.ball_manual) {
+        setDraft((d) => ({ ...d, ball: out.ball_at_rest, ballManual: false }));
+      }
       setTracerEngineUsed(out.engine || tracerEngine);
       setRenderedFrameSig(frameSig(draft));
       setTracerStats({
@@ -860,6 +871,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         tracer_engine: out.engine || tracerEngine,
         tracer_debug_url: out.debug_url || null,
         tracer_raw_motion_url: out.raw_motion_url || null,
+        ...(out.ball_at_rest && !out.ball_manual
+          ? { ball: out.ball_at_rest }
+          : {}),
       });
       onSaved?.();
       setStep("tracer");
@@ -1144,6 +1158,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               row={row}
               adminPassword={adminPassword}
               draft={draft}
+              setDraft={setDraft}
               tracer={tracer}
               setTracer={setTracer}
               rendering={renderingTracer}
@@ -2213,7 +2228,7 @@ function ImageLightbox({ url, title, onClose }) {
 }
 
 function TracerStep({
-  row, adminPassword, draft, tracer, setTracer,
+  row, adminPassword, draft, setDraft, tracer, setTracer,
   rendering, setRendering, error, setError,
   frameW, frameH, totalFrames, onSaved, persistPatch,
   manualPositions, setManualPositions,
@@ -2533,6 +2548,13 @@ function TracerStep({
     const pt = editorEventToFrame(e);
     if (!pt) return;
     setEditorBall(pt);
+    // Clicking on the REST card's frame moves the resting-ball anchor
+    // itself (the start of the tracer line), not a flight point.
+    if (selectedFrame != null && selectedFrame === restFrame) {
+      setDraft?.((d) => ({ ...d, ball: { x: pt.x, y: pt.y }, ballManual: true }));
+      persistPatch?.({ ball: { x: pt.x, y: pt.y }, ball_manual: true });
+      return;
+    }
     if (selectedFrame != null) {
       setManualPositions((m) => ({ ...m, [selectedFrame]: pt }));
       // Marking a position un-clears the frame: the operator is
