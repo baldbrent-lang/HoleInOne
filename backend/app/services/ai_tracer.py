@@ -3161,18 +3161,18 @@ def render_tracer_video(
         else:
             anchors.append((rest_anchor_frame, rx, ry))
             rest_added = True
-    # If the operator has manually plotted ANY ball positions, their
-    # clicks are the ground-truth trajectory: drop the AI's auto-detected
-    # points so they can't pull the fitted line off the plotted path.
-    # (Bug this fixes: a near-vertical shot plotted straight up over the
-    # golfer rendered with the line yanked sideways, because leftover AI
-    # points stayed in the weighted fit and dragged the single straight
-    # left/right line off to one side.)
+    # Manual points MERGE with the auto-detected ones: the operator's
+    # clicks are pinned ground truth (never rejected, 10x weight in the
+    # fit) but the auto points stay in — the common workflow is mapping
+    # a few frames the detector missed (e.g. the blurred launch) while
+    # keeping the detector's good arc. The old behaviour dropped EVERY
+    # auto point the moment one manual existed, so two early clicks
+    # rendered as a tiny spline through just those clicks and the whole
+    # detected flight vanished from the tracer.
     has_manual = any(m for (_x, _y, m) in points_by_frame.values())
+    n_auto_pts = sum(1 for (_x, _y, m) in points_by_frame.values() if not m)
     for f in sorted(points_by_frame):
         x, y, is_manual = points_by_frame[f]
-        if has_manual and not is_manual:
-            continue  # operator override in effect — ignore AI points
         if is_manual:
             manual_anchor_idxs.add(len(anchors))
         anchors.append((f, x, y))
@@ -3196,8 +3196,14 @@ def render_tracer_video(
     # can't be represented as a straight-line x, so the descent rendered on
     # the wrong side of the golfer. Interpolating through the marks honours
     # exactly what was plotted — up AND down, on the correct side.
+    # Manual-ONLY render (Catmull spline through the clicks) applies only
+    # when the operator plotted the entire path themselves and there are
+    # no auto points to blend with — e.g. a shot the detector missed
+    # completely, or an up-and-over flight the parametric fit can't
+    # represent. With auto points present, manual marks act as pinned
+    # anchors inside the robust fit instead.
     manual_render = False
-    if has_manual and len(anchors) >= 2:
+    if has_manual and n_auto_pts == 0 and len(anchors) >= 2:
         # Draw a SMOOTH Catmull-Rom spline through the plotted anchors.
         # It still passes through every plotted point, but curves smoothly
         # between them instead of connecting them with straight segments
