@@ -1097,7 +1097,9 @@ def _render(
     # top-hat blob search. Recovers faint ball frames the global detector
     # was too strict to flag — denser plotting along the known path
     # without adding noise elsewhere. Additive; never removes points.
-    track, n_backfilled = _corridor_backfill(input_path, track, det_scale)
+    track, n_backfilled = _corridor_backfill(
+        input_path, track, det_scale, impact_frame_hint=impact_frame_hint,
+    )
     if n_backfilled:
         log.info("tracer: corridor backfill added %d point(s)", n_backfilled)
 
@@ -2400,17 +2402,31 @@ CORRIDOR_HALF_MIN_PX = 14
 CORRIDOR_EPS_MULT = 3.0
 
 
-def _corridor_backfill(input_path, track, det_scale):
+def _corridor_backfill(
+    input_path, track, det_scale,
+    impact_frame_hint=None, forward_frames=45,
+):
     """Recover faint ball frames the global detector missed, by looking
     only where the fitted parabola says the ball should be.
 
-    Fit (x_coef, y_coef) from the confident track, then for each in-range
-    frame WITHOUT a track point, re-decode it, crop a small corridor box
+    Fit (x_coef, y_coef) from the confident track, then for each frame
+    WITHOUT a track point, re-decode it, crop a small corridor box
     around the predicted position, and run the same top-hat ball-blob
     search the address detector uses. Add the nearest ball-sized hit
     within the corridor. Confining the search to the corridor is what
     makes it safe — it plots more points along the known path without
     flagging noise elsewhere. Additive: returns (track, n_added).
+
+    Searches beyond the chained range in BOTH directions:
+    - backward to `impact_frame_hint`: the chain often only starts once
+      the ball rises above a busy background (treeline) even though the
+      raw motion mask fired on it the whole way — the extrapolated
+      parabola points the search at the early low-contrast flight.
+    - forward `forward_frames` past the last point: the descent, which
+      the upward-streak chaining never covers.
+    Frames whose predicted position falls outside the frame are skipped,
+    and a frame only gains a point when a ball-sized blob actually shows
+    up inside the corridor — extrapolating into empty sky adds nothing.
     """
     if not HAS_CV or len(track) < 5:
         return track, 0
@@ -2420,7 +2436,11 @@ def _corridor_backfill(input_path, track, det_scale):
     have = {int(d.frame) for d in track}
     f0 = min(int(d.frame) for d in track)
     f1 = max(int(d.frame) for d in track)
-    missing = {f for f in range(f0, f1 + 1) if f not in have}
+    lo = f0
+    if impact_frame_hint is not None:
+        lo = max(0, min(f0, int(impact_frame_hint)))
+    hi = f1 + max(0, int(forward_frames))
+    missing = {f for f in range(lo, hi + 1) if f not in have}
     if not missing:
         return track, 0
 
@@ -2437,7 +2457,7 @@ def _corridor_backfill(input_path, track, det_scale):
     try:
         while True:
             ok, frame = cap.read()
-            if not ok or idx >= f1:
+            if not ok or idx >= hi:
                 break
             idx += 1
             if idx not in missing:
