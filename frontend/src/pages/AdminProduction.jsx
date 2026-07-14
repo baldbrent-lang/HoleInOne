@@ -2053,6 +2053,112 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
   );
 }
 
+function ImageLightbox({ url, title, onClose }) {
+  // Full-screen zoom/pan viewer for a single image (the per-frame
+  // detector-view JPGs). Wheel or +/− to zoom, drag to pan when zoomed,
+  // double-click toggles 1x ⇄ 3x. Esc/backdrop/Close to dismiss.
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const drag = useRef(null);
+  useEffect(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, [url]);
+  useEffect(() => {
+    if (!url) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose?.();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [url, onClose]);
+  if (!url) return null;
+  const clampZoom = (z) => Math.max(1, Math.min(12, z));
+  const zoomBy = (mult) =>
+    setZoom((z) => {
+      const nz = clampZoom(z * mult);
+      if (nz === 1) setPan({ x: 0, y: 0 });
+      return nz;
+    });
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title || "Image viewer"}
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)",
+        zIndex: 1100, display: "flex", flexDirection: "column", padding: 14,
+      }}
+    >
+      <div
+        className="row"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          color: "#fff", alignItems: "center",
+          justifyContent: "space-between", marginBottom: 8, cursor: "default",
+        }}
+      >
+        <b style={{ fontSize: "0.9rem" }}>{title || "Image"}</b>
+        <div className="row" style={{ gap: 6, alignItems: "center" }}>
+          <button type="button" className="ghost small" style={{ width: "auto" }}
+            onClick={() => zoomBy(1 / 1.4)} title="Zoom out">−</button>
+          <span className="small" style={{ minWidth: 44, textAlign: "center" }}>
+            {zoom.toFixed(1)}×
+          </span>
+          <button type="button" className="ghost small" style={{ width: "auto" }}
+            onClick={() => zoomBy(1.4)} title="Zoom in">+</button>
+          <button type="button" className="ghost small" style={{ width: "auto" }}
+            onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} title="Reset zoom">
+            Reset
+          </button>
+          <button type="button" className="ghost small" style={{ width: "auto" }}
+            onClick={onClose}>Close ✕</button>
+        </div>
+      </div>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        onWheel={(e) => zoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2)}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          drag.current = { sx: e.clientX, sy: e.clientY, px: pan.x, py: pan.y };
+        }}
+        onMouseMove={(e) => {
+          if (!drag.current) return;
+          setPan({
+            x: drag.current.px + (e.clientX - drag.current.sx),
+            y: drag.current.py + (e.clientY - drag.current.sy),
+          });
+        }}
+        onMouseUp={() => { drag.current = null; }}
+        onMouseLeave={() => { drag.current = null; }}
+        onDoubleClick={() => {
+          setPan({ x: 0, y: 0 });
+          setZoom((z) => (z > 1 ? 1 : 3));
+        }}
+        style={{
+          flex: 1, minHeight: 0, overflow: "hidden",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          cursor: zoom > 1 ? "grab" : "zoom-in",
+        }}
+      >
+        <img
+          src={url}
+          alt={title || "detector view"}
+          draggable={false}
+          style={{
+            maxWidth: "100%", maxHeight: "100%",
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transformOrigin: "center center",
+            imageRendering: zoom >= 4 ? "pixelated" : "auto",
+            userSelect: "none",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function TracerStep({
   row, adminPassword, draft, tracer, setTracer,
   rendering, setRendering, error, setError,
@@ -2066,6 +2172,8 @@ function TracerStep({
   const [editorBg, setEditorBg] = useState(null); // {url, frame}
   const [editorBall, setEditorBall] = useState(null); // {x, y}
   const [zoom, setZoom] = useState(1);
+  // Full-screen zoomable viewer for a card's detector-view image.
+  const [imgView, setImgView] = useState(null); // {url, title}
   // Frames the operator explicitly cleared. Sent to the backend so
   // the renderer drops them from the ball track entirely (AI marks
   // included). Reset after a successful re-render.
@@ -2735,6 +2843,38 @@ function TracerStep({
                       style={{ width: "100%", height: "100%", objectFit: "cover" }}
                     />
                   )}
+                  {f.image_url && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setImgView({
+                          url: f.image_url,
+                          title: `Frame ${f.frame} — detector view (red=motion · yellow=candidates · green=chosen)`,
+                        });
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setImgView({
+                            url: f.image_url,
+                            title: `Frame ${f.frame} — detector view`,
+                          });
+                        }
+                      }}
+                      title="Enlarge detector view (zoom / pan)"
+                      style={{
+                        position: "absolute", top: 2, right: 2,
+                        padding: "0 5px", fontSize: 13, lineHeight: "18px",
+                        background: "rgba(0,0,0,0.55)", color: "#fff",
+                        borderRadius: 4, cursor: "zoom-in",
+                      }}
+                    >
+                      🔍
+                    </span>
+                  )}
                   {hasDims && ball && !(f.zoomed && f.image_url) && (
                     <div
                       style={{
@@ -2766,6 +2906,11 @@ function TracerStep({
           )}
         </div>
       </div>
+      <ImageLightbox
+        url={imgView?.url}
+        title={imgView?.title}
+        onClose={() => setImgView(null)}
+      />
     </div>
   );
 }
