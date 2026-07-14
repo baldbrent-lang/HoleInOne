@@ -3605,6 +3605,13 @@ def render_wizard_tracer(
             frame_debug_dir=CLIPS_DIR,
             frame_debug_prefix=_dbg_prefix,
             bg_algo=("knn" if engine == "knn" else "mog2"),
+            # The operator's impact pick (mapped into cut-relative frames)
+            # governs the pre-impact cutoff — not the audio re-detection.
+            impact_frame_hint_override=(
+                max(0, int(impact_override) - offset_frames)
+                if impact_override is not None
+                else None
+            ),
         )
         info_c = info_c or {}
         track = info_c.get("track") or []
@@ -3698,7 +3705,11 @@ def render_wizard_tracer(
                 "ball_track_frames": ball_track_frames_out,
             }
         )
-        if classical_impact is not None:
+        # Only let the audio-derived impact update the saved metrics when
+        # the operator DIDN'T explicitly supply one in this request — an
+        # explicit Step-1 pick must never be silently overwritten by the
+        # render's own audio opinion.
+        if classical_impact is not None and payload.get("impact_frame") is None:
             saved["impact_frame"] = int(classical_impact)
         row.edit_metrics = saved
         db.add(row)
@@ -4784,6 +4795,7 @@ def _run_tracer(
     frame_debug_dir: Path | None = None,
     frame_debug_prefix: str = "tracerdbg",
     bg_algo: str = "mog2",
+    impact_frame_hint_override: int | None = None,
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -4813,6 +4825,12 @@ def _run_tracer(
         if audio_impact.get("ok") and audio_impact.get("impact_frame") is not None
         else None
     )
+    # An explicit caller-supplied impact (the operator's pick in the Edit
+    # wizard) beats the audio-derived one — the hint controls where the
+    # tracer starts keeping track points, and the operator's choice must
+    # not be second-guessed by the audio peak.
+    if impact_frame_hint_override is not None:
+        impact_hint = max(0, int(impact_frame_hint_override))
     log.info(
         "tracer: audio impact hint for %s — frame=%s (ratio=%.1f, ok=%s)",
         clip_path.name,
