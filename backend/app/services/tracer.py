@@ -640,7 +640,14 @@ def _render(
     raw_motion_name: str | None = None
     if frame_debug_dir is not None and counted_frames > 0 and first_frame_snapshot is not None:
         try:
-            _hm = heatmap.astype(np.float32)
+            # LOG scale, not linear. The swing/club/ball touch any given
+            # pixel for only 1-3 of the ~350 frames, while foliage / water
+            # ripple / cloud edges fire on hundreds — a linear scale maps
+            # the transient (interesting) motion to <1% brightness and it
+            # vanishes. log1p compresses the constant-noise ceiling so
+            # brief motion still reads clearly: a 2-hit swing pixel lands
+            # around 20% brightness instead of 0.6%.
+            _hm = np.log1p(heatmap.astype(np.float32))
             _peak = float(_hm.max())
             if _peak > 0:
                 hm8 = np.clip(_hm / _peak * 255.0, 0, 255).astype(np.uint8)
@@ -649,13 +656,13 @@ def _render(
                 )
                 color = cv2.applyColorMap(hm_native, cv2.COLORMAP_TURBO)
                 base_img = first_frame_snapshot.copy()
-                blend = cv2.addWeighted(base_img, 0.45, color, 0.55, 0)
+                blend = cv2.addWeighted(base_img, 0.35, color, 0.65, 0)
                 on = hm_native > 0
                 base_img[on] = blend[on]
                 _lbl = (
-                    f"raw motion heat [{str(bg_algo).upper()}] - unfiltered "
-                    f"foreground hits over {counted_frames} frames "
-                    f"(blue=rare, red=constant)"
+                    f"raw motion heat [{str(bg_algo).upper()}] - foreground "
+                    f"hits over {counted_frames} frames, log scale "
+                    f"(blue=brief e.g. swing/ball, red=constant)"
                 )
                 cv2.putText(
                     base_img, _lbl, (12, 28),
