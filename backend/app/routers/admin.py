@@ -3660,6 +3660,14 @@ def render_wizard_tracer(
         )
         info_c = info_c or {}
         track = info_c.get("track") or []
+        try:
+            import json as _json
+            log.info(
+                "wizard %s arc_debug: %s",
+                engine, _json.dumps(info_c.get("arc_debug") or {}),
+            )
+        except Exception:  # noqa: BLE001
+            pass
         # Per-frame MOG2 debug images — keyed by CUT-relative frame.
         # `debug_frame_images` = card crops zoomed on each chosen point;
         # `debug_frame_full_images` = whole annotated frames (source
@@ -4151,6 +4159,7 @@ def render_wizard_tracer(
             "raw_motion_url": raw_motion_url,
             "raw_motion_arc_url": raw_motion_arc_url,
             "raw_motion_frames_url": raw_motion_frames_url,
+            "arc_debug": info_c.get("arc_debug"),
             "ball_at_rest": (
                 {"x": int(round(rest_used[0])), "y": int(round(rest_used[1]))}
                 if rest_used is not None

@@ -1129,12 +1129,14 @@ def _render(
     # a RESCUE when chaining found nothing, or REPLACE the chained track
     # when it covers clearly more of the flight.
     arc_track: list = []
+    _arc_dbg: dict = {}
     if _mask_png_store:
         try:
             arc_track = _arc_track_from_heatmap(
                 heatmap, _mask_png_store, det_scale, counted_frames,
                 impact_frame_hint=impact_frame_hint,
                 pts=(_timed_pts or None),
+                debug_out=_arc_dbg,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("tracer: heatmap-arc recovery failed: %s", exc)
@@ -1170,6 +1172,11 @@ def _render(
         elif _arc_span > _cv_span:
             use_arc = True
             reason = f"arc covers more flight ({_arc_span}f > {_cv_span}f)"
+        _arc_dbg["arc_used"] = bool(use_arc)
+        _arc_dbg["arbitration"] = reason or "chained track kept"
+        _arc_dbg["cv_chain_frames"] = (
+            [int(d.frame) for d in track][:40] if track else []
+        )
         if use_arc:
             log.info(
                 "tracer: heatmap-arc track (%d pts) chosen — %s",
@@ -1360,6 +1367,7 @@ def _render(
         "raw_motion_image": raw_motion_name,
         "raw_motion_arc_image": raw_motion_arc_name,
         "raw_motion_frames_image": raw_motion_frames_name,
+        "arc_debug": _arc_dbg,
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's
@@ -2638,7 +2646,7 @@ def _timed_heatmap_points(
 
 def _arc_track_from_heatmap(
     heatmap, mask_png_store, det_scale, counted_frames,
-    impact_frame_hint=None, max_hits=3, pts=None,
+    impact_frame_hint=None, max_hits=3, pts=None, debug_out=None,
 ):
     """Recover the ball track straight from the accumulated motion
     heatmap: timed transient dots (see _timed_heatmap_points, or pass
@@ -2761,6 +2769,10 @@ def _arc_track_from_heatmap(
                     if dd <= launch_r + 10.0 * (f2 - f):
                         best_chain = _consider(_grow(d, d2), best_chain)
     work = best_chain
+    if debug_out is not None:
+        debug_out["n_timed"] = len(pts)
+        debug_out["timed_frames"] = [int(d.frame) for d in pts]
+        debug_out["ascent_chain"] = [int(d.frame) for d in work]
     # 5-dot chains are real: a fast low shot can clear the frame with
     # only a handful of timed dots (operator's swing 2: f1217 + 1220-23),
     # and the AI anchors densify it afterwards in the hybrid merge.
@@ -2778,13 +2790,16 @@ def _arc_track_from_heatmap(
     # join it. The descent chain's own time+space consistency is the
     # verification — never a single reacquired point.
     end = work[-1]
-    if float(end.y) <= 0.55 * h_nat:
+    # Reference the chain's HIGHEST point (min y) for the re-entry height
+    # — the last chained dot isn't always the topmost one.
+    _chain_top_y = min(float(d.y) for d in work)
+    if _chain_top_y <= 0.55 * h_nat:
         # Re-entry must be NEAR THE TOP: a ball that exited through the
         # top edge re-appears close to where it left in y. Gating starts
         # to the exit height + a margin excludes descending NOISE ladders
         # that begin mid-frame (tree flicker chains), which could out-span
         # the real re-entry and win the selection.
-        _reentry_max_y = float(end.y) + 0.15 * h_nat
+        _reentry_max_y = _chain_top_y + 0.15 * h_nat
         cand_starts = [
             d for d in pts
             if int(d.frame) > int(end.frame)
@@ -2792,11 +2807,21 @@ def _arc_track_from_heatmap(
             and float(d.y) <= _reentry_max_y
             and abs(float(d.x) - float(end.x)) <= 0.45 * w_nat
         ]
+        if debug_out is not None:
+            debug_out["reacq"] = {
+                "chain_end_f": int(end.frame),
+                "chain_top_y": round(_chain_top_y, 1),
+                "reentry_max_y": round(_reentry_max_y, 1),
+                "n_cand_starts": len(cand_starts),
+                "cand_start_frames": sorted(
+                    int(d.frame) for d in cand_starts
+                )[:20],
+            }
         if not cand_starts:
             log.info(
                 "tracer: heatmap-arc descent reacquisition — no candidate "
-                "re-entry dots after f%d (chain end y=%.0f/%.0f)",
-                int(end.frame), float(end.y), h_nat,
+                "re-entry dots after f%d (chain top y=%.0f/%.0f)",
+                int(end.frame), _chain_top_y, h_nat,
             )
         best_desc: list = []
         for s0 in sorted(cand_starts, key=lambda d: d.frame):
@@ -2819,6 +2844,10 @@ def _arc_track_from_heatmap(
                 int(best_desc[-1].frame),
                 int(best_desc[0].frame) - int(end.frame),
             )
+            if debug_out is not None:
+                debug_out["descent_chain"] = [
+                    int(d.frame) for d in best_desc
+                ]
             work = work + best_desc
 
     # Ballistic sanity on the CHAIN: y(frame) fits convex (up-then-down
@@ -2855,7 +2884,7 @@ CORRIDOR_EPS_MULT = 3.0
 
 def _corridor_backfill(
     input_path, track, det_scale,
-    impact_frame_hint=None, forward_frames=12,
+    impact_frame_hint=None, forward_frames=0,
 ):
     """Recover faint ball frames the global detector missed, by looking
     only where the fitted parabola says the ball should be.
