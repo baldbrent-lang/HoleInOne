@@ -3776,28 +3776,54 @@ def render_wizard_tracer(
                         _ycf = _np.polyfit(_fr, _ys, 2)
                         _xcf = _np.polyfit(_fr, _xs, 1 if len(ai_pts) < 6 else 2)
 
-                        # Tight gate: at 45px, club-streak/backfill noise
-                        # running ~43px parallel to the true flight slid
-                        # under it and got "verified" while the real ball
-                        # sat just outside. 25px matches the anchor
-                        # self-consistency tolerance.
-                        def _agrees(p) -> bool:
-                            px = float(_np.polyval(_xcf, p["frame"]))
-                            py = float(_np.polyval(_ycf, p["frame"]))
+                        # Two-stage gate. Stage 1: strict (25px) but ONLY
+                        # within the anchors' own frame span — the anchors
+                        # cover the early flight, and extrapolating their
+                        # curve far past its span rejected legitimate
+                        # DESCENT points (the fitted track stopped at the
+                        # apex). Stage 2: refit on the merged core (anchors
+                        # + stage-1 CV, longer span, better grounded) and
+                        # accept the remaining CV points — descent included
+                        # — against THAT curve at 30px.
+                        def _dist(p, xc, yc) -> float:
+                            px = float(_np.polyval(xc, p["frame"]))
+                            py = float(_np.polyval(yc, p["frame"]))
                             return (
                                 (p["x"] - px) ** 2 + (p["y"] - py) ** 2
-                            ) ** 0.5 <= 25.0
+                            ) ** 0.5
 
-                        agree = [p for p in track if _agrees(p)]
+                        _a_lo = float(_fr.min()) - 5
+                        _a_hi = float(_fr.max()) + 5
                         _have = {p["frame"] for p in ai_pts}
-                        merged = ai_pts + [
-                            p for p in agree if int(p["frame"]) not in _have
+                        stage1 = [
+                            p for p in track
+                            if _a_lo <= p["frame"] <= _a_hi
+                            and _dist(p, _xcf, _ycf) <= 25.0
+                            and int(p["frame"]) not in _have
                         ]
+                        merged = ai_pts + stage1
+                        stage2: list = []
+                        if len(merged) >= 5:
+                            _f2 = _np.array([p["frame"] for p in merged], float)
+                            _x2 = _np.array([p["x"] for p in merged], float)
+                            _y2 = _np.array([p["y"] for p in merged], float)
+                            _ycf2 = _np.polyfit(_f2, _y2, 2)
+                            _xcf2 = _np.polyfit(
+                                _f2, _x2, 1 if len(merged) < 8 else 2,
+                            )
+                            _picked = {p["frame"] for p in merged}
+                            stage2 = [
+                                p for p in track
+                                if int(p["frame"]) not in _picked
+                                and _dist(p, _xcf2, _ycf2) <= 30.0
+                            ]
+                            merged = merged + stage2
                         merged.sort(key=lambda p: int(p["frame"]))
                         log.info(
-                            "wizard hybrid: %d AI anchors; %d/%d CV points "
-                            "agree -> merged track %d pts",
-                            len(ai_pts), len(agree), len(track), len(merged),
+                            "wizard hybrid: %d AI anchors; stage1=%d in-span, "
+                            "stage2=%d beyond-span (of %d CV) -> merged %d pts",
+                            len(ai_pts), len(stage1), len(stage2),
+                            len(track), len(merged),
                         )
                         track = merged
                         # Re-draw the path-on-heat overlay from the MERGED

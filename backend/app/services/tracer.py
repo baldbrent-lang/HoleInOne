@@ -2628,7 +2628,6 @@ def _arc_track_from_heatmap(
         )
     if len(pts) < 6:
         return []
-    blobs = pts  # for the log line below
     pts = sorted(pts, key=lambda d: d.frame)
 
     # Robust parametric fit with iterative outlier rejection. x is
@@ -2658,9 +2657,33 @@ def _arc_track_from_heatmap(
     # Ballistic sanity: y(frame) convex in image coords (up then down).
     if float(ycf[0]) <= 0:
         return []
+    # RE-INCLUSION pass: while the fit was still bad (early iterations,
+    # ascent-dominated), the sparse DESCENT dots were always the "worst
+    # residual" and got popped one by one — so the track stopped at the
+    # apex even with clean, correctly-timed descent dots. Test every
+    # timed dot against the FINAL curve and re-admit the ones that sit
+    # on it, then refit once so the returned curve spans the full flight.
+    fr_all = np.array([d.frame for d in pts], float)
+    xs_all = np.array([d.x for d in pts], float)
+    ys_all = np.array([d.y for d in pts], float)
+    res_all = np.sqrt(
+        (xs_all - np.polyval(xcf, fr_all)) ** 2
+        + (ys_all - np.polyval(ycf, fr_all)) ** 2
+    )
+    readmitted = [d for d, r in zip(pts, res_all) if float(r) <= 35.0]
+    if len(readmitted) > len(work):
+        fr2 = np.array([d.frame for d in readmitted], float)
+        ys2 = np.array([d.y for d in readmitted], float)
+        ycf2 = np.polyfit(fr2, ys2, 2)
+        if float(ycf2[0]) > 0:  # still ballistic after re-inclusion
+            log.info(
+                "tracer: heatmap-arc re-included %d dot(s) near the final "
+                "curve (descent recovery)", len(readmitted) - len(work),
+            )
+            work = sorted(readmitted, key=lambda d: d.frame)
     log.info(
-        "tracer: heatmap-arc — %d dots -> %d timed pts -> %d on arc",
-        len(blobs), len(pts), len(work),
+        "tracer: heatmap-arc — %d timed pts -> %d on arc (f%d-f%d)",
+        len(pts), len(work), int(work[0].frame), int(work[-1].frame),
     )
     return work
 
