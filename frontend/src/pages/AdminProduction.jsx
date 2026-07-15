@@ -210,7 +210,7 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
   );
 }
 
-function ProducedTile({ clips, onOpenViewer }) {
+function ProducedTile({ clips, swings, onOpenViewer }) {
   // Right-most tile on the Production card: thumbnail + summary of every
   // produced clip cut from this upload. With multiple swings, toggle
   // through each produced clip (◀/▶); the thumbnail + play follow the
@@ -219,6 +219,14 @@ function ProducedTile({ clips, onOpenViewer }) {
   const [sel, setSel] = useState(0);
   const idx = has ? Math.min(sel, clips.length - 1) : 0;
   const cur = has ? clips[idx] : null;
+  // MOG2 layer-in evidence for the selected clip: produce persists a
+  // per-swing overlay (raw motion heat + AI picks + MOG2 chain/added
+  // points) into edit_metrics.swings — clip order matches swing order.
+  const withOverlay = (swings || []).filter((s) => s?.mog2_overlay_url);
+  const curSwing =
+    withOverlay.length === 1 && (clips || []).length <= 1
+      ? withOverlay[0]
+      : (swings || []).find((s) => s?.idx === idx && s?.mog2_overlay_url);
   const aces = has ? clips.filter((c) => c.ball_in_cup).length : 0;
   const holes = has
     ? clips.map((c) => c.hole_number).filter((h, i, a) => h != null && a.indexOf(h) === i)
@@ -275,6 +283,33 @@ function ProducedTile({ clips, onOpenViewer }) {
             ▶
           </button>
         </div>
+      )}
+      {curSwing && (
+        <a
+          href={curSwing.mog2_overlay_url}
+          target="_blank"
+          rel="noreferrer"
+          className="small"
+          style={{
+            display: "block", textAlign: "center", marginTop: 4,
+            padding: "3px 8px", borderRadius: 6,
+            border: "1px solid rgba(230,126,34,0.5)",
+            textDecoration: "none",
+          }}
+          title={
+            curSwing.mog2_stats
+              ? `AI picks: ${curSwing.mog2_stats.n_ai ?? "?"} · MOG2 chain: ` +
+                `${curSwing.mog2_stats.n_cv ?? "?"} · matched: ` +
+                `${curSwing.mog2_stats.n_matched ?? "?"} · added to arc: ` +
+                `${curSwing.mog2_stats.n_added ?? 0}`
+              : "MOG2 raw motion heat with AI + MOG2 plot points"
+          }
+        >
+          🔥 MOG2 vs AI points
+          {curSwing.mog2_stats?.n_added > 0
+            ? ` (+${curSwing.mog2_stats.n_added} added)`
+            : ""}
+        </a>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
         <MetaRow k="Clips" v={has ? clips.length : ""} />
@@ -5163,6 +5198,7 @@ export default function AdminProduction() {
                 />
                 <ProducedTile
                   clips={row.produced_clips}
+                  swings={row.edit_metrics?.swings}
                   onOpenViewer={openViewer}
                 />
               </div>

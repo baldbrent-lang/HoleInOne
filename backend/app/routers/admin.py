@@ -1877,6 +1877,9 @@ def _process_long_upload_segments(
                 "y": rec.get("y"),
                 "confidence": rec.get("confidence"),
                 "manual": bool(rec.get("manual", False)),
+                # 'mog2' when the point came from the MOG2 layer-in
+                # extension rather than an AI pick.
+                "source": rec.get("source"),
                 "image_url": None,
             })
         try:
@@ -1929,6 +1932,17 @@ def _process_long_upload_segments(
                 nsw["tracer_url"] = tracer_url
             if mapped or tracer_url:
                 nsw["tracer_engine"] = tracer_info.get("engine") or "ai"
+            # MOG2 layer-in evidence: overlay image (raw motion heat +
+            # AI picks + MOG2 chain + added points) and the match/extend
+            # stats — shown via the button under the produced video.
+            _ovl = tracer_info.get("mog2_overlay_image")
+            if _ovl and (CLIPS_DIR / _ovl).exists():
+                nsw["mog2_overlay_url"] = (
+                    f"{settings.app_base_url}/uploads/clips/{_ovl}"
+                    f"?v={int((CLIPS_DIR / _ovl).stat().st_mtime)}"
+                )
+            if tracer_info.get("mog2"):
+                nsw["mog2_stats"] = tracer_info["mog2"]
             if slot is not None:
                 swings[slot] = nsw
             else:
@@ -5600,6 +5614,206 @@ def _run_tracer(
     )
 
 
+def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
+    """Post-produce MOG2 layer over a successful AI tracer run.
+
+    Runs the classical MOG2 heatmap-arc pass on the SAME produced cut,
+    checks whether its detected chain corresponds with the AI tracer's
+    points (>=2 AI points within +/-3 frames and 25px of a chain point —
+    the wizard-hybrid coincidence rule), and when it does, extends the
+    ball-path arc with chain points BEYOND the last AI point. AI points
+    are never moved or overridden — MOG2 only adds tail.
+
+    Also writes an overlay JPEG on the raw-motion heat composite showing
+    both point sets (yellow = AI picks, white = MOG2 chain, red = MOG2
+    points actually added to the arc) for the button under the produced
+    video.
+
+    Returns {stats, overlay_name, merged, url, path} — merged/url/path
+    only set when the arc was actually extended and the re-render
+    succeeded. Never raises; returns None when MOG2 found nothing usable
+    and no overlay could be drawn."""
+    import cv2  # type: ignore
+
+    ai_all = list(pipe.get("ball_track_frames") or [])
+    ai_pts = [
+        rec for rec in ai_all
+        if rec.get("found") and rec.get("x") is not None and rec.get("y") is not None
+    ]
+    _imp = (pipe.get("impact_refined") or {}).get("impact_frame")
+    _rest = pipe.get("ball_rest_xy_native")
+
+    _pfx = f"mog2layer-{clip_path.stem}"
+    _cv_url, cv_info, _cv_traced, _cv_dbg = _run_tracer(
+        clip_path,
+        frame_debug_dir=CLIPS_DIR,
+        frame_debug_prefix=_pfx,
+        impact_frame_hint_override=(int(_imp) if _imp is not None else None),
+        ball_rest_hint=(
+            (float(_rest[0]), float(_rest[1]))
+            if _rest and len(_rest) == 2 else None
+        ),
+    )
+    # The classical traced video itself is a byproduct here — the AI
+    # render (possibly extended below) is the deliverable.
+    if _cv_traced is not None:
+        try:
+            Path(_cv_traced).unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+    cv_info = cv_info or {}
+    cv_track = [
+        rec for rec in (cv_info.get("track") or [])
+        if rec.get("frame") is not None
+        and rec.get("x") is not None and rec.get("y") is not None
+    ]
+
+    def _near(a, b, df=3, dpx=25.0):
+        return (
+            abs(int(a["frame"]) - int(b["frame"])) <= df
+            and ((float(a["x"]) - float(b["x"])) ** 2
+                 + (float(a["y"]) - float(b["y"])) ** 2) ** 0.5 <= dpx
+        )
+
+    n_matched = sum(
+        1 for ap in ai_pts if any(_near(ap, cp) for cp in cv_track)
+    )
+    corresponds = n_matched >= 2
+
+    added: list[dict] = []
+    if corresponds and ai_pts:
+        last_ai_f = max(int(p["frame"]) for p in ai_pts)
+        # Direction of flight from the AI picks — an extension that
+        # reverses course is the club/body, not the ball.
+        _dx = float(ai_pts[-1]["x"]) - float(ai_pts[0]["x"])
+        tail = sorted(
+            (cp for cp in cv_track if int(cp["frame"]) > last_ai_f),
+            key=lambda c: int(c["frame"]),
+        )
+        prev_f = last_ai_f
+        prev_x = float(ai_pts[-1]["x"])
+        for cp in tail:
+            f = int(cp["frame"])
+            if f - prev_f > 45:  # gap too big to trust
+                break
+            step_x = float(cp["x"]) - prev_x
+            if abs(_dx) > 20 and step_x * _dx < 0 and abs(step_x) > 30:
+                break  # hard reversal — stop extending
+            added.append({
+                "frame": f, "found": True,
+                "x": float(cp["x"]), "y": float(cp["y"]),
+                "source": "mog2",
+            })
+            prev_f, prev_x = f, float(cp["x"])
+
+    stats = {
+        "n_ai": len(ai_pts),
+        "n_cv": len(cv_track),
+        "n_matched": n_matched,
+        "n_added": len(added),
+        "corresponds": bool(corresponds),
+    }
+
+    # Overlay: raw-motion heat + both point sets, for the produced-video
+    # button. Drawn even when nothing was added — seeing WHY (no chain,
+    # no correspondence) is the point of the debug view.
+    overlay_name = None
+    _raw = cv_info.get("raw_motion_image")
+    if _raw and (CLIPS_DIR / _raw).exists():
+        try:
+            img = cv2.imread(str(CLIPS_DIR / _raw))
+            if img is not None:
+                for cp in cv_track:
+                    cv2.circle(
+                        img, (int(cp["x"]), int(cp["y"])), 7,
+                        (255, 255, 255), 2, cv2.LINE_AA,
+                    )
+                for ap in added:
+                    cv2.circle(
+                        img, (int(ap["x"]), int(ap["y"])), 6,
+                        (0, 0, 255), -1, cv2.LINE_AA,
+                    )
+                    cv2.circle(
+                        img, (int(ap["x"]), int(ap["y"])), 8,
+                        (255, 255, 255), 1, cv2.LINE_AA,
+                    )
+                for ap in ai_pts:
+                    cv2.circle(
+                        img, (int(ap["x"]), int(ap["y"])), 5,
+                        (0, 255, 255), -1, cv2.LINE_AA,
+                    )
+                _lbl = (
+                    f"MOG2 vs AI - yellow=AI picks ({len(ai_pts)}), "
+                    f"white=MOG2 chain ({len(cv_track)}), "
+                    f"red=added to arc ({len(added)}), "
+                    f"matched={n_matched}"
+                )
+                cv2.putText(img, _lbl, (12, 56), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.62, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(img, _lbl, (12, 56), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.62, (255, 255, 255), 1, cv2.LINE_AA)
+                overlay_name = f"{clip_path.stem}_mog2_overlay.jpg"
+                cv2.imwrite(
+                    str(CLIPS_DIR / overlay_name), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mog2 layer: overlay draw failed: %s", exc)
+            overlay_name = None
+
+    out = {
+        "stats": stats, "overlay_name": overlay_name,
+        "merged": None, "url": None, "path": None,
+    }
+    if not added:
+        log.info(
+            "produce: mog2 layer for %s — no extension (%s)",
+            clip_path.name, stats,
+        )
+        return out if (overlay_name or cv_track) else None
+
+    merged = sorted(
+        ai_all + added, key=lambda rec: int(rec.get("frame") or 0),
+    )
+    try:
+        from ..services.ai_tracer import render_tracer_video
+
+        ext_path = CLIPS_DIR / f"{clip_path.stem}_ai_mog2_tracer.mp4"
+        rr = render_tracer_video(
+            clip_path, ext_path,
+            ball_rest_xy_native=(
+                (float(_rest[0]), float(_rest[1]))
+                if _rest and len(_rest) == 2 else None
+            ),
+            impact_frame_idx=int(_imp) if _imp is not None else 0,
+            track_frames=merged,
+        )
+        if rr.get("ok") and ext_path.exists():
+            compress_for_email(ext_path)
+            if ext_path.exists() and ext_path.stat().st_size > 0:
+                out["merged"] = merged
+                out["path"] = ext_path
+                out["url"] = (
+                    f"{settings.app_base_url}/uploads/clips/{ext_path.name}"
+                    f"?v={int(ext_path.stat().st_mtime)}"
+                )
+                log.info(
+                    "produce: mog2 layer EXTENDED %s by %d points (%s)",
+                    clip_path.name, len(added), stats,
+                )
+        else:
+            log.warning(
+                "produce: mog2 extended re-render failed for %s (%s) — "
+                "keeping AI-only tracer", clip_path.name, rr.get("error"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "produce: mog2 extended re-render crashed for %s (%s)",
+            clip_path.name, exc,
+        )
+    return out
+
+
 def _trace_segment(clip_path: Path, ball_at_rest_override=None):
     """Draw the ball-flight tracer on a cut segment for PRODUCTION.
 
@@ -5659,6 +5873,29 @@ def _trace_segment(clip_path: Path, ball_at_rest_override=None):
                         "ball_rest_xy": r.get("ball_rest_xy_native"),
                         "ball_rest_source": r.get("ball_rest_source"),
                     }
+                    # MOG2 layer-in: after the AI tracer lands, run the
+                    # classical MOG2 arc pass on the same cut; when its
+                    # chain corresponds with the AI points, extend the
+                    # arc with the chain's tail and swap in the
+                    # re-rendered video. Best-effort — any failure keeps
+                    # the AI-only tracer.
+                    try:
+                        _layer = _mog2_layer_for_ai_track(clip_path, r)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "produce: mog2 layer crashed for %s: %s",
+                            clip_path.name, exc,
+                        )
+                        _layer = None
+                    if _layer:
+                        info["mog2"] = _layer.get("stats")
+                        if _layer.get("overlay_name"):
+                            info["mog2_overlay_image"] = _layer["overlay_name"]
+                        if _layer.get("merged") and _layer.get("url"):
+                            info["ball_track_frames"] = _layer["merged"]
+                            info["n_points"] = len(_layer["merged"])
+                            url = _layer["url"]
+                            p = _layer["path"]
                     log.info("produce: AI tracer ok for %s", clip_path.name)
                     return url, info, p, None
             log.warning(
