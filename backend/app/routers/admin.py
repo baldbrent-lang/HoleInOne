@@ -1700,9 +1700,19 @@ def _build_tracer_diagnostics(
     this swing ("departed" / "present" / "no_ball" / "uncertain"), carried
     through so we can review — and tune — why each swing was or wasn't
     treated as a confirmed shot, straight from the produced clip."""
-    addr = (pipe or {}).get("address") or {}
-    hand = (pipe or {}).get("handedness") or {}
-    impact = (pipe or {}).get("impact") or {}
+    p = pipe or {}
+    # `pipe` is either the full run_full_ai_tracer_pipeline result (nested
+    # address/handedness/impact dicts) or _trace_segment's condensed info
+    # (flat address_frame/impact_frame ints, handedness as a plain string).
+    addr = p.get("address") or {}
+    if not isinstance(addr, dict):
+        addr = {}
+    hand = p.get("handedness") or {}
+    if not isinstance(hand, dict):
+        hand = {"handedness": hand}
+    impact = p.get("impact") or {}
+    if not isinstance(impact, dict):
+        impact = {}
     examples_summary = {}
     if examples_by_kind:
         for kind, exs in examples_by_kind.items():
@@ -1714,12 +1724,12 @@ def _build_tracer_diagnostics(
     return {
         "examples": examples_summary,
         "ai_picks": {
-            "address_frame": addr.get("address_frame"),
+            "address_frame": addr.get("address_frame", p.get("address_frame")),
             "address_method": addr.get("method"),
             "address_confidence": addr.get("confidence"),
             "handedness": hand.get("handedness"),
             "handedness_confidence": hand.get("confidence"),
-            "impact_frame": impact.get("impact_frame"),
+            "impact_frame": impact.get("impact_frame", p.get("impact_frame")),
             "impact_method": impact.get("method"),
             "impact_confidence": impact.get("confidence"),
         },
