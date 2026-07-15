@@ -154,7 +154,7 @@ def detect_swings_from_pose(
     back_bend_min_deg: float = 15.0,
     back_bend_max_deg: float = 40.0,
     strong_ratio: float = 6.0,
-    ratio_min: float = 9.0,
+    ratio_min: float = 5.0,
     ratio_max: float = 25.0,
     start_sec: float = 0.0,
     max_scan_sec: float | None = None,
@@ -412,7 +412,7 @@ def detect_swings_from_pose(
         b = _bend_near(p_i)
         ratio = p_v / median if median > 0 else 0.0
         # Ratio BAND (operator-tuned): a real swing's wrist-speed peak
-        # sits between ~9x and ~25x the resting-hands median. Below =
+        # sits between ~5x and ~25x the resting-hands median. Below =
         # waggle / walk noise; above = tracking glitch (a landmark jump
         # reads as impossible speed).
         if ratio < ratio_min:
