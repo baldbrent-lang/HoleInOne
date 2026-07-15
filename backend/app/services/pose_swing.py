@@ -154,6 +154,8 @@ def detect_swings_from_pose(
     back_bend_min_deg: float = 15.0,
     back_bend_max_deg: float = 40.0,
     strong_ratio: float = 6.0,
+    ratio_min: float = 9.0,
+    ratio_max: float = 25.0,
     start_sec: float = 0.0,
     max_scan_sec: float | None = None,
     debug: dict | None = None,
@@ -383,7 +385,11 @@ def detect_swings_from_pose(
         if dur < min_burst_sec:
             ratio_pk = (p_v / median) if median > 0 else 0.0
             b_pk = _bend_near(p_i)
-            if ratio_pk >= strong_ratio and b_pk is not None and b_pk >= back_bend_min_deg:
+            if (
+                ratio_min <= ratio_pk <= ratio_max
+                and b_pk is not None
+                and b_pk >= back_bend_min_deg
+            ):
                 accepted.append((s_i, e_i, p_i, p_v))
             else:
                 burst_status[p_i] = "too_short"
@@ -405,6 +411,16 @@ def detect_swings_from_pose(
     for s_i, e_i, p_i, p_v in accepted:
         b = _bend_near(p_i)
         ratio = p_v / median if median > 0 else 0.0
+        # Ratio BAND (operator-tuned): a real swing's wrist-speed peak
+        # sits between ~9x and ~25x the resting-hands median. Below =
+        # waggle / walk noise; above = tracking glitch (a landmark jump
+        # reads as impossible speed).
+        if ratio < ratio_min:
+            burst_status[p_i] = "ratio_low"
+            continue
+        if ratio > ratio_max:
+            burst_status[p_i] = "ratio_high"
+            continue
         if b is not None and b < back_bend_min_deg:
             burst_status[p_i] = "upright"
             n_bend_rejected += 1
@@ -488,6 +504,8 @@ def detect_swings_from_pose(
             "back_bend_min_deg": float(back_bend_min_deg),
             "back_bend_max_deg": float(back_bend_max_deg),
             "strong_ratio": float(strong_ratio),
+            "ratio_min": float(ratio_min),
+            "ratio_max": float(ratio_max),
             "n_swings": len(segments),
             "reached_eof": reached_eof,
             "series": [round(float(v), 5) for v in series],

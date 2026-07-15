@@ -4048,7 +4048,12 @@ _FIND_RESTING_BALL_PROMPT = (
     "ground / mat / tee — a small, roughly round, usually white ball that is "
     "stationary and ready to be hit. It may be partially hidden by the club "
     "head resting behind it. Do NOT count a ball in flight, balls in a "
-    "bucket, distant range balls, or the hole. Reply with JSON only:\n"
+    "bucket, distant range balls, or the hole. CRITICALLY: do NOT count "
+    "white shoes, socks, shoe trim, tee markers, sprinkler heads, signs or "
+    "any other white object — a golf ball is TINY (typically under 2% of "
+    "the image width) and perfectly round; if the white thing is attached "
+    "to the golfer or bigger than a few pixels, it is not the ball. When "
+    "unsure, answer present=false. Reply with JSON only:\n"
     '{"present": true|false, "x": <int pixel x or null>, '
     '"y": <int pixel y or null>, "confidence": "high"|"medium"|"low"}\n'
     "Coordinates are pixels in THIS image (top-left = 0,0)."
@@ -4184,9 +4189,11 @@ def _white_blob_at(input_path: Path, frame_idx: int, x: int, y: int) -> bool | N
         mask = gray >= thr
         n_bright = int(mask.sum())
         area = gray.shape[0] * gray.shape[1]
-        # A ball is a small bright cluster: some bright pixels, but not the
-        # whole patch (that'd be a bright surface, not a ball on it).
-        if n_bright < 4 or n_bright > 0.4 * area:
+        # A ball is a SMALL bright cluster: some bright pixels, but only a
+        # small fraction of the patch. A white shoe / sock / marker fills
+        # far more of it (false positive: part of a white shoe was marked
+        # as the ball while the golfer walked).
+        if n_bright < 4 or n_bright > 0.22 * area:
             return False
         ys, xs = np.nonzero(mask)
         cy, cx = float(ys.mean()), float(xs.mean())
@@ -4309,6 +4316,19 @@ def classify_swing_shot(
             "before": before_out, "after": after,
         }
     if not after["present"]:
+        # Verify the BEFORE mark actually looks like a ball before
+        # asserting a real shot — a white shoe marked as the "ball" while
+        # the golfer walks away also reads as found-then-gone.
+        b_ok = _white_blob_at(
+            input_path, int(before["t"] * fps), before["x"], before["y"],
+        )
+        if b_ok is False:
+            return {
+                "verdict": "unknown",
+                "reason": "before mark doesn't look like a ball — not "
+                          "trusting 'departed' verdict",
+                "before": before_out, "after": after,
+            }
         return {"verdict": "real", "reason": "ball departed",
                 "before": before_out, "after": after}
 

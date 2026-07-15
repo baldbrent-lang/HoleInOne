@@ -3944,6 +3944,8 @@ function PoseChart({ pose }) {
     swing: { color: "#9b59b6", label: "swing" },
     upright: { color: "#e67e22", label: "upright — no forward tilt" },
     bend_unknown_weak: { color: "#e67e22", label: "posture unclear, too weak" },
+    ratio_low: { color: "#e67e22", label: "below 9× — waggle/walk speed" },
+    ratio_high: { color: "#e67e22", label: "above 25× — tracking glitch" },
     too_short: { color: "#7f8c8d", label: "burst too short" },
     too_long: { color: "#7f8c8d", label: "burst too long" },
     nms_suppressed: { color: "#7f8c8d", label: "merged with a nearer swing" },

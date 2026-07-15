@@ -2733,10 +2733,10 @@ def _arc_track_from_heatmap(
                 # reach a real launch hop (e.g. f1217 -> f1220 travelled
                 # ~1/8 of the frame), so scale by frame size and gap.
                 pred = (chain[-1].x, chain[-1].y)
-                radius = 0.10 * max(w_nat, h_nat) + 10.0 * df
+                radius = 0.09 * max(w_nat, h_nat) + 9.0 * df
             else:
                 pred = (chain[-1].x + v[0] * df, chain[-1].y + v[1] * df)
-                radius = 25.0 + 6.0 * df
+                radius = 18.0 + 5.0 * df
             best = None
             best_d = 1e18
             for c in by_frame[f]:
@@ -2773,7 +2773,7 @@ def _arc_track_from_heatmap(
         )
         return c if (span, len(c)) > (b_span, len(best)) else best
 
-    launch_r = 0.10 * max(w_nat, h_nat)
+    launch_r = 0.09 * max(w_nat, h_nat)
     # When the caller knows where the ball SITS (operator rest ball /
     # derived launch), chains that start near it are preferred outright —
     # this is the spatial half of "the flight launches at the clubface"
@@ -2793,8 +2793,10 @@ def _arc_track_from_heatmap(
     # real launch. Consider every dot up to impact+45 frames (capped for
     # cost); without an impact hint, fall back to the earliest 8 frames.
     if impact_frame_hint is not None:
+        # Operator-tuned: launches become visible within ~20 frames of
+        # impact; a wider window let mid-flight noise seed chains.
         _start_frames = [
-            f for f in frames_sorted if f <= int(impact_frame_hint) + 45
+            f for f in frames_sorted if f <= int(impact_frame_hint) + 20
         ]
     else:
         _start_frames = frames_sorted[:8]
@@ -2823,7 +2825,7 @@ def _arc_track_from_heatmap(
                     break
                 for d2 in by_frame[f2]:
                     dd = ((d2.x - d.x) ** 2 + (d2.y - d.y) ** 2) ** 0.5
-                    if dd <= launch_r + 10.0 * (f2 - f):
+                    if dd <= launch_r + 9.0 * (f2 - f):
                         c = _grow(d, d2)
                         best_chain = _consider(c, best_chain)
                         if _near_hint(d):
@@ -2927,7 +2929,7 @@ def _arc_track_from_heatmap(
     # A ball flight has real VERTICAL extent; a walking golfer's edge
     # dots chain coherently but stay flat — reject flat chains outright
     # (a flat chain can pass convexity on a +0.0001 quadratic term).
-    if float(ys.max() - ys.min()) < 0.10 * h_nat:
+    if float(ys.max() - ys.min()) < 0.25 * h_nat:
         return []
     ycf = np.polyfit(fr, ys, 2)
     if float(ycf[0]) <= 0:
