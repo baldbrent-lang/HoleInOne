@@ -2886,7 +2886,12 @@ def _robust_quadratic_fit(
             ws = None
         try:
             y_coef = np.polyfit(frames, ys, 2, w=ws)
-            x_coef = np.polyfit(frames, xs, 1, w=ws)
+            # x quadratic on longer tracks: a full flight (ascent + apex
+            # + descent) often reverses x direction in image coords —
+            # forcing a straight-line x made the fit reject the descent
+            # points as outliers. Short tracks keep the stabler linear x.
+            x_deg = 2 if len(kept_idxs) >= 8 else 1
+            x_coef = np.polyfit(frames, xs, x_deg, w=ws)
         except Exception:
             return None
         last_coefs = (x_coef, y_coef)
@@ -3324,6 +3329,10 @@ def render_tracer_video(
         if (
             rest_is_anchor_zero and HAS_NP and len(kept) >= 3
             and rest_anchor_frame is not None and 0 in kept_indices
+            # Only when the main fit used LINEAR x — this refit rebuilds a
+            # linear x and would clobber the quadratic x that long
+            # (descent-including) tracks need.
+            and len(x_coef) == 2
         ):
             try:
                 f0 = float(rest_anchor_frame)

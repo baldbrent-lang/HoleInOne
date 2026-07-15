@@ -2532,7 +2532,9 @@ def _fit_motion(track):
     if float(frames.max() - frames.min()) < 4:
         return None, None, None
     y_coef = np.polyfit(frames, ys, 2)
-    x_coef = np.polyfit(frames, xs, 1)
+    # x quadratic on longer tracks — full flights reverse x in image
+    # coords; a forced straight-line x mispredicts the descent corridor.
+    x_coef = np.polyfit(frames, xs, 2 if len(track) >= 8 else 1)
     xs_pred = np.polyval(x_coef, frames)
     ys_pred = np.polyval(y_coef, frames)
     rms = float(np.sqrt(np.mean((xs - xs_pred) ** 2 + (ys - ys_pred) ** 2)))
@@ -2630,60 +2632,87 @@ def _arc_track_from_heatmap(
         return []
     pts = sorted(pts, key=lambda d: d.frame)
 
-    # Robust parametric fit with iterative outlier rejection. x is
-    # quadratic too — heatmap arcs often curve back in x near the apex.
-    work = list(pts)
-    ycf = xcf = None
-    for _ in range(10):
-        if len(work) < 6:
-            return []
-        fr = np.array([d.frame for d in work], float)
-        if fr.max() - fr.min() < 6:
-            return []
-        xs = np.array([d.x for d in work], float)
-        ys = np.array([d.y for d in work], float)
-        ycf = np.polyfit(fr, ys, 2)
-        xcf = np.polyfit(fr, xs, 2)
-        res = np.sqrt(
-            (xs - np.polyval(xcf, fr)) ** 2 + (ys - np.polyval(ycf, fr)) ** 2
-        )
-        worst = int(np.argmax(res))
-        if float(res[worst]) > 45.0:
-            work.pop(worst)
-            continue
-        break
-    if ycf is None or len(work) < 6:
+    # TEMPORAL CHAINING (operator insight: the monotonically increasing
+    # frame numbers along the path ARE the signal). A single global
+    # parametric fit as the membership test kept rejecting the sparse
+    # descent: the fit converges on the dense ascent, and its curve
+    # extrapolated past the apex misses the real descent dots (which sit
+    # offset from any one parabola due to perspective/spin). Instead,
+    # walk the dots in frame order and chain those consistent with a
+    # smoothly-evolving velocity — gravity bends the chain over the apex
+    # naturally and the descent follows because its dots keep arriving
+    # in time order at plausible positions.
+    by_frame: dict[int, list] = {}
+    for d in pts:
+        by_frame.setdefault(int(d.frame), []).append(d)
+    frames_sorted = sorted(by_frame)
+
+    def _grow(start) -> list:
+        chain = [start]
+        v = None  # (vx, vy) px/frame, exponentially smoothed
+        last_f = int(start.frame)
+        for f in frames_sorted:
+            if f <= last_f:
+                continue
+            df = f - last_f
+            if df > 25:
+                break  # flight lost for ~a second of frames — stop
+            if v is None:
+                pred = (chain[-1].x, chain[-1].y)
+                radius = 30.0 + 8.0 * df
+            else:
+                pred = (chain[-1].x + v[0] * df, chain[-1].y + v[1] * df)
+                radius = 25.0 + 6.0 * df
+            best = None
+            best_d = 1e18
+            for c in by_frame[f]:
+                dd = ((c.x - pred[0]) ** 2 + (c.y - pred[1]) ** 2) ** 0.5
+                if dd < best_d:
+                    best_d = dd
+                    best = c
+            if best is None or best_d > radius:
+                continue  # nothing plausible this frame; keep scanning
+            nv = (
+                (best.x - chain[-1].x) / df,
+                (best.y - chain[-1].y) / df,
+            )
+            v = nv if v is None else (
+                0.6 * v[0] + 0.4 * nv[0], 0.6 * v[1] + 0.4 * nv[1],
+            )
+            chain.append(best)
+            last_f = int(best.frame)
+        return chain
+
+    # Try chain starts from the earliest handful of frames (the launch
+    # region) and keep the chain covering the most frames.
+    best_chain: list = []
+    for f in frames_sorted[:8]:
+        for d in by_frame[f]:
+            c = _grow(d)
+            if len(c) < 2:
+                continue
+            span = int(c[-1].frame) - int(c[0].frame)
+            best_span = (
+                int(best_chain[-1].frame) - int(best_chain[0].frame)
+                if best_chain else -1
+            )
+            if (span, len(c)) > (best_span, len(best_chain)):
+                best_chain = c
+    work = best_chain
+    if len(work) < 6:
         return []
-    # Ballistic sanity: y(frame) convex in image coords (up then down).
+    if int(work[-1].frame) - int(work[0].frame) < 6:
+        return []
+    # Ballistic sanity on the CHAIN: y(frame) fits convex (up-then-down
+    # in image coords) — a wandering noise chain doesn't.
+    fr = np.array([d.frame for d in work], float)
+    ys = np.array([d.y for d in work], float)
+    ycf = np.polyfit(fr, ys, 2)
     if float(ycf[0]) <= 0:
         return []
-    # RE-INCLUSION pass: while the fit was still bad (early iterations,
-    # ascent-dominated), the sparse DESCENT dots were always the "worst
-    # residual" and got popped one by one — so the track stopped at the
-    # apex even with clean, correctly-timed descent dots. Test every
-    # timed dot against the FINAL curve and re-admit the ones that sit
-    # on it, then refit once so the returned curve spans the full flight.
-    fr_all = np.array([d.frame for d in pts], float)
-    xs_all = np.array([d.x for d in pts], float)
-    ys_all = np.array([d.y for d in pts], float)
-    res_all = np.sqrt(
-        (xs_all - np.polyval(xcf, fr_all)) ** 2
-        + (ys_all - np.polyval(ycf, fr_all)) ** 2
-    )
-    readmitted = [d for d, r in zip(pts, res_all) if float(r) <= 35.0]
-    if len(readmitted) > len(work):
-        fr2 = np.array([d.frame for d in readmitted], float)
-        ys2 = np.array([d.y for d in readmitted], float)
-        ycf2 = np.polyfit(fr2, ys2, 2)
-        if float(ycf2[0]) > 0:  # still ballistic after re-inclusion
-            log.info(
-                "tracer: heatmap-arc re-included %d dot(s) near the final "
-                "curve (descent recovery)", len(readmitted) - len(work),
-            )
-            work = sorted(readmitted, key=lambda d: d.frame)
     log.info(
-        "tracer: heatmap-arc — %d timed pts -> %d on arc (f%d-f%d)",
-        len(pts), len(work), int(work[0].frame), int(work[-1].frame),
+        "tracer: heatmap-arc chained %d/%d timed pts (f%d-f%d)",
+        len(work), len(pts), int(work[0].frame), int(work[-1].frame),
     )
     return work
 
