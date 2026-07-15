@@ -3703,24 +3703,41 @@ def render_wizard_tracer(
                         if impact_override is not None
                         else int(track[0]["frame"])
                     )
-                    # Seed the AI tracker ONLY from an operator-placed rest
-                    # ball (trusted, independent). Never seed from CV's own
-                    # track — that turned the "independent verifier" into a
-                    # feedback loop where the AI's crops followed CV's error
-                    # and then confirmed it. Unseeded, the AI scans on its
-                    # own and stays a genuine cross-check.
-                    _seed_xy = _seed_dims = None
+                    # Seed the AI tracker from, in order: an operator-placed
+                    # rest ball (trusted), else the track's LAUNCH point —
+                    # but only when the track starts within 8 frames of the
+                    # operator's impact (at impact the club head IS at the
+                    # ball, so that position is physically the ball
+                    # regardless of which detector found it). Unseeded runs
+                    # on a wide scene found 0 anchors, which disabled AI
+                    # verification entirely. Anchors past the seed remain an
+                    # independent check — they only validate/gap-fill the
+                    # chain, never per-point rescue it.
+                    _seed_pt = None
                     if ball_manual and ball_at_rest_override is not None:
+                        _seed_pt = (
+                            float(ball_at_rest_override[0]),
+                            float(ball_at_rest_override[1]),
+                        )
+                    elif (
+                        impact_override is not None
+                        and abs(
+                            int(track[0]["frame"])
+                            - (int(impact_override) - offset_frames)
+                        ) <= 8
+                    ):
+                        _seed_pt = (
+                            float(track[0]["x"]), float(track[0]["y"]),
+                        )
+                    _seed_xy = _seed_dims = None
+                    if _seed_pt is not None:
                         try:
                             _vinfo = probe_video_info(src_for_trace)
                             if _vinfo.get("width") and _vinfo.get("height"):
                                 _seed_dims = (
                                     int(_vinfo["width"]), int(_vinfo["height"]),
                                 )
-                                _seed_xy = (
-                                    float(ball_at_rest_override[0]),
-                                    float(ball_at_rest_override[1]),
-                                )
+                                _seed_xy = _seed_pt
                         except Exception:  # noqa: BLE001
                             _seed_xy = _seed_dims = None
                     ai_info = track_ball_after_impact(

@@ -1139,18 +1139,44 @@ def _render(
         except Exception as exc:  # noqa: BLE001
             log.warning("tracer: heatmap-arc recovery failed: %s", exc)
     if arc_track:
-        if not seed_track:
-            log.info(
-                "tracer: heatmap-arc RESCUE — %d points (chaining found none)",
-                len(arc_track),
+        # Arbitration between the heatmap arc and the classic chained
+        # track. Raw point count is NOT the criterion — a 15-dot tree-
+        # flicker cluster beat a 6-dot genuine clubface ladder on count
+        # alone. The decisive physical prior: the real flight LAUNCHES AT
+        # THE CLUBFACE AT THE IMPACT FRAME. A track that starts near the
+        # impact frame beats one that doesn't; only when both (or
+        # neither) do does flight coverage (frame span) decide.
+        def _starts_near_impact(tk) -> bool:
+            if impact_frame_hint is None:
+                return True
+            return abs(int(tk[0].frame) - int(impact_frame_hint)) <= 8
+
+        _arc_span = int(arc_track[-1].frame) - int(arc_track[0].frame)
+        _cv_span = (
+            int(track[-1].frame) - int(track[0].frame) if track else -1
+        )
+        use_arc = False
+        reason = ""
+        if not seed_track or not track:
+            use_arc, reason = True, "chaining found none"
+        elif _starts_near_impact(arc_track) and not _starts_near_impact(track):
+            use_arc = True
+            reason = (
+                f"arc launches at impact (f{int(arc_track[0].frame)}), "
+                f"chained track doesn't (f{int(track[0].frame)})"
             )
-            seed_track = arc_track
-            track = arc_track
-        elif len(arc_track) >= max(6, int(1.3 * len(track))):
+        elif _starts_near_impact(track) and not _starts_near_impact(arc_track):
+            use_arc = False
+        elif _arc_span > _cv_span:
+            use_arc = True
+            reason = f"arc covers more flight ({_arc_span}f > {_cv_span}f)"
+        if use_arc:
             log.info(
-                "tracer: heatmap-arc track (%d pts) beats chained (%d) — using it",
-                len(arc_track), len(track),
+                "tracer: heatmap-arc track (%d pts) chosen — %s",
+                len(arc_track), reason,
             )
+            if not seed_track:
+                seed_track = arc_track
             track = arc_track
 
     if not seed_track:
