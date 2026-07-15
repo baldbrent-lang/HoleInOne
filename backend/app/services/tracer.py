@@ -2628,9 +2628,15 @@ def _arc_track_from_heatmap(
             heatmap, mask_png_store, det_scale, counted_frames,
             impact_frame_hint=impact_frame_hint, max_hits=max_hits,
         )
-    if len(pts) < 6:
+    if len(pts) < 5:
         return []
     pts = sorted(pts, key=lambda d: d.frame)
+    # Native frame dims (used for the launch-speed seed radius and the
+    # descent-reacquisition gates).
+    _det_hh, _det_ww = heatmap.shape[:2]
+    _inv = (1.0 / det_scale) if det_scale else 1.0
+    w_nat = _det_ww * _inv
+    h_nat = _det_hh * _inv
 
     # TEMPORAL CHAINING (operator insight: the monotonically increasing
     # frame numbers along the path ARE the signal). A single global
@@ -2647,10 +2653,20 @@ def _arc_track_from_heatmap(
         by_frame.setdefault(int(d.frame), []).append(d)
     frames_sorted = sorted(by_frame)
 
-    def _grow(start) -> list:
+    def _grow(start, second=None) -> list:
         chain = [start]
         v = None  # (vx, vy) px/frame, exponentially smoothed
         last_f = int(start.frame)
+        if second is not None:
+            _df0 = int(second.frame) - last_f
+            if _df0 <= 0:
+                return chain
+            v = (
+                (second.x - start.x) / _df0,
+                (second.y - start.y) / _df0,
+            )
+            chain.append(second)
+            last_f = int(second.frame)
         for f in frames_sorted:
             if f <= last_f:
                 continue
@@ -2658,8 +2674,13 @@ def _arc_track_from_heatmap(
             if df > 25:
                 break  # flight lost for ~a second of frames — stop
             if v is None:
+                # No velocity yet — the FIRST hop happens at launch, when
+                # the ball is at its fastest, and the first two dots can
+                # be several frames apart. A fixed ~40px radius could not
+                # reach a real launch hop (e.g. f1217 -> f1220 travelled
+                # ~1/8 of the frame), so scale by frame size and gap.
                 pred = (chain[-1].x, chain[-1].y)
-                radius = 30.0 + 8.0 * df
+                radius = 0.10 * max(w_nat, h_nat) + 10.0 * df
             else:
                 pred = (chain[-1].x + v[0] * df, chain[-1].y + v[1] * df)
                 radius = 25.0 + 6.0 * df
@@ -2684,24 +2705,42 @@ def _arc_track_from_heatmap(
         return chain
 
     # Try chain starts from the earliest handful of frames (the launch
-    # region) and keep the chain covering the most frames.
+    # region). The first hop BRANCHES: greedy nearest-first let a noise
+    # dot in an intermediate frame poison the seed velocity, after which
+    # the real ladder of dots fell outside every prediction. Instead,
+    # each plausible second dot (within the launch-radius, up to 12
+    # frames out) seeds its own candidate chain, and the chain covering
+    # the most frames wins.
+    def _consider(c, best):
+        if len(c) < 2:
+            return best
+        span = int(c[-1].frame) - int(c[0].frame)
+        b_span = (
+            int(best[-1].frame) - int(best[0].frame) if best else -1
+        )
+        return c if (span, len(c)) > (b_span, len(best)) else best
+
+    launch_r = 0.10 * max(w_nat, h_nat)
     best_chain: list = []
     for f in frames_sorted[:8]:
         for d in by_frame[f]:
-            c = _grow(d)
-            if len(c) < 2:
-                continue
-            span = int(c[-1].frame) - int(c[0].frame)
-            best_span = (
-                int(best_chain[-1].frame) - int(best_chain[0].frame)
-                if best_chain else -1
-            )
-            if (span, len(c)) > (best_span, len(best_chain)):
-                best_chain = c
+            best_chain = _consider(_grow(d), best_chain)
+            for f2 in frames_sorted:
+                if f2 <= f:
+                    continue
+                if f2 - f > 12:
+                    break
+                for d2 in by_frame[f2]:
+                    dd = ((d2.x - d.x) ** 2 + (d2.y - d.y) ** 2) ** 0.5
+                    if dd <= launch_r + 10.0 * (f2 - f):
+                        best_chain = _consider(_grow(d, d2), best_chain)
     work = best_chain
-    if len(work) < 6:
+    # 5-dot chains are real: a fast low shot can clear the frame with
+    # only a handful of timed dots (operator's swing 2: f1217 + 1220-23),
+    # and the AI anchors densify it afterwards in the hybrid merge.
+    if len(work) < 5:
         return []
-    if int(work[-1].frame) - int(work[0].frame) < 6:
+    if int(work[-1].frame) - int(work[0].frame) < 5:
         return []
 
     # DESCENT REACQUISITION across an off-screen apex. A high shot exits
@@ -2712,10 +2751,6 @@ def _arc_track_from_heatmap(
     # (monotone frames, moving down, re-entering near the exit x) and
     # join it. The descent chain's own time+space consistency is the
     # verification — never a single reacquired point.
-    det_hh, det_ww = heatmap.shape[:2]
-    inv2 = (1.0 / det_scale) if det_scale else 1.0
-    w_nat = det_ww * inv2
-    h_nat = det_hh * inv2
     end = work[-1]
     if float(end.y) <= 0.55 * h_nat:
         cand_starts = [
@@ -2755,12 +2790,20 @@ def _arc_track_from_heatmap(
             work = work + best_desc
 
     # Ballistic sanity on the CHAIN: y(frame) fits convex (up-then-down
-    # in image coords) — a wandering noise chain doesn't.
+    # in image coords) — a wandering noise chain doesn't. EXCEPTION: a
+    # short pure-ascent chain (fast shot clearing the frame in a handful
+    # of dots) has near-constant velocity — gravity's bend over ~6 frames
+    # is smaller than pixel noise, so its fitted curvature can be ~0 or
+    # negative. Accept those on strong net-upward motion instead; the
+    # velocity-coherent chaining already vouches for them.
     fr = np.array([d.frame for d in work], float)
     ys = np.array([d.y for d in work], float)
     ycf = np.polyfit(fr, ys, 2)
     if float(ycf[0]) <= 0:
-        return []
+        net_up = float(work[0].y) - float(work[-1].y)
+        span_f = int(work[-1].frame) - int(work[0].frame)
+        if not (net_up >= 0.12 * h_nat and span_f <= 30):
+            return []
     log.info(
         "tracer: heatmap-arc chained %d/%d timed pts (f%d-f%d)",
         len(work), len(pts), int(work[0].frame), int(work[-1].frame),
