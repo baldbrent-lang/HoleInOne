@@ -3649,6 +3649,7 @@ def render_wizard_tracer(
             frame_debug_dir=CLIPS_DIR,
             frame_debug_prefix=_dbg_prefix,
             bg_algo=("knn" if engine == "knn" else "mog2"),
+            frame_label_offset=offset_frames,
             # The operator's impact pick (mapped into cut-relative frames)
             # governs the pre-impact cutoff — not the audio re-detection.
             impact_frame_hint_override=(
@@ -3990,6 +3991,7 @@ def render_wizard_tracer(
                 )
         raw_motion_url = _named_url(info_c.get("raw_motion_image"))
         raw_motion_arc_url = _named_url(info_c.get("raw_motion_arc_image"))
+        raw_motion_frames_url = _named_url(info_c.get("raw_motion_frames_image"))
         saved.update(
             {
                 "tracer_engine": engine,
@@ -3997,6 +3999,7 @@ def render_wizard_tracer(
                 "tracer_debug_url": debug_url_c,
                 "tracer_raw_motion_url": raw_motion_url,
                 "tracer_raw_motion_arc_url": raw_motion_arc_url,
+                "tracer_raw_motion_frames_url": raw_motion_frames_url,
                 "tracer_info": {
                     "engine": engine,
                     "ok": bool(info_c.get("ok")),
@@ -4052,6 +4055,7 @@ def render_wizard_tracer(
             "debug_url": debug_url_c,
             "raw_motion_url": raw_motion_url,
             "raw_motion_arc_url": raw_motion_arc_url,
+            "raw_motion_frames_url": raw_motion_frames_url,
             "ball_at_rest": (
                 {"x": int(round(rest_used[0])), "y": int(round(rest_used[1]))}
                 if rest_used is not None
@@ -5115,6 +5119,7 @@ def _run_tracer(
     frame_debug_prefix: str = "tracerdbg",
     bg_algo: str = "mog2",
     impact_frame_hint_override: int | None = None,
+    frame_label_offset: int = 0,
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -5167,6 +5172,7 @@ def _run_tracer(
         frame_debug_dir=frame_debug_dir,
         frame_debug_prefix=frame_debug_prefix,
         bg_algo=bg_algo,
+        frame_label_offset=frame_label_offset,
     )
     info["audio_impact"] = audio_impact
     info["sensitivity"] = float(sensitivity)

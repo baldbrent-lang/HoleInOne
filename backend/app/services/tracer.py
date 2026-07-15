@@ -334,6 +334,7 @@ def render_tracer(
     frame_debug_dir: Path | None = None,
     frame_debug_prefix: str = "tracerdbg",
     bg_algo: str = "mog2",
+    frame_label_offset: int = 0,
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
 
@@ -366,6 +367,7 @@ def render_tracer(
                 frame_debug_dir=frame_debug_dir,
                 frame_debug_prefix=frame_debug_prefix,
                 bg_algo=bg_algo,
+                frame_label_offset=frame_label_offset,
             )
         with _SENSITIVITY_LOCK:
             global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
@@ -391,6 +393,7 @@ def render_tracer(
                     frame_debug_dir=frame_debug_dir,
                     frame_debug_prefix=frame_debug_prefix,
                     bg_algo=bg_algo,
+                    frame_label_offset=frame_label_offset,
                 )
             finally:
                 (
@@ -416,6 +419,7 @@ def _render(
     frame_debug_dir: Path | None = None,
     frame_debug_prefix: str = "tracerdbg",
     bg_algo: str = "mog2",
+    frame_label_offset: int = 0,
 ) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -680,6 +684,64 @@ def _render(
         except Exception as exc:  # noqa: BLE001
             log.warning("tracer: raw-motion composite failed: %s", exc)
             raw_motion_name = None
+
+    # Timed transient dots (computed once; reused by the arc detector) +
+    # the frames-on-heat overlay: the raw-motion image with each dot
+    # labelled with its SOURCE frame number, so the operator can read
+    # "that descent dot is frame N", open that card, and plot the ball.
+    _timed_pts: list = []
+    raw_motion_frames_name: str | None = None
+    if frame_debug_dir is not None and _mask_png_store:
+        try:
+            _timed_pts = _timed_heatmap_points(
+                heatmap, _mask_png_store, det_scale, counted_frames,
+                impact_frame_hint=impact_frame_hint,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tracer: timed-dot extraction failed: %s", exc)
+            _timed_pts = []
+        if raw_motion_name and _timed_pts:
+            try:
+                img = cv2.imread(str(Path(frame_debug_dir) / raw_motion_name))
+                if img is not None:
+                    for i, d in enumerate(sorted(_timed_pts, key=lambda p: p.frame)):
+                        px, py = int(d.x), int(d.y)
+                        cv2.circle(img, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
+                        cv2.circle(img, (px, py), 5, (0, 0, 0), 1, cv2.LINE_AA)
+                        # Alternate label placement to reduce overlap on
+                        # dense stretches of the flight.
+                        _ly = py - 7 if i % 2 == 0 else py + 17
+                        _txt = str(int(d.frame) + int(frame_label_offset))
+                        cv2.putText(
+                            img, _txt, (px + 7, _ly),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA,
+                        )
+                        cv2.putText(
+                            img, _txt, (px + 7, _ly),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1, cv2.LINE_AA,
+                        )
+                    _lbl3 = (
+                        f"timed motion dots ({len(_timed_pts)}) - each label "
+                        f"= the SOURCE FRAME that pixel fired in"
+                    )
+                    cv2.putText(
+                        img, _lbl3, (12, 84),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 3, cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        img, _lbl3, (12, 84),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 1, cv2.LINE_AA,
+                    )
+                    raw_motion_frames_name = raw_motion_name.replace(
+                        ".jpg", "-frames.jpg",
+                    )
+                    cv2.imwrite(
+                        str(Path(frame_debug_dir) / raw_motion_frames_name), img,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("tracer: frames-on-heat overlay failed: %s", exc)
+                raw_motion_frames_name = None
 
     # Ball address (detection-coord) + body bbox → kept for display
     # and as fallback signals. The primary handedness signal now comes
@@ -1059,6 +1121,7 @@ def _render(
             "n_points": 0,
             "debug_frame_full_images": _fallback_debug_images(),
             "raw_motion_image": raw_motion_name,
+            "raw_motion_frames_image": raw_motion_frames_name,
         }
     # Heatmap-arc recovery (operator insight: the flight is an obvious
     # dotted arc in the accumulated motion heatmap even when per-frame
@@ -1071,6 +1134,7 @@ def _render(
             arc_track = _arc_track_from_heatmap(
                 heatmap, _mask_png_store, det_scale, counted_frames,
                 impact_frame_hint=impact_frame_hint,
+                pts=(_timed_pts or None),
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("tracer: heatmap-arc recovery failed: %s", exc)
@@ -1097,6 +1161,7 @@ def _render(
             "n_points": 0,
             "debug_frame_full_images": _fallback_debug_images(),
             "raw_motion_image": raw_motion_name,
+            "raw_motion_frames_image": raw_motion_frames_name,
         }
     if len(track) > len(seed_track):
         log.info(
@@ -1118,6 +1183,7 @@ def _render(
                 "n_points": 0,
                 "debug_frame_full_images": _fallback_debug_images(),
                 "raw_motion_image": raw_motion_name,
+                "raw_motion_frames_image": raw_motion_frames_name,
             }
 
     # Predict-then-search backfill: fit the parabola from the confident
@@ -1267,6 +1333,7 @@ def _render(
         "debug_frame_full_images": debug_frame_full_images,
         "raw_motion_image": raw_motion_name,
         "raw_motion_arc_image": raw_motion_arc_name,
+        "raw_motion_frames_image": raw_motion_frames_name,
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's
@@ -2472,14 +2539,11 @@ def _fit_motion(track):
     return y_coef, x_coef, rms
 
 
-def _arc_track_from_heatmap(
+def _timed_heatmap_points(
     heatmap, mask_png_store, det_scale, counted_frames,
     impact_frame_hint=None, max_hits=3,
 ):
-    """Recover the ball track straight from the accumulated motion
-    heatmap (operator insight: the flight reads as an obvious dotted arc
-    of BRIEF pixels there, even where per-frame candidate gates lose the
-    ball against a busy background).
+    """Extract every TIMED transient dot from the motion heatmap.
 
     1. Transient mask: pixels hit 1..max_hits times — the blue dots.
     2. Drop constant motion (body, club-fan core, foliage): pixels above
@@ -2488,14 +2552,11 @@ def _arc_track_from_heatmap(
        long streaks (club fan) and big patches.
     4. TIME LOOKUP — the step the composite image can't do: for each dot,
        find which frame's stored mask fired at that spot. That converts
-       the spatial arc into real (frame, x, y) points.
-    5. Robust parametric fit (x and y quadratic in frame) with iterative
-       outlier rejection; require enough points/span and a convex y
-       (up-then-down in image coords) so only a genuine ballistic arc
-       survives. Temporal consistency IS the confirmation: noise dots
-       don't line up in both space and time.
+       each spatial dot into a real (frame, x, y) point.
 
-    Returns a list of _Det (native coords) or [].
+    Returns a list of _Det (native coords), unfitted/unfiltered beyond
+    the blob gates — callers fit (arc detection) or label (frames-on-heat
+    overlay) as needed.
     """
     if not HAS_CV or heatmap is None or not mask_png_store:
         return []
@@ -2543,9 +2604,32 @@ def _arc_track_from_heatmap(
         if impact_frame_hint is not None and f < int(impact_frame_hint) - 3:
             continue
         pts.append(_Det(f, cx * inv, cy * inv, 3.0 * inv))
+    pts.sort(key=lambda d: d.frame)
+    return pts
+
+
+def _arc_track_from_heatmap(
+    heatmap, mask_png_store, det_scale, counted_frames,
+    impact_frame_hint=None, max_hits=3, pts=None,
+):
+    """Recover the ball track straight from the accumulated motion
+    heatmap: timed transient dots (see _timed_heatmap_points, or pass
+    precomputed `pts`) put through a robust parametric fit (x and y
+    quadratic in frame) with iterative outlier rejection, requiring
+    enough points/span and a convex y (up-then-down in image coords) so
+    only a genuine ballistic arc survives. Temporal consistency IS the
+    confirmation: noise dots don't line up in both space and time.
+
+    Returns a list of _Det (native coords) or []."""
+    if pts is None:
+        pts = _timed_heatmap_points(
+            heatmap, mask_png_store, det_scale, counted_frames,
+            impact_frame_hint=impact_frame_hint, max_hits=max_hits,
+        )
     if len(pts) < 6:
         return []
-    pts.sort(key=lambda d: d.frame)
+    blobs = pts  # for the log line below
+    pts = sorted(pts, key=lambda d: d.frame)
 
     # Robust parametric fit with iterative outlier rejection. x is
     # quadratic too — heatmap arcs often curve back in x near the apex.
