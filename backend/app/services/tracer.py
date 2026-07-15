@@ -335,6 +335,7 @@ def render_tracer(
     frame_debug_prefix: str = "tracerdbg",
     bg_algo: str = "mog2",
     frame_label_offset: int = 0,
+    ball_rest_hint: tuple | None = None,
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
 
@@ -368,6 +369,7 @@ def render_tracer(
                 frame_debug_prefix=frame_debug_prefix,
                 bg_algo=bg_algo,
                 frame_label_offset=frame_label_offset,
+                ball_rest_hint=ball_rest_hint,
             )
         with _SENSITIVITY_LOCK:
             global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
@@ -394,6 +396,7 @@ def render_tracer(
                     frame_debug_prefix=frame_debug_prefix,
                     bg_algo=bg_algo,
                     frame_label_offset=frame_label_offset,
+                    ball_rest_hint=ball_rest_hint,
                 )
             finally:
                 (
@@ -420,6 +423,7 @@ def _render(
     frame_debug_prefix: str = "tracerdbg",
     bg_algo: str = "mog2",
     frame_label_offset: int = 0,
+    ball_rest_hint: tuple | None = None,
 ) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -1137,6 +1141,7 @@ def _render(
                 impact_frame_hint=impact_frame_hint,
                 pts=(_timed_pts or None),
                 debug_out=_arc_dbg,
+                launch_hint=ball_rest_hint,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("tracer: heatmap-arc recovery failed: %s", exc)
@@ -1149,9 +1154,21 @@ def _render(
         # impact frame beats one that doesn't; only when both (or
         # neither) do does flight coverage (frame span) decide.
         def _starts_near_impact(tk) -> bool:
-            if impact_frame_hint is None:
-                return True
-            return abs(int(tk[0].frame) - int(impact_frame_hint)) <= 8
+            ok_f = (
+                impact_frame_hint is None
+                or abs(int(tk[0].frame) - int(impact_frame_hint)) <= 8
+            )
+            # Spatial half: the launch must also be near the BALL. Tree
+            # flicker has dots near the impact FRAME too — just nowhere
+            # near the clubface, so time alone can't separate them.
+            ok_p = True
+            if ball_rest_hint is not None:
+                _diag_n = (width ** 2 + height ** 2) ** 0.5
+                ok_p = (
+                    (float(tk[0].x) - float(ball_rest_hint[0])) ** 2
+                    + (float(tk[0].y) - float(ball_rest_hint[1])) ** 2
+                ) ** 0.5 <= 0.15 * _diag_n
+            return ok_f and ok_p
 
         _arc_span = int(arc_track[-1].frame) - int(arc_track[0].frame)
         _cv_span = (
@@ -2647,6 +2664,7 @@ def _timed_heatmap_points(
 def _arc_track_from_heatmap(
     heatmap, mask_png_store, det_scale, counted_frames,
     impact_frame_hint=None, max_hits=3, pts=None, debug_out=None,
+    launch_hint=None,
 ):
     """Recover the ball track straight from the accumulated motion
     heatmap: timed transient dots (see _timed_heatmap_points, or pass
@@ -2755,10 +2773,27 @@ def _arc_track_from_heatmap(
         return c if (span, len(c)) > (b_span, len(best)) else best
 
     launch_r = 0.10 * max(w_nat, h_nat)
+    # When the caller knows where the ball SITS (operator rest ball /
+    # derived launch), chains that start near it are preferred outright —
+    # this is the spatial half of "the flight launches at the clubface"
+    # that the impact-FRAME test alone can't provide (tree flicker also
+    # has dots near the impact frame, just nowhere near the ball).
+    hint_r = 0.12 * max(w_nat, h_nat)
+
+    def _near_hint(d) -> bool:
+        return launch_hint is not None and (
+            (float(d.x) - float(launch_hint[0])) ** 2
+            + (float(d.y) - float(launch_hint[1])) ** 2
+        ) ** 0.5 <= hint_r
+
     best_chain: list = []
+    best_near: list = []
     for f in frames_sorted[:8]:
         for d in by_frame[f]:
-            best_chain = _consider(_grow(d), best_chain)
+            c = _grow(d)
+            best_chain = _consider(c, best_chain)
+            if _near_hint(d):
+                best_near = _consider(c, best_near)
             for f2 in frames_sorted:
                 if f2 <= f:
                     continue
@@ -2767,8 +2802,16 @@ def _arc_track_from_heatmap(
                 for d2 in by_frame[f2]:
                     dd = ((d2.x - d.x) ** 2 + (d2.y - d.y) ** 2) ** 0.5
                     if dd <= launch_r + 10.0 * (f2 - f):
-                        best_chain = _consider(_grow(d, d2), best_chain)
-    work = best_chain
+                        c = _grow(d, d2)
+                        best_chain = _consider(c, best_chain)
+                        if _near_hint(d):
+                            best_near = _consider(c, best_near)
+    if launch_hint is not None and len(best_near) >= 5:
+        work = best_near
+        if debug_out is not None:
+            debug_out["chain_start"] = "launch-hint-anchored"
+    else:
+        work = best_chain
     if debug_out is not None:
         debug_out["n_timed"] = len(pts)
         debug_out["timed_frames"] = [int(d.frame) for d in pts]

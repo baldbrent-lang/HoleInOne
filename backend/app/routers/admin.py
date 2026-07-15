@@ -3650,6 +3650,9 @@ def render_wizard_tracer(
             frame_debug_prefix=_dbg_prefix,
             bg_algo=("knn" if engine == "knn" else "mog2"),
             frame_label_offset=offset_frames,
+            # Spatial launch anchor for chain selection + arbitration —
+            # the operator/derived resting ball position.
+            ball_rest_hint=ball_at_rest_override,
             # The operator's impact pick (mapped into cut-relative frames)
             # governs the pre-impact cutoff — not the audio re-detection.
             impact_frame_hint_override=(
@@ -3943,10 +3946,48 @@ def render_wizard_tracer(
                                     info_c["raw_motion_arc_image"] = _arc_name
                             except Exception as exc:  # noqa: BLE001
                                 log.warning("wizard hybrid: arc redraw failed: %s", exc)
+                    elif len(ai_pts) >= 2:
+                        # Too few anchors to GATE anything — but verified
+                        # ball fixes are still gold as references (operator:
+                        # "AI found 2 points once the ball hit the sky —
+                        # those should have been used"). Pin the ones that
+                        # coincide with the track into it; ignore the rest.
+                        def _near_track_few(a) -> bool:
+                            best = 1e18
+                            for p in track:
+                                if abs(int(p["frame"]) - int(a["frame"])) <= 3:
+                                    d = (
+                                        (p["x"] - a["x"]) ** 2
+                                        + (p["y"] - a["y"]) ** 2
+                                    ) ** 0.5
+                                    best = min(best, d)
+                            return best <= 30.0
+
+                        _coinc = [a for a in ai_pts if _near_track_few(a)]
+                        if _coinc:
+                            _have2 = {int(a["frame"]) for a in _coinc}
+                            merged = _coinc + [
+                                p for p in track
+                                if int(p["frame"]) not in _have2
+                            ]
+                            merged.sort(key=lambda p: int(p["frame"]))
+                            log.info(
+                                "wizard hybrid: %d anchors (too few to "
+                                "gate) — %d coincide with the track and "
+                                "were pinned in",
+                                len(ai_pts), len(_coinc),
+                            )
+                            track = merged
+                        else:
+                            log.info(
+                                "wizard hybrid: %d anchors, none coincide "
+                                "with the track — CV track kept unchanged",
+                                len(ai_pts),
+                            )
                     else:
                         log.info(
-                            "wizard hybrid: only %d self-consistent AI "
-                            "anchors (need 4) — CV track kept unchanged",
+                            "wizard hybrid: only %d AI anchor(s) — CV "
+                            "track kept unchanged",
                             len(ai_pts),
                         )
                 except Exception as exc:  # noqa: BLE001
@@ -5224,6 +5265,7 @@ def _run_tracer(
     bg_algo: str = "mog2",
     impact_frame_hint_override: int | None = None,
     frame_label_offset: int = 0,
+    ball_rest_hint: tuple | None = None,
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -5277,6 +5319,7 @@ def _run_tracer(
         frame_debug_prefix=frame_debug_prefix,
         bg_algo=bg_algo,
         frame_label_offset=frame_label_offset,
+        ball_rest_hint=ball_rest_hint,
     )
     info["audio_impact"] = audio_impact
     info["sensitivity"] = float(sensitivity)
