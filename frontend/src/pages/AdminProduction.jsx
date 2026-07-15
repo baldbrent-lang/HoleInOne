@@ -4099,9 +4099,10 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
           </button>
         </div>
         <p className="small muted" style={{ marginTop: 0 }}>
-          The clip is also being produced &amp; saved normally. Below: each
-          swing analyzed by the classical-CV tracer (motion heatmap) vs the AI
-          tracer, side by side.
+          The clip is also being produced &amp; saved normally. Same pipeline
+          as Produce — this just shows the work. Only swings that survive
+          every filter get the classical-CV vs AI tracer comparison below;
+          eliminated ones are skipped (produce skips them too).
         </p>
         <div className="small" style={{ marginBottom: 12 }}>
           {data.running
@@ -4113,6 +4114,38 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             : "AI tracer: OFF (set ANTHROPIC_API_KEY on this deployment)"}
           {data.error ? ` · error: ${data.error}` : ""}
         </div>
+
+        {data.final_verdict?.available && (
+          <div
+            style={{
+              border: "2px solid rgba(26,157,85,0.6)", borderRadius: 8,
+              padding: "8px 12px", marginBottom: 14,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>
+              ⚖️ Final verdict — {data.final_verdict.n_produced}/
+              {data.final_verdict.n_candidates} produced
+            </div>
+            <div className="small" style={{ marginBottom: 6 }}>
+              {data.final_verdict.summary}
+            </div>
+            {(data.final_verdict.swings || []).map((s) => (
+              <div
+                key={s.swing}
+                className="small"
+                style={{
+                  marginTop: 4, paddingTop: 4,
+                  borderTop: "1px solid rgba(120,120,120,0.25)",
+                }}
+              >
+                <b style={{ color: s.produced ? "#1a9d55" : "#c0392b" }}>
+                  swing {s.swing} @ {s.t}s: {s.produced ? "✅ PRODUCE" : "❌ eliminated"}
+                </b>
+                <span className="muted"> — {s.explanation}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         {data.ai_ball && (
           <div
@@ -4137,7 +4170,8 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                 {(data.ai_ball.swings || []).map((s, i) => {
                   const real = s.verdict === "real";
                   const unknown = s.verdict === "unknown";
-                  const col = real ? "#1a9d55" : unknown ? "#888" : "#c0392b";
+                  const skipped = s.verdict === "skipped";
+                  const col = real ? "#1a9d55" : (unknown || skipped) ? "#888" : "#c0392b";
                   return (
                     <div
                       key={i}
@@ -4147,7 +4181,7 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       }}
                     >
                       <div className="small" style={{ fontWeight: 700, color: col }}>
-                        swing {s.swing}: {real ? "✅ REAL" : unknown ? "? unknown" : "❌ practice"}
+                        swing {s.swing}: {real ? "✅ REAL" : skipped ? "⏭ skipped" : unknown ? "? unknown" : "❌ practice"}
                         <span className="small muted" style={{ fontWeight: 400 }}>
                           {" "}· {s.reason}
                         </span>
@@ -4264,10 +4298,11 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
             </div>
             <div className="small muted" style={{ marginBottom: 6 }}>
               ✅ ball flight = launch chain of brief motion dots (red line).
-              🟡 club swing = the club-fan heat signature (kept — the ball
-              may be invisible to MOG2). ❌ no swing = neither, dropped from
-              production — unless the check rejects every swing, in which
-              case all are kept.
+              🟡 club swing = the AI judge (or club-fan heuristic) recognised
+              a swing (kept — the ball may be invisible to MOG2). ❌ no swing
+              = eliminated: skipped by every later stage and not produced.
+              (Fail-safe: heuristic-only rejections are resurrected if
+              everything was rejected; an AI-judged "not a swing" stays out.)
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
               {data.heat_check.swings.map((s) => (
@@ -4316,7 +4351,11 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
         )}
 
         {swings.length === 0 && !data.running && (
-          <div className="small muted">No swings detected in this clip.</div>
+          <div className="small muted">
+            {data.final_verdict?.n_candidates > 0
+              ? "Every pose candidate was eliminated by the filters — no tracer comparisons to run."
+              : "No swings detected in this clip."}
+          </div>
         )}
 
         {swings.map((s) => (

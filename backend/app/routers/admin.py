@@ -5816,10 +5816,15 @@ def _ai_ball_report(src_path: Path, tee_fps: float, upload_id: int, aib: dict) -
 
 def _ai_resting_ball_for_pose(
     src_path: Path, tee_fps: float, upload_id: int, pose_swings: list,
+    skip_idxs: set | None = None,
 ) -> dict:
     """Classify each POSE swing as a REAL shot vs a practice swing by ball
     departure (ball present before the swing → gone after). Produces a
-    before + after screenshot per swing with the recognized ball ringed."""
+    before + after screenshot per swing with the recognized ball ringed.
+
+    skip_idxs: 0-based indices already eliminated by an earlier stage (the
+    MOG2/AI swing check) — listed as 'skipped' without spending vision calls,
+    matching the produce pipeline which only classifies confirmed swings."""
     import cv2  # type: ignore
 
     def _url(name: str):
@@ -5869,6 +5874,18 @@ def _ai_resting_ball_for_pose(
     n_real = 0
     try:
         for i, sw in enumerate(pose_swings):
+            if skip_idxs and i in skip_idxs:
+                swings.append({
+                    "swing": i + 1,
+                    "verdict": "skipped",
+                    "reason": (
+                        "eliminated by the MOG2/AI swing check — "
+                        "not classified (produce skips it too)"
+                    ),
+                    "before": None,
+                    "after": None,
+                })
+                continue
             pk = sw.get("peak_time_sec") if isinstance(sw, dict) else sw
             hint = sw.get("impact_wrist_xy") if isinstance(sw, dict) else None
             v = classify_swing_shot(
@@ -5960,8 +5977,13 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         except Exception as exc:  # noqa: BLE001
             pose_debug = {"reason": f"crashed: {exc}", "available": False}
 
-        # Per-swing tracer comparison runs on the pose swings.
-        detected = pose_segments
+        # SAME LOGIC AS PRODUCE, shown step by step. Stage order mirrors
+        # _run_long_upload_job: pose candidates → MOG2 + AI-judge swing
+        # check → ball-departure (practice) filter. A swing a stage
+        # eliminates is skipped by every later stage — including the
+        # expensive per-swing tracer comparisons at the bottom.
+        _kept_idxs: list[int] = list(range(len(pose_segments)))
+        _dropped: dict[int, dict] = {}  # idx -> {"stage", "why"}
 
         # MOG2 swing confirmation — SHOW THE WORK: same check produce uses
         # to eliminate non-swings, but with the evidence image (log-scale
@@ -5971,6 +5993,8 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
             try:
                 from ..services.tracer import swing_heat_check
 
+                _confirmed_idxs: list[int] = []
+                _heur_dropped_idxs: list[int] = []
                 for i, d in enumerate(pose_segments):
                     _pfx = f"heatchk-{upload_id}-s{i}-{secrets.token_hex(3)}"
                     chk = swing_heat_check(
@@ -5981,6 +6005,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         debug_dir=CLIPS_DIR,
                         debug_prefix=_pfx,
                     )
+                    _ai_seen = False
                     if (
                         chk.get("verdict") != "ball_flight"
                         and chk.get("image_clean")
@@ -5991,10 +6016,41 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         )
                         if _j.get("is_swing") is True:
                             chk["verdict"] = "club_swing"
+                            _ai_seen = True
                         elif _j.get("is_swing") is False:
                             chk["verdict"] = "no_swing"
+                            _ai_seen = True
                         chk["ai_judge"] = _j.get("is_swing")
                         chk["ai_reason"] = _j.get("reason")
+                    if (
+                        chk.get("available")
+                        and chk.get("verdict") == "no_swing"
+                    ):
+                        if _ai_seen:
+                            _dropped[i] = {
+                                "stage": "heat_ai",
+                                "why": (
+                                    "the AI judge looked at the motion-heat "
+                                    "composite and said it is not a swing"
+                                    + (
+                                        f' ("{chk.get("ai_reason")}")'
+                                        if chk.get("ai_reason") else ""
+                                    )
+                                ),
+                            }
+                        else:
+                            _heur_dropped_idxs.append(i)
+                            _dropped[i] = {
+                                "stage": "heat_heuristic",
+                                "why": (
+                                    f"no ball-flight chain "
+                                    f"({chk.get('chain_len')} chained of "
+                                    f"{chk.get('n_timed')} timed dots) and no "
+                                    f"club fan (no AI judge available)"
+                                ),
+                            }
+                    else:
+                        _confirmed_idxs.append(i)
                     _img = chk.get("image")
                     _img_url = None
                     if _img:
@@ -6020,16 +6076,40 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         "reason": chk.get("reason"),
                         "image_url": _img_url,
                     })
+                # Apply the eliminations exactly like produce does — but
+                # only when the check is actually enabled there. Fail-safe
+                # mirrors produce too: heuristic-only rejections (no AI
+                # judge) are resurrected if EVERYTHING was rejected; an
+                # AI-judged "not a swing" stays dropped.
+                if settings.swing_heat_check_enabled:
+                    if _confirmed_idxs:
+                        _kept_idxs = _confirmed_idxs
+                    elif _heur_dropped_idxs:
+                        for _hi in _heur_dropped_idxs:
+                            _dropped.pop(_hi, None)
+                        _kept_idxs = _heur_dropped_idxs
+                    else:
+                        _kept_idxs = []
+                else:
+                    _dropped = {}
             except Exception as exc:  # noqa: BLE001
                 log.warning("produce-debug heat check failed: %s", exc)
+                _kept_idxs = list(range(len(pose_segments)))
+                _dropped = {}
 
         # AI resting-ball, anchored to the pose swings: try 1.5s, then 1.0s,
         # then 0.5s before each pose spike (the club can hide the ball at 1.5s
         # but not nearer the top of the backswing). Dev-only, needs a key.
+        # Runs ONLY on swings that survived the swing check (like produce);
+        # eliminated ones are listed as 'skipped'.
+        _heat_skip = {
+            i for i in range(len(pose_segments)) if i not in set(_kept_idxs)
+        }
         if os.environ.get("ANTHROPIC_API_KEY"):
             try:
                 ai_ball_dict = _ai_resting_ball_for_pose(
                     src_path, tee_fps, upload_id, pose_segments or [],
+                    skip_idxs=_heat_skip,
                 )
             except Exception as exc:  # noqa: BLE001
                 ai_ball_dict = {"available": False, "reason": f"crashed: {exc}"}
@@ -6038,6 +6118,129 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 "available": False,
                 "reason": "ANTHROPIC_API_KEY not set on this deployment",
             }
+
+        # Practice-filter drops, same as produce: a confirmed swing whose
+        # ball never left ('practice') is cut; unknown/no-key keeps it.
+        if ai_ball_dict.get("available"):
+            for _s in ai_ball_dict.get("swings") or []:
+                _i = int(_s.get("swing") or 0) - 1
+                if _s.get("verdict") == "practice" and _i in _kept_idxs:
+                    _kept_idxs = [k for k in _kept_idxs if k != _i]
+                    _dropped[_i] = {
+                        "stage": "practice_filter",
+                        "why": (
+                            "the ball never left its spot"
+                            + (
+                                f' ("{_s.get("reason")}")'
+                                if _s.get("reason") else ""
+                            )
+                        ),
+                    }
+
+        # Per-swing tracer comparison runs ONLY on the swings produce will
+        # actually cut — same list, same order.
+        detected = [(i, pose_segments[i]) for i in _kept_idxs]
+
+        # FINAL VERDICT — plain-language explanation of what the pipeline
+        # concluded per swing and what will be produced.
+        _stage_names = {
+            "heat_ai": "MOG2 + AI swing judge",
+            "heat_heuristic": "MOG2 swing check",
+            "practice_filter": "ball-departure (practice) filter",
+        }
+        _fv_swings = []
+        for i, d in enumerate(pose_segments):
+            _t = round(float(d.get("peak_time_sec") or 0.0), 2)
+            if i in _dropped:
+                _info = _dropped[i]
+                _fv_swings.append({
+                    "swing": i + 1,
+                    "t": _t,
+                    "produced": False,
+                    "stage": _info["stage"],
+                    "explanation": (
+                        f"Pose flagged a candidate @ {_t}s, but the "
+                        f"{_stage_names.get(_info['stage'], _info['stage'])} "
+                        f"eliminated it: {_info['why']}. Not produced — "
+                        f"later stages skipped it."
+                    ),
+                })
+                continue
+            _bits = []
+            _hc = next(
+                (h for h in heat_checks if h.get("swing") == i + 1), None,
+            )
+            if _hc:
+                if _hc.get("verdict") == "ball_flight":
+                    _bits.append(
+                        f"MOG2 found a ball-flight chain "
+                        f"({_hc.get('chain_len')} dots, frames "
+                        f"{_hc.get('chain_f0')}–{_hc.get('chain_f1')})"
+                    )
+                elif _hc.get("verdict") == "club_swing":
+                    _bits.append(
+                        "the AI judge recognised the heat composite as a "
+                        "golf swing"
+                        if _hc.get("ai_judge")
+                        else "the club-fan heuristic recognised a swing"
+                    )
+            _pv = next(
+                (
+                    s for s in (ai_ball_dict.get("swings") or [])
+                    if s.get("swing") == i + 1
+                ),
+                None,
+            )
+            if _pv and _pv.get("verdict") == "real":
+                _bits.append(
+                    "the ball was there before impact and gone after "
+                    "(real shot)"
+                )
+            elif _pv and _pv.get("verdict") == "unknown":
+                _bits.append(
+                    "ball-departure was inconclusive"
+                    + (
+                        f' ("{_pv.get("reason")}")'
+                        if _pv.get("reason") else ""
+                    )
+                    + " — kept, the filter only drops confirmed practice "
+                    "swings"
+                )
+            _fv_swings.append({
+                "swing": i + 1,
+                "t": _t,
+                "produced": True,
+                "stage": None,
+                "explanation": (
+                    f"Pose burst @ {_t}s passed the wrist-speed and bend "
+                    f"gates"
+                    + ("; " + "; ".join(_bits) if _bits else "")
+                    + ". Produced as a clip."
+                ),
+            })
+        _prod_nums = [i + 1 for i in _kept_idxs]
+        if not pose_segments:
+            _fv_summary = "No pose swing candidates were found."
+        elif _prod_nums:
+            _fv_summary = (
+                f"{len(_prod_nums)} of {len(pose_segments)} pose "
+                f"candidate(s) survived every filter — producing swing"
+                f"{'s' if len(_prod_nums) != 1 else ''} "
+                f"{', '.join(str(n) for n in _prod_nums)}."
+            )
+        else:
+            _fv_summary = (
+                f"None of the {len(pose_segments)} pose candidates "
+                f"survived the filters — nothing will be produced."
+            )
+        final_verdict = {
+            "available": bool(pose_segments),
+            "n_candidates": len(pose_segments),
+            "n_produced": len(_kept_idxs),
+            "produced": _prod_nums,
+            "summary": _fv_summary,
+            "swings": _fv_swings,
+        }
 
         with _produce_debug_lock:
             st = _produce_debug_state[upload_id]
@@ -6065,8 +6268,9 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                 "screenshots": pose_shots,
             }
             st["ai_ball"] = ai_ball_dict
+            st["final_verdict"] = final_verdict
 
-        for i, d in enumerate(detected):
+        for _done_n, (i, d) in enumerate(detected, start=1):
             start_sec = float(d.get("start_sec") or 0.0)
             peak = float(d.get("peak_time_sec") or (start_sec + CLIP_SECONDS_BEFORE_IMPACT))
             cut_start = max(0.0, peak - CLIP_SECONDS_BEFORE_IMPACT)
@@ -6128,7 +6332,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
             with _produce_debug_lock:
                 st = _produce_debug_state[upload_id]
                 st["swings"].append(entry)
-                st["done"] = i + 1
+                st["done"] = _done_n
             log.info(
                 "produce-debug: upload=%s swing %d classical_ok=%s ai_ok=%s",
                 upload_id, i, classical.get("ok"), ai.get("ok"),
