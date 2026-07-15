@@ -2955,21 +2955,24 @@ def swing_heat_check(
     """Confirm a suspected swing with MOG2 physics.
 
     Runs a short background-subtraction pass around the pose peak and
-    looks for a BALL-FLIGHT launch chain in the timed transient dots —
-    the same heatmap-arc detection the wizard uses. A real struck shot
-    leaves a chain of brief motion dots climbing away from the strike;
-    tee-planting, waggles and walk-throughs light up the body but never
-    produce one.
+    builds a log-scale motion-heat composite. The verdict here is only
+    the no-API-key fallback (club-fan angular spread); callers run the
+    Claude swing judge on the clean composite for every swing and its
+    answer overrides. A ball-flight launch chain is still detected and
+    drawn on the evidence image (chain_len / chain_f0/f1 / chain_flight)
+    but no longer decides anything — it false-positived too often.
 
-    Returns {available, verdict ('ball_flight'|'no_ball_flight'|
-    'unknown'), n_timed, chain_len, chain_f0/f1, image, reason}. When
-    `debug_dir` is set, writes a log-scale heat composite with the chain
-    drawn so the debug UI can SHOW the evidence. Never raises.
+    Returns {available, verdict ('club_swing'|'no_swing'|'unknown'),
+    n_timed, chain_len, chain_f0/f1, chain_flight, n_rays, n_angles,
+    fan, image, image_clean, reason}. When `debug_dir` is set, writes
+    the composite with the chain drawn so the debug UI can SHOW the
+    evidence. Never raises.
     """
     out = {
         "available": False, "verdict": "unknown", "n_timed": 0,
         "chain_len": 0, "chain_f0": None, "chain_f1": None,
-        "image": None, "image_clean": None, "reason": None,
+        "chain_flight": False, "image": None, "image_clean": None,
+        "reason": None,
     }
     if not HAS_CV:
         out["reason"] = "opencv not installed"
@@ -3090,26 +3093,20 @@ def swing_heat_check(
         out["n_rays"] = int(n_rays)
         out["fan"] = bool(club_fan)
 
-        # Three-tier verdict: ball flight is the strongest proof; a club
-        # fan still confirms a real swinging motion (kept — the ball may
-        # just be invisible to MOG2); neither = not a swing.
-        #
-        # Flight test: the club-fan TIPS also chain briefly (fast, frame-
-        # ordered arc motion around the peak) and masquerade as a ball —
-        # but a tip chain dies at the follow-through, while a real ball
-        # chain keeps going well past impact. Require the chain to extend
-        # >= 0.5s beyond the peak to count as flight.
+        # Verdict: the AI judge on the heat composite is the decider
+        # (callers run it on every swing and override this); the club-fan
+        # heuristic here is only the no-key fallback. The ball-flight
+        # chain is NOT part of the verdict any more — it false-positived
+        # too often (walking, club tips) — but it's still computed and
+        # drawn on the evidence image, and exposed as chain_flight, since
+        # a found launch chain remains useful tracer evidence.
         flight_ok = len(chain) >= 5
         if flight_ok and (
             int(chain[-1].frame) - impact_f < int(round(0.5 * fps))
         ):
             flight_ok = False
-        if flight_ok:
-            out["verdict"] = "ball_flight"
-        elif club_fan:
-            out["verdict"] = "club_swing"
-        else:
-            out["verdict"] = "no_swing"
+        out["chain_flight"] = bool(flight_ok)
+        out["verdict"] = "club_swing" if club_fan else "no_swing"
         # Evidence image for the debug UI: log-scale heat blend + the
         # chain (when any) in red.
         if debug_dir is not None and first_frame is not None:

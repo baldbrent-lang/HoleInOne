@@ -4292,15 +4292,18 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
           >
             <div style={{ fontWeight: 700, marginBottom: 2 }}>
               🔥 MOG2 swing check —{" "}
-              {data.heat_check.swings.filter((s) => s.verdict === "ball_flight").length}
+              {data.heat_check.swings.filter(
+                (s) => s.verdict && s.verdict !== "no_swing",
+              ).length}
               /{data.heat_check.swings.length} confirmed
               {!data.heat_check.enabled && " (filter disabled)"}
             </div>
             <div className="small muted" style={{ marginBottom: 6 }}>
-              ✅ ball flight = launch chain of brief motion dots (red line).
-              🟡 club swing = the AI judge (or club-fan heuristic) recognised
-              a swing (kept — the ball may be invisible to MOG2). ❌ no swing
-              = eliminated: skipped by every later stage and not produced.
+              The AI judge looks at the motion-heat composite and decides
+              for every swing (club-fan heuristic is the no-key fallback).
+              ✅ swing = kept. ❌ no swing = eliminated: skipped by every
+              later stage and not produced. The launch chain (red line) is
+              drawn as evidence only — it no longer decides anything.
               (Fail-safe: heuristic-only rejections are resurrected if
               everything was rejected; an AI-judged "not a swing" stays out.)
             </div>
@@ -4318,23 +4321,26 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                   )}
                   <div className="small" style={{ marginTop: 2 }}>
                     swing {s.swing} · {s.t}s:{" "}
-                    {s.verdict === "ball_flight" ? (
+                    {s.verdict === "club_swing" || s.verdict === "ball_flight" ? (
                       <b style={{ color: "#1a9d55" }}>
-                        ✅ ball flight (chain {s.chain_len}, f{s.chain_f0}–f{s.chain_f1})
-                      </b>
-                    ) : s.verdict === "club_swing" ? (
-                      <b style={{ color: "#b7791f" }}>
-                        🟡 club swing ({s.n_rays} rays @ {s.n_angles ?? "?"} angles,
-                        no flight chain)
+                        ✅ swing
+                        {s.ai_judge != null
+                          ? " (AI judge)"
+                          : ` (${s.n_rays} rays @ ${s.n_angles ?? "?"} angles)`}
                       </b>
                     ) : s.verdict === "no_swing" || s.verdict === "no_ball_flight" ? (
                       <b style={{ color: "#c0392b" }}>
-                        ❌ no swing ({s.chain_len} chained of {s.n_timed} dots
-                        · {s.n_rays ?? 0} rays)
+                        ❌ no swing ({s.n_timed} dots · {s.n_rays ?? 0} rays)
                       </b>
                     ) : (
                       <span className="muted">
                         check unavailable{s.reason ? ` — ${s.reason}` : ""}
+                      </span>
+                    )}
+                    {s.chain_len > 0 && (
+                      <span className="muted">
+                        {" "}· chain {s.chain_len} (f{s.chain_f0}–f{s.chain_f1},
+                        evidence only)
                       </span>
                     )}
                     {s.ai_judge != null && (

@@ -1428,10 +1428,14 @@ def _run_long_upload_job(
                                     f"{secrets.token_hex(3)}"
                                 ),
                             )
+                            # The AI judge decides for EVERY swing (the
+                            # ball-flight chain no longer short-circuits —
+                            # it false-positived too often); the club-fan
+                            # heuristic verdict only stands when there's
+                            # no key.
                             _ai_seen = False
                             if (
-                                chk.get("verdict") != "ball_flight"
-                                and chk.get("image_clean")
+                                chk.get("image_clean")
                                 and os.environ.get("ANTHROPIC_API_KEY")
                             ):
                                 _j = judge_swing_heat_image(
@@ -1824,21 +1828,33 @@ def _process_long_upload_segments(
     # ball track back into full-clip frame indices for the Edit wizard.
     _src_fps = probe_fps(src_path) or 30.0
 
-    def _persist_swing_track(swing_idx, tracer_info, tracer_url, cut_start_sec):
-        """Save this swing's production ball track into edit_metrics.swings so
-        the Edit wizard hydrates the found points (and the rendered tracer)
-        instead of re-running the AI pipeline on the whole multi-swing source
-        — which tracks the wrong window and comes back "no ball".
+    def _persist_swing_track(
+        swing_idx, tracer_info, tracer_url, cut_start_sec, cut_end_sec=None,
+    ):
+        """Save everything this swing's production run figured out into
+        edit_metrics.swings, so the Edit wizard opens fully pre-populated
+        instead of re-running the AI pipeline on the whole multi-swing
+        source: the actual cut window (start/end frame), the refined
+        impact + address frames, handedness, the resting-ball position,
+        the per-frame ball track, and the rendered tracer.
 
-        The pipeline runs on the CUT segment (frame 0 = the cut's start), so
-        every frame index is shifted by the cut's start offset to land in the
-        full-clip frame space the wizard works in."""
+        The pipeline runs on the CUT segment (frame 0 = the cut's start),
+        so every FRAME index is shifted by the cut's start offset to land
+        in the full-clip frame space the wizard works in. Pixel coords
+        (ball x/y, track x/y) need no mapping — the cut trims time, not
+        space. An operator-marked ball (ball_manual) is never overwritten."""
         if progress_upload_id is None or not tracer_info:
             return
+        offset = int(round((cut_start_sec or 0.0) * _src_fps))
+        # AI engine emits ball_track_frames; the classical fallback emits
+        # `track` ({frame,x,y} raw detections) — same shape after mapping.
         seg_frames = tracer_info.get("ball_track_frames") or []
         if not seg_frames:
-            return
-        offset = int(round((cut_start_sec or 0.0) * _src_fps))
+            seg_frames = [
+                {"frame": rec.get("frame"), "found": True,
+                 "x": rec.get("x"), "y": rec.get("y")}
+                for rec in (tracer_info.get("track") or [])
+            ]
         mapped = []
         for rec in seg_frames:
             f = rec.get("frame")
@@ -1853,30 +1869,71 @@ def _process_long_upload_segments(
                 "manual": bool(rec.get("manual", False)),
                 "image_url": None,
             })
-        if not mapped:
-            return
         try:
             row = db.get(LongVideoUpload, progress_upload_id)
             if row is None:
                 return
             em = dict(row.edit_metrics or {})
             swings = list(em.get("swings") or [])
+            slot = None
             for i, sw in enumerate(swings):
                 if isinstance(sw, dict) and int(sw.get("idx", -1)) == swing_idx:
-                    nsw = dict(sw)
-                    nsw["ball_track_frames"] = mapped
-                    if tracer_url:
-                        nsw["tracer_url"] = tracer_url
-                    nsw["tracer_engine"] = tracer_info.get("engine") or "ai"
-                    swings[i] = nsw
+                    slot = i
                     break
+            nsw = dict(swings[slot]) if slot is not None else {"idx": swing_idx}
+            # The window of the clip this run actually cut — source of
+            # truth for the wizard's start/impact/end frames.
+            nsw["start_frame"] = offset
+            if cut_end_sec is not None:
+                nsw["end_frame"] = int(round(float(cut_end_sec) * _src_fps))
+            nsw["fps"] = round(_src_fps, 2)
+            _imp = tracer_info.get("impact_frame")
+            if _imp is not None:
+                nsw["impact_frame"] = int(_imp) + offset
+            _addr = tracer_info.get("address_frame")
+            if _addr is not None:
+                nsw["address_frame"] = int(_addr) + offset
+            elif _imp is not None:
+                nsw["address_frame"] = max(
+                    offset, int(_imp) + offset - int(round(1.5 * _src_fps)),
+                )
+            if tracer_info.get("handedness"):
+                nsw["handedness"] = tracer_info["handedness"]
+            # Resting-ball position — but not the pose-hands fallback
+            # (that's the golfer's hands, not a ball) and never on top
+            # of a ball the operator placed by hand.
+            _rest = tracer_info.get("ball_rest_xy")
+            if (
+                _rest
+                and len(_rest) == 2
+                and tracer_info.get("ball_rest_source") != "pose_wrist_fallback"
+                and not nsw.get("ball_manual")
+            ):
+                nsw["ball"] = {
+                    "x": int(round(float(_rest[0]))),
+                    "y": int(round(float(_rest[1]))),
+                }
+            if mapped:
+                nsw["ball_track_frames"] = mapped
+            if tracer_url:
+                nsw["tracer_url"] = tracer_url
+            if mapped or tracer_url:
+                nsw["tracer_engine"] = tracer_info.get("engine") or "ai"
+            if slot is not None:
+                swings[slot] = nsw
+            else:
+                swings.append(nsw)
+                swings.sort(key=lambda s: int(s.get("idx", 0)))
             em["swings"] = swings
             row.edit_metrics = em
             db.commit()
             log.info(
-                "long-upload: persisted %d ball-track points into swing idx=%s "
+                "long-upload: persisted swing idx=%s for the wizard — "
+                "%d track points, window f%s–%s, impact=%s, ball=%s "
                 "(offset=%d frames)",
-                len(mapped), swing_idx, offset,
+                swing_idx, len(mapped), nsw.get("start_frame"),
+                nsw.get("end_frame"), nsw.get("impact_frame"),
+                nsw.get("ball"), offset,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("persist swing track failed (idx=%s): %s", swing_idx, exc)
@@ -2100,8 +2157,10 @@ def _process_long_upload_segments(
                 )
             _intro_overlay_for_clip(clip, participant)
             db.commit()
-            # Save the ball track for the Edit wizard (see helper).
-            _persist_swing_track(idx, tracer_info, _tracer_url, tee_cut_start)
+            # Save the swing's detections for the Edit wizard (see helper).
+            _persist_swing_track(
+                idx, tracer_info, _tracer_url, tee_cut_start, tee_cut_end,
+            )
 
             results.append(
                 {
@@ -2168,8 +2227,10 @@ def _process_long_upload_segments(
             )
         _intro_overlay_for_clip(clip, participant)
         db.commit()
-        # Save the ball track for the Edit wizard (see helper).
-        _persist_swing_track(idx, tracer_info, tracer_url, tee_cut_start)
+        # Save the swing's detections for the Edit wizard (see helper).
+        _persist_swing_track(
+            idx, tracer_info, tracer_url, tee_cut_start, tee_cut_end,
+        )
 
         results.append(
             {
@@ -5577,6 +5638,16 @@ def _trace_segment(clip_path: Path, ball_at_rest_override=None):
                         "impact_frame": (
                             (r.get("impact_refined") or {}).get("impact_frame")
                         ),
+                        # Everything else the Edit wizard hydrates from —
+                        # persisted per swing so Step 1/2 open pre-populated.
+                        "address_frame": (
+                            (r.get("address") or {}).get("address_frame")
+                        ),
+                        "handedness": (
+                            (r.get("handedness") or {}).get("handedness")
+                        ),
+                        "ball_rest_xy": r.get("ball_rest_xy_native"),
+                        "ball_rest_source": r.get("ball_rest_source"),
                     }
                     log.info("produce: AI tracer ok for %s", clip_path.name)
                     return url, info, p, None
@@ -5589,7 +5660,10 @@ def _trace_segment(clip_path: Path, ball_at_rest_override=None):
                 "produce: AI tracer crashed for %s (%s) — classical fallback",
                 clip_path.name, exc,
             )
-    return _run_tracer(clip_path)
+    url, info, traced, dbg = _run_tracer(clip_path)
+    if isinstance(info, dict) and not info.get("engine"):
+        info["engine"] = "classical"
+    return url, info, traced, dbg
 
 
 # ── Produce debug (dev course-testing tool) ────────────────────────────
@@ -6005,10 +6079,12 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         debug_dir=CLIPS_DIR,
                         debug_prefix=_pfx,
                     )
+                    # AI judge decides for EVERY swing — the ball-flight
+                    # chain no longer short-circuits (too many false
+                    # positives); fan heuristic is the no-key fallback.
                     _ai_seen = False
                     if (
-                        chk.get("verdict") != "ball_flight"
-                        and chk.get("image_clean")
+                        chk.get("image_clean")
                         and os.environ.get("ANTHROPIC_API_KEY")
                     ):
                         _j = judge_swing_heat_image(
@@ -6068,6 +6144,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         "chain_len": chk.get("chain_len"),
                         "chain_f0": chk.get("chain_f0"),
                         "chain_f1": chk.get("chain_f1"),
+                        "chain_flight": chk.get("chain_flight"),
                         "n_rays": chk.get("n_rays"),
                         "n_angles": chk.get("n_angles"),
                         "fan": chk.get("fan"),
@@ -6170,19 +6247,19 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
             _hc = next(
                 (h for h in heat_checks if h.get("swing") == i + 1), None,
             )
-            if _hc:
-                if _hc.get("verdict") == "ball_flight":
+            if _hc and _hc.get("verdict") == "club_swing":
+                _bits.append(
+                    "the AI judge recognised the heat composite as a "
+                    "golf swing"
+                    if _hc.get("ai_judge")
+                    else "the club-fan heuristic recognised a swing"
+                )
+                if _hc.get("chain_len"):
                     _bits.append(
-                        f"MOG2 found a ball-flight chain "
-                        f"({_hc.get('chain_len')} dots, frames "
-                        f"{_hc.get('chain_f0')}–{_hc.get('chain_f1')})"
-                    )
-                elif _hc.get("verdict") == "club_swing":
-                    _bits.append(
-                        "the AI judge recognised the heat composite as a "
-                        "golf swing"
-                        if _hc.get("ai_judge")
-                        else "the club-fan heuristic recognised a swing"
+                        f"MOG2 also chained {_hc.get('chain_len')} launch "
+                        f"dots (frames {_hc.get('chain_f0')}–"
+                        f"{_hc.get('chain_f1')}) — evidence only, not part "
+                        f"of the verdict"
                     )
             _pv = next(
                 (
