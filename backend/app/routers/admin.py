@@ -3702,19 +3702,26 @@ def render_wizard_tracer(
                         if impact_override is not None
                         else int(track[0]["frame"])
                     )
-                    # Seed the AI tracker with CV's launch point (first CV
-                    # track point) so its crops hunt in the right region
-                    # instead of scanning whole frames for a tiny sky ball.
+                    # Seed the AI tracker ONLY from an operator-placed rest
+                    # ball (trusted, independent). Never seed from CV's own
+                    # track — that turned the "independent verifier" into a
+                    # feedback loop where the AI's crops followed CV's error
+                    # and then confirmed it. Unseeded, the AI scans on its
+                    # own and stays a genuine cross-check.
                     _seed_xy = _seed_dims = None
-                    try:
-                        _vinfo = probe_video_info(src_for_trace)
-                        if _vinfo.get("width") and _vinfo.get("height"):
-                            _seed_dims = (int(_vinfo["width"]), int(_vinfo["height"]))
-                            _seed_xy = (
-                                float(track[0]["x"]), float(track[0]["y"]),
-                            )
-                    except Exception:  # noqa: BLE001
-                        _seed_xy = _seed_dims = None
+                    if ball_manual and ball_at_rest_override is not None:
+                        try:
+                            _vinfo = probe_video_info(src_for_trace)
+                            if _vinfo.get("width") and _vinfo.get("height"):
+                                _seed_dims = (
+                                    int(_vinfo["width"]), int(_vinfo["height"]),
+                                )
+                                _seed_xy = (
+                                    float(ball_at_rest_override[0]),
+                                    float(ball_at_rest_override[1]),
+                                )
+                        except Exception:  # noqa: BLE001
+                            _seed_xy = _seed_dims = None
                     ai_info = track_ball_after_impact(
                         src_for_trace,
                         max(0, _imp_cut),
@@ -3768,12 +3775,17 @@ def render_wizard_tracer(
                         _ycf = _np.polyfit(_fr, _ys, 2)
                         _xcf = _np.polyfit(_fr, _xs, 1 if len(ai_pts) < 6 else 2)
 
+                        # Tight gate: at 45px, club-streak/backfill noise
+                        # running ~43px parallel to the true flight slid
+                        # under it and got "verified" while the real ball
+                        # sat just outside. 25px matches the anchor
+                        # self-consistency tolerance.
                         def _agrees(p) -> bool:
                             px = float(_np.polyval(_xcf, p["frame"]))
                             py = float(_np.polyval(_ycf, p["frame"]))
                             return (
                                 (p["x"] - px) ** 2 + (p["y"] - py) ** 2
-                            ) ** 0.5 <= 45.0
+                            ) ** 0.5 <= 25.0
 
                         agree = [p for p in track if _agrees(p)]
                         _have = {p["frame"] for p in ai_pts}
