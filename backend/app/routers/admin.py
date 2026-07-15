@@ -1379,38 +1379,43 @@ def _run_long_upload_job(
                         debug=_detect_debug,
                     )
 
-                # Practice-swing filter (pose mode): only produce swings where
-                # a ball was at rest before and gone after — drop practice
-                # swings and whiffs. Needs a key; unknown/no-key keeps the
-                # swing so a real shot is never dropped for lack of a key.
-                if used_pose and detected and os.environ.get("ANTHROPIC_API_KEY"):
-                    _real = []
-                    for d in detected:
-                        v = classify_swing_shot(
-                            src_path, float(d.get("peak_time_sec") or 0.0), tee_fps,
-                            hint_xy=d.get("impact_wrist_xy"),
-                        )
-                        if v.get("verdict") == "practice":
-                            log.info(
-                                "long-upload worker: upload=%s dropping practice "
-                                "swing @ %.1fs (%s)", upload_id,
-                                float(d.get("peak_time_sec") or 0.0), v.get("reason"),
-                            )
-                        else:
-                            _real.append(d)
-                    detected = _real
+                # Per-swing audit trail. Every filter decision lands here,
+                # is logged as one JSON line, and is persisted to
+                # edit_metrics.produce_decisions — so "debug said X but
+                # produce did Y" is answerable from data, not guesswork.
+                _decisions: list[dict] = []
+                for d in detected:
+                    _decisions.append({
+                        "t": round(float(d.get("peak_time_sec") or 0.0), 2),
+                        "ratio": d.get("ratio"),
+                        "bend": d.get("back_bend_deg"),
+                        "kept": True,
+                        "dropped_by": None,
+                    })
 
-                # MOG2 swing confirmation: each pose swing must show a
-                # ball-flight launch chain in the transient motion around
-                # its peak — physical proof a ball flew. Tee-planting,
-                # waggles and walk-throughs light up the body but never
-                # leave one. Fail-safe: if the check rejects EVERY swing,
-                # keep them all (scene may be blind to the ball).
+                def _dec_for(d):
+                    _t = round(float(d.get("peak_time_sec") or 0.0), 2)
+                    for _e in _decisions:
+                        if _e["t"] == _t:
+                            return _e
+                    return {}
+
+                # MOG2 + AI-judge swing confirmation FIRST (stronger and
+                # cheaper than the ball-departure filter): each pose swing
+                # must show a ball-flight chain, or Claude must recognise
+                # the heat composite as a swing. Fail-safe: heuristic-only
+                # rejections (no API key) can be resurrected if everything
+                # was rejected — but a swing the AI judge positively called
+                # "not a swing" STAYS dropped, even if that empties the
+                # list. (Previously the keep-all fail-safe resurrected a
+                # walking golfer that was the sole survivor of the
+                # practice filter.)
                 if used_pose and detected and settings.swing_heat_check_enabled:
                     try:
                         from ..services.tracer import swing_heat_check
 
                         _confirmed = []
+                        _dropped_heuristic = []
                         for d in detected:
                             chk = swing_heat_check(
                                 src_path,
@@ -1423,13 +1428,7 @@ def _run_long_upload_job(
                                     f"{secrets.token_hex(3)}"
                                 ),
                             )
-                            # AI swing judge (operator-validated): Claude
-                            # reads the heat composite's gestalt where the
-                            # ray heuristic inverted (walking ghosts kept,
-                            # real fans dropped). Overrides the heuristic
-                            # verdict BOTH ways; ball_flight (physics)
-                            # stands on its own. Heuristic remains the
-                            # no-key fallback.
+                            _ai_seen = False
                             if (
                                 chk.get("verdict") != "ball_flight"
                                 and chk.get("image_clean")
@@ -1440,8 +1439,10 @@ def _run_long_upload_job(
                                 )
                                 if _j.get("is_swing") is True:
                                     chk["verdict"] = "club_swing"
+                                    _ai_seen = True
                                 elif _j.get("is_swing") is False:
                                     chk["verdict"] = "no_swing"
+                                    _ai_seen = True
                                 chk["ai_judge"] = _j.get("is_swing")
                                 chk["ai_reason"] = _j.get("reason")
                             d["heat_check"] = {
@@ -1450,33 +1451,95 @@ def _run_long_upload_job(
                                 "chain_len": chk.get("chain_len"),
                                 "n_rays": chk.get("n_rays"),
                             }
+                            _e = _dec_for(d)
+                            _e["heat"] = chk.get("verdict")
+                            _e["ai_judge"] = chk.get("ai_judge")
+                            _e["ai_reason"] = chk.get("ai_reason")
                             if (
                                 chk.get("available")
                                 and chk.get("verdict") == "no_swing"
                             ):
-                                log.info(
-                                    "long-upload worker: upload=%s heat check "
-                                    "DROPPED swing @ %.1fs (chain %s, %s dots)",
-                                    upload_id,
-                                    float(d.get("peak_time_sec") or 0.0),
-                                    chk.get("chain_len"), chk.get("n_timed"),
+                                _e["kept"] = False
+                                _e["dropped_by"] = (
+                                    "heat_ai" if _ai_seen else "heat_heuristic"
                                 )
+                                if _ai_seen:
+                                    log.info(
+                                        "long-upload worker: upload=%s AI judge "
+                                        "DROPPED swing @ %.1fs (%s)",
+                                        upload_id,
+                                        float(d.get("peak_time_sec") or 0.0),
+                                        chk.get("ai_reason"),
+                                    )
+                                else:
+                                    _dropped_heuristic.append(d)
+                                    log.info(
+                                        "long-upload worker: upload=%s heat "
+                                        "heuristic dropped swing @ %.1fs "
+                                        "(chain %s, %s dots)",
+                                        upload_id,
+                                        float(d.get("peak_time_sec") or 0.0),
+                                        chk.get("chain_len"),
+                                        chk.get("n_timed"),
+                                    )
                             else:
                                 _confirmed.append(d)
                         if _confirmed:
                             detected = _confirmed
-                        elif detected:
+                        elif _dropped_heuristic:
                             log.info(
-                                "long-upload worker: upload=%s heat check "
-                                "rejected ALL %d swings — fail-safe keeping "
-                                "them (scene may be blind to the ball)",
-                                upload_id, len(detected),
+                                "long-upload worker: upload=%s heat heuristic "
+                                "rejected all %d — fail-safe keeping them "
+                                "(no AI judge available)",
+                                upload_id, len(_dropped_heuristic),
                             )
+                            for d in _dropped_heuristic:
+                                _e = _dec_for(d)
+                                _e["kept"] = True
+                                _e["dropped_by"] = None
+                            detected = _dropped_heuristic
+                        else:
+                            detected = []
                     except Exception as exc:  # noqa: BLE001
                         log.warning(
                             "long-upload worker: heat check failed (%s) — "
                             "keeping all swings", exc,
                         )
+
+                # Practice-swing filter (pose mode) on the CONFIRMED swings:
+                # ball at rest before and gone after. Needs a key;
+                # unknown/no-key keeps the swing so a real shot is never
+                # dropped for lack of a key.
+                if used_pose and detected and os.environ.get("ANTHROPIC_API_KEY"):
+                    _real = []
+                    for d in detected:
+                        v = classify_swing_shot(
+                            src_path, float(d.get("peak_time_sec") or 0.0), tee_fps,
+                            hint_xy=d.get("impact_wrist_xy"),
+                        )
+                        _e = _dec_for(d)
+                        _e["practice"] = v.get("verdict")
+                        _e["practice_reason"] = v.get("reason")
+                        if v.get("verdict") == "practice":
+                            _e["kept"] = False
+                            _e["dropped_by"] = "practice_filter"
+                            log.info(
+                                "long-upload worker: upload=%s dropping practice "
+                                "swing @ %.1fs (%s)", upload_id,
+                                float(d.get("peak_time_sec") or 0.0), v.get("reason"),
+                            )
+                        else:
+                            _real.append(d)
+                    detected = _real
+
+                try:
+                    import json as _json
+                    log.info(
+                        "long-upload worker: upload=%s produce decisions: %s",
+                        upload_id, _json.dumps(_decisions),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
                 for i, d in enumerate(detected):
                     segs.append(
@@ -1569,6 +1632,14 @@ def _run_long_upload_job(
                     "fps": round(tee_fps, 2) if tee_fps else None,
                 }
             saved_em["swings"] = [by_idx[i] for i in sorted(by_idx)]
+            # Audit trail of this produce run's per-swing filter decisions
+            # (pose ratio/bend, heat verdict, AI judge, practice verdict,
+            # what dropped it) — the ground truth for "why did produce cut
+            # these clips?".
+            try:
+                saved_em["produce_decisions"] = _decisions
+            except NameError:
+                pass
             row.edit_metrics = saved_em
             db.commit()
 
