@@ -4287,7 +4287,8 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       </b>
                     ) : s.verdict === "club_swing" ? (
                       <b style={{ color: "#b7791f" }}>
-                        🟡 club swing ({s.n_rays} club rays, no flight chain)
+                        🟡 club swing ({s.n_rays} rays @ {s.n_angles ?? "?"} angles,
+                        no flight chain)
                       </b>
                     ) : s.verdict === "no_swing" || s.verdict === "no_ball_flight" ? (
                       <b style={{ color: "#c0392b" }}>

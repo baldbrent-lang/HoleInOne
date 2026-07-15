@@ -14,6 +14,7 @@ the raw clip.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -2786,10 +2787,31 @@ def _arc_track_from_heatmap(
             + (float(d.y) - float(launch_hint[1])) ** 2
         ) ** 0.5 <= hint_r
 
+    # Chain-start candidates: the ball often becomes VISIBLE well after
+    # impact (e.g. only once it clears a dark treeline ~15 frames in), so
+    # limiting starts to the earliest 8 dot-frames never even tried the
+    # real launch. Consider every dot up to impact+45 frames (capped for
+    # cost); without an impact hint, fall back to the earliest 8 frames.
+    if impact_frame_hint is not None:
+        _start_frames = [
+            f for f in frames_sorted if f <= int(impact_frame_hint) + 45
+        ]
+    else:
+        _start_frames = frames_sorted[:8]
+    _start_dots: list = []
+    for f in _start_frames:
+        for d in by_frame[f]:
+            _start_dots.append((f, d))
+    if len(_start_dots) > 40:
+        # Sample evenly — head-truncation starved out later (real) launch
+        # dots when pre-impact fragments filled the cap.
+        _stp = -(-len(_start_dots) // 40)
+        _start_dots = _start_dots[::_stp]
+
     best_chain: list = []
     best_near: list = []
-    for f in frames_sorted[:8]:
-        for d in by_frame[f]:
+    for f, d in _start_dots:
+        if True:
             c = _grow(d)
             best_chain = _consider(c, best_chain)
             if _near_hint(d):
@@ -2902,6 +2924,11 @@ def _arc_track_from_heatmap(
     # velocity-coherent chaining already vouches for them.
     fr = np.array([d.frame for d in work], float)
     ys = np.array([d.y for d in work], float)
+    # A ball flight has real VERTICAL extent; a walking golfer's edge
+    # dots chain coherently but stay flat — reject flat chains outright
+    # (a flat chain can pass convexity on a +0.0001 quadratic term).
+    if float(ys.max() - ys.min()) < 0.10 * h_nat:
+        return []
     ycf = np.polyfit(fr, ys, 2)
     if float(ycf[0]) <= 0:
         net_up = float(work[0].y) - float(work[-1].y)
@@ -3018,32 +3045,46 @@ def swing_heat_check(
         # fan-shaped component (spokes joined at the hands: huge bbox,
         # low fill). Tee-planting / walk-throughs show compact blocky
         # blobs — high fill, no rays.
-        transient = ((heat > 0) & (heat <= 3)).astype(np.uint8)
+        # Fan band is WIDER than the ball band (1..~8 hits): the fan hub
+        # gets swept several times (backswing + downswing + follow-through
+        # overlap), so 1..3 missed obvious fans entirely (0 rays on a
+        # textbook swing). Constant motion (body standing there) still
+        # gets removed.
+        _fan_max = max(6, int(round(0.06 * counted)))
+        fan_band = ((heat > 0) & (heat <= _fan_max)).astype(np.uint8)
         const_thr = max(5, int(0.15 * counted))
         constant = (heat >= const_thr).astype(np.uint8)
         if constant.any():
-            transient &= 1 - cv2.dilate(constant, np.ones((15, 15), np.uint8))
-        nl, _lb, stats2, _c2 = cv2.connectedComponentsWithStats(transient, 8)
-        det_diag = (det_w ** 2 + det_h ** 2) ** 0.5
-        n_rays = 0
-        ray_area = 0
-        fan_found = False
-        for i in range(1, nl):
-            w_ = int(stats2[i, cv2.CC_STAT_WIDTH])
-            h_ = int(stats2[i, cv2.CC_STAT_HEIGHT])
-            area = int(stats2[i, cv2.CC_STAT_AREA])
-            mx = max(w_, h_)
-            mn = max(1, min(w_, h_))
-            fill = area / float(max(1, w_ * h_))
-            if mx >= 0.05 * det_w and mx / mn >= 3.0 and fill <= 0.5:
-                n_rays += 1
-                ray_area += area
-            elif (w_ ** 2 + h_ ** 2) ** 0.5 >= 0.15 * det_diag and fill <= 0.25:
-                fan_found = True
-        club_fan = (
-            fan_found or n_rays >= 5
-            or ray_area >= 0.003 * det_w * det_h
+            fan_band &= 1 - cv2.dilate(constant, np.ones((15, 15), np.uint8))
+        # Count the SPOKES with a line detector. Component analysis can't
+        # do it — the whole fan is ONE connected component (spokes touch
+        # near the hub), so any per-component thinness test fails.
+        # HoughLinesP finds each long straight streak individually. A
+        # walking/planting ghost can't fake this: its interior exceeds
+        # the hit band (swept for many frames), leaving only speckle
+        # fringes — no long contiguous lines.
+        _lines = cv2.HoughLinesP(
+            (fan_band * 255).astype(np.uint8), 1, np.pi / 180.0,
+            threshold=30,
+            minLineLength=int(0.07 * det_w),
+            maxLineGap=2,
         )
+        # The defining fan property is ANGULAR SPREAD: the shaft sweeps
+        # 200°+, painting spokes at many angles, while walking/planting
+        # ghosts produce edges at one or two orientations (vertical
+        # strips). Count distinct 10° angle bins among the long lines —
+        # line COUNT alone was fooled by dense speckle (211 "lines" on a
+        # walking ghost via gap-bridging).
+        _bins = set()
+        n_rays = 0
+        if _lines is not None:
+            n_rays = int(len(_lines))
+            for ln in _lines:
+                x1, y1, x2, y2 = [float(v) for v in np.ravel(ln)[:4]]
+                ang = math.degrees(math.atan2(y2 - y1, x2 - x1)) % 180.0
+                _bins.add(int(ang // 10))
+        out["n_angles"] = len(_bins)
+        club_fan = n_rays >= 6 and len(_bins) >= 5
         out["n_rays"] = int(n_rays)
         out["fan"] = bool(club_fan)
 
@@ -3092,7 +3133,8 @@ def swing_heat_check(
                 _lbl = (
                     f"swing check @ {float(peak_time_sec):.1f}s - "
                     f"{out['verdict']} (chain {len(chain)}, "
-                    f"{len(pts)} dots, {n_rays} club rays)"
+                    f"{len(pts)} dots, {n_rays} rays @ "
+                    f"{out.get('n_angles', 0)} angles)"
                 )
                 cv2.putText(img, _lbl, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
                             0.62, (0, 0, 0), 3, cv2.LINE_AA)

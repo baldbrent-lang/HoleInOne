@@ -5901,6 +5901,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         "chain_f0": chk.get("chain_f0"),
                         "chain_f1": chk.get("chain_f1"),
                         "n_rays": chk.get("n_rays"),
+                        "n_angles": chk.get("n_angles"),
                         "fan": chk.get("fan"),
                         "reason": chk.get("reason"),
                         "image_url": _img_url,
