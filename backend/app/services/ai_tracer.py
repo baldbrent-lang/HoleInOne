@@ -211,8 +211,10 @@ BALL_TRACK_MAX_FRAMES_HIGH_FPS = 40
 BALL_TRACK_HIGH_FPS_THRESHOLD = 50.0
 BALL_TRACK_VHIGH_FPS_THRESHOLD = 100.0
 BALL_TRACK_VHIGH_FPS_STRIDE = 5
-# <50 fps: 12 points every other frame → 24-frame span (~0.8s at 30fps).
-BALL_TRACK_LOW_FPS_STRIDE = 2
+# <50 fps: 12 points every THIRD frame → 36-frame span (~1.2s at 30fps).
+# Operator call: same 12 AI calls, half again more flight covered — the
+# per-frame gaps get filled by the CV chain / fitted curve anyway.
+BALL_TRACK_LOW_FPS_STRIDE = 3
 BALL_TRACK_CONCURRENCY = 8
 
 # Phase-2 retry sends a crop. Crop size is in NATIVE pixels (how much
@@ -2101,27 +2103,28 @@ def track_ball_after_impact(
 
     # Resolve frame budget + stride from clip fps. Goal: roughly the
     # same wall-clock window of flight covered by ~20-40 Claude calls
-    # regardless of source fps.
-    stride = 1
+    # regardless of source fps. The STRIDE is fps-derived even when the
+    # caller overrides max_frames — a supplied max_frames used to force
+    # stride 1, which bunched all the calls into consecutive frames right
+    # at the launch (0.4s) instead of spreading them over the flight.
+    if clip_fps > BALL_TRACK_VHIGH_FPS_THRESHOLD:
+        stride = BALL_TRACK_VHIGH_FPS_STRIDE
+        _default_max = BALL_TRACK_MAX_FRAMES_HIGH_FPS
+    elif clip_fps >= BALL_TRACK_HIGH_FPS_THRESHOLD:
+        stride = 1
+        _default_max = BALL_TRACK_MAX_FRAMES_HIGH_FPS
+    else:
+        # <50 fps: 12 data points sampled every THIRD frame (stride 3),
+        # so the same 12 Claude calls span 36 frames (~1.2s at 30fps).
+        stride = BALL_TRACK_LOW_FPS_STRIDE
+        _default_max = BALL_TRACK_MAX_FRAMES
     if max_frames is None:
-        if clip_fps > BALL_TRACK_VHIGH_FPS_THRESHOLD:
-            # Slow-mo (>100 fps): same 40-call budget, but every other
-            # frame so we span 2× the time window.
-            max_frames = BALL_TRACK_MAX_FRAMES_HIGH_FPS
-            stride = BALL_TRACK_VHIGH_FPS_STRIDE
-        elif clip_fps >= BALL_TRACK_HIGH_FPS_THRESHOLD:
-            max_frames = BALL_TRACK_MAX_FRAMES_HIGH_FPS
-        else:
-            # <50 fps: 12 data points sampled EVERY OTHER frame (stride 2),
-            # so the same 12 Claude calls span 24 frames (~0.8s at 30fps),
-            # covering more of the ball flight than every-consecutive-frame.
-            max_frames = BALL_TRACK_MAX_FRAMES
-            stride = BALL_TRACK_LOW_FPS_STRIDE
-        log.info(
-            "ai_tracer: ball_track — fps=%.1f → max_frames=%d, stride=%d "
-            "(spanning %d frames)",
-            clip_fps, max_frames, stride, max_frames * stride,
-        )
+        max_frames = _default_max
+    log.info(
+        "ai_tracer: ball_track — fps=%.1f → max_frames=%d, stride=%d "
+        "(spanning %d frames)",
+        clip_fps, max_frames, stride, max_frames * stride,
+    )
 
     impact_frame_idx = int(impact_frame_idx)
     span = max_frames * stride
