@@ -2703,6 +2703,51 @@ def _arc_track_from_heatmap(
         return []
     if int(work[-1].frame) - int(work[0].frame) < 6:
         return []
+
+    # DESCENT REACQUISITION across an off-screen apex. A high shot exits
+    # the top of the frame and re-enters on the way down (operator's
+    # clip: dots to f1986, gone, back at f2023) — a gap far beyond the
+    # in-chain cap. When the chain ends in the upper half of the frame,
+    # look up to ~90 frames ahead for a COHERENT DESCENDING chain
+    # (monotone frames, moving down, re-entering near the exit x) and
+    # join it. The descent chain's own time+space consistency is the
+    # verification — never a single reacquired point.
+    det_hh, det_ww = heatmap.shape[:2]
+    inv2 = (1.0 / det_scale) if det_scale else 1.0
+    w_nat = det_ww * inv2
+    h_nat = det_hh * inv2
+    end = work[-1]
+    if float(end.y) <= 0.5 * h_nat:
+        cand_starts = [
+            d for d in pts
+            if int(d.frame) > int(end.frame)
+            and int(d.frame) - int(end.frame) <= 90
+            and float(d.y) <= 0.6 * h_nat
+            and abs(float(d.x) - float(end.x)) <= 0.35 * w_nat
+        ]
+        best_desc: list = []
+        for s0 in sorted(cand_starts, key=lambda d: d.frame)[:12]:
+            c = _grow(s0)
+            c = [d for d in c if int(d.frame) > int(end.frame)]
+            # Downward-coherent: at least 3 dots, net downward motion.
+            if len(c) >= 3 and float(c[-1].y) > float(c[0].y) + 10:
+                span = int(c[-1].frame) - int(c[0].frame)
+                b_span = (
+                    int(best_desc[-1].frame) - int(best_desc[0].frame)
+                    if best_desc else -1
+                )
+                if (span, len(c)) > (b_span, len(best_desc)):
+                    best_desc = c
+        if best_desc:
+            log.info(
+                "tracer: heatmap-arc descent reacquired — %d dots "
+                "f%d-f%d after a %d-frame off-screen gap",
+                len(best_desc), int(best_desc[0].frame),
+                int(best_desc[-1].frame),
+                int(best_desc[0].frame) - int(end.frame),
+            )
+            work = work + best_desc
+
     # Ballistic sanity on the CHAIN: y(frame) fits convex (up-then-down
     # in image coords) — a wandering noise chain doesn't.
     fr = np.array([d.frame for d in work], float)
@@ -2729,7 +2774,7 @@ CORRIDOR_EPS_MULT = 3.0
 
 def _corridor_backfill(
     input_path, track, det_scale,
-    impact_frame_hint=None, forward_frames=45,
+    impact_frame_hint=None, forward_frames=12,
 ):
     """Recover faint ball frames the global detector missed, by looking
     only where the fitted parabola says the ball should be.
