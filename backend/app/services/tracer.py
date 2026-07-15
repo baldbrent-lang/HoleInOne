@@ -2915,6 +2915,147 @@ def _arc_track_from_heatmap(
     return work
 
 
+def swing_heat_check(
+    input_path,
+    peak_time_sec: float,
+    fps: float,
+    ball_hint=None,
+    debug_dir=None,
+    debug_prefix: str = "heatchk",
+) -> dict:
+    """Confirm a suspected swing with MOG2 physics.
+
+    Runs a short background-subtraction pass around the pose peak and
+    looks for a BALL-FLIGHT launch chain in the timed transient dots —
+    the same heatmap-arc detection the wizard uses. A real struck shot
+    leaves a chain of brief motion dots climbing away from the strike;
+    tee-planting, waggles and walk-throughs light up the body but never
+    produce one.
+
+    Returns {available, verdict ('ball_flight'|'no_ball_flight'|
+    'unknown'), n_timed, chain_len, chain_f0/f1, image, reason}. When
+    `debug_dir` is set, writes a log-scale heat composite with the chain
+    drawn so the debug UI can SHOW the evidence. Never raises.
+    """
+    out = {
+        "available": False, "verdict": "unknown", "n_timed": 0,
+        "chain_len": 0, "chain_f0": None, "chain_f1": None,
+        "image": None, "reason": None,
+    }
+    if not HAS_CV:
+        out["reason"] = "opencv not installed"
+        return out
+    try:
+        fps = float(fps or 30.0)
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open video"
+            return out
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        det_scale = 1.0
+        if width > DETECT_MAX_WIDTH:
+            det_scale = DETECT_MAX_WIDTH / float(width)
+        det_w = max(1, int(round(width * det_scale)))
+        det_h = max(1, int(round(height * det_scale)))
+        start_f = max(0, int((float(peak_time_sec) - 2.0) * fps))
+        end_f = int((float(peak_time_sec) + 2.5) * fps)
+        warmup = 12
+        bg = cv2.createBackgroundSubtractorMOG2(
+            history=150, varThreshold=BG_VAR_THRESHOLD, detectShadows=False,
+        )
+        heat = np.zeros((det_h, det_w), np.uint16)
+        masks: dict[int, "np.ndarray"] = {}
+        counted = 0
+        first_frame = None
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
+        idx = start_f - 1
+        try:
+            while idx < end_f:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    break
+                idx += 1
+                if first_frame is None:
+                    first_frame = frame.copy()
+                det = (
+                    cv2.resize(frame, (det_w, det_h))
+                    if det_scale != 1.0 else frame
+                )
+                fg = bg.apply(det)
+                if idx - start_f < warmup:
+                    continue
+                okp, png = cv2.imencode(".png", fg)
+                if okp:
+                    masks[idx] = png
+                heat += (fg > 0).astype(np.uint16)
+                counted += 1
+        finally:
+            cap.release()
+        if counted < 10:
+            out["reason"] = "window too short"
+            return out
+        out["available"] = True
+        impact_f = int(float(peak_time_sec) * fps)
+        pts = _timed_heatmap_points(
+            heat, masks, det_scale, counted, impact_frame_hint=impact_f,
+        )
+        out["n_timed"] = len(pts)
+        chain = _arc_track_from_heatmap(
+            heat, masks, det_scale, counted,
+            impact_frame_hint=impact_f, pts=pts, launch_hint=ball_hint,
+        )
+        out["chain_len"] = len(chain)
+        if chain:
+            out["chain_f0"] = int(chain[0].frame)
+            out["chain_f1"] = int(chain[-1].frame)
+        out["verdict"] = (
+            "ball_flight" if len(chain) >= 5 else "no_ball_flight"
+        )
+        # Evidence image for the debug UI: log-scale heat blend + the
+        # chain (when any) in red.
+        if debug_dir is not None and first_frame is not None:
+            _hm = np.log1p(heat.astype(np.float32))
+            _pk = float(_hm.max())
+            if _pk > 0:
+                hm8 = np.clip(_hm / _pk * 255.0, 0, 255).astype(np.uint8)
+                hm_n = cv2.resize(
+                    hm8, (width, height), interpolation=cv2.INTER_LINEAR,
+                )
+                color = cv2.applyColorMap(hm_n, cv2.COLORMAP_TURBO)
+                img = first_frame.copy()
+                blend = cv2.addWeighted(img, 0.4, color, 0.6, 0)
+                on = hm_n > 0
+                img[on] = blend[on]
+                if len(chain) >= 2:
+                    _poly = np.array(
+                        [(int(d.x), int(d.y)) for d in chain], np.int32,
+                    )
+                    cv2.polylines(img, [_poly], False, (0, 0, 255), 4, cv2.LINE_AA)
+                    for d in chain:
+                        cv2.circle(img, (int(d.x), int(d.y)), 5, (255, 255, 255), -1, cv2.LINE_AA)
+                _lbl = (
+                    f"swing check @ {float(peak_time_sec):.1f}s - "
+                    f"{out['verdict']} (chain {len(chain)}, "
+                    f"{len(pts)} timed dots)"
+                )
+                cv2.putText(img, _lbl, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.62, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(img, _lbl, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.62, (255, 255, 255), 1, cv2.LINE_AA)
+                name = f"{debug_prefix}.jpg"
+                cv2.imwrite(
+                    str(Path(debug_dir) / name), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 82],
+                )
+                out["image"] = name
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("swing_heat_check failed: %s", exc)
+        out["reason"] = str(exc)
+        return out
+
+
 # Corridor backfill tuning. Half-box (det px) searched around each
 # predicted position = max(MIN, MULT × fit-RMS). Conservative on
 # purpose: a tight corridor means a stray bright blob far from the

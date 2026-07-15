@@ -4247,6 +4247,59 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
         )}
 
 
+        {data.heat_check?.swings?.length > 0 && (
+          <div
+            style={{
+              border: "1px solid rgba(230,126,34,0.45)", borderRadius: 8,
+              padding: "8px 12px", marginBottom: 14,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>
+              🔥 MOG2 swing check —{" "}
+              {data.heat_check.swings.filter((s) => s.verdict === "ball_flight").length}
+              /{data.heat_check.swings.length} confirmed
+              {!data.heat_check.enabled && " (filter disabled)"}
+            </div>
+            <div className="small muted" style={{ marginBottom: 6 }}>
+              A real struck shot leaves a launch chain of brief motion dots
+              (red line). Swings without one are dropped from production —
+              unless the check rejects every swing, in which case all are
+              kept (the scene may be blind to the ball).
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+              {data.heat_check.swings.map((s) => (
+                <div key={s.swing} style={{ width: 260, maxWidth: "100%" }}>
+                  {s.image_url && (
+                    <a href={s.image_url} target="_blank" rel="noreferrer">
+                      <img
+                        src={s.image_url}
+                        alt={`heat check swing ${s.swing}`}
+                        style={{ width: "100%", borderRadius: 6, display: "block" }}
+                      />
+                    </a>
+                  )}
+                  <div className="small" style={{ marginTop: 2 }}>
+                    swing {s.swing} · {s.t}s:{" "}
+                    {s.verdict === "ball_flight" ? (
+                      <b style={{ color: "#1a9d55" }}>
+                        ✅ ball flight (chain {s.chain_len}, f{s.chain_f0}–f{s.chain_f1})
+                      </b>
+                    ) : s.verdict === "no_ball_flight" ? (
+                      <b style={{ color: "#c0392b" }}>
+                        ❌ no ball flight ({s.chain_len} chained of {s.n_timed} dots)
+                      </b>
+                    ) : (
+                      <span className="muted">
+                        check unavailable{s.reason ? ` — ${s.reason}` : ""}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {swings.length === 0 && !data.running && (
           <div className="small muted">No swings detected in this clip.</div>
         )}

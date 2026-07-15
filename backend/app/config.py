@@ -124,6 +124,15 @@ class Settings(BaseSettings):
     pose_clip_before_sec: float = 2.0
     pose_clip_after_sec: float = 7.0
 
+    # MOG2 swing confirmation for the produce pipeline (pose mode). Each
+    # pose-detected swing gets a short background-subtraction pass around
+    # its peak looking for a ball-flight launch chain in the transient
+    # motion — physical proof a ball actually flew. Swings without one are
+    # dropped from production (tee-planting, waggles). Fail-safe: if the
+    # check rejects EVERY swing, all are kept (scene may be blind to the
+    # ball, e.g. distant course framing). Env: SWING_HEAT_CHECK_ENABLED=0.
+    swing_heat_check_enabled: bool = True
+
     # Ball-flight tracer engine for produced clips. "ai" (default) uses the
     # Claude vision tracer; "classical" uses the motion/parabola CV tracer.
     # AI needs ANTHROPIC_API_KEY — without a key (or on any AI failure) the

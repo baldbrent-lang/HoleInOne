@@ -1399,6 +1399,56 @@ def _run_long_upload_job(
                             _real.append(d)
                     detected = _real
 
+                # MOG2 swing confirmation: each pose swing must show a
+                # ball-flight launch chain in the transient motion around
+                # its peak — physical proof a ball flew. Tee-planting,
+                # waggles and walk-throughs light up the body but never
+                # leave one. Fail-safe: if the check rejects EVERY swing,
+                # keep them all (scene may be blind to the ball).
+                if used_pose and detected and settings.swing_heat_check_enabled:
+                    try:
+                        from ..services.tracer import swing_heat_check
+
+                        _confirmed = []
+                        for d in detected:
+                            chk = swing_heat_check(
+                                src_path,
+                                float(d.get("peak_time_sec") or 0.0),
+                                tee_fps,
+                            )
+                            d["heat_check"] = {
+                                "verdict": chk.get("verdict"),
+                                "n_timed": chk.get("n_timed"),
+                                "chain_len": chk.get("chain_len"),
+                            }
+                            if (
+                                chk.get("available")
+                                and chk.get("verdict") == "no_ball_flight"
+                            ):
+                                log.info(
+                                    "long-upload worker: upload=%s heat check "
+                                    "DROPPED swing @ %.1fs (chain %s, %s dots)",
+                                    upload_id,
+                                    float(d.get("peak_time_sec") or 0.0),
+                                    chk.get("chain_len"), chk.get("n_timed"),
+                                )
+                            else:
+                                _confirmed.append(d)
+                        if _confirmed:
+                            detected = _confirmed
+                        elif detected:
+                            log.info(
+                                "long-upload worker: upload=%s heat check "
+                                "rejected ALL %d swings — fail-safe keeping "
+                                "them (scene may be blind to the ball)",
+                                upload_id, len(detected),
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "long-upload worker: heat check failed (%s) — "
+                            "keeping all swings", exc,
+                        )
+
                 for i, d in enumerate(detected):
                     segs.append(
                         {
@@ -5813,6 +5863,46 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         # Per-swing tracer comparison runs on the pose swings.
         detected = pose_segments
 
+        # MOG2 swing confirmation — SHOW THE WORK: same check produce uses
+        # to eliminate non-swings, but with the evidence image (log-scale
+        # heat + detected launch chain in red) per swing.
+        heat_checks = []
+        if pose_segments:
+            try:
+                from ..services.tracer import swing_heat_check
+
+                for i, d in enumerate(pose_segments):
+                    _pfx = f"heatchk-{upload_id}-s{i}-{secrets.token_hex(3)}"
+                    chk = swing_heat_check(
+                        src_path,
+                        float(d.get("peak_time_sec") or 0.0),
+                        tee_fps,
+                        debug_dir=CLIPS_DIR,
+                        debug_prefix=_pfx,
+                    )
+                    _img = chk.get("image")
+                    _img_url = None
+                    if _img:
+                        _p = CLIPS_DIR / _img
+                        if _p.exists():
+                            _img_url = (
+                                f"{settings.app_base_url}/uploads/clips/{_img}"
+                                f"?v={int(_p.stat().st_mtime)}"
+                            )
+                    heat_checks.append({
+                        "swing": i + 1,
+                        "t": round(float(d.get("peak_time_sec") or 0.0), 2),
+                        "verdict": chk.get("verdict"),
+                        "n_timed": chk.get("n_timed"),
+                        "chain_len": chk.get("chain_len"),
+                        "chain_f0": chk.get("chain_f0"),
+                        "chain_f1": chk.get("chain_f1"),
+                        "reason": chk.get("reason"),
+                        "image_url": _img_url,
+                    })
+            except Exception as exc:  # noqa: BLE001
+                log.warning("produce-debug heat check failed: %s", exc)
+
         # AI resting-ball, anchored to the pose swings: try 1.5s, then 1.0s,
         # then 0.5s before each pose spike (the club can hide the ball at 1.5s
         # but not nearer the top of the backswing). Dev-only, needs a key.
@@ -5832,6 +5922,11 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
         with _produce_debug_lock:
             st = _produce_debug_state[upload_id]
             st["total"] = len(detected)
+            st["heat_check"] = {
+                "available": bool(heat_checks),
+                "enabled": bool(settings.swing_heat_check_enabled),
+                "swings": heat_checks,
+            }
             st["pose"] = {
                 "available": bool(pose_debug.get("available")),
                 "reason": pose_debug.get("reason"),
