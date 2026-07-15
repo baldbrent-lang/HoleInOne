@@ -5718,7 +5718,12 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     )
     added_launch: list[dict] = []
     added_descent: list[dict] = []
-    if len(ai_pts) >= 2:
+    # Even a SINGLE AI pick is enough to anchor the layer: the launch
+    # corridor (impact position → that pick) needs nothing else, and the
+    # dots it fills in then anchor the extrapolation fit (real case:
+    # upload where the AI found the ball on 1 frame of a near-vertical
+    # flight sitting on a 169-dot MOG2 chain — nothing was mapped).
+    if ai_pts:
         ai_sorted = sorted(ai_pts, key=lambda r: int(r["frame"]))
         first_ai, last_ai = ai_sorted[0], ai_sorted[-1]
         first_f, last_f = int(first_ai["frame"]), int(last_ai["frame"])
@@ -5768,18 +5773,29 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                     "x": c["x"], "y": c["y"], "source": "mog2",
                 })
 
-        # ── Descent extension beyond the last AI pick ────────────────
-        # Extrapolate the arc (quadratic x/y in frame over the AI
-        # picks) and accept pool dots near the prediction, frames
-        # strictly and gradually increasing. The corridor widens the
-        # further out we extrapolate; a >45-frame silence ends it.
-        if len(ai_sorted) >= 3:
-            _fs = _np.array([float(p["frame"]) for p in ai_sorted])
-            _xs = _np.array([float(p["x"]) for p in ai_sorted])
-            _ys = _np.array([float(p["y"]) for p in ai_sorted])
-            _deg_x = 2 if len(ai_sorted) >= 4 else 1
-            _cx = _np.polyfit(_fs, _xs, _deg_x)
-            _cy = _np.polyfit(_fs, _ys, 2)
+        # ── Extension beyond the last AI pick ────────────────────────
+        # Extrapolate the arc (quadratic x/y in frame) and accept pool
+        # dots near the prediction, frames strictly and gradually
+        # increasing. The fit anchors on the AI picks PLUS the launch-
+        # fill dots — so even one AI pick, backed by a filled launch
+        # corridor, extrapolates confidently. The corridor widens the
+        # further out we go; a >45-frame silence ends it.
+        _known = sorted(
+            ai_sorted + added_launch, key=lambda r: int(r["frame"]),
+        )
+        if len(_known) >= 3:
+            _kf = [float(p["frame"]) for p in _known]
+            _kx = [float(p["x"]) for p in _known]
+            _ky = [float(p["y"]) for p in _known]
+
+            def _fit():
+                _deg_x = 2 if len(_kf) >= 4 else 1
+                return (
+                    _np.polyfit(_kf, _kx, _deg_x),
+                    _np.polyfit(_kf, _ky, 2),
+                )
+
+            _cx, _cy = _fit()
             prev_f = last_f
             for c in pool:
                 f = int(c["frame"])
@@ -5791,7 +5807,7 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                     break  # trail went quiet — stop extending
                 pred_x = float(_np.polyval(_cx, f))
                 pred_y = float(_np.polyval(_cy, f))
-                tol = 40.0 + 0.35 * (f - last_f)
+                tol = 40.0 + 0.35 * (f - prev_f)
                 d = ((c["x"] - pred_x) ** 2 + (c["y"] - pred_y) ** 2) ** 0.5
                 if d > tol:
                     continue
@@ -5799,6 +5815,13 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                     "frame": f, "found": True,
                     "x": c["x"], "y": c["y"], "source": "mog2",
                 })
+                # Refit with the accepted dot so the corridor FOLLOWS
+                # the actual trail instead of drifting off the initial
+                # extrapolation on long extensions.
+                _kf.append(float(f))
+                _kx.append(float(c["x"]))
+                _ky.append(float(c["y"]))
+                _cx, _cy = _fit()
                 prev_f = f
 
     added = sorted(
