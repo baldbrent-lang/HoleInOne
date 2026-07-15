@@ -1415,15 +1415,17 @@ def _run_long_upload_job(
                                 src_path,
                                 float(d.get("peak_time_sec") or 0.0),
                                 tee_fps,
+                                ball_hint=d.get("impact_wrist_xy"),
                             )
                             d["heat_check"] = {
                                 "verdict": chk.get("verdict"),
                                 "n_timed": chk.get("n_timed"),
                                 "chain_len": chk.get("chain_len"),
+                                "n_rays": chk.get("n_rays"),
                             }
                             if (
                                 chk.get("available")
-                                and chk.get("verdict") == "no_ball_flight"
+                                and chk.get("verdict") == "no_swing"
                             ):
                                 log.info(
                                     "long-upload worker: upload=%s heat check "
@@ -5877,6 +5879,7 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         src_path,
                         float(d.get("peak_time_sec") or 0.0),
                         tee_fps,
+                        ball_hint=d.get("impact_wrist_xy"),
                         debug_dir=CLIPS_DIR,
                         debug_prefix=_pfx,
                     )
@@ -5897,6 +5900,8 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         "chain_len": chk.get("chain_len"),
                         "chain_f0": chk.get("chain_f0"),
                         "chain_f1": chk.get("chain_f1"),
+                        "n_rays": chk.get("n_rays"),
+                        "fan": chk.get("fan"),
                         "reason": chk.get("reason"),
                         "image_url": _img_url,
                     })

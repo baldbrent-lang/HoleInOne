@@ -3009,9 +3009,64 @@ def swing_heat_check(
         if chain:
             out["chain_f0"] = int(chain[0].frame)
             out["chain_f1"] = int(chain[-1].frame)
-        out["verdict"] = (
-            "ball_flight" if len(chain) >= 5 else "no_ball_flight"
+
+        # CLUB-FAN detection (operator insight: the fan of brief-motion
+        # streaks radiating around the golfer — the shaft painting a line
+        # per frame — is the loudest swing signature in the heat map).
+        # In the transient mask (constant motion removed), a swing shows
+        # either many long/thin "ray" components or one big sparse
+        # fan-shaped component (spokes joined at the hands: huge bbox,
+        # low fill). Tee-planting / walk-throughs show compact blocky
+        # blobs — high fill, no rays.
+        transient = ((heat > 0) & (heat <= 3)).astype(np.uint8)
+        const_thr = max(5, int(0.15 * counted))
+        constant = (heat >= const_thr).astype(np.uint8)
+        if constant.any():
+            transient &= 1 - cv2.dilate(constant, np.ones((15, 15), np.uint8))
+        nl, _lb, stats2, _c2 = cv2.connectedComponentsWithStats(transient, 8)
+        det_diag = (det_w ** 2 + det_h ** 2) ** 0.5
+        n_rays = 0
+        ray_area = 0
+        fan_found = False
+        for i in range(1, nl):
+            w_ = int(stats2[i, cv2.CC_STAT_WIDTH])
+            h_ = int(stats2[i, cv2.CC_STAT_HEIGHT])
+            area = int(stats2[i, cv2.CC_STAT_AREA])
+            mx = max(w_, h_)
+            mn = max(1, min(w_, h_))
+            fill = area / float(max(1, w_ * h_))
+            if mx >= 0.05 * det_w and mx / mn >= 3.0 and fill <= 0.5:
+                n_rays += 1
+                ray_area += area
+            elif (w_ ** 2 + h_ ** 2) ** 0.5 >= 0.15 * det_diag and fill <= 0.25:
+                fan_found = True
+        club_fan = (
+            fan_found or n_rays >= 5
+            or ray_area >= 0.003 * det_w * det_h
         )
+        out["n_rays"] = int(n_rays)
+        out["fan"] = bool(club_fan)
+
+        # Three-tier verdict: ball flight is the strongest proof; a club
+        # fan still confirms a real swinging motion (kept — the ball may
+        # just be invisible to MOG2); neither = not a swing.
+        #
+        # Flight test: the club-fan TIPS also chain briefly (fast, frame-
+        # ordered arc motion around the peak) and masquerade as a ball —
+        # but a tip chain dies at the follow-through, while a real ball
+        # chain keeps going well past impact. Require the chain to extend
+        # >= 0.5s beyond the peak to count as flight.
+        flight_ok = len(chain) >= 5
+        if flight_ok and (
+            int(chain[-1].frame) - impact_f < int(round(0.5 * fps))
+        ):
+            flight_ok = False
+        if flight_ok:
+            out["verdict"] = "ball_flight"
+        elif club_fan:
+            out["verdict"] = "club_swing"
+        else:
+            out["verdict"] = "no_swing"
         # Evidence image for the debug UI: log-scale heat blend + the
         # chain (when any) in red.
         if debug_dir is not None and first_frame is not None:
@@ -3037,7 +3092,7 @@ def swing_heat_check(
                 _lbl = (
                     f"swing check @ {float(peak_time_sec):.1f}s - "
                     f"{out['verdict']} (chain {len(chain)}, "
-                    f"{len(pts)} timed dots)"
+                    f"{len(pts)} dots, {n_rays} club rays)"
                 )
                 cv2.putText(img, _lbl, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
                             0.62, (0, 0, 0), 3, cv2.LINE_AA)

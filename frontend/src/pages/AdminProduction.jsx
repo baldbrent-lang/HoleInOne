@@ -4261,10 +4261,11 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
               {!data.heat_check.enabled && " (filter disabled)"}
             </div>
             <div className="small muted" style={{ marginBottom: 6 }}>
-              A real struck shot leaves a launch chain of brief motion dots
-              (red line). Swings without one are dropped from production —
-              unless the check rejects every swing, in which case all are
-              kept (the scene may be blind to the ball).
+              ✅ ball flight = launch chain of brief motion dots (red line).
+              🟡 club swing = the club-fan heat signature (kept — the ball
+              may be invisible to MOG2). ❌ no swing = neither, dropped from
+              production — unless the check rejects every swing, in which
+              case all are kept.
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
               {data.heat_check.swings.map((s) => (
@@ -4284,9 +4285,14 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       <b style={{ color: "#1a9d55" }}>
                         ✅ ball flight (chain {s.chain_len}, f{s.chain_f0}–f{s.chain_f1})
                       </b>
-                    ) : s.verdict === "no_ball_flight" ? (
+                    ) : s.verdict === "club_swing" ? (
+                      <b style={{ color: "#b7791f" }}>
+                        🟡 club swing ({s.n_rays} club rays, no flight chain)
+                      </b>
+                    ) : s.verdict === "no_swing" || s.verdict === "no_ball_flight" ? (
                       <b style={{ color: "#c0392b" }}>
-                        ❌ no ball flight ({s.chain_len} chained of {s.n_timed} dots)
+                        ❌ no swing ({s.chain_len} chained of {s.n_timed} dots
+                        · {s.n_rays ?? 0} rays)
                       </b>
                     ) : (
                       <span className="muted">
