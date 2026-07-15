@@ -2969,7 +2969,7 @@ def swing_heat_check(
     out = {
         "available": False, "verdict": "unknown", "n_timed": 0,
         "chain_len": 0, "chain_f0": None, "chain_f1": None,
-        "image": None, "reason": None,
+        "image": None, "image_clean": None, "reason": None,
     }
     if not HAS_CV:
         out["reason"] = "opencv not installed"
@@ -3125,6 +3125,14 @@ def swing_heat_check(
                 blend = cv2.addWeighted(img, 0.4, color, 0.6, 0)
                 on = hm_n > 0
                 img[on] = blend[on]
+                # CLEAN copy (no chain, no verdict label) for the AI swing
+                # judge — the printed verdict would bias it.
+                clean_name = f"{debug_prefix}-clean.jpg"
+                cv2.imwrite(
+                    str(Path(debug_dir) / clean_name), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 80],
+                )
+                out["image_clean"] = clean_name
                 if len(chain) >= 2:
                     _poly = np.array(
                         [(int(d.x), int(d.y)) for d in chain], np.int32,

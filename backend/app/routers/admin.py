@@ -63,6 +63,7 @@ from ..services.ai_tracer import (
     find_impact_via_audio,
     refine_impact_frame,
     track_ball_after_impact,
+    judge_swing_heat_image,
     render_tracer_video,
     run_full_ai_tracer_pipeline,
     detect_swings_from_audio,
@@ -1416,7 +1417,33 @@ def _run_long_upload_job(
                                 float(d.get("peak_time_sec") or 0.0),
                                 tee_fps,
                                 ball_hint=d.get("impact_wrist_xy"),
+                                debug_dir=CLIPS_DIR,
+                                debug_prefix=(
+                                    f"heatchk-prod-{upload_id}-"
+                                    f"{secrets.token_hex(3)}"
+                                ),
                             )
+                            # AI swing judge (operator-validated): Claude
+                            # reads the heat composite's gestalt where the
+                            # ray heuristic inverted (walking ghosts kept,
+                            # real fans dropped). Overrides the heuristic
+                            # verdict BOTH ways; ball_flight (physics)
+                            # stands on its own. Heuristic remains the
+                            # no-key fallback.
+                            if (
+                                chk.get("verdict") != "ball_flight"
+                                and chk.get("image_clean")
+                                and os.environ.get("ANTHROPIC_API_KEY")
+                            ):
+                                _j = judge_swing_heat_image(
+                                    CLIPS_DIR / chk["image_clean"],
+                                )
+                                if _j.get("is_swing") is True:
+                                    chk["verdict"] = "club_swing"
+                                elif _j.get("is_swing") is False:
+                                    chk["verdict"] = "no_swing"
+                                chk["ai_judge"] = _j.get("is_swing")
+                                chk["ai_reason"] = _j.get("reason")
                             d["heat_check"] = {
                                 "verdict": chk.get("verdict"),
                                 "n_timed": chk.get("n_timed"),
@@ -5883,6 +5910,20 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         debug_dir=CLIPS_DIR,
                         debug_prefix=_pfx,
                     )
+                    if (
+                        chk.get("verdict") != "ball_flight"
+                        and chk.get("image_clean")
+                        and os.environ.get("ANTHROPIC_API_KEY")
+                    ):
+                        _j = judge_swing_heat_image(
+                            CLIPS_DIR / chk["image_clean"],
+                        )
+                        if _j.get("is_swing") is True:
+                            chk["verdict"] = "club_swing"
+                        elif _j.get("is_swing") is False:
+                            chk["verdict"] = "no_swing"
+                        chk["ai_judge"] = _j.get("is_swing")
+                        chk["ai_reason"] = _j.get("reason")
                     _img = chk.get("image")
                     _img_url = None
                     if _img:
@@ -5903,6 +5944,8 @@ def _run_produce_debug_job(upload_id: int, motion_only: bool) -> None:
                         "n_rays": chk.get("n_rays"),
                         "n_angles": chk.get("n_angles"),
                         "fan": chk.get("fan"),
+                        "ai_judge": chk.get("ai_judge"),
+                        "ai_reason": chk.get("ai_reason"),
                         "reason": chk.get("reason"),
                         "image_url": _img_url,
                     })

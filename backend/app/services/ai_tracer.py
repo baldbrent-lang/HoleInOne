@@ -4206,6 +4206,74 @@ def _white_blob_at(input_path: Path, frame_idx: int, x: int, y: int) -> bool | N
         return None
 
 
+_JUDGE_SWING_HEAT_PROMPT = (
+    "You are looking at a MOTION-HEAT visualization from a fixed golf tee "
+    "camera: one video frame with accumulated motion overlaid in color "
+    "(blue = pixels that moved only briefly, green/yellow/orange/red = "
+    "progressively more constant motion).\n"
+    "Question: does this show a GOLFER SWINGING A GOLF CLUB during this "
+    "window?\n"
+    "A real swing shows a standing human silhouette in heat AND a fan or "
+    "arc of thin streaks sweeping around/above the figure — the club "
+    "shaft painting successive positions — sometimes with a dotted trail "
+    "of brief motion leaving the scene (the ball).\n"
+    "Answer false for: a person walking (a diffuse smeared blob with no "
+    "fan), someone bending over or placing a tee, foliage/tree shimmer, "
+    "or an empty scene.\n"
+    'Reply with JSON only:\n{"is_swing": true|false, '
+    '"confidence": "high"|"medium"|"low", "reason": "<one short sentence>"}'
+)
+
+
+def judge_swing_heat_image(image_path, model: str | None = None) -> dict:
+    """One Claude vision call: does this motion-heat composite look like a
+    golfer swinging a club? The operator A/B-tested this against the
+    ray-counting heuristic and the model read the gestalt correctly where
+    the heuristic inverted (walking ghost kept, real fans dropped).
+    Returns {available, is_swing (bool|None), confidence, reason}.
+    Never raises."""
+    out = {"available": False, "is_swing": None, "confidence": None, "reason": None}
+    if not HAS_ANTHROPIC or not os.environ.get("ANTHROPIC_API_KEY"):
+        out["reason"] = "ANTHROPIC_API_KEY not set"
+        return out
+    try:
+        data = Path(image_path).read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"could not read image: {exc}"
+        return out
+    try:
+        client = _anthropic_client()
+        resp = client.messages.create(
+            model=_resolve_frame_picker_model(model),
+            max_tokens=150,
+            system=[{
+                "type": "text",
+                "text": _JUDGE_SWING_HEAT_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "JSON only."},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg",
+                    "data": base64.standard_b64encode(data).decode("ascii"),
+                }},
+            ]}],
+        )
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"api_failed: {exc}"
+        return out
+    text = "".join(
+        c.text for c in resp.content if getattr(c, "type", None) == "text"
+    )
+    parsed = _extract_json(text) or {}
+    out["available"] = True
+    if isinstance(parsed.get("is_swing"), bool):
+        out["is_swing"] = parsed["is_swing"]
+    out["confidence"] = parsed.get("confidence")
+    out["reason"] = parsed.get("reason")
+    return out
+
+
 def classify_swing_shot(
     input_path: Path,
     peak_time_sec: float,

@@ -4302,6 +4302,12 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                         check unavailable{s.reason ? ` — ${s.reason}` : ""}
                       </span>
                     )}
+                    {s.ai_judge != null && (
+                      <div className="tiny muted">
+                        🤖 AI judge: {s.ai_judge ? "swing" : "not a swing"}
+                        {s.ai_reason ? ` — ${s.ai_reason}` : ""}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
