@@ -2717,16 +2717,22 @@ def _arc_track_from_heatmap(
     w_nat = det_ww * inv2
     h_nat = det_hh * inv2
     end = work[-1]
-    if float(end.y) <= 0.5 * h_nat:
+    if float(end.y) <= 0.55 * h_nat:
         cand_starts = [
             d for d in pts
             if int(d.frame) > int(end.frame)
             and int(d.frame) - int(end.frame) <= 90
             and float(d.y) <= 0.6 * h_nat
-            and abs(float(d.x) - float(end.x)) <= 0.35 * w_nat
+            and abs(float(d.x) - float(end.x)) <= 0.45 * w_nat
         ]
+        if not cand_starts:
+            log.info(
+                "tracer: heatmap-arc descent reacquisition — no candidate "
+                "re-entry dots after f%d (chain end y=%.0f/%.0f)",
+                int(end.frame), float(end.y), h_nat,
+            )
         best_desc: list = []
-        for s0 in sorted(cand_starts, key=lambda d: d.frame)[:12]:
+        for s0 in sorted(cand_starts, key=lambda d: d.frame):
             c = _grow(s0)
             c = [d for d in c if int(d.frame) > int(end.frame)]
             # Downward-coherent: at least 3 dots, net downward motion.

@@ -3776,56 +3776,87 @@ def render_wizard_tracer(
                         _ycf = _np.polyfit(_fr, _ys, 2)
                         _xcf = _np.polyfit(_fr, _xs, 1 if len(ai_pts) < 6 else 2)
 
-                        # Two-stage gate. Stage 1: strict (25px) but ONLY
-                        # within the anchors' own frame span — the anchors
-                        # cover the early flight, and extrapolating their
-                        # curve far past its span rejected legitimate
-                        # DESCENT points (the fitted track stopped at the
-                        # apex). Stage 2: refit on the merged core (anchors
-                        # + stage-1 CV, longer span, better grounded) and
-                        # accept the remaining CV points — descent included
-                        # — against THAT curve at 30px.
-                        def _dist(p, xc, yc) -> float:
-                            px = float(_np.polyval(xc, p["frame"]))
-                            py = float(_np.polyval(yc, p["frame"]))
-                            return (
-                                (p["x"] - px) ** 2 + (p["y"] - py) ** 2
-                            ) ** 0.5
+                        # WHOLE-TRACK validation first (the operator's
+                        # original rule: "if some of the MOG2 mappings are
+                        # also AI mappings, it's correct"). If most anchors
+                        # coincide with the CV track where they overlap in
+                        # time, the ENTIRE track is confirmed — descent
+                        # included — and no per-point curve gating runs.
+                        # Curve gating extrapolated past the anchors' span
+                        # kept re-rejecting the legitimate descent (an
+                        # off-screen-apex flight has no anchors up there by
+                        # definition).
+                        def _near_track(a) -> bool:
+                            best = 1e18
+                            for p in track:
+                                if abs(int(p["frame"]) - int(a["frame"])) <= 3:
+                                    d = (
+                                        (p["x"] - a["x"]) ** 2
+                                        + (p["y"] - a["y"]) ** 2
+                                    ) ** 0.5
+                                    best = min(best, d)
+                            return best <= 25.0
 
-                        _a_lo = float(_fr.min()) - 5
-                        _a_hi = float(_fr.max()) + 5
                         _have = {p["frame"] for p in ai_pts}
-                        stage1 = [
-                            p for p in track
-                            if _a_lo <= p["frame"] <= _a_hi
-                            and _dist(p, _xcf, _ycf) <= 25.0
-                            and int(p["frame"]) not in _have
-                        ]
-                        merged = ai_pts + stage1
-                        stage2: list = []
-                        if len(merged) >= 5:
-                            _f2 = _np.array([p["frame"] for p in merged], float)
-                            _x2 = _np.array([p["x"] for p in merged], float)
-                            _y2 = _np.array([p["y"] for p in merged], float)
-                            _ycf2 = _np.polyfit(_f2, _y2, 2)
-                            _xcf2 = _np.polyfit(
-                                _f2, _x2, 1 if len(merged) < 8 else 2,
-                            )
-                            _picked = {p["frame"] for p in merged}
-                            stage2 = [
+                        n_match = sum(1 for a in ai_pts if _near_track(a))
+                        if n_match >= max(3, int(round(0.6 * len(ai_pts)))):
+                            merged = ai_pts + [
                                 p for p in track
-                                if int(p["frame"]) not in _picked
-                                and _dist(p, _xcf2, _ycf2) <= 30.0
+                                if int(p["frame"]) not in _have
                             ]
-                            merged = merged + stage2
-                        merged.sort(key=lambda p: int(p["frame"]))
-                        log.info(
-                            "wizard hybrid: %d AI anchors; stage1=%d in-span, "
-                            "stage2=%d beyond-span (of %d CV) -> merged %d pts",
-                            len(ai_pts), len(stage1), len(stage2),
-                            len(track), len(merged),
-                        )
-                        track = merged
+                            merged.sort(key=lambda p: int(p["frame"]))
+                            log.info(
+                                "wizard hybrid: track VALIDATED wholesale — "
+                                "%d/%d anchors coincide with the CV track; "
+                                "keeping all %d CV pts + anchors",
+                                n_match, len(ai_pts), len(track),
+                            )
+                            track = merged
+                        else:
+                            # Anchors and CV disagree — fall back to curve
+                            # gating: strict in-span, then refit-and-accept
+                            # beyond span.
+                            def _dist(p, xc, yc) -> float:
+                                px = float(_np.polyval(xc, p["frame"]))
+                                py = float(_np.polyval(yc, p["frame"]))
+                                return (
+                                    (p["x"] - px) ** 2 + (p["y"] - py) ** 2
+                                ) ** 0.5
+
+                            _a_lo = float(_fr.min()) - 5
+                            _a_hi = float(_fr.max()) + 5
+                            stage1 = [
+                                p for p in track
+                                if _a_lo <= p["frame"] <= _a_hi
+                                and _dist(p, _xcf, _ycf) <= 25.0
+                                and int(p["frame"]) not in _have
+                            ]
+                            merged = ai_pts + stage1
+                            stage2: list = []
+                            if len(merged) >= 5:
+                                _f2 = _np.array([p["frame"] for p in merged], float)
+                                _x2 = _np.array([p["x"] for p in merged], float)
+                                _y2 = _np.array([p["y"] for p in merged], float)
+                                _ycf2 = _np.polyfit(_f2, _y2, 2)
+                                _xcf2 = _np.polyfit(
+                                    _f2, _x2, 1 if len(merged) < 8 else 2,
+                                )
+                                _picked = {p["frame"] for p in merged}
+                                stage2 = [
+                                    p for p in track
+                                    if int(p["frame"]) not in _picked
+                                    and _dist(p, _xcf2, _ycf2) <= 30.0
+                                ]
+                                merged = merged + stage2
+                            merged.sort(key=lambda p: int(p["frame"]))
+                            log.info(
+                                "wizard hybrid: anchors DISAGREE with CV "
+                                "(%d/%d coincide) — curve gating: stage1=%d, "
+                                "stage2=%d (of %d CV) -> merged %d pts",
+                                n_match, len(ai_pts), len(stage1),
+                                len(stage2), len(track), len(merged),
+                            )
+                            track = merged
                         # Re-draw the path-on-heat overlay from the MERGED
                         # track so the 🎯 view shows what actually renders.
                         _rm_name = info_c.get("raw_motion_image")
