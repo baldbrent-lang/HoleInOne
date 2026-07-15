@@ -780,6 +780,15 @@ def _render(
                 log.warning("tracer: frames-on-heat overlay failed: %s", exc)
                 raw_motion_frames_name = None
 
+    # Native-coord export of the timed transient dots for callers — the
+    # produce MOG2 layer-in matches these against the AI arc's corridor
+    # (the accepted `track` alone can lock onto club motion and miss the
+    # flight dots entirely).
+    _timed_export = [
+        {"frame": int(d.frame), "x": float(d.x), "y": float(d.y)}
+        for d in sorted(_timed_pts, key=lambda p: p.frame)
+    ]
+
     # Ball address (detection-coord) + body bbox → kept for display
     # and as fallback signals. The primary handedness signal now comes
     # from the club shaft's slope, which is robust to stray practice
@@ -1159,6 +1168,7 @@ def _render(
             "debug_frame_full_images": _fallback_debug_images(),
             "raw_motion_image": raw_motion_name,
             "raw_motion_frames_image": raw_motion_frames_name,
+            "timed_points": _timed_export,
         }
     # Heatmap-arc recovery (operator insight: the flight is an obvious
     # dotted arc in the accumulated motion heatmap even when per-frame
@@ -1245,6 +1255,7 @@ def _render(
             "debug_frame_full_images": _fallback_debug_images(),
             "raw_motion_image": raw_motion_name,
             "raw_motion_frames_image": raw_motion_frames_name,
+            "timed_points": _timed_export,
         }
     if len(track) > len(seed_track):
         log.info(
@@ -1267,6 +1278,7 @@ def _render(
                 "debug_frame_full_images": _fallback_debug_images(),
                 "raw_motion_image": raw_motion_name,
                 "raw_motion_frames_image": raw_motion_frames_name,
+                "timed_points": _timed_export,
             }
 
     # Predict-then-search backfill: fit the parabola from the confident
@@ -1418,6 +1430,7 @@ def _render(
         "raw_motion_arc_image": raw_motion_arc_name,
         "raw_motion_frames_image": raw_motion_frames_name,
         "arc_debug": _arc_dbg,
+        "timed_points": _timed_export,
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's

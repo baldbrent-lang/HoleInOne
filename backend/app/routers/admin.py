@@ -5676,12 +5676,30 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             Path(_cv_traced).unlink(missing_ok=True)
         except Exception:  # noqa: BLE001
             pass
+    import numpy as _np
+
     cv_info = cv_info or {}
-    cv_track = [
-        rec for rec in (cv_info.get("track") or [])
-        if rec.get("frame") is not None
-        and rec.get("x") is not None and rec.get("y") is not None
-    ]
+    # Candidate pool: the raw timed transient dots PLUS the accepted
+    # chain detections, deduped. The chain alone can lock onto club
+    # motion near the hands and miss the flight dots entirely (real
+    # case: upload 384 — chain 14, matched 0, while the launch corridor
+    # was full of timed dots).
+    _pool_by_key: dict = {}
+    for rec in list(cv_info.get("timed_points") or []) + list(cv_info.get("track") or []):
+        if (
+            rec.get("frame") is None
+            or rec.get("x") is None or rec.get("y") is None
+        ):
+            continue
+        k = (
+            int(rec["frame"]),
+            int(round(float(rec["x"]) / 4.0)),
+            int(round(float(rec["y"]) / 4.0)),
+        )
+        _pool_by_key.setdefault(
+            k, {"frame": int(rec["frame"]), "x": float(rec["x"]), "y": float(rec["y"])},
+        )
+    pool = sorted(_pool_by_key.values(), key=lambda r: r["frame"])
 
     def _near(a, b, df=3, dpx=25.0):
         return (
@@ -5691,48 +5709,110 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         )
 
     n_matched = sum(
-        1 for ap in ai_pts if any(_near(ap, cp) for cp in cv_track)
+        1 for ap in ai_pts if any(_near(ap, cp) for cp in pool)
     )
-    corresponds = n_matched >= 2
 
-    added: list[dict] = []
-    if corresponds and ai_pts:
-        last_ai_f = max(int(p["frame"]) for p in ai_pts)
-        # Direction of flight from the AI picks — an extension that
-        # reverses course is the club/body, not the ball.
-        _dx = float(ai_pts[-1]["x"]) - float(ai_pts[0]["x"])
-        tail = sorted(
-            (cp for cp in cv_track if int(cp["frame"]) > last_ai_f),
-            key=lambda c: int(c["frame"]),
+    _f_cap = (
+        int(_imp) + int(round(MOG2_LAYER_POST_IMPACT_SEC * _fps))
+        if _imp is not None else None
+    )
+    added_launch: list[dict] = []
+    added_descent: list[dict] = []
+    if len(ai_pts) >= 2:
+        ai_sorted = sorted(ai_pts, key=lambda r: int(r["frame"]))
+        first_ai, last_ai = ai_sorted[0], ai_sorted[-1]
+        first_f, last_f = int(first_ai["frame"]), int(last_ai["frame"])
+        _ai_found_frames = {int(p["frame"]) for p in ai_sorted}
+
+        # ── Launch fill: impact position → first AI pick ─────────────
+        # The ball demonstrably travelled from the strike to the first
+        # AI point, so MOG2 dots inside that corridor with frames
+        # between impact and the first pick are the flight. Corridor =
+        # distance to the straight segment; frames must progress UP the
+        # corridor (projection t increasing with frame).
+        p0 = (
+            (float(_rest[0]), float(_rest[1]))
+            if _rest and len(_rest) == 2 else None
         )
-        prev_f = last_ai_f
-        prev_x = float(ai_pts[-1]["x"])
-        _f_cap = (
-            int(_imp) + int(round(MOG2_LAYER_POST_IMPACT_SEC * _fps))
-            if _imp is not None else None
-        )
-        for cp in tail:
-            f = int(cp["frame"])
-            if _f_cap is not None and f > _f_cap:
-                break  # past the 4s post-impact analysis window
-            if f - prev_f > 45:  # gap too big to trust
-                break
-            step_x = float(cp["x"]) - prev_x
-            if abs(_dx) > 20 and step_x * _dx < 0 and abs(step_x) > 30:
-                break  # hard reversal — stop extending
-            added.append({
-                "frame": f, "found": True,
-                "x": float(cp["x"]), "y": float(cp["y"]),
-                "source": "mog2",
-            })
-            prev_f, prev_x = f, float(cp["x"])
+        if p0 is not None and _imp is not None and first_f - int(_imp) > 2:
+            _ax, _ay = float(first_ai["x"]), float(first_ai["y"])
+            _vx, _vy = _ax - p0[0], _ay - p0[1]
+            _seg2 = _vx * _vx + _vy * _vy
+            _best_by_f: dict = {}  # frame -> (dist, t, c): best dot per frame
+            if _seg2 > 1.0:
+                for c in pool:
+                    f = int(c["frame"])
+                    if not (int(_imp) - 2 <= f < first_f):
+                        continue
+                    if f in _ai_found_frames:
+                        continue
+                    t = ((c["x"] - p0[0]) * _vx + (c["y"] - p0[1]) * _vy) / _seg2
+                    if not (-0.05 <= t <= 1.05):
+                        continue
+                    _px, _py = p0[0] + t * _vx, p0[1] + t * _vy
+                    d = ((c["x"] - _px) ** 2 + (c["y"] - _py) ** 2) ** 0.5
+                    if d > 45.0:
+                        continue
+                    if f not in _best_by_f or d < _best_by_f[f][0]:
+                        _best_by_f[f] = (d, t, c)
+            _cands = [
+                (f, t, c) for f, (d, t, c) in sorted(_best_by_f.items())
+            ]
+            _prev_t = -0.05
+            for f, t, c in _cands:
+                if t < _prev_t - 0.08:
+                    continue  # steps back down the corridor — not flight
+                _prev_t = max(_prev_t, t)
+                added_launch.append({
+                    "frame": f, "found": True,
+                    "x": c["x"], "y": c["y"], "source": "mog2",
+                })
+
+        # ── Descent extension beyond the last AI pick ────────────────
+        # Extrapolate the arc (quadratic x/y in frame over the AI
+        # picks) and accept pool dots near the prediction, frames
+        # strictly and gradually increasing. The corridor widens the
+        # further out we extrapolate; a >45-frame silence ends it.
+        if len(ai_sorted) >= 3:
+            _fs = _np.array([float(p["frame"]) for p in ai_sorted])
+            _xs = _np.array([float(p["x"]) for p in ai_sorted])
+            _ys = _np.array([float(p["y"]) for p in ai_sorted])
+            _deg_x = 2 if len(ai_sorted) >= 4 else 1
+            _cx = _np.polyfit(_fs, _xs, _deg_x)
+            _cy = _np.polyfit(_fs, _ys, 2)
+            prev_f = last_f
+            for c in pool:
+                f = int(c["frame"])
+                if f <= prev_f:
+                    continue
+                if _f_cap is not None and f > _f_cap:
+                    break
+                if f - prev_f > 45:
+                    break  # trail went quiet — stop extending
+                pred_x = float(_np.polyval(_cx, f))
+                pred_y = float(_np.polyval(_cy, f))
+                tol = 40.0 + 0.35 * (f - last_f)
+                d = ((c["x"] - pred_x) ** 2 + (c["y"] - pred_y) ** 2) ** 0.5
+                if d > tol:
+                    continue
+                added_descent.append({
+                    "frame": f, "found": True,
+                    "x": c["x"], "y": c["y"], "source": "mog2",
+                })
+                prev_f = f
+
+    added = sorted(
+        added_launch + added_descent, key=lambda r: int(r["frame"]),
+    )
 
     stats = {
         "n_ai": len(ai_pts),
-        "n_cv": len(cv_track),
+        "n_cv": len(pool),
         "n_matched": n_matched,
         "n_added": len(added),
-        "corresponds": bool(corresponds),
+        "n_added_launch": len(added_launch),
+        "n_added_descent": len(added_descent),
+        "corresponds": bool(n_matched >= 2),
     }
 
     # Overlay: raw-motion heat + both point sets, for the produced-video
@@ -5744,7 +5824,7 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         try:
             img = cv2.imread(str(CLIPS_DIR / _raw))
             if img is not None:
-                for cp in cv_track:
+                for cp in pool:
                     cv2.circle(
                         img, (int(cp["x"]), int(cp["y"])), 7,
                         (255, 255, 255), 2, cv2.LINE_AA,
@@ -5765,9 +5845,10 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                     )
                 _lbl = (
                     f"MOG2 vs AI - yellow=AI picks ({len(ai_pts)}), "
-                    f"white=MOG2 chain ({len(cv_track)}), "
-                    f"red=added to arc ({len(added)}), "
-                    f"matched={n_matched}"
+                    f"white=MOG2 dots ({len(pool)}), "
+                    f"red=added to arc ({len(added)}: "
+                    f"{len(added_launch)} launch + "
+                    f"{len(added_descent)} descent), matched={n_matched}"
                 )
                 cv2.putText(img, _lbl, (12, 56), cv2.FONT_HERSHEY_SIMPLEX,
                             0.62, (0, 0, 0), 3, cv2.LINE_AA)
@@ -5791,10 +5872,17 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             "produce: mog2 layer for %s — no extension (%s)",
             clip_path.name, stats,
         )
-        return out if (overlay_name or cv_track) else None
+        return out if (overlay_name or pool) else None
 
+    # An added point beats an AI "not found" placeholder on the same
+    # frame; found AI picks always win (added never lands on one).
+    _added_frames = {int(a["frame"]) for a in added}
+    _base = [
+        rec for rec in ai_all
+        if rec.get("found") or int(rec.get("frame") or -1) not in _added_frames
+    ]
     merged = sorted(
-        ai_all + added, key=lambda rec: int(rec.get("frame") or 0),
+        _base + added, key=lambda rec: int(rec.get("frame") or 0),
     )
     try:
         from ..services.ai_tracer import render_tracer_video
