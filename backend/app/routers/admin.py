@@ -3800,16 +3800,37 @@ def render_wizard_tracer(
                         _have = {p["frame"] for p in ai_pts}
                         n_match = sum(1 for a in ai_pts if _near_track(a))
                         if n_match >= max(3, int(round(0.6 * len(ai_pts)))):
-                            merged = ai_pts + [
+                            # Insert anchors ONLY near frames the chain
+                            # actually covers (within 6 frames of a chain
+                            # point). During an off-screen stretch the AI
+                            # cannot see the ball either — "anchors" it
+                            # reports there are fabricated and previously
+                            # injected phantom points on no timed dot.
+                            _chain_frames = sorted(
+                                int(p["frame"]) for p in track
+                            )
+
+                            def _near_chain_frame(a) -> bool:
+                                fa = int(a["frame"])
+                                return any(
+                                    abs(fa - cf) <= 6 for cf in _chain_frames
+                                )
+
+                            _add_anchors = [
+                                a for a in ai_pts if _near_chain_frame(a)
+                            ]
+                            merged = _add_anchors + [
                                 p for p in track
                                 if int(p["frame"]) not in _have
                             ]
                             merged.sort(key=lambda p: int(p["frame"]))
                             log.info(
                                 "wizard hybrid: track VALIDATED wholesale — "
-                                "%d/%d anchors coincide with the CV track; "
-                                "keeping all %d CV pts + anchors",
+                                "%d/%d anchors coincide; keeping all %d CV "
+                                "pts + %d anchors (%d dropped as off-chain)",
                                 n_match, len(ai_pts), len(track),
+                                len(_add_anchors),
+                                len(ai_pts) - len(_add_anchors),
                             )
                             track = merged
                         else:

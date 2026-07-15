@@ -2753,11 +2753,17 @@ def _arc_track_from_heatmap(
     # verification — never a single reacquired point.
     end = work[-1]
     if float(end.y) <= 0.55 * h_nat:
+        # Re-entry must be NEAR THE TOP: a ball that exited through the
+        # top edge re-appears close to where it left in y. Gating starts
+        # to the exit height + a margin excludes descending NOISE ladders
+        # that begin mid-frame (tree flicker chains), which could out-span
+        # the real re-entry and win the selection.
+        _reentry_max_y = float(end.y) + 0.15 * h_nat
         cand_starts = [
             d for d in pts
             if int(d.frame) > int(end.frame)
             and int(d.frame) - int(end.frame) <= 90
-            and float(d.y) <= 0.6 * h_nat
+            and float(d.y) <= _reentry_max_y
             and abs(float(d.x) - float(end.x)) <= 0.45 * w_nat
         ]
         if not cand_starts:
