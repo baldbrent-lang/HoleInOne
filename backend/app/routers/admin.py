@@ -5502,6 +5502,7 @@ def _run_tracer(
     frame_label_offset: int = 0,
     ball_rest_hint: tuple | None = None,
     heat_start_frame: int | None = None,
+    heat_end_frame: int | None = None,
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -5557,6 +5558,7 @@ def _run_tracer(
         frame_label_offset=frame_label_offset,
         ball_rest_hint=ball_rest_hint,
         heat_start_frame=heat_start_frame,
+        heat_end_frame=heat_end_frame,
     )
     info["audio_impact"] = audio_impact
     info["sensitivity"] = float(sensitivity)
@@ -5645,6 +5647,12 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     _imp = (pipe.get("impact_refined") or {}).get("impact_frame")
     _rest = pipe.get("ball_rest_xy_native")
 
+    # Analysis window: impact-3 frames (margin for the strike) through
+    # impact + 4s. Heat outside it never accumulates — the golfer
+    # walking across the swing path BEFORE the shot, or wandering off
+    # AFTER the ball lands, leaves no residue in the flight corridor.
+    MOG2_LAYER_POST_IMPACT_SEC = 4.0
+    _fps = probe_fps(clip_path) or 30.0
     _pfx = f"mog2layer-{clip_path.stem}"
     _cv_url, cv_info, _cv_traced, _cv_dbg = _run_tracer(
         clip_path,
@@ -5655,10 +5663,11 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             (float(_rest[0]), float(_rest[1]))
             if _rest and len(_rest) == 2 else None
         ),
-        # Post-impact heat only (small margin for the strike itself):
-        # the golfer walking across the swing path BEFORE the shot must
-        # not leave motion residue in the flight corridor.
         heat_start_frame=(max(0, int(_imp) - 3) if _imp is not None else None),
+        heat_end_frame=(
+            int(_imp) + int(round(MOG2_LAYER_POST_IMPACT_SEC * _fps))
+            if _imp is not None else None
+        ),
     )
     # The classical traced video itself is a byproduct here — the AI
     # render (possibly extended below) is the deliverable.
@@ -5698,8 +5707,14 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         )
         prev_f = last_ai_f
         prev_x = float(ai_pts[-1]["x"])
+        _f_cap = (
+            int(_imp) + int(round(MOG2_LAYER_POST_IMPACT_SEC * _fps))
+            if _imp is not None else None
+        )
         for cp in tail:
             f = int(cp["frame"])
+            if _f_cap is not None and f > _f_cap:
+                break  # past the 4s post-impact analysis window
             if f - prev_f > 45:  # gap too big to trust
                 break
             step_x = float(cp["x"]) - prev_x

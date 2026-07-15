@@ -338,15 +338,18 @@ def render_tracer(
     frame_label_offset: int = 0,
     ball_rest_hint: tuple | None = None,
     heat_start_frame: int | None = None,
+    heat_end_frame: int | None = None,
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
 
-    `heat_start_frame`: when set, frames BEFORE it still feed the
-    background model (so it stays warmed) but contribute nothing to the
-    motion heatmap, the timed-dot mask store, or the candidate stream —
-    the whole analysis keys on post-impact motion only. Guards against
-    the golfer walking across the swing path before the shot leaving
-    heat in the flight corridor.
+    `heat_start_frame` / `heat_end_frame`: when set, frames outside
+    [start, end] still feed the background model (so it stays warmed)
+    but contribute nothing to the motion heatmap, the timed-dot mask
+    store, or the candidate stream — the whole analysis keys on the
+    given window only. Guards against the golfer walking across the
+    swing path before the shot (start) and post-shot activity like
+    walking off after the ball lands (end) leaving heat in the flight
+    corridor.
 
     `bg_algo`: "mog2" (default) or "knn" — which OpenCV background
     subtractor feeds candidate extraction. Everything downstream (hot
@@ -380,6 +383,7 @@ def render_tracer(
                 frame_label_offset=frame_label_offset,
                 ball_rest_hint=ball_rest_hint,
                 heat_start_frame=heat_start_frame,
+                heat_end_frame=heat_end_frame,
             )
         with _SENSITIVITY_LOCK:
             global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
@@ -408,6 +412,7 @@ def render_tracer(
                     frame_label_offset=frame_label_offset,
                     ball_rest_hint=ball_rest_hint,
                     heat_start_frame=heat_start_frame,
+                    heat_end_frame=heat_end_frame,
                 )
             finally:
                 (
@@ -436,6 +441,7 @@ def _render(
     frame_label_offset: int = 0,
     ball_rest_hint: tuple | None = None,
     heat_start_frame: int | None = None,
+    heat_end_frame: int | None = None,
 ) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -581,6 +587,7 @@ def _render(
             frame_debug_dir is not None
             and idx >= WARMUP_FRAMES
             and (heat_start_frame is None or idx >= heat_start_frame)
+            and (heat_end_frame is None or idx <= heat_end_frame)
         ):
             try:
                 _okp, _png = cv2.imencode(".png", fg_mask)
@@ -615,6 +622,9 @@ def _render(
         # golfer walking across the swing path before impact from
         # leaving motion residue in the flight corridor.
         if heat_start_frame is not None and idx < heat_start_frame:
+            idx += 1
+            continue
+        if heat_end_frame is not None and idx > heat_end_frame:
             idx += 1
             continue
         # Heatmap only accumulates when fg_mask lives in a consistent
