@@ -337,8 +337,16 @@ def render_tracer(
     bg_algo: str = "mog2",
     frame_label_offset: int = 0,
     ball_rest_hint: tuple | None = None,
+    heat_start_frame: int | None = None,
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
+
+    `heat_start_frame`: when set, frames BEFORE it still feed the
+    background model (so it stays warmed) but contribute nothing to the
+    motion heatmap, the timed-dot mask store, or the candidate stream —
+    the whole analysis keys on post-impact motion only. Guards against
+    the golfer walking across the swing path before the shot leaving
+    heat in the flight corridor.
 
     `bg_algo`: "mog2" (default) or "knn" — which OpenCV background
     subtractor feeds candidate extraction. Everything downstream (hot
@@ -371,6 +379,7 @@ def render_tracer(
                 bg_algo=bg_algo,
                 frame_label_offset=frame_label_offset,
                 ball_rest_hint=ball_rest_hint,
+                heat_start_frame=heat_start_frame,
             )
         with _SENSITIVITY_LOCK:
             global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
@@ -398,6 +407,7 @@ def render_tracer(
                     bg_algo=bg_algo,
                     frame_label_offset=frame_label_offset,
                     ball_rest_hint=ball_rest_hint,
+                    heat_start_frame=heat_start_frame,
                 )
             finally:
                 (
@@ -425,6 +435,7 @@ def _render(
     bg_algo: str = "mog2",
     frame_label_offset: int = 0,
     ball_rest_hint: tuple | None = None,
+    heat_start_frame: int | None = None,
 ) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -566,7 +577,11 @@ def _render(
         # show exactly what the detector saw at each FINAL track frame.
         # Only when a debug dir was requested (Edit wizard), never in
         # production produce runs.
-        if frame_debug_dir is not None and idx >= WARMUP_FRAMES:
+        if (
+            frame_debug_dir is not None
+            and idx >= WARMUP_FRAMES
+            and (heat_start_frame is None or idx >= heat_start_frame)
+        ):
             try:
                 _okp, _png = cv2.imencode(".png", fg_mask)
                 if _okp:
@@ -593,6 +608,13 @@ def _render(
             for cand in _detect_club_candidates_in_frame(det_frame):
                 club_line_candidates.append(cand)
         if idx < WARMUP_FRAMES:
+            idx += 1
+            continue
+        # Pre-heat-window frames only warm the background model (and the
+        # address/club scans above) — no heat, no candidates. Keeps a
+        # golfer walking across the swing path before impact from
+        # leaving motion residue in the flight corridor.
+        if heat_start_frame is not None and idx < heat_start_frame:
             idx += 1
             continue
         # Heatmap only accumulates when fg_mask lives in a consistent
@@ -1533,7 +1555,9 @@ def _detect_club_candidates_in_frame(det_frame):
     y_upper_max = h * CLUB_UPPER_Y_MAX_FRACTION
     out = []
     for line in lines:
-        x1, y1, x2, y2 = line[0]
+        # HoughLinesP output shape varies ((N,1,4) vs (N,4)) — ravel is
+        # safe for both; line[0] unpacks to an int on the flat shape.
+        x1, y1, x2, y2 = np.ravel(line)[:4]
         # Put upper endpoint first (smaller y).
         if y1 > y2:
             x1, y1, x2, y2 = x2, y2, x1, y1

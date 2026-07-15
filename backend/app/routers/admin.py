@@ -5501,6 +5501,7 @@ def _run_tracer(
     impact_frame_hint_override: int | None = None,
     frame_label_offset: int = 0,
     ball_rest_hint: tuple | None = None,
+    heat_start_frame: int | None = None,
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -5555,6 +5556,7 @@ def _run_tracer(
         bg_algo=bg_algo,
         frame_label_offset=frame_label_offset,
         ball_rest_hint=ball_rest_hint,
+        heat_start_frame=heat_start_frame,
     )
     info["audio_impact"] = audio_impact
     info["sensitivity"] = float(sensitivity)
@@ -5653,6 +5655,10 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             (float(_rest[0]), float(_rest[1]))
             if _rest and len(_rest) == 2 else None
         ),
+        # Post-impact heat only (small margin for the strike itself):
+        # the golfer walking across the swing path BEFORE the shot must
+        # not leave motion residue in the flight corridor.
+        heat_start_frame=(max(0, int(_imp) - 3) if _imp is not None else None),
     )
     # The classical traced video itself is a byproduct here — the AI
     # render (possibly extended below) is the deliverable.
