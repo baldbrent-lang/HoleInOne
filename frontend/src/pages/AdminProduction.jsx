@@ -434,6 +434,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       rawMotionUrl: s.tracer_raw_motion_url || null,
       rawMotionArcUrl: s.tracer_raw_motion_arc_url || null,
       rawMotionFramesUrl: s.tracer_raw_motion_frames_url || null,
+      // Produce's MOG2 layer-in evidence: raw heat + AI picks (yellow)
+      // + MOG2 chain (white) + points added to the arc (red).
+      mog2OverlayUrl: s.mog2_overlay_url || null,
     });
     // Remember which engine produced the saved tracer so clicking "Next"
     // on Step 1 reuses it instead of re-rendering (which would wipe the
@@ -1010,6 +1013,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             rawMotionUrl: t?.rawMotionUrl || null,
             rawMotionArcUrl: t?.rawMotionArcUrl || null,
             rawMotionFramesUrl: t?.rawMotionFramesUrl || null,
+            mog2OverlayUrl: t?.mog2OverlayUrl || null,
           }));
           setManualPositions({});
           // Persist the merged tracer (operator marks baked in) per
@@ -2565,6 +2569,7 @@ function TracerStep({
             rawMotionUrl: t?.rawMotionUrl || null,
             rawMotionArcUrl: t?.rawMotionArcUrl || null,
             rawMotionFramesUrl: t?.rawMotionFramesUrl || null,
+            mog2OverlayUrl: t?.mog2OverlayUrl || null,
       }));
       setManualPositions({});
       setClearedFrames(new Set());
@@ -3060,6 +3065,25 @@ function TracerStep({
               title="The raw-motion heatmap with each transient dot labelled by the frame it fired in — tells you exactly which frame a descent dot belongs to."
             >
               🔢 Frames on heat
+            </button>
+          )}
+          {tracer?.mog2OverlayUrl && (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto", padding: "1px 8px" }}
+              onClick={() =>
+                setImgView({
+                  url: tracer.mog2OverlayUrl,
+                  title:
+                    "MOG2 vs AI (from produce) — yellow = AI picks, " +
+                    "white = MOG2 chain, red = MOG2 points added to " +
+                    "the arc.",
+                })
+              }
+              title="Produce's MOG2 layer-in evidence: the raw motion heat with the AI tracer's picks (yellow), the MOG2 chain (white rings) and the points MOG2 added to the arc (red)."
+            >
+              🔥 MOG2 vs AI
             </button>
           )}
         </div>
