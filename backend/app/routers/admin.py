@@ -5618,6 +5618,69 @@ def _run_tracer(
     )
 
 
+def _select_pool_dots_along_path(
+    pool: list, path_pts: list, skip_frames: set,
+    f_lo: int, f_hi: int | None, tol: float = 45.0,
+) -> list[dict]:
+    """Pick MOG2 dots lying along an ordered flight polyline (the AI's
+    traced path), best dot per frame, with frames progressing
+    monotonically ALONG the path — the 'frames increase gradually as the
+    line extends' rule, enforced in code no matter who drew the line."""
+    import math as _math
+
+    segs = []
+    s0 = 0.0
+    for a, b in zip(path_pts[:-1], path_pts[1:]):
+        _l = _math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+        segs.append((a, b, s0, _l))
+        s0 += _l
+    total = s0
+    if total <= 1.0:
+        return []
+
+    def _proj(px, py):
+        best = (1e18, 0.0)
+        for a, b, s_off, _l in segs:
+            if _l <= 1e-6:
+                continue
+            t = (
+                (px - a["x"]) * (b["x"] - a["x"])
+                + (py - a["y"]) * (b["y"] - a["y"])
+            ) / (_l * _l)
+            t = min(1.0, max(0.0, t))
+            qx = a["x"] + t * (b["x"] - a["x"])
+            qy = a["y"] + t * (b["y"] - a["y"])
+            d = _math.hypot(px - qx, py - qy)
+            if d < best[0]:
+                best = (d, s_off + t * _l)
+        return best
+
+    best_by_f: dict = {}
+    for c in pool:
+        f = int(c["frame"])
+        if f < f_lo or (f_hi is not None and f > f_hi) or f in skip_frames:
+            continue
+        d, s = _proj(float(c["x"]), float(c["y"]))
+        if d > tol:
+            continue
+        if f not in best_by_f or d < best_by_f[f][0]:
+            best_by_f[f] = (d, s, c)
+
+    slack = max(20.0, 0.05 * total)
+    sel: list[dict] = []
+    prev_s = -slack
+    for f in sorted(best_by_f):
+        d, s, c = best_by_f[f]
+        if s < prev_s - slack:
+            continue  # steps back down the path — not flight
+        prev_s = max(prev_s, s)
+        sel.append({
+            "frame": f, "found": True,
+            "x": float(c["x"]), "y": float(c["y"]), "source": "mog2",
+        })
+    return sel
+
+
 def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     """Post-produce MOG2 layer over a successful AI tracer run.
 
@@ -5716,7 +5779,43 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         int(_imp) + int(round(MOG2_LAYER_POST_IMPACT_SEC * _fps))
         if _imp is not None else None
     )
+
+    # AI path trace (preferred corridor): one Claude vision call on the
+    # heat composite with the pool dots ringed — the model reads the
+    # gestalt (launch chain vs club fan vs water/foliage noise) far
+    # better than a parabola extrapolated from clustered picks. Its
+    # waypoints define WHERE to look; the frame-monotonic selection in
+    # code still decides WHICH dots qualify.
+    ai_path_info = {"used": False, "n_points": 0, "reason": None}
+    _path_pts = None
+    if pool and ai_pts and os.environ.get("ANTHROPIC_API_KEY"):
+        _raw0 = cv_info.get("raw_motion_image")
+        if _raw0 and (CLIPS_DIR / _raw0).exists():
+            try:
+                _img0 = cv2.imread(str(CLIPS_DIR / _raw0))
+                if _img0 is not None:
+                    for cp in pool:
+                        cv2.circle(
+                            _img0, (int(cp["x"]), int(cp["y"])), 7,
+                            (255, 255, 255), 2, cv2.LINE_AA,
+                        )
+                    _pin = f"{clip_path.stem}_mog2_path_input.jpg"
+                    cv2.imwrite(
+                        str(CLIPS_DIR / _pin), _img0,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+                    )
+                    from ..services.ai_tracer import trace_ball_path_on_heat
+
+                    _tp = trace_ball_path_on_heat(CLIPS_DIR / _pin)
+                    ai_path_info["reason"] = _tp.get("reason")
+                    if _tp.get("found") and len(_tp.get("points") or []) >= 3:
+                        _path_pts = _tp["points"]
+                        ai_path_info["n_points"] = len(_path_pts)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("mog2 layer: AI path trace failed: %s", exc)
+
     added_launch: list[dict] = []
+    added_mid: list[dict] = []
     added_descent: list[dict] = []
     descent_debug: dict | None = None
     # Even a SINGLE AI pick is enough to anchor the layer: the launch
@@ -5730,6 +5829,29 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         first_f, last_f = int(first_ai["frame"]), int(last_ai["frame"])
         _ai_found_frames = {int(p["frame"]) for p in ai_sorted}
 
+        # ── AI-path corridor (when the vision trace found a flight) ──
+        # Dots along the traced polyline, best per frame, frames
+        # monotonic along the path — covers launch, mid-gaps AND the
+        # tail past the last pick in one pass. The geometric phases
+        # below only run when there's no traced path to lean on.
+        if _path_pts:
+            _sel = _select_pool_dots_along_path(
+                pool, _path_pts, _ai_found_frames,
+                f_lo=(int(_imp) - 2 if _imp is not None else 0),
+                f_hi=_f_cap,
+            )
+            added_launch = [p for p in _sel if p["frame"] < first_f]
+            added_mid = [
+                p for p in _sel if first_f <= p["frame"] <= last_f
+            ]
+            added_descent = [p for p in _sel if p["frame"] > last_f]
+            ai_path_info["used"] = True
+            descent_debug = {
+                "ai_path": True, "seen": len(_sel), "step_rej": 0,
+                "corr_rej": 0, "samples": [], "rescue": False,
+                "stopped": "AI path corridor mapped the flight",
+            }
+
         # ── Launch fill: impact position → first AI pick ─────────────
         # The ball demonstrably travelled from the strike to the first
         # AI point, so MOG2 dots inside that corridor with frames
@@ -5740,7 +5862,12 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             (float(_rest[0]), float(_rest[1]))
             if _rest and len(_rest) == 2 else None
         )
-        if p0 is not None and _imp is not None and first_f - int(_imp) > 2:
+        if (
+            _path_pts is None
+            and p0 is not None
+            and _imp is not None
+            and first_f - int(_imp) > 2
+        ):
             _ax, _ay = float(first_ai["x"]), float(first_ai["y"])
             _vx, _vy = _ax - p0[0], _ay - p0[1]
             _seg2 = _vx * _vx + _vy * _vy
@@ -5784,7 +5911,7 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         _known = sorted(
             ai_sorted + added_launch, key=lambda r: int(r["frame"]),
         )
-        if len(_known) >= 3:
+        if _path_pts is None and len(_known) >= 3:
             _kf0 = [float(p["frame"]) for p in _known]
             _kx0 = [float(p["x"]) for p in _known]
             _ky0 = [float(p["y"]) for p in _known]
@@ -5883,7 +6010,8 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             descent_debug = _desc_dbg
 
     added = sorted(
-        added_launch + added_descent, key=lambda r: int(r["frame"]),
+        added_launch + added_mid + added_descent,
+        key=lambda r: int(r["frame"]),
     )
 
     stats = {
@@ -5892,8 +6020,10 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         "n_matched": n_matched,
         "n_added": len(added),
         "n_added_launch": len(added_launch),
+        "n_added_mid": len(added_mid),
         "n_added_descent": len(added_descent),
         "corresponds": bool(n_matched >= 2),
+        "ai_path": ai_path_info,
         "descent_debug": descent_debug,
     }
     try:
@@ -5914,6 +6044,14 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         try:
             img = cv2.imread(str(CLIPS_DIR / _raw))
             if img is not None:
+                if _path_pts:
+                    _ppoly = _np.array(
+                        [(int(p["x"]), int(p["y"])) for p in _path_pts],
+                        _np.int32,
+                    )
+                    cv2.polylines(
+                        img, [_ppoly], False, (255, 0, 255), 2, cv2.LINE_AA,
+                    )
                 for cp in pool:
                     cv2.circle(
                         img, (int(cp["x"]), int(cp["y"])), 7,
@@ -5937,8 +6075,13 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                     f"MOG2 vs AI - yellow=AI picks ({len(ai_pts)}), "
                     f"white=MOG2 dots ({len(pool)}), "
                     f"red=added to arc ({len(added)}: "
-                    f"{len(added_launch)} launch + "
+                    f"{len(added_launch)} launch + {len(added_mid)} mid + "
                     f"{len(added_descent)} descent), matched={n_matched}"
+                    + (
+                        f", magenta=AI-traced path"
+                        f" ({ai_path_info['n_points']} waypoints)"
+                        if ai_path_info["used"] else ""
+                    )
                 )
                 cv2.putText(img, _lbl, (12, 56), cv2.FONT_HERSHEY_SIMPLEX,
                             0.62, (0, 0, 0), 3, cv2.LINE_AA)
