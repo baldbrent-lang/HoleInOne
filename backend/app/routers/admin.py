@@ -5797,6 +5797,8 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
 
             _cx, _cy = _fit()
             prev_f = last_f
+            prev_x = float(_known[-1]["x"])
+            prev_y = float(_known[-1]["y"])
             for c in pool:
                 f = int(c["frame"])
                 if f <= prev_f:
@@ -5805,9 +5807,30 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                     break
                 if f - prev_f > 45:
                     break  # trail went quiet — stop extending
+                gap = f - prev_f
+                # STEP gate first: the trail extends gradually, so the
+                # next dot must be a plausible hop from the PREVIOUS
+                # accepted dot — an off-chain dot that happens to sit
+                # near the extrapolated curve can't drag the fit off the
+                # real chain. The allowance is VELOCITY-AWARE (from the
+                # running fit's derivative): a ball accelerating down
+                # the descent legitimately moves 20-40px/frame, which a
+                # fixed slope would reject and the whole descending
+                # chain would never map.
+                _vel = float(_np.hypot(
+                    _np.polyval(_np.polyder(_cx), prev_f),
+                    _np.polyval(_np.polyder(_cy), prev_f),
+                ))
+                step = ((c["x"] - prev_x) ** 2
+                        + (c["y"] - prev_y) ** 2) ** 0.5
+                if step > 30.0 + gap * max(9.0, 1.6 * _vel):
+                    continue
+                # Then the arc corridor: near the running fit (refit on
+                # every acceptance, so it follows the trail). Wider than
+                # before — the step gate now carries the precision.
                 pred_x = float(_np.polyval(_cx, f))
                 pred_y = float(_np.polyval(_cy, f))
-                tol = 40.0 + 0.35 * (f - prev_f)
+                tol = 60.0 + 0.6 * (f - last_f)
                 d = ((c["x"] - pred_x) ** 2 + (c["y"] - pred_y) ** 2) ** 0.5
                 if d > tol:
                     continue
@@ -5815,14 +5838,13 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                     "frame": f, "found": True,
                     "x": c["x"], "y": c["y"], "source": "mog2",
                 })
-                # Refit with the accepted dot so the corridor FOLLOWS
-                # the actual trail instead of drifting off the initial
-                # extrapolation on long extensions.
                 _kf.append(float(f))
                 _kx.append(float(c["x"]))
                 _ky.append(float(c["y"]))
                 _cx, _cy = _fit()
                 prev_f = f
+                prev_x = float(c["x"])
+                prev_y = float(c["y"])
 
     added = sorted(
         added_launch + added_descent, key=lambda r: int(r["frame"]),
