@@ -5718,6 +5718,7 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     )
     added_launch: list[dict] = []
     added_descent: list[dict] = []
+    descent_debug: dict | None = None
     # Even a SINGLE AI pick is enough to anchor the layer: the launch
     # corridor (impact position → that pick) needs nothing else, and the
     # dots it fills in then anchor the extrapolation fit (real case:
@@ -5784,67 +5785,102 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             ai_sorted + added_launch, key=lambda r: int(r["frame"]),
         )
         if len(_known) >= 3:
-            _kf = [float(p["frame"]) for p in _known]
-            _kx = [float(p["x"]) for p in _known]
-            _ky = [float(p["y"]) for p in _known]
+            _kf0 = [float(p["frame"]) for p in _known]
+            _kx0 = [float(p["x"]) for p in _known]
+            _ky0 = [float(p["y"]) for p in _known]
 
-            def _fit():
-                _deg_x = 2 if len(_kf) >= 4 else 1
-                return (
-                    _np.polyfit(_kf, _kx, _deg_x),
-                    _np.polyfit(_kf, _ky, 2),
-                )
+            def _run_extension(corr_base, corr_slope, dbg):
+                """One trail-following pass beyond the last AI pick.
+                Gates per dot: velocity-aware STEP from the previous
+                accepted dot (continuity — keeps off-chain dots from
+                dragging the fit), then an arc corridor around the
+                running fit (refit on every acceptance). Every
+                rejection is counted, and the first few are sampled,
+                so a 0-add result explains itself in mog2_stats."""
+                picked: list[dict] = []
+                kf, kx, ky = list(_kf0), list(_kx0), list(_ky0)
 
-            _cx, _cy = _fit()
-            prev_f = last_f
-            prev_x = float(_known[-1]["x"])
-            prev_y = float(_known[-1]["y"])
-            for c in pool:
-                f = int(c["frame"])
-                if f <= prev_f:
-                    continue
-                if _f_cap is not None and f > _f_cap:
-                    break
-                if f - prev_f > 45:
-                    break  # trail went quiet — stop extending
-                gap = f - prev_f
-                # STEP gate first: the trail extends gradually, so the
-                # next dot must be a plausible hop from the PREVIOUS
-                # accepted dot — an off-chain dot that happens to sit
-                # near the extrapolated curve can't drag the fit off the
-                # real chain. The allowance is VELOCITY-AWARE (from the
-                # running fit's derivative): a ball accelerating down
-                # the descent legitimately moves 20-40px/frame, which a
-                # fixed slope would reject and the whole descending
-                # chain would never map.
-                _vel = float(_np.hypot(
-                    _np.polyval(_np.polyder(_cx), prev_f),
-                    _np.polyval(_np.polyder(_cy), prev_f),
-                ))
-                step = ((c["x"] - prev_x) ** 2
-                        + (c["y"] - prev_y) ** 2) ** 0.5
-                if step > 30.0 + gap * max(9.0, 1.6 * _vel):
-                    continue
-                # Then the arc corridor: near the running fit (refit on
-                # every acceptance, so it follows the trail). Wider than
-                # before — the step gate now carries the precision.
-                pred_x = float(_np.polyval(_cx, f))
-                pred_y = float(_np.polyval(_cy, f))
-                tol = 60.0 + 0.6 * (f - last_f)
-                d = ((c["x"] - pred_x) ** 2 + (c["y"] - pred_y) ** 2) ** 0.5
-                if d > tol:
-                    continue
-                added_descent.append({
-                    "frame": f, "found": True,
-                    "x": c["x"], "y": c["y"], "source": "mog2",
-                })
-                _kf.append(float(f))
-                _kx.append(float(c["x"]))
-                _ky.append(float(c["y"]))
-                _cx, _cy = _fit()
-                prev_f = f
-                prev_x = float(c["x"])
-                prev_y = float(c["y"])
+                def _fit():
+                    _deg_x = 2 if len(kf) >= 4 else 1
+                    return (
+                        _np.polyfit(kf, kx, _deg_x),
+                        _np.polyfit(kf, ky, 2),
+                    )
+
+                cx, cy = _fit()
+                pf = last_f
+                px = float(_known[-1]["x"])
+                py = float(_known[-1]["y"])
+                for c in pool:
+                    f = int(c["frame"])
+                    if f <= pf:
+                        continue
+                    if _f_cap is not None and f > _f_cap:
+                        dbg["stopped"] = f"4s cap at f{f}"
+                        break
+                    if f - pf > 45:
+                        dbg["stopped"] = (
+                            f"gap: no accepted dot between f{pf} and f{f}"
+                        )
+                        break
+                    dbg["seen"] += 1
+                    gap = f - pf
+                    vel = float(_np.hypot(
+                        _np.polyval(_np.polyder(cx), pf),
+                        _np.polyval(_np.polyder(cy), pf),
+                    ))
+                    step = ((c["x"] - px) ** 2 + (c["y"] - py) ** 2) ** 0.5
+                    allow = 30.0 + gap * max(9.0, 1.6 * vel)
+                    pred_x = float(_np.polyval(cx, f))
+                    pred_y = float(_np.polyval(cy, f))
+                    tol = corr_base + corr_slope * (f - last_f)
+                    d = ((c["x"] - pred_x) ** 2
+                         + (c["y"] - pred_y) ** 2) ** 0.5
+                    if step > allow or d > tol:
+                        if step > allow:
+                            dbg["step_rej"] += 1
+                        else:
+                            dbg["corr_rej"] += 1
+                        if len(dbg["samples"]) < 5:
+                            dbg["samples"].append({
+                                "f": f,
+                                "step": round(step),
+                                "allow": round(allow),
+                                "arc_d": round(d),
+                                "tol": round(tol),
+                            })
+                        continue
+                    picked.append({
+                        "frame": f, "found": True,
+                        "x": c["x"], "y": c["y"], "source": "mog2",
+                    })
+                    kf.append(float(f))
+                    kx.append(float(c["x"]))
+                    ky.append(float(c["y"]))
+                    cx, cy = _fit()
+                    pf, px, py = f, float(c["x"]), float(c["y"])
+                if dbg.get("stopped") is None:
+                    dbg["stopped"] = "end of pool"
+                return picked
+
+            _desc_dbg = {
+                "seen": 0, "step_rej": 0, "corr_rej": 0,
+                "stopped": None, "samples": [], "rescue": False,
+            }
+            added_descent = _run_extension(60.0, 0.6, _desc_dbg)
+            if not added_descent:
+                # Rescue pass: the corridor near an apex-clustered fit
+                # is the most likely mis-shape — double it; the step
+                # gate still enforces chain continuity so noise stays
+                # out.
+                _desc_dbg2 = {
+                    "seen": 0, "step_rej": 0, "corr_rej": 0,
+                    "stopped": None, "samples": [], "rescue": True,
+                }
+                added_descent = _run_extension(120.0, 1.2, _desc_dbg2)
+                if added_descent:
+                    _desc_dbg = _desc_dbg2
+            descent_debug = _desc_dbg
 
     added = sorted(
         added_launch + added_descent, key=lambda r: int(r["frame"]),
@@ -5858,7 +5894,16 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         "n_added_launch": len(added_launch),
         "n_added_descent": len(added_descent),
         "corresponds": bool(n_matched >= 2),
+        "descent_debug": descent_debug,
     }
+    try:
+        import json as _json
+        log.info(
+            "produce: mog2 layer %s stats: %s",
+            clip_path.name, _json.dumps(stats),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     # Overlay: raw-motion heat + both point sets, for the produced-video
     # button. Drawn even when nothing was added — seeing WHY (no chain,

@@ -298,10 +298,18 @@ function ProducedTile({ clips, swings, onOpenViewer }) {
           }}
           title={
             curSwing.mog2_stats
-              ? `AI picks: ${curSwing.mog2_stats.n_ai ?? "?"} · MOG2 chain: ` +
+              ? `AI picks: ${curSwing.mog2_stats.n_ai ?? "?"} · MOG2 dots: ` +
                 `${curSwing.mog2_stats.n_cv ?? "?"} · matched: ` +
                 `${curSwing.mog2_stats.n_matched ?? "?"} · added to arc: ` +
-                `${curSwing.mog2_stats.n_added ?? 0}`
+                `${curSwing.mog2_stats.n_added ?? 0}` +
+                (curSwing.mog2_stats.n_added_descent === 0 &&
+                 curSwing.mog2_stats.descent_debug
+                  ? ` · descent 0 because: ` +
+                    `${curSwing.mog2_stats.descent_debug.stopped || "?"} ` +
+                    `(seen ${curSwing.mog2_stats.descent_debug.seen ?? 0}, ` +
+                    `step-rejected ${curSwing.mog2_stats.descent_debug.step_rej ?? 0}, ` +
+                    `corridor-rejected ${curSwing.mog2_stats.descent_debug.corr_rej ?? 0})`
+                  : "")
               : "MOG2 raw motion heat with AI + MOG2 plot points"
           }
         >
