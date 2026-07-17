@@ -4166,10 +4166,11 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
           </button>
         </div>
         <p className="small muted" style={{ marginTop: 0 }}>
-          The clip is also being produced &amp; saved normally. Same pipeline
-          as Produce — this just shows the work. Only swings that survive
-          every filter get the classical-CV vs AI tracer comparison below;
-          eliminated ones are skipped (produce skips them too).
+          One run, two views: the clip is produced &amp; saved normally, and
+          this report renders that SAME run&apos;s recorded work — the exact
+          heat images the AI judge saw, the exact ball-departure calls, the
+          exact decisions. Below, each surviving swing shows the production
+          tracer next to a fresh classical-CV comparison on the same window.
         </p>
         <div className="small" style={{ marginBottom: 12 }}>
           {data.running
@@ -4179,6 +4180,7 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
           {data.ai_available
             ? "AI tracer: on"
             : "AI tracer: OFF (set ANTHROPIC_API_KEY on this deployment)"}
+          {data.single_run ? " · 🔗 single run — produce's own record" : ""}
           {data.error ? ` · error: ${data.error}` : ""}
         </div>
 
@@ -4485,7 +4487,10 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
               {/* AI */}
               <div>
                 <div style={{ marginBottom: 6 }}>
-                  <strong>AI tracer</strong> — {okBadge(s.ai?.ok)}
+                  <strong>
+                    {s.ai?.production ? "Production tracer" : "AI tracer"}
+                  </strong>
+                  {s.ai?.engine ? ` (${s.ai.engine})` : ""} — {okBadge(s.ai?.ok)}
                 </div>
                 {stat("address frame", s.ai?.address_frame)}
                 {stat("impact frame", s.ai?.impact_frame)}
