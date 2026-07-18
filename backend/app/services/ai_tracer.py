@@ -4416,19 +4416,56 @@ def track_launch_from_rest(
             if x1 - x0 < 3 * r or y1 - y0 < 3 * r:
                 out["reason"] = "square left the frame"
                 break
-            diff = cv2.absdiff(
-                cur_g[y0:y1, x0:x1], prev_g[y0:y1, x0:x1],
-            )
+            crop_g = cur_g[y0:y1, x0:x1]
+            diff = cv2.absdiff(crop_g, prev_g[y0:y1, x0:x1])
             mask = (diff >= 20).astype(np.uint8)
             mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
             n, lbl, stats_, cent = cv2.connectedComponentsWithStats(mask)
+            _crop_mean = float(crop_g.mean())
             best = None
             for i in range(1, n):
                 area = int(stats_[i, cv2.CC_STAT_AREA])
                 if area < 3 or area > (3.5 * r) ** 2:
                     continue  # not ball-sized motion
                 cx_, cy_ = float(cent[i][0]) + x0, float(cent[i][1]) + y0
+                # The vacated rest spot keeps firing as motion for ~10
+                # frames (background ghost) — never the ball.
+                if ((cx_ - rx) ** 2 + (cy_ - ry) ** 2) ** 0.5 < 1.5 * r:
+                    continue
+                # BALL-likeness: the ball is a small BRIGHT blob in the
+                # current frame, not just moving pixels (shirt / arm
+                # motion passes the size gate but isn't brighter than
+                # its surroundings).
+                _px = int(round(cx_ - x0)); _py = int(round(cy_ - y0))
+                _p5 = crop_g[
+                    max(0, _py - 2):_py + 3, max(0, _px - 2):_px + 3,
+                ]
+                if _p5.size == 0 or float(_p5.mean()) < _crop_mean + 15.0:
+                    continue
+                if vx is None:
+                    # FIRST find: the ball just launched — it must be
+                    # ABOVE the rest spot and clearly displaced from it
+                    # (an up-cone, like the rest-lock's seed).
+                    if cy_ > ry - 2.0:
+                        continue
+                    if abs(cx_ - rx) > (ry - cy_) + 60.0:
+                        continue
+                else:
+                    # Aim by trajectory: the hop from the last plot
+                    # point must roughly agree with the velocity (flight
+                    # never u-turns), and stay within a velocity-scaled
+                    # accept radius of the prediction.
+                    _sx, _sy = cx_ - last_x, cy_ - last_y
+                    _sm = (_sx ** 2 + _sy ** 2) ** 0.5
+                    _vm = (vx ** 2 + vy ** 2) ** 0.5
+                    if _vm > 6.0 and _sm > 1.0:
+                        if (_sx * vx + _sy * vy) < 0.2 * _sm * _vm:
+                            continue
                 d = ((cx_ - pred_x) ** 2 + (cy_ - pred_y) ** 2) ** 0.5
+                if vx is not None:
+                    _vm = (vx ** 2 + vy ** 2) ** 0.5
+                    if d > max(40.0, 2.2 * _vm * gap):
+                        continue
                 if best is None or d < best[0]:
                     best = (d, cx_, cy_, area)
             found = best is not None
@@ -4475,9 +4512,8 @@ def track_launch_from_rest(
 
         if debug_dir is not None and tiles:
             try:
-                step = max(1, len(tiles) // 36)
-                sel = tiles[::step]
-                TW = 150
+                sel = tiles[:150]  # EVERY frame (capped for sanity)
+                TW = 130
                 rendered = []
                 for (tf, crop, found, fx, fy, bx0, by0) in sel:
                     ch, cw = crop.shape[:2]
