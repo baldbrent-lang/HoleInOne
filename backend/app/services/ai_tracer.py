@@ -6170,6 +6170,7 @@ def run_full_ai_tracer_pipeline(
     examples_by_kind: dict | None = None,
     rest_anchor_fallback: tuple[float, float] | None = None,
     render_video: bool = True,
+    ball_track_enabled: bool = True,
 ) -> dict:
     """Run the complete AI tracer pipeline (address → handedness →
     impact → refine → ball-track → tracer render) on a single clip.
@@ -6226,10 +6227,19 @@ def run_full_ai_tracer_pipeline(
     if not HAS_CV:
         result["error"] = "opencv not installed"
         return result
-    if not HAS_ANTHROPIC:
+    # AI is only REQUIRED when a Claude call can actually happen: the
+    # ball track (if enabled), impact detection (no override), or the
+    # resting-ball fallback (no override). A fully-pinned swing with the
+    # track disabled runs the whole pipeline with zero API calls.
+    _may_need_api = (
+        ball_track_enabled
+        or impact_frame_override is None
+        or ball_at_rest_override is None
+    )
+    if _may_need_api and not HAS_ANTHROPIC:
         result["error"] = "anthropic SDK not installed"
         return result
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if _may_need_api and not os.environ.get("ANTHROPIC_API_KEY"):
         result["error"] = "ANTHROPIC_API_KEY not set in environment"
         return result
 
@@ -6326,10 +6336,37 @@ def run_full_ai_tracer_pipeline(
             addr_idx, int(audio_impact_info["impact_frame"]), 1.5,
         )
     else:
-        address_info = find_address_frame(
-            input_path, output_image_path=address_image_path, model=model,
-            examples=(examples_by_kind or {}).get("address"),
-        )
+        # No override and no confident audio: derive a conservative
+        # address anyway (0.5s into the clip — produce cuts put impact
+        # ~2s in, so the vision-impact window [addr+1, addr+2s] still
+        # covers it). The find_address_frame vision call is retired
+        # per operator: address is always impact-1.5s when impact is
+        # known, and never worth an Opus call when it isn't.
+        addr_idx = max(0, int(round(0.5 * fps_val)))
+        if HAS_CV:
+            try:
+                cap = cv2.VideoCapture(str(input_path))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, addr_idx)
+                ok_read, frame = cap.read()
+                cap.release()
+                if ok_read and frame is not None:
+                    cv2.imwrite(
+                        str(address_image_path), frame,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 92],
+                    )
+            except Exception as exc:  # pragma: no cover
+                log.warning(
+                    "ai_tracer: heuristic address frame grab failed: %s",
+                    exc,
+                )
+        address_info = {
+            "ok": True, "error": None, "address_frame": addr_idx,
+            "confidence": "low",
+            "notes": "heuristic 0.5s fallback (vision address retired)",
+            "model": None, "frames_sent": [],
+            "saved_image": address_image_path.exists(),
+            "method": "heuristic",
+        }
     result["address"] = address_info
     if address_image_path.exists():
         result["address_image_path"] = address_image_path
@@ -6376,22 +6413,22 @@ def run_full_ai_tracer_pipeline(
             int(ball_at_rest_override[0]), int(ball_at_rest_override[1]), nw, nh,
         )
     else:
-        handedness_info = detect_handedness_at_address(
-            input_path, addr_idx, model=model,
-            examples=(examples_by_kind or {}).get("handedness"),
-        )
-        # Operator can override just the handedness label without
-        # touching the AI's ball-at-rest pick.
-        if (
-            handedness_override in ("right", "left", "unknown")
-            and handedness_info.get("ok")
-        ):
-            handedness_info["handedness"] = handedness_override
-            handedness_info["confidence"] = "manual"
-            handedness_info["notes"] = (
-                (handedness_info.get("notes") or "")
-                + " | handedness manually set"
-            ).strip(" |")
+        # Vision handedness call retired per operator (handedness
+        # doesn't matter downstream; the ball position comes from the
+        # found-ball override or the resting-ball fallback at step 6).
+        handedness_info = {
+            "ok": True, "error": None,
+            "handedness": (
+                handedness_override
+                if handedness_override in ("right", "left", "unknown")
+                else "unknown"
+            ),
+            "ball_x": None, "ball_y": None,
+            "image_width": None, "image_height": None,
+            "confidence": None, "method": "retired",
+            "model": None,
+            "notes": "vision handedness call retired",
+        }
     result["handedness"] = handedness_info
     if handedness_info.get("ok") and handedness_info.get("method") != "manual_override":
         annotate_address_with_shaft(
@@ -6532,17 +6569,29 @@ def run_full_ai_tracer_pipeline(
 
     # --- Step 5: per-frame ball tracking ---
     track_prefix = f"{output_prefix}_track"
-    ball_track_info = track_ball_after_impact(
-        input_path,
-        int(refined_impact_info["impact_frame"]),
-        output_dir=output_dir,
-        output_prefix=track_prefix,
-        ball_xy_sent=ball_xy_sent,
-        ball_sent_dims=ball_sent_dims,
-        max_frames=int(ball_track_max_frames_override)
-            if ball_track_max_frames_override is not None else None,
-        model=model,
-    )
+    if not ball_track_enabled:
+        # AI ball track disabled (operator: the launch tracker +
+        # rest-lock supply the flight now). NOT deleted — flip
+        # settings.ai_ball_track_enabled / AI_BALL_TRACK_ENABLED to
+        # bring it back.
+        ball_track_info = {
+            "ok": True, "error": None, "frames": [],
+            "n_frames_found": 0, "n_frames_processed": 0,
+            "skipped": "ai ball track disabled",
+        }
+        log.info("ai_tracer: ball track SKIPPED (disabled by config)")
+    else:
+        ball_track_info = track_ball_after_impact(
+            input_path,
+            int(refined_impact_info["impact_frame"]),
+            output_dir=output_dir,
+            output_prefix=track_prefix,
+            ball_xy_sent=ball_xy_sent,
+            ball_sent_dims=ball_sent_dims,
+            max_frames=int(ball_track_max_frames_override)
+                if ball_track_max_frames_override is not None else None,
+            model=model,
+        )
 
     # Step 5b: merge operator-supplied manual ball positions into the
     # AI-tracked frames. Existing entries with the same frame number

@@ -132,6 +132,11 @@ class Settings(BaseSettings):
     # check rejects EVERY swing, all are kept (scene may be blind to the
     # ball, e.g. distant course framing). Env: SWING_HEAT_CHECK_ENABLED=0.
     swing_heat_check_enabled: bool = True
+    # AI per-frame ball track (12 Opus vision calls/swing — the single
+    # biggest cost item). OFF by default: the pixel launch tracker +
+    # rest-lock supply the flight now. Set AI_BALL_TRACK_ENABLED=1 to
+    # bring it back.
+    ai_ball_track_enabled: bool = False
 
     # Ball-flight tracer engine for produced clips. "ai" (default) uses the
     # Claude vision tracer; "classical" uses the motion/parabola CV tracer.

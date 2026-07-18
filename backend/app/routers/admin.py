@@ -4808,6 +4808,7 @@ def render_wizard_tracer(
         # additions merged in) — the pipeline's full-length render on a
         # long multi-swing source was the proxy-timeout killer.
         render_video=(engine != "ai_mog2"),
+        ball_track_enabled=settings.ai_ball_track_enabled,
     )
 
     def _public_url(p):
@@ -6880,7 +6881,16 @@ def _trace_segment(
     it leave). When set they become hard overrides in the AI pipeline —
     which then SKIPS its audio impact, vision impact, refine, address
     and handedness calls entirely (frame indices are CUT-relative)."""
-    use_ai = settings.tracer_engine == "ai" and bool(os.environ.get("ANTHROPIC_API_KEY"))
+    # A departure-pinned swing with the AI ball track disabled makes
+    # ZERO api calls in the pipeline — it may run without a key.
+    _pinned_zero_ai = (
+        verified_impact_frame is not None
+        and bool(verified_rest_xy)
+        and not settings.ai_ball_track_enabled
+    )
+    use_ai = settings.tracer_engine == "ai" and (
+        bool(os.environ.get("ANTHROPIC_API_KEY")) or _pinned_zero_ai
+    )
     if use_ai:
         try:
             prefix = f"{clip_path.stem}_ai-{secrets.token_hex(3)}"
@@ -6903,6 +6913,11 @@ def _trace_segment(
                     int(verified_impact_frame)
                     if verified_impact_frame is not None else None
                 ),
+                ball_track_enabled=settings.ai_ball_track_enabled,
+                # With the track disabled there are no AI points to
+                # draw — the layer's extended render is the deliverable,
+                # so skip the pipeline's full-clip render pass entirely.
+                render_video=settings.ai_ball_track_enabled,
             )
             # Departure-pinned anchors are already pixel-verified on the
             # FULL source — the layer must trust them, not re-check on
@@ -6915,14 +6930,23 @@ def _trace_segment(
                 # join the layer's dot pool — per-frame, pixel-exact.
                 r["launch_points"] = launch_points
             tvp = r.get("tracer_video_path")
-            if r.get("ok") and tvp and Path(tvp).exists():
-                p = Path(tvp)
-                compress_for_email(p)  # transcode mp4v → H.264 for browsers
-                if p.exists() and p.stat().st_size > 0:
-                    url = (
-                        f"{settings.app_base_url}/uploads/clips/{p.name}"
-                        f"?v={int(p.stat().st_mtime)}"
-                    )
+            if r.get("ok"):
+                # The pipeline's own render is optional now: with the AI
+                # ball track disabled it produces anchors + no video,
+                # and the MOG2 layer's extended render (launch tracker +
+                # rest-lock points) is the deliverable.
+                url = None
+                p = None
+                if tvp and Path(tvp).exists():
+                    _p0 = Path(tvp)
+                    compress_for_email(_p0)
+                    if _p0.exists() and _p0.stat().st_size > 0:
+                        p = _p0
+                        url = (
+                            f"{settings.app_base_url}/uploads/clips/"
+                            f"{_p0.name}?v={int(_p0.stat().st_mtime)}"
+                        )
+                if True:
                     info = {
                         "ok": True, "engine": "ai",
                         "n_points": len(r.get("ball_track_frames") or []),
@@ -6980,12 +7004,25 @@ def _trace_segment(
                             info["n_points"] = len(_layer["merged"])
                             url = _layer["url"]
                             p = _layer["path"]
-                    log.info("produce: AI tracer ok for %s", clip_path.name)
-                    return url, info, p, None
-            log.warning(
-                "produce: AI tracer empty/failed for %s (%s) — classical fallback",
-                clip_path.name, r.get("error"),
-            )
+                    if url:
+                        info["ok"] = True
+                        info["n_points"] = len(
+                            info.get("ball_track_frames") or [],
+                        )
+                        log.info(
+                            "produce: AI tracer ok for %s", clip_path.name,
+                        )
+                        return url, info, p, None
+                    log.warning(
+                        "produce: pipeline ok but nothing rendered for %s "
+                        "(track disabled and layer added no points) — "
+                        "classical fallback", clip_path.name,
+                    )
+            else:
+                log.warning(
+                    "produce: AI tracer failed for %s (%s) — classical "
+                    "fallback", clip_path.name, r.get("error"),
+                )
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "produce: AI tracer crashed for %s (%s) — classical fallback",
