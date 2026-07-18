@@ -4388,8 +4388,13 @@ def track_launch_from_rest(
 
         last_x, last_y, last_f = rx, ry, f0 - 1
         vx = vy = None
+        recent_marks: list = []  # last few FOUND marks — the operator's
+        # 'marks nearly on top of each other' apex signal is their NET
+        # drift over the window (single-hop spacing is jitter-inflated
+        # by diff-crescent centroids exactly when true motion is tiny)
         scale = 1.0
         consec_miss = 0
+        ref_found_g = prev_g  # gray at the last FOUND frame (apex diffing)
         tiles = []  # (frame, crop_bgr, found, fx, fy, bw, bh)
         f = f0
         while f <= f_end:
@@ -4399,6 +4404,35 @@ def track_launch_from_rest(
                 break
             cur_g = cv2.cvtColor(cur, cv2.COLOR_BGR2GRAY)
             gap = f - last_f
+            # APEX MODE (operator insight): when the found marks land
+            # nearly on top of each other, the ball is topping out —
+            # its per-frame motion approaches zero and plain frame
+            # differencing goes blind. Hold the box tight on the last
+            # position, diff against the LAST FOUND frame (slow drift
+            # accumulates into a visible blob), drop the motion-per-
+            # frame demands, and be extra patient before giving up.
+            _vm_now = (
+                (vx * vx + vy * vy) ** 0.5 if vx is not None else None
+            )
+            _net_pf = None
+            if len(recent_marks) >= 3:
+                _f0m, _x0m, _y0m = recent_marks[0]
+                _f1m, _x1m, _y1m = recent_marks[-1]
+                if _f1m > _f0m:
+                    _net_pf = (
+                        ((_x1m - _x0m) ** 2 + (_y1m - _y0m) ** 2) ** 0.5
+                        / (_f1m - _f0m)
+                    )
+            # Threshold 6px/f: mark jitter (diff-crescent centroids)
+            # inflates measured drift by ~2-3px on a genuinely slow
+            # ball, so 4.0 left a dead zone where neither apex mode nor
+            # normal-mode gates would accept the real ball.
+            apex_mode = (
+                (_net_pf is not None and _net_pf < 6.0)
+                or (_vm_now is not None and _vm_now < 6.0)
+            )
+            if apex_mode:
+                scale = 1.0  # never widen at apex — drift hunts sparkle
             pred_x = last_x + (vx * gap if vx is not None else 0.0)
             pred_y = last_y + (vy * gap if vy is not None else 0.0)
             bw = bh = int(2 * m0 * scale)
@@ -4417,7 +4451,8 @@ def track_launch_from_rest(
                 out["reason"] = "square left the frame"
                 break
             crop_g = cur_g[y0:y1, x0:x1]
-            diff = cv2.absdiff(crop_g, prev_g[y0:y1, x0:x1])
+            _base_g = ref_found_g if apex_mode else prev_g
+            diff = cv2.absdiff(crop_g, _base_g[y0:y1, x0:x1])
             mask = (diff >= 20).astype(np.uint8)
             mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
             n, lbl, stats_, cent = cv2.connectedComponentsWithStats(mask)
@@ -4440,7 +4475,11 @@ def track_launch_from_rest(
                 # the crop average (real miss at f493: dark-trees crop
                 # turned sky-white and the gate killed the visible ball,
                 # then the widened box chained canopy sparkle instead).
-                if len(out["points"]) < 3:
+                if len(out["points"]) < 3 or apex_mode:
+                    # Also required in APEX mode: diffing against the
+                    # last-found frame lights up the VACATED old spot
+                    # (dark background now) as well as the ball — the
+                    # ball is the bright one.
                     _px = int(round(cx_ - x0)); _py = int(round(cy_ - y0))
                     _p5 = crop_g[
                         max(0, _py - 2):_py + 3, max(0, _px - 2):_px + 3,
@@ -4458,6 +4497,14 @@ def track_launch_from_rest(
                         continue
                     if abs(cx_ - rx) > (ry - cy_) + 60.0:
                         continue
+                elif apex_mode:
+                    # Topping out: accept only a small drift near the
+                    # last mark — no direction demand (it reverses
+                    # here), no minimum step (there barely is one).
+                    _sm = ((cx_ - last_x) ** 2
+                           + (cy_ - last_y) ** 2) ** 0.5
+                    if _sm > 45.0:
+                        continue
                 else:
                     # Aim by trajectory: the hop from the last plot
                     # point must roughly agree with the velocity (flight
@@ -4471,8 +4518,8 @@ def track_launch_from_rest(
                     if _vm > 6.0 and _sm > 1.0:
                         if (_sx * vx + _sy * vy) < 0.2 * _sm * _vm:
                             continue
-                    if _vm > 6.0 and _sm < 0.35 * _vm * gap:
-                        continue
+                    if _vm > 10.0 and _sm < 0.3 * _vm * gap:
+                        continue  # anti-sparkle: fast flight only
                 d = ((cx_ - pred_x) ** 2 + (cy_ - pred_y) ** 2) ** 0.5
                 if vx is not None:
                     _vm = (vx ** 2 + vy ** 2) ** 0.5
@@ -4486,6 +4533,9 @@ def track_launch_from_rest(
                 _, fx, fy, _a = best
                 nvx = (fx - last_x) / max(1, gap)
                 nvy = (fy - last_y) / max(1, gap)
+                recent_marks.append((f, float(fx), float(fy)))
+                if len(recent_marks) > 6:
+                    recent_marks.pop(0)
                 # First hop from rest can be huge (launch) — take it;
                 # afterwards smooth so one noisy hit can't yank aim.
                 if vx is None:
@@ -4493,6 +4543,7 @@ def track_launch_from_rest(
                 else:
                     vx, vy = 0.5 * vx + 0.5 * nvx, 0.5 * vy + 0.5 * nvy
                 last_x, last_y, last_f = fx, fy, f
+                ref_found_g = cur_g
                 out["points"].append({
                     "frame": int(f), "x": round(float(fx), 1),
                     "y": round(float(fy), 1),
@@ -4513,7 +4564,8 @@ def track_launch_from_rest(
                 0.35 * _heat_bgr[_mm] + np.array([0, 0, 165])
             ).clip(0, 255).astype(np.uint8)
             tiles.append((f, _crop_bgr, _heat_bgr, found, fx, fy, x0, y0))
-            if consec_miss >= 18:
+            _miss_limit = 36 if apex_mode else 18
+            if consec_miss >= _miss_limit:
                 out["reason"] = (
                     f"lost the ball ({consec_miss} straight misses)"
                 )
