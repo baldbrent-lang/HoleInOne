@@ -1606,6 +1606,15 @@ def _run_long_upload_job(
                                         _anchor_rec["rest_xy"],
                                     )
                                     d["impact_pinned"] = True
+                                    d["anchor_rec"] = {
+                                        k: _anchor_rec.get(k)
+                                        for k in (
+                                            "verified", "snapped",
+                                            "snap_px", "impact_frame",
+                                            "impact_delta", "reason",
+                                            "image",
+                                        )
+                                    }
                                     d["peak_time_sec"] = (
                                         float(_anchor_rec["impact_frame"])
                                         / tee_fps
@@ -1697,6 +1706,7 @@ def _run_long_upload_job(
                             # ball-rest calls when these are present.
                             "ball_rest_xy": d.get("ball_rest_xy"),
                             "impact_pinned": bool(d.get("impact_pinned")),
+                            "anchor_rec": d.get("anchor_rec"),
                         }
                     )
                 if not segs:
@@ -2346,6 +2356,8 @@ def _process_long_upload_segments(
             _intro_overlay_for_clip(clip, participant)
             db.commit()
             # Save the swing's detections for the Edit wizard (see helper).
+            if seg.get("anchor_rec") and isinstance(tracer_info, dict):
+                tracer_info.setdefault("anchor_check", seg["anchor_rec"])
             _persist_swing_track(
                 idx, tracer_info, _tracer_url, tee_cut_start, tee_cut_end,
             )
@@ -2422,6 +2434,8 @@ def _process_long_upload_segments(
         _intro_overlay_for_clip(clip, participant)
         db.commit()
         # Save the swing's detections for the Edit wizard (see helper).
+        if seg.get("anchor_rec") and isinstance(tracer_info, dict):
+            tracer_info.setdefault("anchor_check", seg["anchor_rec"])
         _persist_swing_track(
             idx, tracer_info, tracer_url, tee_cut_start, tee_cut_end,
         )
@@ -6296,6 +6310,7 @@ def _mog2_layer_for_ai_track(
     if (
         _rest and len(_rest) == 2 and _imp is not None
         and pipe.get("ball_rest_source") != "pose_wrist_fallback"
+        and not pipe.get("anchors_preverified")
     ):
         try:
             from ..services.ai_tracer import verify_rest_and_impact
@@ -6790,6 +6805,12 @@ def _trace_segment(
                     if verified_impact_frame is not None else None
                 ),
             )
+            # Departure-pinned anchors are already pixel-verified on the
+            # FULL source — the layer must trust them, not re-check on
+            # the re-encoded cut (a weaker look that once re-snapped a
+            # dim ball onto the golfer's shoe 66px away).
+            if verified_impact_frame is not None and _rest_ovr is not None:
+                r["anchors_preverified"] = True
             tvp = r.get("tracer_video_path")
             if r.get("ok") and tvp and Path(tvp).exists():
                 p = Path(tvp)
