@@ -4569,9 +4569,13 @@ def classify_swing_shot(
     _hint = tuple(hint_xy) if hint_xy else None
     before = None
     probe = None  # last absent look-up, kept so the debug UI can show it
+    _errs: list[str] = []  # vision-call FAILURES (rate limit, network) —
+    # must never masquerade as "looked and saw no ball"
     for lead in leads:
         t_b = max(0.0, float(peak_time_sec) - lead)
         r = find_resting_ball(input_path, int(t_b * fps), crop_center=_hint)
+        if r.get("error"):
+            _errs.append(str(r["error"]))
         if r.get("present") and r.get("x") is not None:
             before = {
                 "present": True, "x": r["x"], "y": r["y"],
@@ -4590,6 +4594,8 @@ def classify_swing_shot(
     if before is None and _hint is not None:
         t_b = max(0.0, float(peak_time_sec) - leads[-1])
         r = find_resting_ball(input_path, int(t_b * fps))
+        if r.get("error"):
+            _errs.append(str(r["error"]))
         if r.get("present") and r.get("x") is not None:
             before = {
                 "present": True, "x": r["x"], "y": r["y"],
@@ -4600,6 +4606,8 @@ def classify_swing_shot(
 
     t_a = float(peak_time_sec) + after_sec
     ra = find_resting_ball(input_path, int(t_a * fps), crop_center=_hint)
+    if ra.get("error"):
+        _errs.append(str(ra["error"]))
     after = {
         "present": bool(ra.get("present") and ra.get("x") is not None),
         "x": ra.get("x"), "y": ra.get("y"), "t": round(t_a, 2),
@@ -4627,6 +4635,24 @@ def classify_swing_shot(
     # looks like a white ball; a non-ball latch (tee marker / leaf) would
     # sit "unmoved" across every swing and silently kill real shots.
     if before is None and not after["present"]:
+        if _errs:
+            # The look-ups didn't fail to SEE a ball — the calls
+            # themselves failed. Say so, loudly: an API rate-limit
+            # looks exactly like "no ball" otherwise and sends the
+            # operator hunting a detection bug that isn't there.
+            log.warning(
+                "classify_swing_shot: %d ball look-up call(s) FAILED: %s",
+                len(_errs), _errs[0],
+            )
+            return {
+                "verdict": "unknown",
+                "reason": (
+                    f"ball look-up calls FAILED ({_errs[0][:120]}) — "
+                    f"not a detection miss; can't judge, keeping"
+                ),
+                "errors": _errs[:3],
+                "before": before_out, "after": after,
+            }
         return {
             "verdict": "unknown",
             "reason": "couldn't find a ball before or after — can't judge, keeping",
