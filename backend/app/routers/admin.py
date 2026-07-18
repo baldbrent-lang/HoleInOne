@@ -1574,6 +1574,13 @@ def _run_long_upload_job(
                             and _bf.get("present")
                             and _bf.get("x") is not None
                         ):
+                            # The FOUND ball is the rest position — full
+                            # stop. The tracer must look HERE, not
+                            # wherever its own address-frame guess lands.
+                            # (Pin verification below only tightens it.)
+                            d["ball_rest_xy"] = [
+                                float(_bf["x"]), float(_bf["y"]),
+                            ]
                             try:
                                 from ..services.ai_tracer import (
                                     verify_rest_and_impact,
@@ -6286,7 +6293,10 @@ def _mog2_layer_for_ai_track(
     # here tightens everything downstream. Unverified = keep the
     # originals (never let a failed check break a working trace).
     anchor_check: dict | None = None
-    if _rest and len(_rest) == 2 and _imp is not None:
+    if (
+        _rest and len(_rest) == 2 and _imp is not None
+        and pipe.get("ball_rest_source") != "pose_wrist_fallback"
+    ):
         try:
             from ..services.ai_tracer import verify_rest_and_impact
 
