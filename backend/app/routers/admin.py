@@ -5730,13 +5730,21 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     import numpy as _np
 
     cv_info = cv_info or {}
-    # Candidate pool: the raw timed transient dots PLUS the accepted
-    # chain detections, deduped. The chain alone can lock onto club
-    # motion near the hands and miss the flight dots entirely (real
-    # case: upload 384 — chain 14, matched 0, while the launch corridor
-    # was full of timed dots).
+    # Candidate pool, three MOG2 signals deduped:
+    #  - per-frame surviving candidate detections (the yellow rings on
+    #    the editor cards) — the sharpest signal: exact frame, exact
+    #    position, motion-verified by construction. A ball in flight
+    #    reads as one candidate per consecutive frame ("empty ring -
+    #    red-filled ring - empty ring" across neighboring cards).
+    #  - timed transient dots (frame = median of hits — jittery, but
+    #    survives when the per-frame gates lose the ball).
+    #  - the accepted chain (can lock onto club motion; never alone).
     _pool_by_key: dict = {}
-    for rec in list(cv_info.get("timed_points") or []) + list(cv_info.get("track") or []):
+    for rec in (
+        list(cv_info.get("candidates") or [])
+        + list(cv_info.get("timed_points") or [])
+        + list(cv_info.get("track") or [])
+    ):
         if (
             rec.get("frame") is None
             or rec.get("x") is None or rec.get("y") is None

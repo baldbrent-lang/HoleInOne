@@ -789,6 +789,22 @@ def _render(
         for d in sorted(_timed_pts, key=lambda p: p.frame)
     ]
 
+    def _cand_export(cap: int = 6000) -> list:
+        """Surviving per-frame candidate detections (the yellow rings on
+        the editor cards) in native coords — the sharpest MOG2 signal
+        for the layer-in's trail following: exact frame, exact position,
+        motion-verified by construction (unlike the timed dots, whose
+        median-of-hits frame jitters). Capped for sanity on noisy
+        clips."""
+        try:
+            _ds = sorted(detections, key=lambda d: d.frame)[:cap]
+            return [
+                {"frame": int(d.frame), "x": float(d.x), "y": float(d.y)}
+                for d in _ds
+            ]
+        except Exception:  # noqa: BLE001
+            return []
+
     # Ball address (detection-coord) + body bbox → kept for display
     # and as fallback signals. The primary handedness signal now comes
     # from the club shaft's slope, which is robust to stray practice
@@ -1169,6 +1185,7 @@ def _render(
             "raw_motion_image": raw_motion_name,
             "raw_motion_frames_image": raw_motion_frames_name,
             "timed_points": _timed_export,
+            "candidates": _cand_export(),
         }
     # Heatmap-arc recovery (operator insight: the flight is an obvious
     # dotted arc in the accumulated motion heatmap even when per-frame
@@ -1256,6 +1273,7 @@ def _render(
             "raw_motion_image": raw_motion_name,
             "raw_motion_frames_image": raw_motion_frames_name,
             "timed_points": _timed_export,
+            "candidates": _cand_export(),
         }
     if len(track) > len(seed_track):
         log.info(
@@ -1279,6 +1297,7 @@ def _render(
                 "raw_motion_image": raw_motion_name,
                 "raw_motion_frames_image": raw_motion_frames_name,
                 "timed_points": _timed_export,
+                "candidates": _cand_export(),
             }
 
     # Predict-then-search backfill: fit the parabola from the confident
@@ -1431,6 +1450,7 @@ def _render(
         "raw_motion_frames_image": raw_motion_frames_name,
         "arc_debug": _arc_dbg,
         "timed_points": _timed_export,
+        "candidates": _cand_export(),
         # Per-frame detected ball positions (native coords), so callers
         # like the Edit wizard can hydrate a manual editor from the
         # classical detections — same {frame,x,y} shape the AI tracer's
