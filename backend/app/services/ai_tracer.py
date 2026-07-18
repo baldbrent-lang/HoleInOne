@@ -4107,15 +4107,21 @@ def verify_rest_and_impact(
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = float(fps or 30.0)
         imp = int(approx_impact_frame)
-        r = max(10, int(round(0.015 * h)))  # patch half-size ~ ball scale
-        m = 2 * r  # crop half-size (room for the snap search)
+        r = max(10, int(round(0.015 * h)))  # ball scale
+        # WIDE crop: the claimed rest position is often off by tens of
+        # px (vision downscale error, operator click) — search a 4r
+        # half-size neighborhood so the real ball is in view even when
+        # the claim is noticeably off. Clamp at frame edges instead of
+        # bailing (the ball usually sits low in the frame).
+        m = 4 * r
         cx0, cy0 = float(rest_xy[0]), float(rest_xy[1])
-        x0, x1 = int(cx0 - m), int(cx0 + m + 1)
-        y0, y1 = int(cy0 - m), int(cy0 + m + 1)
-        if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        x0, x1 = max(0, int(cx0 - m)), min(w, int(cx0 + m + 1))
+        y0, y1 = max(0, int(cy0 - m)), min(h, int(cy0 + m + 1))
+        if x1 - x0 < 3 * r or y1 - y0 < 3 * r:
             out["reason"] = "rest patch clipped by frame edge"
             cap.release()
             return out
+        ccx, ccy = cx0 - x0, cy0 - y0  # claimed centre, crop coords
         f_lo = max(0, imp - int(round(1.0 * fps)))
         f_hi = imp + int(round(1.0 * fps))
         crops: dict[int, "np.ndarray"] = {}
@@ -4140,43 +4146,45 @@ def verify_rest_and_impact(
             np.stack([crops[f].astype(np.float32) for f in base_fs]), axis=0,
         ).astype(np.uint8)
 
-        def _bright_centroid(g):
-            """Centroid of the small bright cluster nearest the crop
-            centre, or None. Same spirit as _white_blob_at."""
+        def _bright_centroid(g, tx, ty):
+            """Centroid of the small bright cluster nearest (tx, ty),
+            or None. Ball-sized only: the absolute-pixel area cap keeps
+            shoes / tee markers / bright patio from qualifying in the
+            wide crop."""
             mean = float(g.mean())
             thr = max(mean + 25.0, float(np.percentile(g, 92)))
             mask = (g >= thr).astype(np.uint8)
             n, lbl, stats_, cent = cv2.connectedComponentsWithStats(mask)
             best = None
-            gc = (g.shape[1] / 2.0, g.shape[0] / 2.0)
             for i in range(1, n):
                 area = int(stats_[i, cv2.CC_STAT_AREA])
-                if area < 4 or area > 0.25 * g.size:
+                if area < 4 or area > (1.8 * r) ** 2:
                     continue
-                d = ((cent[i][0] - gc[0]) ** 2
-                     + (cent[i][1] - gc[1]) ** 2) ** 0.5
+                d = ((cent[i][0] - tx) ** 2
+                     + (cent[i][1] - ty) ** 2) ** 0.5
                 if best is None or d < best[0]:
                     best = (d, float(cent[i][0]), float(cent[i][1]), area)
-            return best  # (dist_to_centre, cx, cy, area) | None
+            return best  # (dist_to_target, cx, cy, area) | None
 
-        # SNAP on the baseline composite.
-        snap = _bright_centroid(base)
-        scx, scy = float(m), float(m)  # crop-space rest (centre)
-        if snap is not None and snap[0] <= 15.0:
+        # SNAP on the baseline composite: nearest ball-sized bright
+        # cluster to the CLAIMED position, anywhere in the wide crop.
+        snap = _bright_centroid(base, ccx, ccy)
+        scx, scy = float(ccx), float(ccy)
+        if snap is not None and snap[0] <= 3.0 * r:
             scx, scy = snap[1], snap[2]
             out["snapped"] = True
             out["snap_px"] = float(round(float(snap[0]), 1))
             out["rest_xy"] = [
-                float(round(cx0 + (scx - m), 1)),
-                float(round(cy0 + (scy - m), 1)),
+                float(round(x0 + scx, 1)),
+                float(round(y0 + scy, 1)),
             ]
 
         # Per-frame ball presence at the SNAPPED spot.
         def _present(g):
-            b = _bright_centroid(g)
+            b = _bright_centroid(g, scx, scy)
             if b is None:
                 return False
-            return ((b[1] - scx) ** 2 + (b[2] - scy) ** 2) ** 0.5 <= r * 0.8
+            return b[0] <= r * 0.8
 
         present = {f: _present(g) for f, g in crops.items()}
         pre_ratio = (
@@ -4236,7 +4244,8 @@ def verify_rest_and_impact(
                         if extra in crops and extra not in sel:
                             sel.append(extra)
                     sel = sorted(set(sel))
-                Z = 3  # upscale
+                _cw = crops[fs_sorted[0]].shape[1]
+                Z = 1 if _cw >= 100 else (2 if _cw >= 60 else 3)
                 tiles = []
                 for f in sel:
                     g = crops[f]
