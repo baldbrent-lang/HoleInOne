@@ -6429,22 +6429,17 @@ def _mog2_layer_for_ai_track(
 
     cv_info = cv_info or {}
     pool = _mog2_dot_pool(cv_info)
-    _lp = pipe.get("launch_points") or []
-    if _lp:
+    launch_pts = [
+        {"frame": int(pt["frame"]), "x": float(pt["x"]), "y": float(pt["y"])}
+        for pt in (pipe.get("launch_points") or [])
+        if pt.get("frame") is not None and int(pt["frame"]) >= 0
+    ]
+    if launch_pts:
         # Adaptive-square tracker points: per-frame, pixel-exact,
-        # already ball-verified — they join (and effectively lead) the
-        # dot pool the rest-lock chains over.
-        pool = sorted(
-            pool + [
-                {
-                    "frame": int(pt["frame"]),
-                    "x": float(pt["x"]), "y": float(pt["y"]),
-                }
-                for pt in _lp
-                if pt.get("frame") is not None and int(pt["frame"]) >= 0
-            ],
-            key=lambda rec: rec["frame"],
-        )
+        # already ball-verified — they join the dot pool AND go into
+        # the arc directly (below); the lock/corridor phases only fill
+        # what the tracker didn't cover.
+        pool = sorted(pool + list(launch_pts), key=lambda rec: rec["frame"])
 
     def _near(a, b, df=3, dpx=25.0):
         return (
@@ -6672,8 +6667,28 @@ def _mog2_layer_for_ai_track(
                     _desc_dbg = _desc_dbg2
             descent_debug = _desc_dbg
 
+    # DIRECT adds: launch-tracker points are verified flight — into the
+    # arc unconditionally (never dependent on the lock re-finding them).
+    _ai_ff_all = {int(pp["frame"]) for pp in ai_pts}
+    added_track: list[dict] = []
+    _lt_frames: set = set()
+    for pt in launch_pts:
+        f = int(pt["frame"])
+        if f in _ai_ff_all or f in _lt_frames:
+            continue
+        if _f_cap is not None and f > _f_cap:
+            continue
+        _lt_frames.add(f)
+        added_track.append({
+            "frame": f, "found": True,
+            "x": pt["x"], "y": pt["y"], "source": "launch",
+        })
+
     added = sorted(
-        added_launch + added_mid + added_descent,
+        added_track + [
+            a for a in (added_launch + added_mid + added_descent)
+            if int(a["frame"]) not in _lt_frames
+        ],
         key=lambda r: int(r["frame"]),
     )
 
@@ -6682,6 +6697,7 @@ def _mog2_layer_for_ai_track(
         "n_cv": len(pool),
         "n_matched": n_matched,
         "n_added": len(added),
+        "n_added_track": len(added_track),
         "n_added_launch": len(added_launch),
         "n_added_mid": len(added_mid),
         "n_added_descent": len(added_descent),
@@ -6740,8 +6756,12 @@ def _mog2_layer_for_ai_track(
                 _lbl = (
                     f"MOG2 vs AI - yellow=AI picks ({len(ai_pts)}), "
                     f"white=MOG2 dots ({len(pool)}), "
-                    f"red=added to arc ({len(added)}), "
-                    f"matched={n_matched}"
+                    f"red=added to arc ({len(added)}"
+                    + (
+                        f", {len(added_track)} from launch tracker"
+                        if added_track else ""
+                    )
+                    + f"), matched={n_matched}"
                     + (
                         f", LOCKED @ f{lock_info.get('seed_frames')}"
                         f" (magenta line, chain "
