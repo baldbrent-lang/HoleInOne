@@ -4108,12 +4108,14 @@ def verify_rest_and_impact(
         fps = float(fps or 30.0)
         imp = int(approx_impact_frame)
         r = max(10, int(round(0.015 * h)))  # ball scale
-        # WIDE crop: the claimed rest position is often off by tens of
-        # px (vision downscale error, operator click) — search a 4r
-        # half-size neighborhood so the real ball is in view even when
-        # the claim is noticeably off. Clamp at frame edges instead of
-        # bailing (the ball usually sits low in the frame).
-        m = 4 * r
+        # WIDE crop: the claimed rest position can be off by 50-100px
+        # (vision downscale error, operator click) — search an 8r
+        # half-size neighborhood (~260px square at 1080p) so the real
+        # ball is in view even when the claim is well off. The
+        # ball-sized area cap + nearest-to-claim selection keep bigger
+        # bright objects from hijacking the snap. Clamp at frame edges
+        # instead of bailing (the ball usually sits low in the frame).
+        m = 8 * r
         cx0, cy0 = float(rest_xy[0]), float(rest_xy[1])
         x0, x1 = max(0, int(cx0 - m)), min(w, int(cx0 + m + 1))
         y0, y1 = max(0, int(cy0 - m)), min(h, int(cy0 + m + 1))
@@ -4170,7 +4172,7 @@ def verify_rest_and_impact(
         # cluster to the CLAIMED position, anywhere in the wide crop.
         snap = _bright_centroid(base, ccx, ccy)
         scx, scy = float(ccx), float(ccy)
-        if snap is not None and snap[0] <= 3.0 * r:
+        if snap is not None and snap[0] <= 6.0 * r:
             scx, scy = snap[1], snap[2]
             out["snapped"] = True
             out["snap_px"] = float(round(float(snap[0]), 1))
@@ -4285,7 +4287,8 @@ def verify_rest_and_impact(
                 bar = np.zeros((56, strip.shape[1], 3), np.uint8)
                 _lbl = (
                     f"anchor check @ rest ({out['rest_xy'][0]:.0f},"
-                    f"{out['rest_xy'][1]:.0f})"
+                    f"{out['rest_xy'][1]:.0f}) "
+                    f"[{x1 - x0}x{y1 - y0}px window]"
                     + (
                         f" snapped {out['snap_px']}px" if out["snapped"]
                         else " (no snap)"
