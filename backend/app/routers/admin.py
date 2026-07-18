@@ -1606,13 +1606,56 @@ def _run_long_upload_job(
                                         _anchor_rec["rest_xy"],
                                     )
                                     d["impact_pinned"] = True
+                                    # LAUNCH TRACKER (operator-designed,
+                                    # pure pixels): adaptive square from
+                                    # the pinned ball — up, widen on
+                                    # miss, shrink on find. Its points
+                                    # feed the tracer's dot pool.
+                                    try:
+                                        from ..services.ai_tracer import (
+                                            track_launch_from_rest,
+                                        )
+
+                                        _lt = track_launch_from_rest(
+                                            src_path,
+                                            tuple(_anchor_rec["rest_xy"]),
+                                            int(_anchor_rec["impact_frame"]),
+                                            tee_fps,
+                                            debug_dir=CLIPS_DIR,
+                                            debug_prefix=(
+                                                f"launchtrk-{upload_id}-"
+                                                f"{secrets.token_hex(3)}"
+                                            ),
+                                        )
+                                        if _lt.get("points"):
+                                            d["launch_points"] = _lt["points"]
+                                        _anchor_rec["launch_n"] = _lt.get(
+                                            "n_found",
+                                        )
+                                        _anchor_rec["launch_reason"] = (
+                                            _lt.get("reason")
+                                        )
+                                        _anchor_rec["launch_image"] = (
+                                            _lt.get("image")
+                                        )
+                                        log.info(
+                                            "long-upload worker: launch "
+                                            "tracker found %s point(s) (%s)",
+                                            _lt.get("n_found"),
+                                            _lt.get("reason"),
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        log.warning(
+                                            "launch tracker failed: %s", exc,
+                                        )
                                     d["anchor_rec"] = {
                                         k: _anchor_rec.get(k)
                                         for k in (
                                             "verified", "snapped",
                                             "snap_px", "impact_frame",
                                             "impact_delta", "reason",
-                                            "image",
+                                            "image", "launch_n",
+                                            "launch_reason", "launch_image",
                                         )
                                     }
                                     d["peak_time_sec"] = (
@@ -1652,7 +1695,8 @@ def _run_long_upload_job(
                                     for k in (
                                         "verified", "snapped", "snap_px",
                                         "impact_frame", "impact_delta",
-                                        "reason", "image",
+                                        "reason", "image", "launch_n",
+                                        "launch_reason", "launch_image",
                                     )
                                 }
                                 if _anchor_rec else None
@@ -1707,6 +1751,7 @@ def _run_long_upload_job(
                             "ball_rest_xy": d.get("ball_rest_xy"),
                             "impact_pinned": bool(d.get("impact_pinned")),
                             "anchor_rec": d.get("anchor_rec"),
+                            "launch_points": d.get("launch_points"),
                         }
                     )
                 if not segs:
@@ -2235,14 +2280,23 @@ def _process_long_upload_segments(
             # Ball-flight tracer — AI by default (settings.tracer_engine),
             # classical fallback. The cut to green is driven by tee_video_dur,
             # not the tracer, so the engine choice doesn't affect the cut.
+            _seg_fps = probe_fps(seg_path) or 30.0
+            _cut_off = int(round(tee_cut_start * _src_fps))
+            _lp_cut = [
+                {**pt, "frame": int(pt["frame"]) - _cut_off}
+                for pt in (seg.get("launch_points") or [])
+                if pt.get("frame") is not None
+                and int(pt["frame"]) >= _cut_off
+            ]
             _tracer_url, tracer_info, traced_path, _debug_url = _trace_segment(
                 seg_path,
                 ball_at_rest_override=seg.get("impact_wrist_xy"),
                 verified_rest_xy=seg.get("ball_rest_xy"),
                 verified_impact_frame=(
-                    int(round(actual_before_sec * (probe_fps(seg_path) or 30.0)))
+                    int(round(actual_before_sec * _seg_fps))
                     if seg.get("impact_pinned") else None
                 ),
+                launch_points=_lp_cut or None,
             )
             tracer_ok = bool(tracer_info and tracer_info.get("ok"))
 
@@ -2393,14 +2447,22 @@ def _process_long_upload_segments(
             if thumb_path
             else None
         )
+        _seg_fps = probe_fps(seg_path) or 30.0
+        _cut_off = int(round(tee_cut_start * _src_fps))
+        _lp_cut = [
+            {**pt, "frame": int(pt["frame"]) - _cut_off}
+            for pt in (seg.get("launch_points") or [])
+            if pt.get("frame") is not None and int(pt["frame"]) >= _cut_off
+        ]
         tracer_url, tracer_info, _, _ = _trace_segment(
             seg_path,
             ball_at_rest_override=seg.get("impact_wrist_xy"),
             verified_rest_xy=seg.get("ball_rest_xy"),
             verified_impact_frame=(
-                int(round(actual_before_sec * (probe_fps(seg_path) or 30.0)))
+                int(round(actual_before_sec * _seg_fps))
                 if seg.get("impact_pinned") else None
             ),
+            launch_points=_lp_cut or None,
         )
 
         captured_dt = base_dt + timedelta(seconds=tee_cut_start)
@@ -6367,6 +6429,22 @@ def _mog2_layer_for_ai_track(
 
     cv_info = cv_info or {}
     pool = _mog2_dot_pool(cv_info)
+    _lp = pipe.get("launch_points") or []
+    if _lp:
+        # Adaptive-square tracker points: per-frame, pixel-exact,
+        # already ball-verified — they join (and effectively lead) the
+        # dot pool the rest-lock chains over.
+        pool = sorted(
+            pool + [
+                {
+                    "frame": int(pt["frame"]),
+                    "x": float(pt["x"]), "y": float(pt["y"]),
+                }
+                for pt in _lp
+                if pt.get("frame") is not None and int(pt["frame"]) >= 0
+            ],
+            key=lambda rec: rec["frame"],
+        )
 
     def _near(a, b, df=3, dpx=25.0):
         return (
@@ -6762,6 +6840,7 @@ def _trace_segment(
     ball_at_rest_override=None,
     verified_rest_xy=None,
     verified_impact_frame=None,
+    launch_points=None,
 ):
     """Draw the ball-flight tracer on a cut segment for PRODUCTION.
 
@@ -6811,6 +6890,10 @@ def _trace_segment(
             # dim ball onto the golfer's shoe 66px away).
             if verified_impact_frame is not None and _rest_ovr is not None:
                 r["anchors_preverified"] = True
+            if launch_points:
+                # Adaptive-square tracker points (CUT-relative frames)
+                # join the layer's dot pool — per-frame, pixel-exact.
+                r["launch_points"] = launch_points
             tvp = r.get("tracer_video_path")
             if r.get("ok") and tvp and Path(tvp).exists():
                 p = Path(tvp)
@@ -7346,14 +7429,18 @@ def _run_produce_debug_job(
                 _anc = _p.get("anchor")
                 if _anc:
                     _anc = dict(_anc)
-                    if _anc.get("image") and (
-                        CLIPS_DIR / _anc["image"]
-                    ).exists():
-                        _ap = CLIPS_DIR / _anc["image"]
-                        _anc["image_url"] = (
-                            f"{settings.app_base_url}/uploads/clips/"
-                            f"{_ap.name}?v={int(_ap.stat().st_mtime)}"
-                        )
+                    for _ik, _uk in (
+                        ("image", "image_url"),
+                        ("launch_image", "launch_image_url"),
+                    ):
+                        if _anc.get(_ik) and (
+                            CLIPS_DIR / _anc[_ik]
+                        ).exists():
+                            _ap = CLIPS_DIR / _anc[_ik]
+                            _anc[_uk] = (
+                                f"{settings.app_base_url}/uploads/clips/"
+                                f"{_ap.name}?v={int(_ap.stat().st_mtime)}"
+                            )
                 ai_ball_swings.append({
                     "swing": i + 1,
                     "verdict": _p.get("verdict"),

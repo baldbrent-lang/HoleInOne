@@ -4330,6 +4330,36 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                               />
                             </a>
                           )}
+                          {s.anchor.launch_n != null && (
+                            <div style={{ marginTop: 3 }}>
+                              {"\ud83d\ude80"} launch tracker:{" "}
+                              {s.anchor.launch_n > 0 ? (
+                                <span style={{ color: "#1a9d55" }}>
+                                  {s.anchor.launch_n} flight points —{" "}
+                                  {s.anchor.launch_reason}
+                                </span>
+                              ) : (
+                                <span style={{ color: "#b7791f" }}>
+                                  {s.anchor.launch_reason}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {s.anchor.launch_image_url && (
+                            <a
+                              href={s.anchor.launch_image_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ display: "block", marginTop: 3 }}
+                              title="Adaptive-square launch tracker: the square rides the ball (bottom-third bias while ascending), widens on a miss, shrinks on a find. Green=found (ball ringed), red=missed, box size labelled per tile."
+                            >
+                              <img
+                                src={s.anchor.launch_image_url}
+                                alt="launch tracker film-strip"
+                                style={{ maxWidth: "100%", borderRadius: 6 }}
+                              />
+                            </a>
+                          )}
                         </div>
                       )}
                       <div style={{ display: "flex", gap: 10, marginTop: 4 }}>

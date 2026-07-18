@@ -4329,6 +4329,226 @@ def verify_rest_and_impact(
         return out
 
 
+def track_launch_from_rest(
+    input_path: Path,
+    rest_xy: tuple[float, float],
+    impact_frame: int,
+    fps: float,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "launchtrk",
+    max_seconds: float = 4.0,
+) -> dict:
+    """Adaptive launch tracker (operator-designed; pure pixels, no AI).
+
+    Seeded at the PINNED rest ball + departure frame. The viewing
+    square starts with the ball in its BOTTOM THIRD (centred left-
+    right) — the ball is about to go UP. Each frame: find the moving
+    ball-sized blob in the square (frame differencing);
+      found  -> mark it, advance a frame, move the square along the
+                ball's velocity, SHRINK back toward base size;
+      missed -> advance a frame, keep extrapolating, WIDEN the square
+                until it's found again.
+    Stops after ~18 consecutive misses, the 4s cap, or the square
+    leaving the frame. While ascending the ball rides the bottom third
+    of the square; once descending, the top third (the square always
+    looks ahead of the motion).
+
+    Returns {available, points: [{frame,x,y}], n_found, boxes, image,
+    reason}. When debug_dir is set, writes a film-strip of the moving
+    square per frame (green border=found with the ball dotted,
+    red=missed, box size labelled) — the work, visible. Never raises."""
+    out = {
+        "available": False, "points": [], "n_found": 0,
+        "boxes": [], "image": None, "reason": None,
+    }
+    if not HAS_CV or not HAS_NP:
+        out["reason"] = "opencv/numpy not installed"
+        return out
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open video"
+            return out
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(fps or 30.0)
+        r = max(10, int(round(0.015 * h)))   # ball scale
+        m0 = 8 * r                            # base box half-size
+        f0 = int(impact_frame)
+        f_end = f0 + int(round(float(max_seconds) * fps))
+        rx, ry = float(rest_xy[0]), float(rest_xy[1])
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, f0 - 1))
+        ok, prev = cap.read()
+        if not ok or prev is None:
+            out["reason"] = "could not read pre-impact frame"
+            cap.release()
+            return out
+        prev_g = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY)
+
+        last_x, last_y, last_f = rx, ry, f0 - 1
+        vx = vy = None
+        scale = 1.0
+        consec_miss = 0
+        tiles = []  # (frame, crop_bgr, found, fx, fy, bw, bh)
+        f = f0
+        while f <= f_end:
+            ok, cur = cap.read()
+            if not ok or cur is None:
+                out["reason"] = "end of video"
+                break
+            cur_g = cv2.cvtColor(cur, cv2.COLOR_BGR2GRAY)
+            gap = f - last_f
+            pred_x = last_x + (vx * gap if vx is not None else 0.0)
+            pred_y = last_y + (vy * gap if vy is not None else 0.0)
+            bw = bh = int(2 * m0 * scale)
+            # Directional bias: the square looks AHEAD of the motion —
+            # ball in the bottom third while ascending (or unknown),
+            # top third once descending.
+            if vy is not None and vy > 2.0:
+                y0 = int(pred_y - bh / 3.0)
+            else:
+                y0 = int(pred_y - 2.0 * bh / 3.0)
+            x0 = int(pred_x - bw / 2.0)
+            x0 = max(0, min(w - bw, x0)) if bw <= w else 0
+            y0 = max(0, min(h - bh, y0)) if bh <= h else 0
+            x1, y1 = min(w, x0 + bw), min(h, y0 + bh)
+            if x1 - x0 < 3 * r or y1 - y0 < 3 * r:
+                out["reason"] = "square left the frame"
+                break
+            diff = cv2.absdiff(
+                cur_g[y0:y1, x0:x1], prev_g[y0:y1, x0:x1],
+            )
+            mask = (diff >= 20).astype(np.uint8)
+            mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+            n, lbl, stats_, cent = cv2.connectedComponentsWithStats(mask)
+            best = None
+            for i in range(1, n):
+                area = int(stats_[i, cv2.CC_STAT_AREA])
+                if area < 3 or area > (3.5 * r) ** 2:
+                    continue  # not ball-sized motion
+                cx_, cy_ = float(cent[i][0]) + x0, float(cent[i][1]) + y0
+                d = ((cx_ - pred_x) ** 2 + (cy_ - pred_y) ** 2) ** 0.5
+                if best is None or d < best[0]:
+                    best = (d, cx_, cy_, area)
+            found = best is not None
+            fx = fy = None
+            if found:
+                _, fx, fy, _a = best
+                nvx = (fx - last_x) / max(1, gap)
+                nvy = (fy - last_y) / max(1, gap)
+                # First hop from rest can be huge (launch) — take it;
+                # afterwards smooth so one noisy hit can't yank aim.
+                if vx is None:
+                    vx, vy = nvx, nvy
+                else:
+                    vx, vy = 0.5 * vx + 0.5 * nvx, 0.5 * vy + 0.5 * nvy
+                last_x, last_y, last_f = fx, fy, f
+                out["points"].append({
+                    "frame": int(f), "x": round(float(fx), 1),
+                    "y": round(float(fy), 1),
+                })
+                scale = max(1.0, scale * 0.75)
+                consec_miss = 0
+            else:
+                consec_miss += 1
+                scale = min(3.0, scale * 1.35)
+            out["boxes"].append({
+                "frame": int(f), "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+                "found": bool(found),
+            })
+            tiles.append((f, cur[y0:y1, x0:x1].copy(), found, fx, fy, x0, y0))
+            if consec_miss >= 18:
+                out["reason"] = (
+                    f"lost the ball ({consec_miss} straight misses)"
+                )
+                break
+            prev_g = cur_g
+            f += 1
+        cap.release()
+        out["available"] = True
+        out["n_found"] = len(out["points"])
+        if out["reason"] is None:
+            out["reason"] = f"tracked to the {max_seconds:.0f}s cap"
+        if out["n_found"] == 0:
+            out["reason"] = "never re-found the ball after departure"
+
+        if debug_dir is not None and tiles:
+            try:
+                step = max(1, len(tiles) // 36)
+                sel = tiles[::step]
+                TW = 150
+                rendered = []
+                for (tf, crop, found, fx, fy, bx0, by0) in sel:
+                    ch, cw = crop.shape[:2]
+                    z = TW / float(cw)
+                    t = cv2.resize(crop, (TW, max(1, int(ch * z))))
+                    col = (0, 200, 0) if found else (0, 0, 230)
+                    cv2.rectangle(
+                        t, (0, 0), (t.shape[1] - 1, t.shape[0] - 1), col, 2,
+                    )
+                    if found and fx is not None:
+                        cv2.circle(
+                            t,
+                            (int((fx - bx0) * z), int((fy - by0) * z)),
+                            max(3, int(r * z)), (0, 255, 255), 1,
+                            cv2.LINE_AA,
+                        )
+                    cv2.putText(
+                        t, f"{tf}", (3, 13), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.38, (255, 255, 255), 1, cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        t, f"{cw}px", (3, t.shape[0] - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.34,
+                        (200, 200, 200), 1, cv2.LINE_AA,
+                    )
+                    rendered.append(t)
+                mh = max(t.shape[0] for t in rendered)
+                rendered = [
+                    cv2.copyMakeBorder(
+                        t, 0, mh - t.shape[0], 0, 0,
+                        cv2.BORDER_CONSTANT, value=(0, 0, 0),
+                    )
+                    for t in rendered
+                ]
+                per_row = 12
+                rows = []
+                for i in range(0, len(rendered), per_row):
+                    row = rendered[i:i + per_row]
+                    while len(row) < per_row:
+                        row.append(np.zeros_like(rendered[0]))
+                    rows.append(cv2.hconcat(row))
+                strip = cv2.vconcat(rows)
+                bar = np.zeros((34, strip.shape[1], 3), np.uint8)
+                cv2.putText(
+                    bar,
+                    (
+                        f"launch tracker from rest "
+                        f"({rx:.0f},{ry:.0f}) @ f{f0} - "
+                        f"{out['n_found']} found, {out['reason']} | "
+                        f"square moves with the ball; widens on miss, "
+                        f"shrinks on find"
+                    ),
+                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                img = cv2.vconcat([bar, strip])
+                name = f"{debug_prefix}.jpg"
+                cv2.imwrite(
+                    str(Path(debug_dir) / name), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 86],
+                )
+                out["image"] = name
+            except Exception as exc:  # noqa: BLE001
+                log.warning("launch tracker: debug strip failed: %s", exc)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("track_launch_from_rest failed: %s", exc)
+        out["reason"] = str(exc)
+        return out
+
+
 def find_resting_ball(
     input_path: Path,
     frame_idx: int,
