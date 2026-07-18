@@ -3957,6 +3957,47 @@ def render_wizard_tracer(
             )
         except Exception:  # noqa: BLE001
             pass
+
+        # Rest-lock (the same launch detector production uses): cone up
+        # from the operator's resting ball, 3-dot straight-line lock,
+        # trail-follow over the ghost-filtered candidate pool. Wins when
+        # it maps more flight than the classical chain — the exact
+        # rescue for a "953 candidates, 0 points" run.
+        rest_lock_info = None
+        _imp_cut = (
+            max(0, int(impact_override) - offset_frames)
+            if impact_override is not None else None
+        )
+        if ball_at_rest_override is not None and _imp_cut is not None:
+            try:
+                _chain_c, rest_lock_info = _flight_from_rest_lock(
+                    _mog2_dot_pool(info_c),
+                    (
+                        float(ball_at_rest_override[0]),
+                        float(ball_at_rest_override[1]),
+                    ),
+                    _imp_cut, fps_c,
+                    _imp_cut + int(
+                        round(MOG2_LAYER_POST_IMPACT_SEC * fps_c),
+                    ),
+                )
+                if rest_lock_info and rest_lock_info.get("seed_frames"):
+                    # Report seeds in FULL-SOURCE frame space.
+                    rest_lock_info["seed_frames"] = [
+                        int(sf) + offset_frames
+                        for sf in rest_lock_info["seed_frames"]
+                    ]
+                if len(_chain_c) > len(track):
+                    log.info(
+                        "wizard %s: rest-lock chain (%d dots, seed %s) "
+                        "beats classical track (%d) — using it",
+                        engine, len(_chain_c),
+                        rest_lock_info.get("seed_frames"), len(track),
+                    )
+                    track = _chain_c
+                rest_lock_info["used"] = len(_chain_c) > 0 and track is _chain_c
+            except Exception as exc:  # noqa: BLE001
+                log.warning("wizard %s: rest-lock failed: %s", engine, exc)
         # Per-frame MOG2 debug images — keyed by CUT-relative frame.
         # `debug_frame_images` = card crops zoomed on each chosen point;
         # `debug_frame_full_images` = whole annotated frames (source
@@ -4478,10 +4519,11 @@ def render_wizard_tracer(
             "engine": engine,
             "tracer_url": tracer_url_c,
             "ball_track_frames": ball_track_frames_out,
-            "n_points": info_c.get("n_points"),
+            "n_points": len(track),
             "n_candidates": info_c.get("n_candidates"),
             "n_backfilled": info_c.get("n_backfilled"),
             "n_ai_anchors": n_ai_anchors,
+            "rest_lock": rest_lock_info,
             "debug_url": debug_url_c,
             "raw_motion_url": raw_motion_url,
             "raw_motion_arc_url": raw_motion_arc_url,
@@ -4603,10 +4645,6 @@ def render_wizard_tracer(
                                 _base + _added_back,
                                 key=lambda r: int(r.get("frame") or 0),
                             )
-                            from ..services.ai_tracer import (
-                                render_tracer_video,
-                            )
-
                             _ext = (
                                 CLIPS_DIR
                                 / f"wizard-{upload_id}_ai_mog2_tracer.mp4"
@@ -5774,6 +5812,61 @@ def _run_tracer(
     )
 
 
+def _mog2_dot_pool(cv_info: dict) -> list:
+    """Deduped, ghost-filtered MOG2 dot pool from a classical tracer run.
+
+    Three signals merged:
+     - per-frame surviving candidate detections (the yellow rings on the
+       editor cards) — exact frame, exact position, motion-verified;
+     - timed transient dots (median-of-hits frame — jittery, but
+       survives when per-frame gates lose the ball);
+     - the accepted chain (can lock onto club motion; never alone).
+
+    Ghost-trail filter: MOG2 keeps firing a VACATED spot for several
+    frames after the ball leaves it, so every early flight position
+    re-appears as a stationary dot for ~5-10 frames — a ladder a trail
+    follower could walk back down. A flying ball never occupies the
+    same spot 3+ times in a short window: dots with >=2 prior
+    appearances within 7px in the previous 12 frames are dropped.
+    (Also thins pool-ripple / foliage repeats.)"""
+    _pool_by_key: dict = {}
+    for rec in (
+        list(cv_info.get("candidates") or [])
+        + list(cv_info.get("timed_points") or [])
+        + list(cv_info.get("track") or [])
+    ):
+        if (
+            rec.get("frame") is None
+            or rec.get("x") is None or rec.get("y") is None
+        ):
+            continue
+        k = (
+            int(rec["frame"]),
+            int(round(float(rec["x"]) / 4.0)),
+            int(round(float(rec["y"]) / 4.0)),
+        )
+        _pool_by_key.setdefault(
+            k, {"frame": int(rec["frame"]), "x": float(rec["x"]), "y": float(rec["y"])},
+        )
+    pool = sorted(_pool_by_key.values(), key=lambda r: r["frame"])
+    _ghost_free: list = []
+    _win: list = []
+    for c in pool:
+        f = int(c["frame"])
+        while _win and f - _win[0][0] > 12:
+            _win.pop(0)
+        n_prior = sum(
+            1 for (pf, px_, py_) in _win
+            if pf < f
+            and ((float(c["x"]) - px_) ** 2
+                 + (float(c["y"]) - py_) ** 2) ** 0.5 < 7.0
+        )
+        if n_prior < 2:
+            _ghost_free.append(c)
+        _win.append((f, float(c["x"]), float(c["y"])))
+    return _ghost_free
+
+
 # MOG2 layer-in analysis window: nothing past this many seconds after
 # impact accumulates heat or extends the arc (operator: "no more than 4
 # seconds"). Shared by produce's layer and the wizard's ai_mog2 engine.
@@ -6021,60 +6114,7 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     import numpy as _np
 
     cv_info = cv_info or {}
-    # Candidate pool, three MOG2 signals deduped:
-    #  - per-frame surviving candidate detections (the yellow rings on
-    #    the editor cards) — the sharpest signal: exact frame, exact
-    #    position, motion-verified by construction. A ball in flight
-    #    reads as one candidate per consecutive frame ("empty ring -
-    #    red-filled ring - empty ring" across neighboring cards).
-    #  - timed transient dots (frame = median of hits — jittery, but
-    #    survives when the per-frame gates lose the ball).
-    #  - the accepted chain (can lock onto club motion; never alone).
-    _pool_by_key: dict = {}
-    for rec in (
-        list(cv_info.get("candidates") or [])
-        + list(cv_info.get("timed_points") or [])
-        + list(cv_info.get("track") or [])
-    ):
-        if (
-            rec.get("frame") is None
-            or rec.get("x") is None or rec.get("y") is None
-        ):
-            continue
-        k = (
-            int(rec["frame"]),
-            int(round(float(rec["x"]) / 4.0)),
-            int(round(float(rec["y"]) / 4.0)),
-        )
-        _pool_by_key.setdefault(
-            k, {"frame": int(rec["frame"]), "x": float(rec["x"]), "y": float(rec["y"])},
-        )
-    pool = sorted(_pool_by_key.values(), key=lambda r: r["frame"])
-
-    # Ghost-trail filter: MOG2 keeps firing a VACATED spot for several
-    # frames after the ball leaves it (background model lag) — so right
-    # after launch, every early flight position re-appears as a
-    # stationary dot for ~5-10 frames. A trail follower can walk
-    # backward down that ghost ladder and lose the real flight. A
-    # flying ball never occupies the same spot 3+ times in a short
-    # window: drop dots with >=2 prior appearances within 7px in the
-    # previous 12 frames. (Also thins pool-ripple / foliage repeats.)
-    _ghost_free: list = []
-    _win: list = []
-    for c in pool:
-        f = int(c["frame"])
-        while _win and f - _win[0][0] > 12:
-            _win.pop(0)
-        n_prior = sum(
-            1 for (pf, px_, py_) in _win
-            if pf < f
-            and ((float(c["x"]) - px_) ** 2
-                 + (float(c["y"]) - py_) ** 2) ** 0.5 < 7.0
-        )
-        if n_prior < 2:
-            _ghost_free.append(c)
-        _win.append((f, float(c["x"]), float(c["y"])))
-    pool = _ghost_free
+    pool = _mog2_dot_pool(cv_info)
 
     def _near(a, b, df=3, dpx=25.0):
         return (
@@ -6408,8 +6448,6 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         _base + added, key=lambda rec: int(rec.get("frame") or 0),
     )
     try:
-        from ..services.ai_tracer import render_tracer_video
-
         ext_path = CLIPS_DIR / f"{clip_path.stem}_ai_mog2_tracer.mp4"
         rr = render_tracer_video(
             clip_path, ext_path,

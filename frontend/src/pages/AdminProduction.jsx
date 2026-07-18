@@ -803,6 +803,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           n_candidates: out.n_candidates,
           n_backfilled: out.n_backfilled,
           n_ai_anchors: out.n_ai_anchors ?? null,
+          rest_lock: out.rest_lock || null,
         });
       }
       // Persist to the captured swing index regardless of current tab.
@@ -920,6 +921,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         n_candidates: out.n_candidates,
         n_backfilled: out.n_backfilled,
         n_ai_anchors: out.n_ai_anchors ?? null,
+        rest_lock: out.rest_lock || null,
       });
       // Cache the run into the swing so re-opens hydrate the tracer
       // instead of re-running. Records which engine produced it. The
@@ -1216,6 +1218,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               </b>
               {tracerStats.n_ai_anchors != null && (
                 <> · {tracerStats.n_ai_anchors} AI anchors</>
+              )}
+              {tracerStats.rest_lock?.locked && (
+                <> · 🔒 rest-lock @ f{(tracerStats.rest_lock.seed_frames || []).join(",")}</>
               )}
               {" · "}{tracerStats.n_points ?? "—"} points plotted
               {tracerStats.n_candidates != null && (
