@@ -4556,16 +4556,19 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       </span>
                     )}
                     {s.ai.anchor_check.image_url && (
-                      <>
-                        {" "}
-                        <a
-                          href={s.ai.anchor_check.image_url}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          film-strip
-                        </a>
-                      </>
+                      <a
+                        href={s.ai.anchor_check.image_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ display: "block", marginTop: 4 }}
+                        title="Anchor-check film-strip — each rest-patch crop across impact: green border = ball present, red = absent, yellow box = the departure frame (impact), ring = watched spot. Click to open full size."
+                      >
+                        <img
+                          src={s.ai.anchor_check.image_url}
+                          alt="anchor check film-strip"
+                          style={{ maxWidth: "100%", borderRadius: 6 }}
+                        />
+                      </a>
                     )}
                   </div>
                 )}
