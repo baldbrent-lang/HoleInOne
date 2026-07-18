@@ -1638,6 +1638,9 @@ def _run_long_upload_job(
                                         _anchor_rec["launch_image"] = (
                                             _lt.get("image")
                                         )
+                                        _anchor_rec["launch_image_heat"] = (
+                                            _lt.get("image_heat")
+                                        )
                                         log.info(
                                             "long-upload worker: launch "
                                             "tracker found %s point(s) (%s)",
@@ -1656,6 +1659,7 @@ def _run_long_upload_job(
                                             "impact_delta", "reason",
                                             "image", "launch_n",
                                             "launch_reason", "launch_image",
+                                            "launch_image_heat",
                                         )
                                     }
                                     d["peak_time_sec"] = (
@@ -1697,6 +1701,7 @@ def _run_long_upload_job(
                                         "impact_frame", "impact_delta",
                                         "reason", "image", "launch_n",
                                         "launch_reason", "launch_image",
+                                        "launch_image_heat",
                                     )
                                 }
                                 if _anchor_rec else None
@@ -7489,6 +7494,7 @@ def _run_produce_debug_job(
                     for _ik, _uk in (
                         ("image", "image_url"),
                         ("launch_image", "launch_image_url"),
+                        ("launch_image_heat", "launch_image_heat_url"),
                     ):
                         if _anc.get(_ik) and (
                             CLIPS_DIR / _anc[_ik]

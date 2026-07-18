@@ -4164,6 +4164,9 @@ function PoseChart({ pose }) {
 // classical-CV tracer found (motion heatmap + ball/candidate counts) next
 // to the AI tracer's result on the same swing, so the two can be compared.
 function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
+  // Per-swing 🔥 toggle for the launch-tracker film-strip (plain vs
+  // motion-mask tint).
+  const [launchHeat, setLaunchHeat] = useState({});
   const swings = data.swings || [];
   const okBadge = (ok) => (
     <span
@@ -4346,19 +4349,49 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                             </div>
                           )}
                           {s.anchor.launch_image_url && (
-                            <a
-                              href={s.anchor.launch_image_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{ display: "block", marginTop: 3 }}
-                              title="Adaptive-square launch tracker: the square rides the ball (bottom-third bias while ascending), widens on a miss, shrinks on a find. Green=found (ball ringed), red=missed, box size labelled per tile."
-                            >
-                              <img
-                                src={s.anchor.launch_image_url}
-                                alt="launch tracker film-strip"
-                                style={{ maxWidth: "100%", borderRadius: 6 }}
-                              />
-                            </a>
+                            <div style={{ marginTop: 3 }}>
+                              {s.anchor.launch_image_heat_url && (
+                                <button
+                                  type="button"
+                                  className={
+                                    launchHeat[s.swing]
+                                      ? "small"
+                                      : "ghost small"
+                                  }
+                                  style={{ width: "auto", padding: "1px 8px", marginBottom: 3 }}
+                                  onClick={() =>
+                                    setLaunchHeat((m) => ({
+                                      ...m,
+                                      [s.swing]: !m[s.swing],
+                                    }))
+                                  }
+                                  title="Toggle the MOG2/frame-diff motion mask (red tint) on the launch-tracker tiles — what the tracker actually looked at."
+                                >
+                                  🔥 heat {launchHeat[s.swing] ? "on" : "off"}
+                                </button>
+                              )}
+                              <a
+                                href={
+                                  launchHeat[s.swing]
+                                    ? s.anchor.launch_image_heat_url
+                                    : s.anchor.launch_image_url
+                                }
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ display: "block" }}
+                                title="Adaptive-square launch tracker: the square rides the ball (bottom-third bias while ascending), widens on a miss, shrinks on a find. Green=found (ball ringed), red=missed, box size labelled per tile."
+                              >
+                                <img
+                                  src={
+                                    launchHeat[s.swing]
+                                      ? s.anchor.launch_image_heat_url
+                                      : s.anchor.launch_image_url
+                                  }
+                                  alt="launch tracker film-strip"
+                                  style={{ maxWidth: "100%", borderRadius: 6 }}
+                                />
+                              </a>
+                            </div>
                           )}
                         </div>
                       )}

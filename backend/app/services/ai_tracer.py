@@ -4432,16 +4432,24 @@ def track_launch_from_rest(
                 # frames (background ghost) — never the ball.
                 if ((cx_ - rx) ** 2 + (cy_ - ry) ** 2) ** 0.5 < 1.5 * r:
                     continue
-                # BALL-likeness: the ball is a small BRIGHT blob in the
-                # current frame, not just moving pixels (shirt / arm
-                # motion passes the size gate but isn't brighter than
-                # its surroundings).
-                _px = int(round(cx_ - x0)); _py = int(round(cy_ - y0))
-                _p5 = crop_g[
-                    max(0, _py - 2):_py + 3, max(0, _px - 2):_px + 3,
-                ]
-                if _p5.size == 0 or float(_p5.mean()) < _crop_mean + 15.0:
-                    continue
+                # BALL-likeness during LOCK-ON only (first finds): the
+                # ball must be a small BRIGHT blob, which rejects shirt
+                # and arm motion near the golfer. Once the trajectory is
+                # established the direction/step gates carry precision —
+                # and against bright sky the ball is NOT brighter than
+                # the crop average (real miss at f493: dark-trees crop
+                # turned sky-white and the gate killed the visible ball,
+                # then the widened box chained canopy sparkle instead).
+                if len(out["points"]) < 3:
+                    _px = int(round(cx_ - x0)); _py = int(round(cy_ - y0))
+                    _p5 = crop_g[
+                        max(0, _py - 2):_py + 3, max(0, _px - 2):_px + 3,
+                    ]
+                    if (
+                        _p5.size == 0
+                        or float(_p5.mean()) < _crop_mean + 15.0
+                    ):
+                        continue
                 if vx is None:
                     # FIRST find: the ball just launched — it must be
                     # ABOVE the rest spot and clearly displaced from it
@@ -4453,14 +4461,18 @@ def track_launch_from_rest(
                 else:
                     # Aim by trajectory: the hop from the last plot
                     # point must roughly agree with the velocity (flight
-                    # never u-turns), and stay within a velocity-scaled
-                    # accept radius of the prediction.
+                    # never u-turns), stay within a velocity-scaled
+                    # accept radius of the prediction, AND make real
+                    # progress (near-static canopy sparkle produces
+                    # ball-sized flickers that sit still).
                     _sx, _sy = cx_ - last_x, cy_ - last_y
                     _sm = (_sx ** 2 + _sy ** 2) ** 0.5
                     _vm = (vx ** 2 + vy ** 2) ** 0.5
                     if _vm > 6.0 and _sm > 1.0:
                         if (_sx * vx + _sy * vy) < 0.2 * _sm * _vm:
                             continue
+                    if _vm > 6.0 and _sm < 0.35 * _vm * gap:
+                        continue
                 d = ((cx_ - pred_x) ** 2 + (cy_ - pred_y) ** 2) ** 0.5
                 if vx is not None:
                     _vm = (vx ** 2 + vy ** 2) ** 0.5
@@ -4494,7 +4506,13 @@ def track_launch_from_rest(
                 "frame": int(f), "x0": x0, "y0": y0, "x1": x1, "y1": y1,
                 "found": bool(found),
             })
-            tiles.append((f, cur[y0:y1, x0:x1].copy(), found, fx, fy, x0, y0))
+            _crop_bgr = cur[y0:y1, x0:x1].copy()
+            _heat_bgr = _crop_bgr.copy()
+            _mm = mask > 0
+            _heat_bgr[_mm] = (
+                0.35 * _heat_bgr[_mm] + np.array([0, 0, 165])
+            ).clip(0, 255).astype(np.uint8)
+            tiles.append((f, _crop_bgr, _heat_bgr, found, fx, fy, x0, y0))
             if consec_miss >= 18:
                 out["reason"] = (
                     f"lost the ball ({consec_miss} straight misses)"
@@ -4514,68 +4532,83 @@ def track_launch_from_rest(
             try:
                 sel = tiles[:150]  # EVERY frame (capped for sanity)
                 TW = 130
-                rendered = []
-                for (tf, crop, found, fx, fy, bx0, by0) in sel:
-                    ch, cw = crop.shape[:2]
-                    z = TW / float(cw)
-                    t = cv2.resize(crop, (TW, max(1, int(ch * z))))
-                    col = (0, 200, 0) if found else (0, 0, 230)
-                    cv2.rectangle(
-                        t, (0, 0), (t.shape[1] - 1, t.shape[0] - 1), col, 2,
-                    )
-                    if found and fx is not None:
-                        cv2.circle(
-                            t,
-                            (int((fx - bx0) * z), int((fy - by0) * z)),
-                            max(3, int(r * z)), (0, 255, 255), 1,
-                            cv2.LINE_AA,
+
+                def _render_strip(use_heat: bool) -> "np.ndarray":
+                    rendered = []
+                    for (tf, crop_p, crop_h, found, fx, fy, bx0, by0) in sel:
+                        crop = crop_h if use_heat else crop_p
+                        ch, cw = crop.shape[:2]
+                        z = TW / float(cw)
+                        t = cv2.resize(crop, (TW, max(1, int(ch * z))))
+                        col = (0, 200, 0) if found else (0, 0, 230)
+                        cv2.rectangle(
+                            t, (0, 0),
+                            (t.shape[1] - 1, t.shape[0] - 1), col, 2,
                         )
+                        if found and fx is not None:
+                            cv2.circle(
+                                t,
+                                (int((fx - bx0) * z), int((fy - by0) * z)),
+                                max(3, int(r * z)), (0, 255, 255), 1,
+                                cv2.LINE_AA,
+                            )
+                        cv2.putText(
+                            t, f"{tf}", (3, 13), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.38, (255, 255, 255), 1, cv2.LINE_AA,
+                        )
+                        cv2.putText(
+                            t, f"{cw}px", (3, t.shape[0] - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.34,
+                            (200, 200, 200), 1, cv2.LINE_AA,
+                        )
+                        rendered.append(t)
+                    mh = max(t.shape[0] for t in rendered)
+                    rendered = [
+                        cv2.copyMakeBorder(
+                            t, 0, mh - t.shape[0], 0, 0,
+                            cv2.BORDER_CONSTANT, value=(0, 0, 0),
+                        )
+                        for t in rendered
+                    ]
+                    per_row = 12
+                    rows = []
+                    for i in range(0, len(rendered), per_row):
+                        row = rendered[i:i + per_row]
+                        while len(row) < per_row:
+                            row.append(np.zeros_like(rendered[0]))
+                        rows.append(cv2.hconcat(row))
+                    strip = cv2.vconcat(rows)
+                    bar = np.zeros((34, strip.shape[1], 3), np.uint8)
                     cv2.putText(
-                        t, f"{tf}", (3, 13), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.38, (255, 255, 255), 1, cv2.LINE_AA,
+                        bar,
+                        (
+                            f"launch tracker from rest "
+                            f"({rx:.0f},{ry:.0f}) @ f{f0} - "
+                            f"{out['n_found']} found, {out['reason']} | "
+                            f"square moves with the ball; widens on miss, "
+                            f"shrinks on find"
+                            + (" | RED TINT = motion mask" if use_heat else "")
+                        ),
+                        (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255), 1, cv2.LINE_AA,
                     )
-                    cv2.putText(
-                        t, f"{cw}px", (3, t.shape[0] - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.34,
-                        (200, 200, 200), 1, cv2.LINE_AA,
-                    )
-                    rendered.append(t)
-                mh = max(t.shape[0] for t in rendered)
-                rendered = [
-                    cv2.copyMakeBorder(
-                        t, 0, mh - t.shape[0], 0, 0,
-                        cv2.BORDER_CONSTANT, value=(0, 0, 0),
-                    )
-                    for t in rendered
-                ]
-                per_row = 12
-                rows = []
-                for i in range(0, len(rendered), per_row):
-                    row = rendered[i:i + per_row]
-                    while len(row) < per_row:
-                        row.append(np.zeros_like(rendered[0]))
-                    rows.append(cv2.hconcat(row))
-                strip = cv2.vconcat(rows)
-                bar = np.zeros((34, strip.shape[1], 3), np.uint8)
-                cv2.putText(
-                    bar,
-                    (
-                        f"launch tracker from rest "
-                        f"({rx:.0f},{ry:.0f}) @ f{f0} - "
-                        f"{out['n_found']} found, {out['reason']} | "
-                        f"square moves with the ball; widens on miss, "
-                        f"shrinks on find"
-                    ),
-                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (255, 255, 255), 1, cv2.LINE_AA,
-                )
-                img = cv2.vconcat([bar, strip])
+                    return cv2.vconcat([bar, strip])
+
                 name = f"{debug_prefix}.jpg"
                 cv2.imwrite(
-                    str(Path(debug_dir) / name), img,
+                    str(Path(debug_dir) / name), _render_strip(False),
                     [int(cv2.IMWRITE_JPEG_QUALITY), 86],
                 )
                 out["image"] = name
+                # Heat variant — the SAME tiles with the frame-diff
+                # motion mask tinted red (what the tracker actually
+                # looked at), toggled from the debug UI.
+                name_h = f"{debug_prefix}-heat.jpg"
+                cv2.imwrite(
+                    str(Path(debug_dir) / name_h), _render_strip(True),
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 86],
+                )
+                out["image_heat"] = name_h
             except Exception as exc:  # noqa: BLE001
                 log.warning("launch tracker: debug strip failed: %s", exc)
         return out
