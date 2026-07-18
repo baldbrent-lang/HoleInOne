@@ -5780,6 +5780,187 @@ def _run_tracer(
 MOG2_LAYER_POST_IMPACT_SEC = 4.0
 
 
+def _flight_from_rest_lock(
+    pool: list, rest_xy: tuple, imp: int, fps: float,
+    f_cap: int | None,
+) -> tuple[list, dict]:
+    """Operator-designed launch lock: search a variance cone opening UP
+    from the RESTING BALL position in the frames after impact for a
+    3-dot sequence with (a) strictly increasing frames, (b) each dot
+    higher than the last, (c) all three on a straight line from the
+    rest position (within tolerance), and (d) spacing that does not
+    grow much dot-to-dot (a launched ball decelerates — its marks get
+    slightly closer; club debris accelerating away does not). Once
+    locked, follow the flight with the velocity-aware trail follower.
+
+    Anchored at rest + impact ONLY — works even when the AI picks are
+    few, clustered, or wrong. Returns (chain, lock_info); chain entries
+    are {frame, found, x, y, source:'mog2'} in increasing frames."""
+    import numpy as _np
+
+    rx, ry = float(rest_xy[0]), float(rest_xy[1])
+    lim_f = imp + int(round(1.5 * fps))
+    cone = []
+    for c in pool:
+        f = int(c["frame"])
+        if not (imp - 2 <= f <= lim_f):
+            continue
+        rise = ry - float(c["y"])
+        if rise < 8:
+            continue  # not above the ball
+        if ((float(c["x"]) - rx) ** 2
+                + (float(c["y"]) - ry) ** 2) ** 0.5 < 25.0:
+            continue  # vacated-ball ghost at the rest spot
+        if abs(float(c["x"]) - rx) > rise + 40.0:
+            continue  # outside the cone (~45° half-angle + base slack)
+        cone.append(c)
+    cone.sort(key=lambda r: int(r["frame"]))
+    info = {"locked": False, "n_cone": len(cone), "seed_frames": None}
+    if len(cone) < 3:
+        return [], info
+
+    def _dline(p, bx, by):
+        # distance of p from the line rest -> (bx, by)
+        _l = ((bx - rx) ** 2 + (by - ry) ** 2) ** 0.5
+        if _l < 1.0:
+            return 1e9
+        return abs(
+            (bx - rx) * (ry - float(p["y"]))
+            - (rx - float(p["x"])) * (by - ry)
+        ) / _l
+
+    def _d(a, b):
+        return ((float(a["x"]) - float(b["x"])) ** 2
+                + (float(a["y"]) - float(b["y"])) ** 2) ** 0.5
+
+    # Collect up to 8 candidate seeds (one per starting dot) and follow
+    # each — the LONGEST surviving chain wins. A seed built on a walker
+    # or club fragment dies within a few dots; the real launch follows
+    # for dozens of frames.
+    seeds = []
+    for d1 in cone:
+        f1 = int(d1["frame"])
+        found = None
+        for d2 in cone:
+            f2 = int(d2["frame"])
+            if not (f1 < f2 <= f1 + 6):
+                continue
+            if float(d2["y"]) > float(d1["y"]) - 3.0:
+                continue  # not moving upward
+            for d3 in cone:
+                f3 = int(d3["frame"])
+                if not (f2 < f3 <= f2 + 6):
+                    continue
+                if float(d3["y"]) > float(d2["y"]) - 3.0:
+                    continue
+                # Straight line from REST through the sequence.
+                if (
+                    _dline(d1, float(d3["x"]), float(d3["y"])) > 25.0
+                    or _dline(d2, float(d3["x"]), float(d3["y"])) > 25.0
+                ):
+                    continue
+                # Per-frame spacing must not grow much.
+                v12 = _d(d1, d2) / max(1, f2 - f1)
+                v23 = _d(d2, d3) / max(1, f3 - f2)
+                if v23 > v12 * 1.5 + 5.0:
+                    continue
+                found = (d1, d2, d3)
+                break
+            if found:
+                break
+        if found:
+            seeds.append(found)
+            if len(seeds) >= 8:
+                break
+    info["n_seeds"] = len(seeds)
+    if not seeds:
+        return [], info
+
+    def _follow(seed):
+        d1, d2, d3 = seed
+        chain = [
+            {
+                "frame": int(d["frame"]), "found": True,
+                "x": float(d["x"]), "y": float(d["y"]), "source": "mog2",
+            }
+            for d in seed
+        ]
+        _kf = [float(imp)] + [float(c["frame"]) for c in chain]
+        _kx = [rx] + [c["x"] for c in chain]
+        _ky = [ry] + [c["y"] for c in chain]
+
+        def _fit():
+            _deg_x = 2 if len(_kf) >= 4 else 1
+            return _np.polyfit(_kf, _kx, _deg_x), _np.polyfit(_kf, _ky, 2)
+
+        _cx, _cy = _fit()
+        prev_f = int(d3["frame"])
+        prev_x, prev_y = float(d3["x"]), float(d3["y"])
+        lock_f = prev_f
+        for c in pool:
+            f = int(c["frame"])
+            if f <= prev_f:
+                continue
+            if f_cap is not None and f > f_cap:
+                break
+            if f - prev_f > 45:
+                break  # trail went quiet
+            # Vacated-ball ghost at the rest spot.
+            if ((float(c["x"]) - rx) ** 2
+                    + (float(c["y"]) - ry) ** 2) ** 0.5 < 25.0:
+                continue
+            gap = f - prev_f
+            vel = float(_np.hypot(
+                _np.polyval(_np.polyder(_cx), prev_f),
+                _np.polyval(_np.polyder(_cy), prev_f),
+            ))
+            step = ((float(c["x"]) - prev_x) ** 2
+                    + (float(c["y"]) - prev_y) ** 2) ** 0.5
+            if step > 30.0 + gap * max(9.0, 1.6 * vel):
+                continue
+            # Minimum progress: ghosts of vacated positions barely move
+            # (and drift a few px as they decay, evading a same-spot
+            # filter). Early flight ALWAYS moves — hard floor for the
+            # first 1.5s, velocity-scaled thereafter.
+            if f - lock_f <= int(round(1.5 * fps)) and step < 3.5 * gap:
+                continue
+            if vel > 8.0 and step < 0.3 * vel * gap:
+                continue
+            # Tight predictive corridor keyed to the GAP since the last
+            # accepted dot (refit on every accept, so the prediction is
+            # only ever `gap` frames of extrapolation).
+            pred_x = float(_np.polyval(_cx, f))
+            pred_y = float(_np.polyval(_cy, f))
+            tol = 20.0 + 6.0 * gap
+            d = ((float(c["x"]) - pred_x) ** 2
+                 + (float(c["y"]) - pred_y) ** 2) ** 0.5
+            if d > tol:
+                continue
+            chain.append({
+                "frame": f, "found": True,
+                "x": float(c["x"]), "y": float(c["y"]), "source": "mog2",
+            })
+            _kf.append(float(f))
+            _kx.append(float(c["x"]))
+            _ky.append(float(c["y"]))
+            _cx, _cy = _fit()
+            prev_f, prev_x, prev_y = f, float(c["x"]), float(c["y"])
+        return chain
+
+    best_chain, best_seed = [], None
+    for sd in seeds:
+        ch = _follow(sd)
+        if len(ch) > len(best_chain):
+            best_chain, best_seed = ch, sd
+    if len(best_chain) < 5:
+        return [], info
+    chain = best_chain
+    info["locked"] = True
+    info["seed_frames"] = [int(d["frame"]) for d in best_seed]
+    info["chain_len"] = len(chain)
+    return chain, info
+
+
 def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     """Post-produce MOG2 layer over a successful AI tracer run.
 
@@ -5870,6 +6051,31 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         )
     pool = sorted(_pool_by_key.values(), key=lambda r: r["frame"])
 
+    # Ghost-trail filter: MOG2 keeps firing a VACATED spot for several
+    # frames after the ball leaves it (background model lag) — so right
+    # after launch, every early flight position re-appears as a
+    # stationary dot for ~5-10 frames. A trail follower can walk
+    # backward down that ghost ladder and lose the real flight. A
+    # flying ball never occupies the same spot 3+ times in a short
+    # window: drop dots with >=2 prior appearances within 7px in the
+    # previous 12 frames. (Also thins pool-ripple / foliage repeats.)
+    _ghost_free: list = []
+    _win: list = []
+    for c in pool:
+        f = int(c["frame"])
+        while _win and f - _win[0][0] > 12:
+            _win.pop(0)
+        n_prior = sum(
+            1 for (pf, px_, py_) in _win
+            if pf < f
+            and ((float(c["x"]) - px_) ** 2
+                 + (float(c["y"]) - py_) ** 2) ** 0.5 < 7.0
+        )
+        if n_prior < 2:
+            _ghost_free.append(c)
+        _win.append((f, float(c["x"]), float(c["y"])))
+    pool = _ghost_free
+
     def _near(a, b, df=3, dpx=25.0):
         return (
             abs(int(a["frame"]) - int(b["frame"])) <= df
@@ -5886,14 +6092,53 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         if _imp is not None else None
     )
     added_launch: list[dict] = []
+    added_mid: list[dict] = []
     added_descent: list[dict] = []
     descent_debug: dict | None = None
-    # Even a SINGLE AI pick is enough to anchor the layer: the launch
-    # corridor (impact position → that pick) needs nothing else, and the
-    # dots it fills in then anchor the extrapolation fit (real case:
-    # upload where the AI found the ball on 1 frame of a near-vertical
-    # flight sitting on a 169-dot MOG2 chain — nothing was mapped).
-    if ai_pts:
+
+    # PRIMARY: rest-lock flight chain (operator-designed). A cone opens
+    # UP from the resting ball; a 3-dot straight-line, frames-increasing
+    # sequence locks the launch; the trail follower takes it from there.
+    # Anchored at rest + impact only, so it works even when the AI picks
+    # are few, clustered at the apex, or plain wrong.
+    lock_chain: list = []
+    lock_info: dict = {"locked": False}
+    if _rest and len(_rest) == 2 and _imp is not None:
+        try:
+            lock_chain, lock_info = _flight_from_rest_lock(
+                pool, (float(_rest[0]), float(_rest[1])),
+                int(_imp), _fps, _f_cap,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mog2 layer: rest-lock failed: %s", exc)
+
+    if lock_chain:
+        _ai_ff = {int(p["frame"]) for p in ai_pts}
+        _chain_add = [
+            c for c in lock_chain if int(c["frame"]) not in _ai_ff
+        ]
+        if ai_pts:
+            _ff = min(int(p["frame"]) for p in ai_pts)
+            _lf = max(int(p["frame"]) for p in ai_pts)
+            added_launch = [c for c in _chain_add if c["frame"] < _ff]
+            added_mid = [
+                c for c in _chain_add if _ff <= c["frame"] <= _lf
+            ]
+            added_descent = [c for c in _chain_add if c["frame"] > _lf]
+        else:
+            added_launch = _chain_add
+        descent_debug = {
+            "seen": len(lock_chain), "step_rej": 0, "corr_rej": 0,
+            "samples": [], "rescue": False,
+            "stopped": (
+                f"rest-lock chain (seed f"
+                f"{lock_info.get('seed_frames')})"
+            ),
+        }
+    # FALLBACK (no lock): AI-anchored corridor phases. Even a SINGLE AI
+    # pick anchors the launch corridor (impact position → that pick),
+    # and the dots it fills then anchor the extrapolation fit.
+    elif ai_pts:
         ai_sorted = sorted(ai_pts, key=lambda r: int(r["frame"]))
         first_ai, last_ai = ai_sorted[0], ai_sorted[-1]
         first_f, last_f = int(first_ai["frame"]), int(last_ai["frame"])
@@ -6052,7 +6297,8 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             descent_debug = _desc_dbg
 
     added = sorted(
-        added_launch + added_descent, key=lambda r: int(r["frame"]),
+        added_launch + added_mid + added_descent,
+        key=lambda r: int(r["frame"]),
     )
 
     stats = {
@@ -6061,8 +6307,10 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         "n_matched": n_matched,
         "n_added": len(added),
         "n_added_launch": len(added_launch),
+        "n_added_mid": len(added_mid),
         "n_added_descent": len(added_descent),
         "corresponds": bool(n_matched >= 2),
+        "lock": lock_info,
         "descent_debug": descent_debug,
     }
     try:
@@ -6083,6 +6331,16 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
         try:
             img = cv2.imread(str(CLIPS_DIR / _raw))
             if img is not None:
+                # Rest-lock visual: magenta line from the resting ball
+                # through the 3-dot seed that locked the launch.
+                if lock_info.get("locked") and _rest and lock_chain:
+                    _s3 = lock_chain[min(2, len(lock_chain) - 1)]
+                    cv2.line(
+                        img,
+                        (int(float(_rest[0])), int(float(_rest[1]))),
+                        (int(_s3["x"]), int(_s3["y"])),
+                        (255, 0, 255), 2, cv2.LINE_AA,
+                    )
                 for cp in pool:
                     cv2.circle(
                         img, (int(cp["x"]), int(cp["y"])), 7,
@@ -6105,9 +6363,15 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
                 _lbl = (
                     f"MOG2 vs AI - yellow=AI picks ({len(ai_pts)}), "
                     f"white=MOG2 dots ({len(pool)}), "
-                    f"red=added to arc ({len(added)}: "
-                    f"{len(added_launch)} launch + "
-                    f"{len(added_descent)} descent), matched={n_matched}"
+                    f"red=added to arc ({len(added)}), "
+                    f"matched={n_matched}"
+                    + (
+                        f", LOCKED @ f{lock_info.get('seed_frames')}"
+                        f" (magenta line, chain "
+                        f"{lock_info.get('chain_len')})"
+                        if lock_info.get("locked")
+                        else ", no rest-lock"
+                    )
                 )
                 cv2.putText(img, _lbl, (12, 56), cv2.FONT_HERSHEY_SIMPLEX,
                             0.62, (0, 0, 0), 3, cv2.LINE_AA)
