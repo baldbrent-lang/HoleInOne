@@ -804,6 +804,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           n_backfilled: out.n_backfilled,
           n_ai_anchors: out.n_ai_anchors ?? null,
           rest_lock: out.rest_lock || null,
+          anchor_check: out.anchor_check || out.mog2_stats?.anchor_check || null,
         });
       }
       // Persist to the captured swing index regardless of current tab.
@@ -922,6 +923,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         n_backfilled: out.n_backfilled,
         n_ai_anchors: out.n_ai_anchors ?? null,
         rest_lock: out.rest_lock || null,
+        anchor_check: out.anchor_check || out.mog2_stats?.anchor_check || null,
       });
       // Cache the run into the swing so re-opens hydrate the tracer
       // instead of re-running. Records which engine produced it. The
@@ -1221,6 +1223,32 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               )}
               {tracerStats.rest_lock?.locked && (
                 <> · 🔒 rest-lock @ f{(tracerStats.rest_lock.seed_frames || []).join(",")}</>
+              )}
+              {tracerStats.anchor_check && (
+                <>
+                  {" · \u2693 "}
+                  {tracerStats.anchor_check.verified
+                    ? `anchors verified (rest ${
+                        tracerStats.anchor_check.snapped
+                          ? `snapped ${tracerStats.anchor_check.snap_px}px`
+                          : "exact"
+                      }, impact ${
+                        tracerStats.anchor_check.impact_delta >= 0 ? "+" : ""
+                      }${tracerStats.anchor_check.impact_delta}f by departure)`
+                    : `anchors unverified: ${tracerStats.anchor_check.reason}`}
+                  {tracerStats.anchor_check.image_url && (
+                    <>
+                      {" "}
+                      <a
+                        href={tracerStats.anchor_check.image_url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        film-strip
+                      </a>
+                    </>
+                  )}
+                </>
               )}
               {" · "}{tracerStats.n_points ?? "—"} points plotted
               {tracerStats.n_candidates != null && (
@@ -4509,6 +4537,38 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                 {stat("impact frame", s.ai?.impact_frame)}
                 {stat("handedness", s.ai?.handedness)}
                 {stat("ball-track points", s.ai?.n_track)}
+                {s.ai?.anchor_check && (
+                  <div className="tiny" style={{ marginTop: 2 }}>
+                    {"\u2693"} anchors:{" "}
+                    {s.ai.anchor_check.verified ? (
+                      <span style={{ color: "#1a9d55" }}>
+                        verified — rest{" "}
+                        {s.ai.anchor_check.snapped
+                          ? `snapped ${s.ai.anchor_check.snap_px}px`
+                          : "exact"}
+                        , impact by ball departure (
+                        {s.ai.anchor_check.impact_delta >= 0 ? "+" : ""}
+                        {s.ai.anchor_check.impact_delta}f vs estimate)
+                      </span>
+                    ) : (
+                      <span style={{ color: "#b7791f" }}>
+                        unverified — {s.ai.anchor_check.reason}
+                      </span>
+                    )}
+                    {s.ai.anchor_check.image_url && (
+                      <>
+                        {" "}
+                        <a
+                          href={s.ai.anchor_check.image_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          film-strip
+                        </a>
+                      </>
+                    )}
+                  </div>
+                )}
                 {s.ai?.error && (
                   <div className="small" style={{ color: "#c0392b" }}>
                     {s.ai.error}

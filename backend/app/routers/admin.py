@@ -1983,6 +1983,25 @@ def _process_long_upload_segments(
                 nsw["tracer_url"] = tracer_url
             if mapped or tracer_url:
                 nsw["tracer_engine"] = tracer_info.get("engine") or "ai"
+            # Anchor check (rest snap + departure-frame impact) — the
+            # pixel verification's verdict and film-strip, shown in the
+            # debug report so the operator can SEE what was tried.
+            _ac = tracer_info.get("anchor_check")
+            if _ac:
+                _ac_entry = {
+                    k: _ac.get(k)
+                    for k in (
+                        "verified", "snapped", "snap_px", "impact_delta",
+                        "present_ratio_pre", "reason",
+                    )
+                }
+                if _ac.get("image") and (CLIPS_DIR / _ac["image"]).exists():
+                    _acp = CLIPS_DIR / _ac["image"]
+                    _ac_entry["image_url"] = (
+                        f"{settings.app_base_url}/uploads/clips/"
+                        f"{_acp.name}?v={int(_acp.stat().st_mtime)}"
+                    )
+                nsw["anchor_check"] = _ac_entry
             # MOG2 layer-in evidence: overlay image (raw motion heat +
             # AI picks + MOG2 chain + added points) and the match/extend
             # stats — shown via the button under the produced video.
@@ -3964,18 +3983,44 @@ def render_wizard_tracer(
         # it maps more flight than the classical chain — the exact
         # rescue for a "953 candidates, 0 points" run.
         rest_lock_info = None
+        anchor_check_c = None
         _imp_cut = (
             max(0, int(impact_override) - offset_frames)
             if impact_override is not None else None
         )
+        _lock_rest = ball_at_rest_override
         if ball_at_rest_override is not None and _imp_cut is not None:
             try:
-                _chain_c, rest_lock_info = _flight_from_rest_lock(
-                    _mog2_dot_pool(info_c),
+                # ANCHOR CHECK first (pixel-verify, no API): snap the
+                # rest ball to the bright-blob centroid; pin impact to
+                # the frame the ball departs the rest patch. Verified
+                # corrections feed the rest-lock cone below.
+                from ..services.ai_tracer import verify_rest_and_impact
+
+                anchor_check_c = verify_rest_and_impact(
+                    src_for_trace,
                     (
                         float(ball_at_rest_override[0]),
                         float(ball_at_rest_override[1]),
                     ),
+                    _imp_cut, fps_c,
+                    debug_dir=CLIPS_DIR,
+                    debug_prefix=(
+                        f"anchorchk-wiz-{upload_id}-{secrets.token_hex(3)}"
+                    ),
+                )
+                if anchor_check_c.get("verified"):
+                    _lock_rest = (
+                        float(anchor_check_c["rest_xy"][0]),
+                        float(anchor_check_c["rest_xy"][1]),
+                    )
+                    _imp_cut = int(anchor_check_c["impact_frame"])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("wizard %s: anchor check failed: %s", engine, exc)
+            try:
+                _chain_c, rest_lock_info = _flight_from_rest_lock(
+                    _mog2_dot_pool(info_c),
+                    (float(_lock_rest[0]), float(_lock_rest[1])),
                     _imp_cut, fps_c,
                     _imp_cut + int(
                         round(MOG2_LAYER_POST_IMPACT_SEC * fps_c),
@@ -4524,6 +4569,25 @@ def render_wizard_tracer(
             "n_backfilled": info_c.get("n_backfilled"),
             "n_ai_anchors": n_ai_anchors,
             "rest_lock": rest_lock_info,
+            "anchor_check": (
+                {
+                    **{
+                        k: anchor_check_c.get(k)
+                        for k in (
+                            "verified", "snapped", "snap_px",
+                            "impact_delta", "present_ratio_pre", "reason",
+                        )
+                    },
+                    "impact_frame": (
+                        int(anchor_check_c["impact_frame"]) + offset_frames
+                        if anchor_check_c.get("impact_frame") is not None
+                        else None
+                    ),
+                    "rest_xy": anchor_check_c.get("rest_xy"),
+                    "image_url": _named_url(anchor_check_c.get("image")),
+                }
+                if anchor_check_c else None
+            ),
             "debug_url": debug_url_c,
             "raw_motion_url": raw_motion_url,
             "raw_motion_arc_url": raw_motion_arc_url,
@@ -4633,6 +4697,11 @@ def render_wizard_tracer(
                     )
                     if _layer:
                         mog2_stats = _layer.get("stats")
+                        _ac = (mog2_stats or {}).get("anchor_check")
+                        if _ac and _ac.get("image"):
+                            _acp = CLIPS_DIR / _ac["image"]
+                            if _acp.exists():
+                                _ac["image_url"] = _public_url(_acp)
                         _ovl = _layer.get("overlay_name")
                         if _ovl and (CLIPS_DIR / _ovl).exists():
                             mog2_overlay_url = _public_url(CLIPS_DIR / _ovl)
@@ -6116,6 +6185,46 @@ def _mog2_layer_for_ai_track(
     # walking across the swing path BEFORE the shot, or wandering off
     # AFTER the ball lands, leaves no residue in the flight corridor.
     _fps = probe_fps(clip_path) or 30.0
+
+    # ANCHOR CHECK (pixel-verify, no API): snap the rest position to
+    # the bright-blob centroid and pin impact to the exact frame the
+    # ball DEPARTS the rest patch. Both anchors feed the rest-lock's
+    # cone, the heat window, and the 4s cap — a verified correction
+    # here tightens everything downstream. Unverified = keep the
+    # originals (never let a failed check break a working trace).
+    anchor_check: dict | None = None
+    if _rest and len(_rest) == 2 and _imp is not None:
+        try:
+            from ..services.ai_tracer import verify_rest_and_impact
+
+            anchor_check = verify_rest_and_impact(
+                clip_path,
+                (float(_rest[0]), float(_rest[1])),
+                int(_imp), _fps,
+                debug_dir=CLIPS_DIR,
+                debug_prefix=f"anchorchk-{clip_path.stem}",
+            )
+            if anchor_check.get("verified"):
+                _rest = (
+                    float(anchor_check["rest_xy"][0]),
+                    float(anchor_check["rest_xy"][1]),
+                )
+                _imp = int(anchor_check["impact_frame"])
+                log.info(
+                    "mog2 layer: anchors verified — rest snapped %spx, "
+                    "impact -> f%d (%+d)",
+                    anchor_check.get("snap_px"), _imp,
+                    anchor_check.get("impact_delta") or 0,
+                )
+            else:
+                log.info(
+                    "mog2 layer: anchor check inconclusive (%s) — "
+                    "keeping original anchors",
+                    anchor_check.get("reason"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mog2 layer: anchor check failed: %s", exc)
+
     _pfx = f"mog2layer-{clip_path.stem}"
     _cv_url, cv_info, _cv_traced, _cv_dbg = _run_tracer(
         clip_path,
@@ -6382,6 +6491,7 @@ def _mog2_layer_for_ai_track(
         "n_added_descent": len(added_descent),
         "corresponds": bool(n_matched >= 2),
         "lock": lock_info,
+        "anchor_check": anchor_check,
         "descent_debug": descent_debug,
     }
     try:
@@ -6460,6 +6570,15 @@ def _mog2_layer_for_ai_track(
     out = {
         "stats": stats, "overlay_name": overlay_name,
         "merged": None, "url": None, "path": None,
+        # Corrected anchors (clip-relative) when the pixel check
+        # verified them — callers persist these for the wizard.
+        "anchors": (
+            {
+                "rest_xy": [float(_rest[0]), float(_rest[1])],
+                "impact_frame": int(_imp),
+            }
+            if anchor_check and anchor_check.get("verified") else None
+        ),
     }
     if not added:
         log.info(
@@ -6597,6 +6716,17 @@ def _trace_segment(clip_path: Path, ball_at_rest_override=None):
                         info["mog2"] = _layer.get("stats")
                         if _layer.get("overlay_name"):
                             info["mog2_overlay_image"] = _layer["overlay_name"]
+                        # Pixel-verified anchors beat the vision
+                        # estimates — persist the corrected rest ball +
+                        # departure-frame impact for the wizard.
+                        _anch = _layer.get("anchors")
+                        if _anch:
+                            info["impact_frame"] = _anch["impact_frame"]
+                            info["ball_rest_xy"] = tuple(_anch["rest_xy"])
+                            info["ball_rest_source"] = "pixel_verified"
+                        _ac = (_layer.get("stats") or {}).get("anchor_check")
+                        if _ac:
+                            info["anchor_check"] = _ac
                         if _layer.get("merged") and _layer.get("url"):
                             info["ball_track_frames"] = _layer["merged"]
                             info["n_points"] = len(_layer["merged"])
@@ -7325,6 +7455,7 @@ def _run_produce_debug_job(
                             ),
                             "traced_url": _sw.get("tracer_url"),
                             "mog2_overlay_url": _sw.get("mog2_overlay_url"),
+                            "anchor_check": _sw.get("anchor_check"),
                             "production": True,
                         }
                         break

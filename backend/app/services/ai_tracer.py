@@ -4060,6 +4060,256 @@ _FIND_RESTING_BALL_PROMPT = (
 )
 
 
+def verify_rest_and_impact(
+    input_path: Path,
+    rest_xy: tuple[float, float],
+    approx_impact_frame: int,
+    fps: float,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "anchorchk",
+) -> dict:
+    """Pixel-verify and TIGHTEN the two anchors the tracers lean on —
+    no API calls, one sequential decode of ~2s of video.
+
+    1) SNAP: vision ball coordinates are ±a-few-px after downscale →
+       native scaling. On the pre-impact frames, find the small bright
+       cluster nearest the claimed rest position (within ~15px) and
+       snap to its centroid.
+    2) DEPARTURE: watch the rest patch across [impact-1s, impact+1s].
+       The ball is a bright blob that is THERE before the strike and
+       GONE after — the first frame it stays absent (3+ consecutive,
+       riding out the clubhead passing over) is impact to ~±1 frame.
+       If the patch never had a ball, or the ball never leaves, the
+       claimed rest position (or the swing) is wrong — verified=False
+       and callers keep their original anchors.
+
+    Writes a debug film-strip (each patch crop bordered green=ball
+    present / red=absent, departure frame flagged) when debug_dir is
+    set. Returns {available, verified, rest_xy, snapped, snap_px,
+    impact_frame, impact_delta, present_ratio_pre, reason, image}.
+    Never raises."""
+    out = {
+        "available": False, "verified": None,
+        "rest_xy": [float(rest_xy[0]), float(rest_xy[1])],
+        "snapped": False, "snap_px": None,
+        "impact_frame": None, "impact_delta": None,
+        "present_ratio_pre": None, "reason": None, "image": None,
+    }
+    if not HAS_CV or not HAS_NP:
+        out["reason"] = "opencv/numpy not installed"
+        return out
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open video"
+            return out
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(fps or 30.0)
+        imp = int(approx_impact_frame)
+        r = max(10, int(round(0.015 * h)))  # patch half-size ~ ball scale
+        m = 2 * r  # crop half-size (room for the snap search)
+        cx0, cy0 = float(rest_xy[0]), float(rest_xy[1])
+        x0, x1 = int(cx0 - m), int(cx0 + m + 1)
+        y0, y1 = int(cy0 - m), int(cy0 + m + 1)
+        if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+            out["reason"] = "rest patch clipped by frame edge"
+            cap.release()
+            return out
+        f_lo = max(0, imp - int(round(1.0 * fps)))
+        f_hi = imp + int(round(1.0 * fps))
+        crops: dict[int, "np.ndarray"] = {}
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f_lo)
+        for f in range(f_lo, f_hi + 1):
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            crops[f] = cv2.cvtColor(fr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        cap.release()
+        if len(crops) < 10:
+            out["reason"] = "window too short / read failed"
+            return out
+        out["available"] = True
+
+        # Baseline = clearly pre-impact frames (up to impact - 0.35s).
+        _pre_end = imp - int(round(0.35 * fps))
+        base_fs = [f for f in crops if f <= _pre_end]
+        if len(base_fs) < 4:
+            base_fs = sorted(crops)[: max(4, len(crops) // 4)]
+        base = np.median(
+            np.stack([crops[f].astype(np.float32) for f in base_fs]), axis=0,
+        ).astype(np.uint8)
+
+        def _bright_centroid(g):
+            """Centroid of the small bright cluster nearest the crop
+            centre, or None. Same spirit as _white_blob_at."""
+            mean = float(g.mean())
+            thr = max(mean + 25.0, float(np.percentile(g, 92)))
+            mask = (g >= thr).astype(np.uint8)
+            n, lbl, stats_, cent = cv2.connectedComponentsWithStats(mask)
+            best = None
+            gc = (g.shape[1] / 2.0, g.shape[0] / 2.0)
+            for i in range(1, n):
+                area = int(stats_[i, cv2.CC_STAT_AREA])
+                if area < 4 or area > 0.25 * g.size:
+                    continue
+                d = ((cent[i][0] - gc[0]) ** 2
+                     + (cent[i][1] - gc[1]) ** 2) ** 0.5
+                if best is None or d < best[0]:
+                    best = (d, float(cent[i][0]), float(cent[i][1]), area)
+            return best  # (dist_to_centre, cx, cy, area) | None
+
+        # SNAP on the baseline composite.
+        snap = _bright_centroid(base)
+        scx, scy = float(m), float(m)  # crop-space rest (centre)
+        if snap is not None and snap[0] <= 15.0:
+            scx, scy = snap[1], snap[2]
+            out["snapped"] = True
+            out["snap_px"] = float(round(float(snap[0]), 1))
+            out["rest_xy"] = [
+                float(round(cx0 + (scx - m), 1)),
+                float(round(cy0 + (scy - m), 1)),
+            ]
+
+        # Per-frame ball presence at the SNAPPED spot.
+        def _present(g):
+            b = _bright_centroid(g)
+            if b is None:
+                return False
+            return ((b[1] - scx) ** 2 + (b[2] - scy) ** 2) ** 0.5 <= r * 0.8
+
+        present = {f: _present(g) for f, g in crops.items()}
+        pre_ratio = (
+            sum(1 for f in base_fs if present[f]) / max(1, len(base_fs))
+        )
+        out["present_ratio_pre"] = round(pre_ratio, 2)
+        if pre_ratio < 0.6:
+            out["verified"] = False
+            out["reason"] = (
+                f"no steady ball at the claimed rest spot before impact "
+                f"(present {int(pre_ratio * 100)}% of baseline frames) — "
+                f"rest position likely wrong"
+            )
+        else:
+            # DEPARTURE: first frame absent and STAYS absent 3 frames
+            # (clubhead passing over occludes 1-2 frames at most).
+            fs_sorted = sorted(crops)
+            dep = None
+            for i, f in enumerate(fs_sorted[:-2]):
+                if f < base_fs[-1]:
+                    continue
+                if (
+                    not present[f]
+                    and not present.get(f + 1, True)
+                    and not present.get(f + 2, True)
+                    and any(present.get(f - k, False) for k in (1, 2, 3, 4))
+                ):
+                    dep = f
+                    break
+            if dep is None:
+                out["verified"] = False
+                out["reason"] = (
+                    "ball never left the rest spot within ±1s of the "
+                    "estimated impact (practice swing, or impact estimate "
+                    "far off)"
+                )
+            else:
+                out["verified"] = True
+                out["impact_frame"] = int(dep)
+                out["impact_delta"] = int(dep - imp)
+                out["reason"] = (
+                    f"ball departed the rest spot at f{dep} "
+                    f"({dep - imp:+d} vs estimate)"
+                )
+
+        # Debug film-strip — SHOW THE WORK: each patch crop bordered by
+        # its presence verdict, the departure frame flagged.
+        if debug_dir is not None:
+            try:
+                fs_sorted = sorted(crops)
+                step = max(1, len(fs_sorted) // 30)
+                sel = fs_sorted[::step]
+                if out.get("impact_frame") is not None:
+                    for extra in range(
+                        out["impact_frame"] - 2, out["impact_frame"] + 3,
+                    ):
+                        if extra in crops and extra not in sel:
+                            sel.append(extra)
+                    sel = sorted(set(sel))
+                Z = 3  # upscale
+                tiles = []
+                for f in sel:
+                    g = crops[f]
+                    t = cv2.cvtColor(
+                        cv2.resize(
+                            g, (g.shape[1] * Z, g.shape[0] * Z),
+                            interpolation=cv2.INTER_NEAREST,
+                        ),
+                        cv2.COLOR_GRAY2BGR,
+                    )
+                    col = (0, 200, 0) if present.get(f) else (0, 0, 230)
+                    cv2.rectangle(
+                        t, (0, 0), (t.shape[1] - 1, t.shape[0] - 1), col, 3,
+                    )
+                    if out.get("impact_frame") == f:
+                        cv2.rectangle(
+                            t, (4, 4), (t.shape[1] - 5, t.shape[0] - 5),
+                            (0, 255, 255), 3,
+                        )
+                    cv2.circle(
+                        t, (int(scx * Z), int(scy * Z)), int(r * 0.8 * Z),
+                        (255, 200, 0), 1, cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        t, str(f), (4, 16), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.42, (255, 255, 255), 1, cv2.LINE_AA,
+                    )
+                    tiles.append(t)
+                per_row = 10
+                rows = []
+                for i in range(0, len(tiles), per_row):
+                    row = tiles[i:i + per_row]
+                    while len(row) < per_row:
+                        row.append(np.zeros_like(tiles[0]))
+                    rows.append(cv2.hconcat(row))
+                strip = cv2.vconcat(rows)
+                bar = np.zeros((56, strip.shape[1], 3), np.uint8)
+                _lbl = (
+                    f"anchor check @ rest ({out['rest_xy'][0]:.0f},"
+                    f"{out['rest_xy'][1]:.0f})"
+                    + (
+                        f" snapped {out['snap_px']}px" if out["snapped"]
+                        else " (no snap)"
+                    )
+                    + f" - {out['reason']}"
+                )
+                cv2.putText(
+                    bar, _lbl, (8, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.52, (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    bar,
+                    "green=ball present, red=absent, yellow box=departure "
+                    "(impact), ring=watched spot",
+                    (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
+                    (180, 180, 180), 1, cv2.LINE_AA,
+                )
+                img = cv2.vconcat([bar, strip])
+                name = f"{debug_prefix}.jpg"
+                cv2.imwrite(
+                    str(Path(debug_dir) / name), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+                )
+                out["image"] = name
+            except Exception as exc:  # noqa: BLE001
+                log.warning("anchor check: debug strip failed: %s", exc)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("verify_rest_and_impact failed: %s", exc)
+        out["reason"] = str(exc)
+        return out
+
+
 def find_resting_ball(
     input_path: Path,
     frame_idx: int,
