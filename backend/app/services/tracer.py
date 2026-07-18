@@ -339,8 +339,13 @@ def render_tracer(
     ball_rest_hint: tuple | None = None,
     heat_start_frame: int | None = None,
     heat_end_frame: int | None = None,
+    render_video: bool = True,
 ) -> dict:
     """Detect the ball + render a traced MP4 to output_path.
+
+    `render_video=False` skips the traced-video write pass entirely
+    (detection/track/debug images only) — for callers that only want
+    the points, e.g. the MOG2 layer-in.
 
     `heat_start_frame` / `heat_end_frame`: when set, frames outside
     [start, end] still feed the background model (so it stays warmed)
@@ -384,6 +389,7 @@ def render_tracer(
                 ball_rest_hint=ball_rest_hint,
                 heat_start_frame=heat_start_frame,
                 heat_end_frame=heat_end_frame,
+                render_video=render_video,
             )
         with _SENSITIVITY_LOCK:
             global BG_VAR_THRESHOLD, MIN_CIRCULARITY, MIN_BALL_AREA, MIN_UPWARD_CHAIN_LEN, MIN_UPWARD_DY_PER_FRAME
@@ -413,6 +419,7 @@ def render_tracer(
                     ball_rest_hint=ball_rest_hint,
                     heat_start_frame=heat_start_frame,
                     heat_end_frame=heat_end_frame,
+                    render_video=render_video,
                 )
             finally:
                 (
@@ -442,6 +449,7 @@ def _render(
     ball_rest_hint: tuple | None = None,
     heat_start_frame: int | None = None,
     heat_end_frame: int | None = None,
+    render_video: bool = True,
 ) -> dict:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
@@ -1312,9 +1320,6 @@ def _render(
     if n_backfilled:
         log.info("tracer: corridor backfill added %d point(s)", n_backfilled)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
-    cap2 = cv2.VideoCapture(str(input_path))
     # Pass the at-rest ball position into smoothing only when it came
     # from the disappearance / address-vote detector (the actual ball).
     # For "track" source, ball_pos == track[0], so adding it as an
@@ -1336,19 +1341,23 @@ def _render(
     # needed here — prepending an exact-ball-position point on top of
     # the fitted-at-anchor point would create a small kink between
     # the two slightly-different positions.
-    i = 0
-    while True:
-        ok, frame = cap2.read()
-        if not ok:
-            break
-        seen = [smooth_by_frame[f] for f in smooth_frames if f <= i]
-        _draw_dashed(frame, seen)
-        if i in detection_frames and i in smooth_by_frame:
-            cv2.circle(frame, smooth_by_frame[i], 7, BALL_HIGHLIGHT_COLOR, 2, cv2.LINE_AA)
-        writer.write(frame)
-        i += 1
-    cap2.release()
-    writer.release()
+    if render_video:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        cap2 = cv2.VideoCapture(str(input_path))
+        i = 0
+        while True:
+            ok, frame = cap2.read()
+            if not ok:
+                break
+            seen = [smooth_by_frame[f] for f in smooth_frames if f <= i]
+            _draw_dashed(frame, seen)
+            if i in detection_frames and i in smooth_by_frame:
+                cv2.circle(frame, smooth_by_frame[i], 7, BALL_HIGHLIGHT_COLOR, 2, cv2.LINE_AA)
+            writer.write(frame)
+            i += 1
+        cap2.release()
+        writer.release()
 
     # Per-frame debug images for the FINAL track points: zoomed crop around
     # the chosen ball position, MOG2 motion mask in red, nearby surviving

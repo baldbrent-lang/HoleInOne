@@ -5618,6 +5618,7 @@ def run_full_ai_tracer_pipeline(
     handedness_override: str | None = None,
     examples_by_kind: dict | None = None,
     rest_anchor_fallback: tuple[float, float] | None = None,
+    render_video: bool = True,
 ) -> dict:
     """Run the complete AI tracer pipeline (address → handedness →
     impact → refine → ball-track → tracer render) on a single clip.
@@ -6104,6 +6105,22 @@ def run_full_ai_tracer_pipeline(
                 rest_anchor_fallback[0], rest_anchor_fallback[1],
             )
     result["ball_rest_xy_native"] = ball_rest_xy_native
+
+    if not render_video:
+        # Caller renders its own video from the returned track (e.g. the
+        # wizard's ai_mog2 engine, which re-renders a windowed clip with
+        # MOG2-extended points). Skipping the full-length render here
+        # saves a whole read+write+transcode pass on long sources.
+        result["ok"] = True
+        log.info(
+            "ai_tracer: pipeline complete (render skipped) for %s — "
+            "addr=%s impact=%s tracked=%d/%d",
+            input_path.name, addr_idx,
+            refined_impact_info.get("impact_frame"),
+            (ball_track_info or {}).get("n_frames_found", 0),
+            (ball_track_info or {}).get("n_frames_processed", 0),
+        )
+        return result
 
     tracer_path = output_dir / f"{output_prefix}_ai_tracer.mp4"
     tracer_info = render_tracer_video(

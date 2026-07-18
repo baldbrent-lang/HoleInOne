@@ -4564,6 +4564,10 @@ def render_wizard_tracer(
         manual_ball_positions=manual_positions or None,
         handedness_override=handedness,
         examples_by_kind=examples_by_kind,
+        # ai_mog2 renders its own WINDOWED video below (with the MOG2
+        # additions merged in) — the pipeline's full-length render on a
+        # long multi-swing source was the proxy-timeout killer.
+        render_video=(engine != "ai_mog2"),
     )
 
     def _public_url(p):
@@ -4580,20 +4584,21 @@ def render_wizard_tracer(
             tracer_url = _public_url(tracer_path)
 
     # "ai_mog2": PRODUCE'S layer-in, in the wizard. After the AI
-    # pipeline, cut the [impact-3s, impact+5s] window (the classical
-    # pass can't chew the whole multi-swing source), run the MOG2 layer
-    # (per-frame candidate trail: launch fill + beyond-pick extension),
-    # shift the added points back to full-source frames, and re-render
-    # the tracer with the merged track. Any failure keeps the AI-only
-    # render.
+    # pipeline (its full-length render skipped — render_video=False),
+    # cut the [impact-3s, impact+5s] window, run the MOG2 layer
+    # (rest-lock + per-frame candidate trail), shift added points back
+    # to full-source frames, then render ONE windowed video of the
+    # final track. Windowing (write_start/write_end) keeps the render
+    # to the swing instead of the whole multi-swing source — the
+    # full-length passes were blowing the HTTP proxy timeout (502).
     mog2_overlay_url = None
     mog2_stats = None
     if engine == "ai_mog2":
+        _imp_full = (
+            pipe.get("impact_refined") or pipe.get("impact") or {}
+        ).get("impact_frame")
+        _fps_w = float(pipe.get("fps") or probe_fps(src_path) or 30.0)
         try:
-            _imp_full = (
-                pipe.get("impact_refined") or pipe.get("impact") or {}
-            ).get("impact_frame")
-            _fps_w = float(pipe.get("fps") or probe_fps(src_path) or 30.0)
             if _imp_full is None:
                 log.info("wizard ai_mog2: no impact frame — layer skipped")
             else:
@@ -4623,7 +4628,9 @@ def render_wizard_tracer(
                             "ball_rest_xy_native",
                         ),
                     }
-                    _layer = _mog2_layer_for_ai_track(_cut_path, _shifted)
+                    _layer = _mog2_layer_for_ai_track(
+                        _cut_path, _shifted, render_extended=False,
+                    )
                     if _layer:
                         mog2_stats = _layer.get("stats")
                         _ovl = _layer.get("overlay_name")
@@ -4641,33 +4648,39 @@ def render_wizard_tracer(
                                 if r.get("found")
                                 or int(r.get("frame") or -1) not in _addf
                             ]
-                            _full_merged = sorted(
+                            pipe["ball_track_frames"] = sorted(
                                 _base + _added_back,
                                 key=lambda r: int(r.get("frame") or 0),
                             )
-                            _ext = (
-                                CLIPS_DIR
-                                / f"wizard-{upload_id}_ai_mog2_tracer.mp4"
-                            )
-                            _rr = render_tracer_video(
-                                src_path, _ext,
-                                ball_rest_xy_native=pipe.get(
-                                    "ball_rest_xy_native",
-                                ),
-                                impact_frame_idx=int(_imp_full),
-                                track_frames=_full_merged,
-                            )
-                            if _rr.get("ok") and _ext.exists():
-                                compress_for_email(_ext)
-                                if _ext.exists() and _ext.stat().st_size > 0:
-                                    pipe["ball_track_frames"] = _full_merged
-                                    tracer_url = _public_url(_ext)
                         log.info(
                             "wizard ai_mog2: layer stats=%s extended=%s",
                             mog2_stats, bool(_added_back),
                         )
         except Exception as exc:  # noqa: BLE001
             log.warning("wizard ai_mog2: layer failed (%s) — AI-only kept", exc)
+        # ONE windowed render of the final track (merged, or AI-only if
+        # the layer added nothing / failed).
+        try:
+            if _imp_full is not None and (pipe.get("ball_track_frames")):
+                _ext = CLIPS_DIR / f"wizard-{upload_id}_ai_mog2_tracer.mp4"
+                _rr = render_tracer_video(
+                    src_path, _ext,
+                    ball_rest_xy_native=pipe.get("ball_rest_xy_native"),
+                    impact_frame_idx=int(_imp_full),
+                    track_frames=pipe.get("ball_track_frames") or [],
+                    write_start=max(
+                        0, int(_imp_full) - int(round(3.0 * _fps_w)),
+                    ),
+                    write_end=int(_imp_full) + int(
+                        round((MOG2_LAYER_POST_IMPACT_SEC + 2.0) * _fps_w),
+                    ),
+                )
+                if _rr.get("ok") and _ext.exists():
+                    compress_for_email(_ext)
+                    if _ext.exists() and _ext.stat().st_size > 0:
+                        tracer_url = _public_url(_ext)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("wizard ai_mog2: windowed render failed: %s", exc)
 
     # Surface per-frame ball-track entries with public image URLs (the
     # ai-trace pipeline writes a JPG per tracked frame next to the
@@ -5697,6 +5710,7 @@ def _run_tracer(
     ball_rest_hint: tuple | None = None,
     heat_start_frame: int | None = None,
     heat_end_frame: int | None = None,
+    render_video: bool = True,
 ) -> tuple[str | None, dict | None, Path | None, str | None]:
     """Render the tracer overlay for clip_path.
 
@@ -5753,6 +5767,7 @@ def _run_tracer(
         ball_rest_hint=ball_rest_hint,
         heat_start_frame=heat_start_frame,
         heat_end_frame=heat_end_frame,
+        render_video=render_video,
     )
     info["audio_impact"] = audio_impact
     info["sensitivity"] = float(sensitivity)
@@ -5763,6 +5778,8 @@ def _run_tracer(
     )
     if not info.get("ok"):
         traced_path.unlink(missing_ok=True)
+        return None, info, None, debug_url
+    if not render_video or not traced_path.exists():
         return None, info, None, debug_url
     # OpenCV writes mp4v; re-encode to H.264 + faststart for browser playback.
     compressed = compress_for_email(traced_path)
@@ -6054,7 +6071,9 @@ def _flight_from_rest_lock(
     return chain, info
 
 
-def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
+def _mog2_layer_for_ai_track(
+    clip_path: Path, pipe: dict, render_extended: bool = True,
+) -> dict | None:
     """Post-produce MOG2 layer over a successful AI tracer run.
 
     Runs the classical MOG2 heatmap-arc pass on the SAME produced cut,
@@ -6103,14 +6122,11 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
             int(_imp) + int(round(MOG2_LAYER_POST_IMPACT_SEC * _fps))
             if _imp is not None else None
         ),
+        # Points only — the AI render (possibly extended below) is the
+        # deliverable; skipping the classical video write saves a full
+        # read+write pass.
+        render_video=False,
     )
-    # The classical traced video itself is a byproduct here — the AI
-    # render (possibly extended below) is the deliverable.
-    if _cv_traced is not None:
-        try:
-            Path(_cv_traced).unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
     import numpy as _np
 
     cv_info = cv_info or {}
@@ -6447,6 +6463,11 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     merged = sorted(
         _base + added, key=lambda rec: int(rec.get("frame") or 0),
     )
+    if not render_extended:
+        # Caller renders its own video from `merged` (the wizard's
+        # windowed render) — skip the cut-clip render here.
+        out["merged"] = merged
+        return out
     try:
         ext_path = CLIPS_DIR / f"{clip_path.stem}_ai_mog2_tracer.mp4"
         rr = render_tracer_video(
