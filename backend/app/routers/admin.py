@@ -1557,14 +1557,90 @@ def _run_long_upload_job(
                         _e = _dec_for(d)
                         _e["practice"] = v.get("verdict")
                         _e["practice_reason"] = v.get("reason")
+                        # IMPACT BY DEPARTURE (MOG2/pixels, no AI): the
+                        # classifier just FOUND the resting ball — watch
+                        # that exact spot and pin impact to the frame the
+                        # ball leaves it. A verified pin replaces the
+                        # pose-peak estimate for the cut window AND lets
+                        # the tracer skip its audio/vision impact +
+                        # handedness calls entirely (overrides).
+                        _anchor_rec = None
+                        _t_orig = round(
+                            float(d.get("peak_time_sec") or 0.0), 2,
+                        )
+                        _bf = v.get("before") or {}
+                        if (
+                            v.get("verdict") != "practice"
+                            and _bf.get("present")
+                            and _bf.get("x") is not None
+                        ):
+                            try:
+                                from ..services.ai_tracer import (
+                                    verify_rest_and_impact,
+                                )
+
+                                _pk_f = int(round(
+                                    float(d.get("peak_time_sec") or 0.0)
+                                    * tee_fps,
+                                ))
+                                _anchor_rec = verify_rest_and_impact(
+                                    src_path,
+                                    (float(_bf["x"]), float(_bf["y"])),
+                                    _pk_f, tee_fps,
+                                    debug_dir=CLIPS_DIR,
+                                    debug_prefix=(
+                                        f"anchorchk-prod-{upload_id}-"
+                                        f"{secrets.token_hex(3)}"
+                                    ),
+                                    window_sec=1.5,
+                                )
+                                if _anchor_rec.get("verified"):
+                                    d["ball_rest_xy"] = list(
+                                        _anchor_rec["rest_xy"],
+                                    )
+                                    d["impact_pinned"] = True
+                                    d["peak_time_sec"] = (
+                                        float(_anchor_rec["impact_frame"])
+                                        / tee_fps
+                                    )
+                                    _e["impact_pinned_f"] = int(
+                                        _anchor_rec["impact_frame"],
+                                    )
+                                    log.info(
+                                        "long-upload worker: upload=%s "
+                                        "impact PINNED by departure @ f%d "
+                                        "(%+d vs pose peak), rest snapped "
+                                        "%spx",
+                                        upload_id,
+                                        int(_anchor_rec["impact_frame"]),
+                                        int(_anchor_rec["impact_delta"] or 0),
+                                        _anchor_rec.get("snap_px"),
+                                    )
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning(
+                                    "long-upload worker: departure pin "
+                                    "failed: %s", exc,
+                                )
                         _work["practice"].append({
-                            "t": round(
-                                float(d.get("peak_time_sec") or 0.0), 2,
-                            ),
+                            # Keyed by the ORIGINAL pose peak — the debug
+                            # report matches records on it; the pin above
+                            # may have shifted d's peak_time_sec.
+                            "t": _t_orig,
                             "verdict": v.get("verdict"),
                             "reason": v.get("reason"),
                             "before": v.get("before"),
                             "after": v.get("after"),
+                            "anchor": (
+                                {
+                                    k: _anchor_rec.get(k)
+                                    for k in (
+                                        "verified", "snapped", "snap_px",
+                                        "impact_frame", "impact_delta",
+                                        "reason", "image",
+                                    )
+                                }
+                                if _anchor_rec else None
+                            ),
                         })
                         if v.get("verdict") == "practice":
                             _e["kept"] = False
@@ -1609,6 +1685,11 @@ def _run_long_upload_job(
                             # Pose hands-at-impact position — the tracer's
                             # start anchor when the ball can't be seen.
                             "impact_wrist_xy": d.get("impact_wrist_xy"),
+                            # Pixel-verified anchors (departure pin): the
+                            # tracer skips its audio/vision impact and
+                            # ball-rest calls when these are present.
+                            "ball_rest_xy": d.get("ball_rest_xy"),
+                            "impact_pinned": bool(d.get("impact_pinned")),
                         }
                     )
                 if not segs:
@@ -2138,7 +2219,13 @@ def _process_long_upload_segments(
             # classical fallback. The cut to green is driven by tee_video_dur,
             # not the tracer, so the engine choice doesn't affect the cut.
             _tracer_url, tracer_info, traced_path, _debug_url = _trace_segment(
-                seg_path, ball_at_rest_override=seg.get("impact_wrist_xy"),
+                seg_path,
+                ball_at_rest_override=seg.get("impact_wrist_xy"),
+                verified_rest_xy=seg.get("ball_rest_xy"),
+                verified_impact_frame=(
+                    int(round(actual_before_sec * (probe_fps(seg_path) or 30.0)))
+                    if seg.get("impact_pinned") else None
+                ),
             )
             tracer_ok = bool(tracer_info and tracer_info.get("ok"))
 
@@ -2288,7 +2375,13 @@ def _process_long_upload_segments(
             else None
         )
         tracer_url, tracer_info, _, _ = _trace_segment(
-            seg_path, ball_at_rest_override=seg.get("impact_wrist_xy"),
+            seg_path,
+            ball_at_rest_override=seg.get("impact_wrist_xy"),
+            verified_rest_xy=seg.get("ball_rest_xy"),
+            verified_impact_frame=(
+                int(round(actual_before_sec * (probe_fps(seg_path) or 30.0)))
+                if seg.get("impact_pinned") else None
+            ),
         )
 
         captured_dt = base_dt + timedelta(seconds=tee_cut_start)
@@ -6639,7 +6732,12 @@ def _mog2_layer_for_ai_track(
     return out
 
 
-def _trace_segment(clip_path: Path, ball_at_rest_override=None):
+def _trace_segment(
+    clip_path: Path,
+    ball_at_rest_override=None,
+    verified_rest_xy=None,
+    verified_impact_frame=None,
+):
     """Draw the ball-flight tracer on a cut segment for PRODUCTION.
 
     Uses the AI tracer by default (settings.tracer_engine == 'ai' and a key
@@ -6651,7 +6749,13 @@ def _trace_segment(clip_path: Path, ball_at_rest_override=None):
     where the tracer line starts: the AI still tries to see the resting ball
     first, but if it can't (backlit scene / dark ground) the line is anchored
     here instead of picking up mid-flight. Used to pass the golfer's hands-at-
-    impact position from the pose detector."""
+    impact position from the pose detector.
+
+    verified_rest_xy / verified_impact_frame are PIXEL-VERIFIED anchors
+    (the departure pin: the classifier found the ball, and MOG2 watched
+    it leave). When set they become hard overrides in the AI pipeline —
+    which then SKIPS its audio impact, vision impact, refine, address
+    and handedness calls entirely (frame indices are CUT-relative)."""
     use_ai = settings.tracer_engine == "ai" and bool(os.environ.get("ANTHROPIC_API_KEY"))
     if use_ai:
         try:
@@ -6662,9 +6766,19 @@ def _trace_segment(clip_path: Path, ball_at_rest_override=None):
                     float(ball_at_rest_override[0]),
                     float(ball_at_rest_override[1]),
                 )
+            _rest_ovr = None
+            if verified_rest_xy and len(verified_rest_xy) == 2:
+                _rest_ovr = (
+                    float(verified_rest_xy[0]), float(verified_rest_xy[1]),
+                )
             r = run_full_ai_tracer_pipeline(
                 clip_path, CLIPS_DIR, prefix,
                 rest_anchor_fallback=_fallback,
+                ball_at_rest_override=_rest_ovr,
+                impact_frame_override=(
+                    int(verified_impact_frame)
+                    if verified_impact_frame is not None else None
+                ),
             )
             tvp = r.get("tracer_video_path")
             if r.get("ok") and tvp and Path(tvp).exists():
@@ -7198,12 +7312,24 @@ def _run_produce_debug_job(
             if _p is not None:
                 if _p.get("verdict") == "real":
                     n_real += 1
+                _anc = _p.get("anchor")
+                if _anc:
+                    _anc = dict(_anc)
+                    if _anc.get("image") and (
+                        CLIPS_DIR / _anc["image"]
+                    ).exists():
+                        _ap = CLIPS_DIR / _anc["image"]
+                        _anc["image_url"] = (
+                            f"{settings.app_base_url}/uploads/clips/"
+                            f"{_ap.name}?v={int(_ap.stat().st_mtime)}"
+                        )
                 ai_ball_swings.append({
                     "swing": i + 1,
                     "verdict": _p.get("verdict"),
                     "reason": _p.get("reason"),
                     "before": _drawn_shot(_p.get("before"), "before", i),
                     "after": _drawn_shot(_p.get("after"), "after", i),
+                    "anchor": _anc,
                 })
             elif _dec.get("dropped_by") in ("heat_ai", "heat_heuristic"):
                 ai_ball_swings.append({

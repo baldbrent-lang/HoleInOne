@@ -4067,6 +4067,7 @@ def verify_rest_and_impact(
     fps: float,
     debug_dir: Path | None = None,
     debug_prefix: str = "anchorchk",
+    window_sec: float = 1.0,
 ) -> dict:
     """Pixel-verify and TIGHTEN the two anchors the tracers lean on —
     no API calls, one sequential decode of ~2s of video.
@@ -4124,8 +4125,8 @@ def verify_rest_and_impact(
             cap.release()
             return out
         ccx, ccy = cx0 - x0, cy0 - y0  # claimed centre, crop coords
-        f_lo = max(0, imp - int(round(1.0 * fps)))
-        f_hi = imp + int(round(1.0 * fps))
+        f_lo = max(0, imp - int(round(float(window_sec) * fps)))
+        f_hi = imp + int(round(float(window_sec) * fps))
         crops: dict[int, "np.ndarray"] = {}
         cap.set(cv2.CAP_PROP_POS_FRAMES, f_lo)
         for f in range(f_lo, f_hi + 1):
@@ -4189,8 +4190,11 @@ def verify_rest_and_impact(
             return b[0] <= r * 0.8
 
         present = {f: _present(g) for f, g in crops.items()}
-        pre_ratio = (
-            sum(1 for f in base_fs if present[f]) / max(1, len(base_fs))
+        _fs_all = sorted(crops)
+        _head = _fs_all[: max(6, int(round(0.4 * fps)))]
+        pre_ratio = max(
+            sum(1 for f in base_fs if present[f]) / max(1, len(base_fs)),
+            sum(1 for f in _head if present[f]) / max(1, len(_head)),
         )
         out["present_ratio_pre"] = round(pre_ratio, 2)
         if pre_ratio < 0.6:
@@ -4206,7 +4210,10 @@ def verify_rest_and_impact(
             fs_sorted = sorted(crops)
             dep = None
             for i, f in enumerate(fs_sorted[:-2]):
-                if f < base_fs[-1]:
+                # Scan the WHOLE window (not just past the baseline) —
+                # the impact estimate can run late (pose peak), putting
+                # the true departure well before it.
+                if f < fs_sorted[0] + 3:
                     continue
                 if (
                     not present[f]

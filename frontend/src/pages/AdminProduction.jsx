@@ -4296,6 +4296,42 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                           {" "}· {s.reason}
                         </span>
                       </div>
+                      {s.anchor && (
+                        <div className="tiny" style={{ marginTop: 2 }}>
+                          {"\u2693"}{" "}
+                          {s.anchor.verified ? (
+                            <span style={{ color: "#1a9d55" }}>
+                              impact PINNED at f{s.anchor.impact_frame} by
+                              ball departure (MOG2, no AI){" "}
+                              {s.anchor.impact_delta != null
+                                ? `· ${s.anchor.impact_delta >= 0 ? "+" : ""}${s.anchor.impact_delta}f vs pose peak`
+                                : ""}
+                              {s.anchor.snapped
+                                ? ` · rest snapped ${s.anchor.snap_px}px`
+                                : ""}
+                            </span>
+                          ) : (
+                            <span style={{ color: "#b7791f" }}>
+                              departure pin failed — {s.anchor.reason}
+                            </span>
+                          )}
+                          {s.anchor.image_url && (
+                            <a
+                              href={s.anchor.image_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ display: "block", marginTop: 3 }}
+                              title="Departure film-strip: green=ball present, red=absent, yellow box=the frame the ball left (impact)"
+                            >
+                              <img
+                                src={s.anchor.image_url}
+                                alt="departure film-strip"
+                                style={{ maxWidth: "100%", borderRadius: 6 }}
+                              />
+                            </a>
+                          )}
+                        </div>
+                      )}
                       <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                         {[["before", s.before], ["after", s.after]].map(
                           ([tag, sh]) =>
