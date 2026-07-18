@@ -793,6 +793,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           rawMotionUrl: out.raw_motion_url || null,
           rawMotionArcUrl: out.raw_motion_arc_url || null,
           rawMotionFramesUrl: out.raw_motion_frames_url || null,
+          mog2OverlayUrl: out.mog2_overlay_url || null,
         });
         setTracerEngineUsed(out.engine || tracerEngine);
         setRenderedFrameSig(frameSig(draft));
@@ -817,6 +818,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 tracer_raw_motion_url: out.raw_motion_url || null,
                 tracer_raw_motion_arc_url: out.raw_motion_arc_url || null,
                 tracer_raw_motion_frames_url: out.raw_motion_frames_url || null,
+                mog2_overlay_url: out.mog2_overlay_url || null,
+                mog2_stats: out.mog2_stats || null,
                 ...(out.ball_at_rest && !out.ball_manual
                   ? { ball: out.ball_at_rest }
                   : {}),
@@ -902,6 +905,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         rawMotionUrl: out.raw_motion_url || null,
         rawMotionArcUrl: out.raw_motion_arc_url || null,
         rawMotionFramesUrl: out.raw_motion_frames_url || null,
+        mog2OverlayUrl: out.mog2_overlay_url || null,
       });
       // Adopt the flight-derived rest position (never over an operator-set
       // one) so the Step-2 rest card starts where the render anchored.
@@ -929,6 +933,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         tracer_raw_motion_url: out.raw_motion_url || null,
         tracer_raw_motion_arc_url: out.raw_motion_arc_url || null,
         tracer_raw_motion_frames_url: out.raw_motion_frames_url || null,
+        mog2_overlay_url: out.mog2_overlay_url || null,
+        mog2_stats: out.mog2_stats || null,
         ...(out.ball_at_rest && !out.ball_manual
           ? { ball: out.ball_at_rest }
           : {}),
@@ -1204,7 +1210,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                     ? "Classical CV (KNN)"
                     : tracerStats.engine === "hybrid"
                       ? "MOG2 + AI verify"
-                      : "AI"}
+                      : tracerStats.engine === "ai_mog2"
+                        ? "AI + MOG2 trail (produce's engine)"
+                        : "AI"}
               </b>
               {tracerStats.n_ai_anchors != null && (
                 <> · {tracerStats.n_ai_anchors} AI anchors</>
@@ -1306,11 +1314,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               </button>
               <button
                 type="button"
-                className={tracerEngine === "hybrid" ? "small" : "ghost small"}
+                className={tracerEngine === "ai_mog2" ? "small" : "ghost small"}
                 style={{ width: "auto" }}
-                onClick={() => setTracerEngine("hybrid")}
+                onClick={() => setTracerEngine("ai_mog2")}
                 disabled={renderingTracer}
-                title="MOG2 detections cross-validated with ~10 AI ball fixes: only CV points that agree with the AI-anchored curve survive. CV = density, AI = truth. Needs ANTHROPIC_API_KEY."
+                title="Produce's engine: AI tracer first, then the MOG2 per-frame candidate trail fills the launch (impact → first AI pick) and extends past the last pick — frames increasing gradually, 4s post-impact cap. Needs ANTHROPIC_API_KEY."
               >
                 MOG2+AI
               </button>

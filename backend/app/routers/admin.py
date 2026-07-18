@@ -4537,6 +4537,100 @@ def render_wizard_tracer(
         if Path(tracer_path).exists() and Path(tracer_path).stat().st_size > 0:
             tracer_url = _public_url(tracer_path)
 
+    # "ai_mog2": PRODUCE'S layer-in, in the wizard. After the AI
+    # pipeline, cut the [impact-3s, impact+5s] window (the classical
+    # pass can't chew the whole multi-swing source), run the MOG2 layer
+    # (per-frame candidate trail: launch fill + beyond-pick extension),
+    # shift the added points back to full-source frames, and re-render
+    # the tracer with the merged track. Any failure keeps the AI-only
+    # render.
+    mog2_overlay_url = None
+    mog2_stats = None
+    if engine == "ai_mog2":
+        try:
+            _imp_full = (
+                pipe.get("impact_refined") or pipe.get("impact") or {}
+            ).get("impact_frame")
+            _fps_w = float(pipe.get("fps") or probe_fps(src_path) or 30.0)
+            if _imp_full is None:
+                log.info("wizard ai_mog2: no impact frame — layer skipped")
+            else:
+                _off = max(0, int(_imp_full) - int(round(3.0 * _fps_w)))
+                _cut_end_sec = (
+                    int(_imp_full)
+                    + int(round((MOG2_LAYER_POST_IMPACT_SEC + 1.0) * _fps_w))
+                ) / _fps_w
+                _cut_name = (
+                    f"wizard-aimog2-{upload_id}-{secrets.token_hex(3)}.mp4"
+                )
+                _cut_path = CLIPS_DIR / _cut_name
+                if cut_segment(
+                    src_path, _cut_path, _off / _fps_w, _cut_end_sec,
+                ):
+                    _shifted = {
+                        "ball_track_frames": [
+                            {**r, "frame": int(r["frame"]) - _off}
+                            for r in (pipe.get("ball_track_frames") or [])
+                            if r.get("frame") is not None
+                            and int(r["frame"]) >= _off
+                        ],
+                        "impact_refined": {
+                            "impact_frame": int(_imp_full) - _off,
+                        },
+                        "ball_rest_xy_native": pipe.get(
+                            "ball_rest_xy_native",
+                        ),
+                    }
+                    _layer = _mog2_layer_for_ai_track(_cut_path, _shifted)
+                    if _layer:
+                        mog2_stats = _layer.get("stats")
+                        _ovl = _layer.get("overlay_name")
+                        if _ovl and (CLIPS_DIR / _ovl).exists():
+                            mog2_overlay_url = _public_url(CLIPS_DIR / _ovl)
+                        _added_back = [
+                            {**r, "frame": int(r["frame"]) + _off}
+                            for r in (_layer.get("merged") or [])
+                            if r.get("source") == "mog2"
+                        ]
+                        if _added_back:
+                            _addf = {r["frame"] for r in _added_back}
+                            _base = [
+                                r for r in (pipe.get("ball_track_frames") or [])
+                                if r.get("found")
+                                or int(r.get("frame") or -1) not in _addf
+                            ]
+                            _full_merged = sorted(
+                                _base + _added_back,
+                                key=lambda r: int(r.get("frame") or 0),
+                            )
+                            from ..services.ai_tracer import (
+                                render_tracer_video,
+                            )
+
+                            _ext = (
+                                CLIPS_DIR
+                                / f"wizard-{upload_id}_ai_mog2_tracer.mp4"
+                            )
+                            _rr = render_tracer_video(
+                                src_path, _ext,
+                                ball_rest_xy_native=pipe.get(
+                                    "ball_rest_xy_native",
+                                ),
+                                impact_frame_idx=int(_imp_full),
+                                track_frames=_full_merged,
+                            )
+                            if _rr.get("ok") and _ext.exists():
+                                compress_for_email(_ext)
+                                if _ext.exists() and _ext.stat().st_size > 0:
+                                    pipe["ball_track_frames"] = _full_merged
+                                    tracer_url = _public_url(_ext)
+                        log.info(
+                            "wizard ai_mog2: layer stats=%s extended=%s",
+                            mog2_stats, bool(_added_back),
+                        )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("wizard ai_mog2: layer failed (%s) — AI-only kept", exc)
+
     # Surface per-frame ball-track entries with public image URLs (the
     # ai-trace pipeline writes a JPG per tracked frame next to the
     # source video — same convention used by /clips/{id}/ai-trace).
@@ -4556,6 +4650,7 @@ def render_wizard_tracer(
                 "y": rec.get("y"),
                 "confidence": rec.get("confidence"),
                 "manual": rec.get("manual", False),
+                "source": rec.get("source"),
                 "image_url": url,
             }
         )
@@ -4581,7 +4676,15 @@ def render_wizard_tracer(
             ),
             "tracer_url": tracer_url,
             "tracer_info": tracer_info,
+            "tracer_engine": engine,
             "ball_track_frames": ball_track_frames_out,
+            **(
+                {
+                    "mog2_overlay_url": mog2_overlay_url,
+                    "mog2_stats": mog2_stats,
+                }
+                if engine == "ai_mog2" else {}
+            ),
         }
     )
     row.edit_metrics = saved
@@ -4605,10 +4708,12 @@ def render_wizard_tracer(
 
     return {
         "upload_id": upload_id,
-        "engine": "ai",
+        "engine": engine,
         "tracer_url": tracer_url,
         "ball_track_frames": ball_track_frames_out,
         "n_points": len(ball_track_frames_out),
+        "mog2_overlay_url": mog2_overlay_url,
+        "mog2_stats": mog2_stats,
         "edit_metrics": row.edit_metrics,
         "pipeline_error": pipe.get("error"),
     }
@@ -5669,6 +5774,12 @@ def _run_tracer(
     )
 
 
+# MOG2 layer-in analysis window: nothing past this many seconds after
+# impact accumulates heat or extends the arc (operator: "no more than 4
+# seconds"). Shared by produce's layer and the wizard's ai_mog2 engine.
+MOG2_LAYER_POST_IMPACT_SEC = 4.0
+
+
 def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     """Post-produce MOG2 layer over a successful AI tracer run.
 
@@ -5702,7 +5813,6 @@ def _mog2_layer_for_ai_track(clip_path: Path, pipe: dict) -> dict | None:
     # impact + 4s. Heat outside it never accumulates — the golfer
     # walking across the swing path BEFORE the shot, or wandering off
     # AFTER the ball lands, leaves no residue in the flight corridor.
-    MOG2_LAYER_POST_IMPACT_SEC = 4.0
     _fps = probe_fps(clip_path) or 30.0
     _pfx = f"mog2layer-{clip_path.stem}"
     _cv_url, cv_info, _cv_traced, _cv_dbg = _run_tracer(
