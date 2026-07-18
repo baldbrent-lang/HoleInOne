@@ -6020,14 +6020,23 @@ def _flight_from_rest_lock(
                     + (float(c["y"]) - ry) ** 2) ** 0.5 < 25.0:
                 continue
             gap = f - prev_f
-            vel = float(_np.hypot(
-                _np.polyval(_np.polyder(_cx), prev_f),
-                _np.polyval(_np.polyder(_cy), prev_f),
-            ))
+            _vx = float(_np.polyval(_np.polyder(_cx), prev_f))
+            _vy = float(_np.polyval(_np.polyder(_cy), prev_f))
+            vel = float(_np.hypot(_vx, _vy))
             step = ((float(c["x"]) - prev_x) ** 2
                     + (float(c["y"]) - prev_y) ** 2) ** 0.5
             if step > 30.0 + gap * max(9.0, 1.6 * vel):
                 continue
+            # Direction consistency (basic physics): gravity bends the
+            # flight a few degrees per frame — it never u-turns. A hop
+            # whose direction fights the fit velocity is the club
+            # follow-through / body motion, not the ball, even when a
+            # grown gap has widened the corridor enough to admit it.
+            if vel > 6.0 and step > 1.0:
+                _dp = ((float(c["x"]) - prev_x) * _vx
+                       + (float(c["y"]) - prev_y) * _vy)
+                if _dp < 0.2 * step * vel:
+                    continue
             # Minimum progress: ghosts of vacated positions barely move
             # (and drift a few px as they decay, evading a same-spot
             # filter). Early flight ALWAYS moves — hard floor for the
@@ -6295,11 +6304,17 @@ def _mog2_layer_for_ai_track(
                         break
                     dbg["seen"] += 1
                     gap = f - pf
-                    vel = float(_np.hypot(
-                        _np.polyval(_np.polyder(cx), pf),
-                        _np.polyval(_np.polyder(cy), pf),
-                    ))
+                    _vx = float(_np.polyval(_np.polyder(cx), pf))
+                    _vy = float(_np.polyval(_np.polyder(cy), pf))
+                    vel = float(_np.hypot(_vx, _vy))
                     step = ((c["x"] - px) ** 2 + (c["y"] - py) ** 2) ** 0.5
+                    # Direction consistency — flight never u-turns; a
+                    # hop fighting the fit velocity is club/body motion.
+                    if vel > 6.0 and step > 1.0:
+                        _dp = ((c["x"] - px) * _vx + (c["y"] - py) * _vy)
+                        if _dp < 0.2 * step * vel:
+                            dbg["step_rej"] += 1
+                            continue
                     allow = 30.0 + gap * max(9.0, 1.6 * vel)
                     pred_x = float(_np.polyval(cx, f))
                     pred_y = float(_np.polyval(cy, f))
