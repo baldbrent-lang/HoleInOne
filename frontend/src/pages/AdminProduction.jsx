@@ -367,10 +367,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   const [renderingTracer, setRenderingTracer] = useState(false);
   const [tracerError, setTracerError] = useState(null);
   // Tracer engine A/B: "ai" (Claude vision, default) vs "classical"
-  // (CV motion + parabola). tracerEngineUsed tracks what produced the
-  // current tracer so switching engines forces a fresh render.
+  // (CV motion + parabola). Switching engines does NOT re-render on
+  // Next — the ↻ Render button forces a fresh render with the selection.
   const [tracerEngine, setTracerEngine] = useState("ai");
-  const [tracerEngineUsed, setTracerEngineUsed] = useState(null);
   // start|impact|end signature the current tracer was rendered against.
   // If Step 1 edits any of these frames, Next re-renders instead of
   // reusing the now-stale ball track.
@@ -446,13 +445,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       // + MOG2 chain (white) + points added to the arc (red).
       mog2OverlayUrl: s.mog2_overlay_url || null,
     });
-    // Remember which engine produced the saved tracer so clicking "Next"
-    // on Step 1 reuses it instead of re-rendering (which would wipe the
-    // operator's manually-plotted points). Mark "used" as null when this
-    // swing has no render yet, so Next / auto-detect renders a fresh one.
-    const eng = s.tracer_engine || "ai";
-    setTracerEngine(eng);
-    setTracerEngineUsed(hasSavedTracer ? eng : null);
+    // Start the engine toggle on whatever produced the saved tracer.
+    setTracerEngine(s.tracer_engine || "ai");
     // A saved tracer corresponds to the saved start/impact/end frames;
     // seed the signature so Next only re-renders after a real edit. No
     // saved tracer → null so the first Next renders fresh.
@@ -795,7 +789,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           rawMotionFramesUrl: out.raw_motion_frames_url || null,
           mog2OverlayUrl: out.mog2_overlay_url || null,
         });
-        setTracerEngineUsed(out.engine || tracerEngine);
         setRenderedFrameSig(frameSig(draft));
         setTracerStats({
           engine: out.engine || tracerEngine,
@@ -841,9 +834,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     }
   }
 
-  async function handleNext() {
-    // Persist current draft, then either reuse the cached tracer or
-    // render a fresh one.
+  async function persistDraftMetrics() {
     await persistPatch({
       handedness: draft.handedness,
       address_frame: draft.addressFrame,
@@ -853,33 +844,29 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       roi: draft.roi,
       target: draft.target,
     });
+  }
+
+  async function handleNext() {
+    // Persist current draft, then either reuse the cached tracer or
+    // render a fresh one.
+    await persistDraftMetrics();
     // NEVER re-render an unchanged swing. If it already has a rendered
-    // tracer OR plotted ball points, and nothing that affects the trace
-    // was edited on Step 1, just advance — re-rendering would wipe the
-    // existing points (the operator's plots AND the ones carried over
-    // from the original production). Only render when:
+    // tracer OR plotted ball points, just advance — re-rendering would
+    // wipe the existing points (the operator's plots AND the ones carried
+    // over from the original production). Only render when:
     //   - there's no existing trace at all (first time through), or
     //   - the start / impact / end frames changed (points are anchored to
-    //     the old window, so they're stale), or
-    //   - the operator switched tracer engines (A/B) — UNLESS they have
-    //     manual points we'd overwrite, in which case keep them.
+    //     the old window, so they're stale).
+    // Switching tracer engines does NOT re-render on Next — that's what
+    // the explicit ↻ Render button is for.
     // Crucially the reuse no longer requires a tracer_url: a swing can
     // carry ball_track_frames without a (still-valid) rendered video, and
     // those points must survive Next.
     const framesChanged =
       renderedFrameSig !== null && frameSig(draft) !== renderedFrameSig;
-    const engineChanged =
-      tracerEngineUsed !== null && tracerEngineUsed !== tracerEngine;
-    const hasManualPoints =
-      (tracer?.frames || []).some((f) => f && f.manual) ||
-      Object.keys(manualPositions).length > 0;
     const hasExistingTrace =
       !!(tracer?.url) || (tracer?.frames?.length || 0) > 0;
-    if (
-      hasExistingTrace &&
-      !framesChanged &&
-      (!engineChanged || hasManualPoints)
-    ) {
+    if (hasExistingTrace && !framesChanged) {
       setStep("tracer");
       return;
     }
@@ -888,6 +875,32 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
     if (framesChanged && Object.keys(manualPositions).length > 0) {
       setManualPositions({});
     }
+    await renderFreshTracer();
+  }
+
+  async function handleForceRender() {
+    // Explicit "↻ Render" on Step 1: always render fresh with the
+    // currently-selected engine (the only way an engine switch takes
+    // effect now that Next reuses the existing track). Warns before
+    // discarding manually plotted points.
+    const nManual =
+      Object.keys(manualPositions).length +
+      (tracer?.frames || []).filter((f) => f && f.manual).length;
+    if (
+      nManual > 0 &&
+      !window.confirm(
+        `Re-rendering replaces the current ball track and discards ` +
+          `${nManual} manually plotted point(s). Continue?`
+      )
+    ) {
+      return;
+    }
+    await persistDraftMetrics();
+    if (Object.keys(manualPositions).length > 0) setManualPositions({});
+    await renderFreshTracer();
+  }
+
+  async function renderFreshTracer() {
     setRenderingTracer(true);
     setTracerError(null);
     try {
@@ -914,7 +927,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       if (out.ball_at_rest && !out.ball_manual) {
         setDraft((d) => ({ ...d, ball: out.ball_at_rest, ballManual: false }));
       }
-      setTracerEngineUsed(out.engine || tracerEngine);
       setRenderedFrameSig(frameSig(draft));
       setTracerStats({
         engine: out.engine || tracerEngine,
@@ -1257,7 +1269,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               {tracerStats.n_backfilled ? (
                 <> · {tracerStats.n_backfilled} backfilled</>
               ) : null}
-              {" — switch the Tracer toggle on Step 1 and re-run to compare."}
+              {" — switch the Tracer toggle on Step 1 and hit ↻ Render to compare."}
             </div>
           )}
           {!running && !error && draft && step === "tracer" && (
@@ -1355,6 +1367,16 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               >
                 MOG2+AI
               </button>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto" }}
+                onClick={handleForceRender}
+                disabled={running || !!error || !draft || renderingTracer}
+                title="Force a fresh tracer render with the selected engine. Next → reuses the existing ball track unless start/impact/end frames changed."
+              >
+                {renderingTracer ? "Rendering…" : "↻ Render"}
+              </button>
             </div>
           )}
           <button
@@ -1372,7 +1394,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               disabled={running || !!error || !draft || renderingTracer}
               onClick={handleNext}
               style={{ width: "auto" }}
-              title="Save metrics and render the tracer"
+              title="Save metrics and continue. Re-renders the tracer only if the start/impact/end frames changed (or there's no track yet) — use ↻ Render to force a fresh render."
             >
               {renderingTracer ? "Rendering tracer…" : "Next →"}
             </button>
