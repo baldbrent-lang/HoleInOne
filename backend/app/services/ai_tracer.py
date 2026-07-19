@@ -4439,7 +4439,11 @@ def track_launch_from_rest(
             # Directional bias: the square looks AHEAD of the motion —
             # ball in the bottom third while ascending (or unknown),
             # top third once descending.
-            if vy is not None and vy > 2.0:
+            if apex_mode:
+                # Topping out: the ball is about to reverse — look both
+                # ways (centred), not up.
+                y0 = int(pred_y - bh / 2.0)
+            elif vy is not None and vy > 2.0:
                 y0 = int(pred_y - bh / 3.0)
             else:
                 y0 = int(pred_y - 2.0 * bh / 3.0)
@@ -4453,7 +4457,8 @@ def track_launch_from_rest(
             crop_g = cur_g[y0:y1, x0:x1]
             _base_g = ref_found_g if apex_mode else prev_g
             diff = cv2.absdiff(crop_g, _base_g[y0:y1, x0:x1])
-            mask = (diff >= 20).astype(np.uint8)
+            _thr = 12 if apex_mode else 20  # faint apex/descent blob
+            mask = (diff >= _thr).astype(np.uint8)
             mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
             n, lbl, stats_, cent = cv2.connectedComponentsWithStats(mask)
             _crop_mean = float(crop_g.mean())
@@ -4462,6 +4467,20 @@ def track_launch_from_rest(
                 area = int(stats_[i, cv2.CC_STAT_AREA])
                 if area < 3 or area > (3.5 * r) ** 2:
                     continue  # not ball-sized motion
+                # SHAPE gate (operator's f484 catch): the club shaft
+                # sweeps up through the ball's corridor right after
+                # impact — its motion component is a long thin STREAK
+                # (small area, huge extent) with the head at its tip.
+                # A ball's diff blob can only be as long as its own
+                # blur (speed x gap + diameter); anything longer is
+                # club, not ball.
+                _cw_ = int(stats_[i, cv2.CC_STAT_WIDTH])
+                _ch_ = int(stats_[i, cv2.CC_STAT_HEIGHT])
+                _dim_cap = 2 * r + 1.6 * max(
+                    20.0, (_vm_now or 30.0) * gap,
+                )
+                if max(_cw_, _ch_) > _dim_cap:
+                    continue
                 cx_, cy_ = float(cent[i][0]) + x0, float(cent[i][1]) + y0
                 # The vacated rest spot keeps firing as motion for ~10
                 # frames (background ghost) — never the ball.
@@ -4484,9 +4503,10 @@ def track_launch_from_rest(
                     _p5 = crop_g[
                         max(0, _py - 2):_py + 3, max(0, _px - 2):_px + 3,
                     ]
+                    _margin = 8.0 if apex_mode else 15.0
                     if (
                         _p5.size == 0
-                        or float(_p5.mean()) < _crop_mean + 15.0
+                        or float(_p5.mean()) < _crop_mean + _margin
                     ):
                         continue
                 if vx is None:
@@ -4564,7 +4584,7 @@ def track_launch_from_rest(
                 0.35 * _heat_bgr[_mm] + np.array([0, 0, 165])
             ).clip(0, 255).astype(np.uint8)
             tiles.append((f, _crop_bgr, _heat_bgr, found, fx, fy, x0, y0))
-            _miss_limit = 36 if apex_mode else 18
+            _miss_limit = 48 if apex_mode else 18
             if consec_miss >= _miss_limit:
                 out["reason"] = (
                     f"lost the ball ({consec_miss} straight misses)"
