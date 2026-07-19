@@ -303,6 +303,9 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot }) {
             marginTop: 4, padding: "3px 8px", borderRadius: 6,
             border: "1px solid rgba(230,126,34,0.5)",
             background: "transparent", cursor: "pointer",
+            // Base button CSS is white-on-green; on a transparent
+            // background the white label vanishes.
+            color: "var(--ink)",
           }}
           title={
             "Open the click-to-plot editor — the motion heat zoomable " +
