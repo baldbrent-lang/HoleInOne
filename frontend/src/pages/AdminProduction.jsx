@@ -210,7 +210,7 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
   );
 }
 
-function ProducedTile({ clips, swings, onOpenViewer }) {
+function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot }) {
   // Right-most tile on the Production card: thumbnail + summary of every
   // produced clip cut from this upload. With multiple swings, toggle
   // through each produced clip (◀/▶); the thumbnail + play follow the
@@ -221,12 +221,15 @@ function ProducedTile({ clips, swings, onOpenViewer }) {
   const cur = has ? clips[idx] : null;
   // MOG2 layer-in evidence for the selected clip: produce persists a
   // per-swing overlay (raw motion heat + AI picks + MOG2 chain/added
-  // points) into edit_metrics.swings — clip order matches swing order.
-  const withOverlay = (swings || []).filter((s) => s?.mog2_overlay_url);
+  // points) + the timed heat dots into edit_metrics.swings — clip
+  // order matches swing order.
+  const hasEvidence = (s) =>
+    s?.mog2_overlay_url || (s?.timed_points || []).length > 0;
+  const withOverlay = (swings || []).filter(hasEvidence);
   const curSwing =
     withOverlay.length === 1 && (clips || []).length <= 1
       ? withOverlay[0]
-      : (swings || []).find((s) => s?.idx === idx && s?.mog2_overlay_url);
+      : (swings || []).find((s) => s?.idx === idx && hasEvidence(s));
   const aces = has ? clips.filter((c) => c.ball_in_cup).length : 0;
   const holes = has
     ? clips.map((c) => c.hole_number).filter((h, i, a) => h != null && a.indexOf(h) === i)
@@ -285,20 +288,28 @@ function ProducedTile({ clips, swings, onOpenViewer }) {
         </div>
       )}
       {curSwing && (
-        <a
-          href={curSwing.mog2_overlay_url}
-          target="_blank"
-          rel="noreferrer"
+        <button
+          type="button"
           className="small"
+          onClick={() => {
+            if (onClickToPlot) {
+              onClickToPlot(curSwing.idx ?? idx);
+            } else if (curSwing.mog2_overlay_url) {
+              window.open(curSwing.mog2_overlay_url, "_blank");
+            }
+          }}
           style={{
-            display: "block", textAlign: "center", marginTop: 4,
-            padding: "3px 8px", borderRadius: 6,
+            display: "block", width: "100%", textAlign: "center",
+            marginTop: 4, padding: "3px 8px", borderRadius: 6,
             border: "1px solid rgba(230,126,34,0.5)",
-            textDecoration: "none",
+            background: "transparent", cursor: "pointer",
           }}
           title={
-            curSwing.mog2_stats
-              ? `AI picks: ${curSwing.mog2_stats.n_ai ?? "?"} · MOG2 dots: ` +
+            "Open the click-to-plot editor — the motion heat zoomable " +
+            "with every timed dot clickable, one click marks the ball " +
+            "for that dot's frame." +
+            (curSwing.mog2_stats
+              ? ` AI picks: ${curSwing.mog2_stats.n_ai ?? "?"} · MOG2 dots: ` +
                 `${curSwing.mog2_stats.n_cv ?? "?"} · matched: ` +
                 `${curSwing.mog2_stats.n_matched ?? "?"} · added to arc: ` +
                 `${curSwing.mog2_stats.n_added ?? 0}` +
@@ -310,14 +321,14 @@ function ProducedTile({ clips, swings, onOpenViewer }) {
                     `step-rejected ${curSwing.mog2_stats.descent_debug.step_rej ?? 0}, ` +
                     `corridor-rejected ${curSwing.mog2_stats.descent_debug.corr_rej ?? 0})`
                   : "")
-              : "MOG2 raw motion heat with AI + MOG2 plot points"
+              : "")
           }
         >
-          🔥 MOG2 vs AI points
+          🖱 Click-to-plot
           {curSwing.mog2_stats?.n_added > 0
             ? ` (+${curSwing.mog2_stats.n_added} added)`
             : ""}
-        </a>
+        </button>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
         <MetaRow k="Clips" v={has ? clips.length : ""} />
@@ -347,7 +358,7 @@ function ProducedTile({ clips, swings, onOpenViewer }) {
  * a stub — wiring the draft back to the production pipeline lands
  * next.
  */
-function EditWizard({ row, adminPassword, onClose, onSaved }) {
+function EditWizard({ row, adminPassword, onClose, onSaved, initialTarget }) {
   // Hydrate from whatever was already persisted: only auto-detect on
   // the very first Edit. Subsequent re-opens skip the AI call and
   // pre-fill the wizard from row.edit_metrics.
@@ -362,7 +373,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   const [editing, setEditing] = useState(null);
   // 'metrics' = step 1 (handedness/frames/ball/ROI/target);
   // 'tracer'  = step 2 (rendered tracer + per-frame ball editor).
-  const [step, setStep] = useState("metrics");
+  // Opened via a card's 🖱 Click-to-plot button → land straight on
+  // Step 2 (TracerStep auto-opens the plot view when dots exist).
+  const [step, setStep] = useState(initialTarget ? "tracer" : "metrics");
   const [tracer, setTracer] = useState(null); // { url, frames }
   const [renderingTracer, setRenderingTracer] = useState(false);
   const [tracerError, setTracerError] = useState(null);
@@ -387,7 +400,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   // wizard. Both unused for single-swing rows.
   const isMulti = row?.swing_count === "multiple";
   const [swings, setSwings] = useState([]);
-  const [selectedSwing, setSelectedSwing] = useState(0);
+  const [selectedSwing, setSelectedSwing] = useState(
+    initialTarget?.swingIdx ?? 0,
+  );
   const [detectingSwings, setDetectingSwings] = useState(false);
   // Mirror of selectedSwing readable inside async callbacks without
   // re-creating them, so a render that finishes after the operator
@@ -1303,6 +1318,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               persistPatch={persistPatch}
               manualPositions={manualPositions}
               setManualPositions={setManualPositions}
+              autoPlotAll={!!initialTarget?.plotAll}
             />
           )}
           {!running && !error && draft && step === "finalize" && (
@@ -2382,7 +2398,7 @@ function TracerStep({
   row, adminPassword, draft, setDraft, tracer, setTracer,
   rendering, setRendering, error, setError,
   frameW, frameH, totalFrames, onSaved, persistPatch,
-  manualPositions, setManualPositions,
+  manualPositions, setManualPositions, autoPlotAll,
 }) {
   // manualPositions / setManualPositions are hoisted to the wizard so
   // Step 3 can see the queued edits (red note) and pass them to
@@ -2781,6 +2797,19 @@ function TracerStep({
     setZoom(1);
     setFocusOverride(null);
   }
+
+  // Opened via a card's 🖱 Click-to-plot button: drop straight into the
+  // plot view as soon as the swing's timed dots are hydrated. Fires at
+  // most once so navigating away inside the wizard sticks.
+  const autoPlotDone = useRef(false);
+  useEffect(() => {
+    if (!autoPlotAll || autoPlotDone.current) return;
+    if ((tracer?.timedPoints || []).length > 0) {
+      autoPlotDone.current = true;
+      openPlotAll();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPlotAll, tracer?.timedPoints]);
 
 
   const zoomBtn = {
@@ -5086,6 +5115,9 @@ export default function AdminProduction() {
   const [busyEventId, setBusyEventId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title, startedAt, fps}
   const [editingRow, setEditingRow] = useState(null);
+  // When the wizard is opened from a card's 🖱 Click-to-plot button:
+  // which swing to land on and that Step 2 should open in plot mode.
+  const [editTarget, setEditTarget] = useState(null);
   // Bulk-delete selection: a Set of long-upload row ids the operator
   // has ticked. Cleared after a bulk delete completes.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
@@ -5738,6 +5770,17 @@ export default function AdminProduction() {
                   clips={row.produced_clips}
                   swings={row.edit_metrics?.swings}
                   onOpenViewer={openViewer}
+                  onClickToPlot={(swingIdx) => {
+                    // Map the produce swing idx to its position in the
+                    // swings array (they diverge if a swing was deleted).
+                    const arr = row.edit_metrics?.swings || [];
+                    const pos = arr.findIndex((s) => s?.idx === swingIdx);
+                    setEditTarget({
+                      swingIdx: pos >= 0 ? pos : swingIdx,
+                      plotAll: true,
+                    });
+                    setEditingRow(row);
+                  }}
                 />
               </div>
 
@@ -5904,7 +5947,12 @@ export default function AdminProduction() {
         <EditWizard
           row={editingRow}
           adminPassword={adminPassword}
-          onClose={() => { setEditingRow(null); refreshAll(); }}
+          initialTarget={editTarget}
+          onClose={() => {
+            setEditingRow(null);
+            setEditTarget(null);
+            refreshAll();
+          }}
           onSaved={refreshAll}
         />
       )}
