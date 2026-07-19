@@ -4788,6 +4788,18 @@ def render_wizard_tracer(
                 for c in (info_c.get("candidates") or [])
                 if _imp_cut is None or int(c["frame"]) >= _imp_cut - 2
             ][:4000],
+            # The timed transient dots — the SAME dots the frames-on-heat
+            # image labels — so the Step-2 "click-to-plot" view can draw
+            # them as clickable targets: one click queues the ball at that
+            # dot for that dot's frame.
+            "timed_points": [
+                {
+                    "frame": int(p["frame"]) + offset_frames,
+                    "x": int(round(p["x"])),
+                    "y": int(round(p["y"])),
+                }
+                for p in (info_c.get("timed_points") or [])
+            ][:2000],
             "ball_at_rest": (
                 {"x": int(round(rest_used[0])), "y": int(round(rest_used[1]))}
                 if rest_used is not None

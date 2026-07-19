@@ -444,9 +444,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       // Produce's MOG2 layer-in evidence: raw heat + AI picks (yellow)
       // + MOG2 chain (white) + points added to the arc (red).
       mog2OverlayUrl: s.mog2_overlay_url || null,
-      // Clickable MOG2 candidate dots (classical/KNN renders only) are
-      // session-only — repopulated by the next render, not persisted.
+      // Clickable MOG2 candidate dots + timed heat dots (classical/KNN
+      // renders only) are session-only — repopulated by the next render,
+      // not persisted.
       candidates: [],
+      timedPoints: [],
     });
     // Start the engine toggle on whatever produced the saved tracer.
     setTracerEngine(s.tracer_engine || "ai");
@@ -792,6 +794,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           rawMotionFramesUrl: out.raw_motion_frames_url || null,
           mog2OverlayUrl: out.mog2_overlay_url || null,
           candidates: out.candidates || [],
+          timedPoints: out.timed_points || [],
         });
         setRenderedFrameSig(frameSig(draft));
         setTracerStats({
@@ -926,6 +929,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         rawMotionFramesUrl: out.raw_motion_frames_url || null,
         mog2OverlayUrl: out.mog2_overlay_url || null,
         candidates: out.candidates || [],
+        timedPoints: out.timed_points || [],
       });
       // Adopt the flight-derived rest position (never over an operator-set
       // one) so the Step-2 rest card starts where the render anchored.
@@ -2397,6 +2401,10 @@ function TracerStep({
   // Clickable MOG2 candidate dots (classical/KNN renders): amber snap
   // targets on the editor — click one to mark the ball exactly there.
   const [showCandidates, setShowCandidates] = useState(true);
+  // Click-to-plot: the frames-on-heat view rebuilt as an interactive
+  // screen — every timed motion dot (labelled with its frame) drawn over
+  // the raw-motion heat, clickable to queue the ball for that frame.
+  const [plotAll, setPlotAll] = useState(false);
   const editorRef = useRef(null);
 
   // Default zoom level when dropping straight onto a ball position.
@@ -2534,6 +2542,7 @@ function TracerStep({
   }
 
   async function loadEditorFrame(frameIdx) {
+    setPlotAll(false);
     setSelectedFrame(frameIdx);
     setEditorBg(null);
     setEditorBall(null);
@@ -2656,9 +2665,10 @@ function TracerStep({
         rawMotionArcUrl: t?.rawMotionArcUrl || null,
         rawMotionFramesUrl: t?.rawMotionFramesUrl || null,
         mog2OverlayUrl: t?.mog2OverlayUrl || null,
-        // Keep the clickable candidate dots across the cv2 fast
+        // Keep the clickable candidate/timed dots across the cv2 fast
         // re-render — the detections themselves haven't changed.
         candidates: t?.candidates || [],
+        timedPoints: t?.timedPoints || [],
       }));
       setManualPositions({});
       setClearedFrames(new Set());
@@ -2735,6 +2745,40 @@ function TracerStep({
     commitPoint(pt);
   }
 
+  function toggleTimedDot(p) {
+    // Click-to-plot dot: queue the ball at this dot for the dot's frame.
+    // Clicking the already-queued dot un-queues it; clicking a different
+    // dot on the same frame replaces the pick (radio-button per frame).
+    const f = p.frame;
+    const cur = manualPositions[f];
+    if (cur && Math.abs(cur.x - p.x) <= 2 && Math.abs(cur.y - p.y) <= 2) {
+      setManualPositions((m) => {
+        const next = { ...m };
+        delete next[f];
+        return next;
+      });
+      return;
+    }
+    setManualPositions((m) => ({ ...m, [f]: { x: p.x, y: p.y } }));
+    if (clearedFrames.has(f)) {
+      setClearedFrames((s) => {
+        const next = new Set(s);
+        next.delete(f);
+        return next;
+      });
+    }
+  }
+
+  function openPlotAll() {
+    setPlotAll(true);
+    setSelectedFrame(null);
+    setEditorBg(null);
+    setEditorBall(null);
+    // Whole-arc view: start at Fit so every dot is on screen.
+    setZoom(1);
+    setFocusOverride(null);
+  }
+
 
   const zoomBtn = {
     background: "rgba(255,255,255,0.12)", color: "#fff",
@@ -2764,9 +2808,11 @@ function TracerStep({
     >
       <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-          {selectedFrame != null
-            ? `Editing frame ${selectedFrame}`
-            : "Rendered tracer"}
+          {plotAll
+            ? `Click-to-plot · ${(tracer?.timedPoints || []).length} timed dots · ${Object.keys(manualPositions).length} queued`
+            : selectedFrame != null
+              ? `Editing frame ${selectedFrame}`
+              : "Rendered tracer"}
         </div>
         <div
           style={{
@@ -2774,7 +2820,171 @@ function TracerStep({
             display: "flex", alignItems: "center", justifyContent: "center",
           }}
         >
-          {selectedFrame != null ? (
+          {plotAll ? (
+            <div
+              style={{
+                position: "relative",
+                height: "100%", maxHeight: "100%", maxWidth: "100%",
+                aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+                background: "var(--border, #222)",
+                borderRadius: 6, overflow: "hidden",
+                userSelect: "none",
+              }}
+            >
+              <div
+                style={{
+                  position: "absolute", inset: 0,
+                  transform: `scale(${zoom})`,
+                  transformOrigin: `${focusPct.x}% ${focusPct.y}%`,
+                  transition: "transform 120ms ease",
+                }}
+              >
+                <img
+                  src={tracer?.rawMotionUrl || tracer?.rawMotionFramesUrl}
+                  alt="Raw motion heat"
+                  draggable={false}
+                  style={{
+                    width: "100%", height: "100%", objectFit: "cover",
+                    pointerEvents: "none",
+                  }}
+                />
+                {hasDims &&
+                  (tracer?.timedPoints || []).map((p, i) => {
+                    const q = manualPositions[p.frame];
+                    const isQueued =
+                      !!q &&
+                      Math.abs(q.x - p.x) <= 2 &&
+                      Math.abs(q.y - p.y) <= 2;
+                    return (
+                      <div
+                        key={`${p.frame}-${i}`}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          toggleTimedDot(p);
+                        }}
+                        title={`Frame ${p.frame} · ${p.x}, ${p.y} — ${
+                          isQueued
+                            ? "queued (click to un-queue)"
+                            : "click to queue the ball here for this frame"
+                        }`}
+                        style={{
+                          position: "absolute",
+                          left: `${(p.x / frameW) * 100}%`,
+                          top: `${(p.y / frameH) * 100}%`,
+                          width: 14, height: 14,
+                          borderRadius: "50%",
+                          border: isQueued
+                            ? "2px solid #fff"
+                            : "2px solid #f59e0b",
+                          background: isQueued
+                            ? "#22c55e"
+                            : "rgba(245,158,11,0.35)",
+                          transform: `translate(-50%, -50%) scale(${1 / zoom})`,
+                          cursor: "pointer",
+                          boxShadow: "0 0 6px rgba(0,0,0,0.7)",
+                        }}
+                      >
+                        {/* Frame label — alternates above/below like the
+                            baked frames-on-heat image, so dense stretches
+                            stay readable. Inherits the counter-scale. */}
+                        <span
+                          style={{
+                            position: "absolute",
+                            left: 13,
+                            top: i % 2 === 0 ? -13 : 11,
+                            fontSize: 10, fontWeight: 600,
+                            color: isQueued ? "#4ade80" : "#fde047",
+                            textShadow:
+                              "0 0 3px #000, 0 0 3px #000, 0 0 3px #000",
+                            whiteSpace: "nowrap",
+                            pointerEvents: "none",
+                          }}
+                        >
+                          {p.frame}
+                        </span>
+                      </div>
+                    );
+                  })}
+              </div>
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  position: "absolute", right: 8, top: 8,
+                  display: "flex", gap: 6,
+                  background: "rgba(0,0,0,0.45)", padding: "4px 6px",
+                  borderRadius: 6, backdropFilter: "blur(4px)",
+                }}
+              >
+                <button
+                  type="button"
+                  style={zoomBtn}
+                  disabled={zoom <= 1.05}
+                  onClick={() => setZoom((z) => Math.max(1, z / 1.4))}
+                  title="Zoom out"
+                >−</button>
+                <span style={{ color: "#fff", fontSize: 12, padding: "0 6px", alignSelf: "center" }}>
+                  {zoom.toFixed(1)}×
+                </span>
+                <button
+                  type="button"
+                  style={zoomBtn}
+                  disabled={zoom >= 15.9}
+                  onClick={() => setZoom((z) => Math.min(16, z * 1.4))}
+                  title="Zoom in"
+                >+</button>
+                <button
+                  type="button"
+                  style={{ ...zoomBtn, width: 36 }}
+                  onClick={() => { setZoom(1); setFocusOverride(null); }}
+                  title="Fit full frame"
+                >Fit</button>
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(3, 22px)",
+                  gridTemplateRows: "22px 22px",
+                  gap: 2, marginLeft: 4,
+                }}>
+                  <span />
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.y <= 0.1}
+                    onClick={() => panBy(0, -1)}
+                    title="Pan up"
+                  >↑</button>
+                  <span />
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.x <= 0.1}
+                    onClick={() => panBy(-1, 0)}
+                    title="Pan left"
+                  >←</button>
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.y >= 99.9}
+                    onClick={() => panBy(0, 1)}
+                    title="Pan down"
+                  >↓</button>
+                  <button
+                    type="button"
+                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+                    disabled={zoom <= 1.05 || focusPct.x >= 99.9}
+                    onClick={() => panBy(1, 0)}
+                    title="Pan right"
+                  >→</button>
+                </div>
+                <button
+                  type="button"
+                  style={{ ...zoomBtn, width: 48 }}
+                  onClick={() => setPlotAll(false)}
+                  title="Close the click-to-plot view"
+                >Close</button>
+              </div>
+            </div>
+          ) : selectedFrame != null ? (
             <div
               ref={editorRef}
               onPointerDown={onEditorPointerDown}
@@ -3010,13 +3220,15 @@ function TracerStep({
           )}
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
-          {selectedFrame != null
-            ? `Click on the ball to queue this frame as a tracer point.${
-                selectedFrameCands.length
-                  ? ` Amber ◎ dots are this frame's MOG2 motion candidates — click one to snap the mark exactly onto the detection.`
-                  : ""
-              } Navigate to other frames and add more — including past the AI's 12-frame stop, all the way to the green. Re-generate tracer re-renders here (no AI calls).`
-            : "Click a frame card on the right to correct the AI's ball position."}
+          {plotAll
+            ? "Every dot is a timed motion detection labelled with its frame number. Click a dot to queue the ball at exactly that spot for that frame — click again to un-queue, or click a different dot on the same frame to replace the pick. Zoom in over the arc to separate dense stretches, then Re-generate tracer to apply."
+            : selectedFrame != null
+              ? `Click on the ball to queue this frame as a tracer point.${
+                  selectedFrameCands.length
+                    ? ` Amber ◎ dots are this frame's MOG2 motion candidates — click one to snap the mark exactly onto the detection.`
+                    : ""
+                } Navigate to other frames and add more — including past the AI's 12-frame stop, all the way to the green. Re-generate tracer re-renders here (no AI calls).`
+              : "Click a frame card on the right to correct the AI's ball position."}
         </div>
       </div>
 
@@ -3207,6 +3419,18 @@ function TracerStep({
               title="The raw-motion heatmap with each transient dot labelled by the frame it fired in — tells you exactly which frame a descent dot belongs to."
             >
               🔢 Frames on heat
+            </button>
+          )}
+          {(tracer?.timedPoints || []).length > 0 &&
+            (tracer?.rawMotionUrl || tracer?.rawMotionFramesUrl) && (
+            <button
+              type="button"
+              className={plotAll ? "small" : "ghost small"}
+              style={{ width: "auto", padding: "1px 8px" }}
+              onClick={() => (plotAll ? setPlotAll(false) : openPlotAll())}
+              title="Interactive frames-on-heat: every timed motion dot drawn over the heat, labelled with its frame — click a dot to queue the ball there for that frame. One click per frame, click again to un-queue, Re-generate tracer applies."
+            >
+              🖱 Click-to-plot
             </button>
           )}
           {tracer?.mog2OverlayUrl && (
