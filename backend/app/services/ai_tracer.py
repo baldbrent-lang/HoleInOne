@@ -4395,6 +4395,8 @@ def track_launch_from_rest(
         scale = 1.0
         consec_miss = 0
         ref_found_g = prev_g  # gray at the last FOUND frame (apex diffing)
+        apex_anchor = None  # position where apex mode engaged — a real
+        # hang stays near it; the lowering club glides hundreds of px
         tiles = []  # (frame, crop_bgr, found, fx, fy, bw, bh)
         f = f0
         while f <= f_end:
@@ -4433,6 +4435,10 @@ def track_launch_from_rest(
             )
             if apex_mode:
                 scale = 1.0  # never widen at apex — drift hunts sparkle
+                if apex_anchor is None:
+                    apex_anchor = (last_x, last_y)
+            else:
+                apex_anchor = None
             pred_x = last_x + (vx * gap if vx is not None else 0.0)
             pred_y = last_y + (vy * gap if vy is not None else 0.0)
             bw = bh = int(2 * m0 * scale)
@@ -4525,6 +4531,37 @@ def track_launch_from_rest(
                            + (cy_ - last_y) ** 2) ** 0.5
                     if _sm > 45.0:
                         continue
+                    # A real hang stays near where it topped out; the
+                    # golfer lowering the club glides the ring hundreds
+                    # of px down the shaft and body. Cap total apex
+                    # drift — genuine descent accelerates, leaves apex
+                    # mode, and continues under normal gates.
+                    if apex_anchor is not None:
+                        _ad = ((cx_ - apex_anchor[0]) ** 2
+                               + (cy_ - apex_anchor[1]) ** 2) ** 0.5
+                        if _ad > 140.0:
+                            continue
+                    # ISOLATED-DOT test: a flying ball is alone in the
+                    # frame; a candidate on the shaft / body / shorts
+                    # sits inside a larger bright structure.
+                    _px2 = int(round(cx_ - x0)); _py2 = int(round(cy_ - y0))
+                    _n0y = max(0, _py2 - 3 * r)
+                    _n1y = min(crop_g.shape[0], _py2 + 3 * r)
+                    _n0x = max(0, _px2 - 3 * r)
+                    _n1x = min(crop_g.shape[1], _px2 + 3 * r)
+                    _neigh = crop_g[_n0y:_n1y, _n0x:_n1x]
+                    _pb = crop_g[
+                        max(0, _py2 - 2):_py2 + 3,
+                        max(0, _px2 - 2):_px2 + 3,
+                    ]
+                    if _neigh.size and _pb.size:
+                        # Structure = nearby pixels about as bright as
+                        # the candidate itself (mean-relative floors
+                        # count background noise texture instead).
+                        _thr_iso = float(_pb.mean()) - 15.0
+                        _nb = int((_neigh >= _thr_iso).sum())
+                        if _nb > max(150, int(1.2 * r * r)):
+                            continue
                 else:
                     # Aim by trajectory: the hop from the last plot
                     # point must roughly agree with the velocity (flight
