@@ -444,6 +444,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       // Produce's MOG2 layer-in evidence: raw heat + AI picks (yellow)
       // + MOG2 chain (white) + points added to the arc (red).
       mog2OverlayUrl: s.mog2_overlay_url || null,
+      // Clickable MOG2 candidate dots (classical/KNN renders only) are
+      // session-only — repopulated by the next render, not persisted.
+      candidates: [],
     });
     // Start the engine toggle on whatever produced the saved tracer.
     setTracerEngine(s.tracer_engine || "ai");
@@ -788,6 +791,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           rawMotionArcUrl: out.raw_motion_arc_url || null,
           rawMotionFramesUrl: out.raw_motion_frames_url || null,
           mog2OverlayUrl: out.mog2_overlay_url || null,
+          candidates: out.candidates || [],
         });
         setRenderedFrameSig(frameSig(draft));
         setTracerStats({
@@ -921,6 +925,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         rawMotionArcUrl: out.raw_motion_arc_url || null,
         rawMotionFramesUrl: out.raw_motion_frames_url || null,
         mog2OverlayUrl: out.mog2_overlay_url || null,
+        candidates: out.candidates || [],
       });
       // Adopt the flight-derived rest position (never over an operator-set
       // one) so the Step-2 rest card starts where the render anchored.
@@ -2389,6 +2394,9 @@ function TracerStep({
   // the renderer drops them from the ball track entirely (AI marks
   // included). Reset after a successful re-render.
   const [clearedFrames, setClearedFrames] = useState(() => new Set());
+  // Clickable MOG2 candidate dots (classical/KNN renders): amber snap
+  // targets on the editor — click one to mark the ball exactly there.
+  const [showCandidates, setShowCandidates] = useState(true);
   const editorRef = useRef(null);
 
   // Default zoom level when dropping straight onto a ball position.
@@ -2399,6 +2407,13 @@ function TracerStep({
   const frames = tracer?.frames || [];
   const hasDims = !!(frameW && frameH);
   const maxFrame = totalFrames ? totalFrames - 1 : null;
+  // MOG2 candidate detections on the frame being edited (classical/KNN
+  // renders only; empty for AI or after a wizard reopen).
+  const selectedFrameCands =
+    selectedFrame != null
+      ? (tracer?.candidates || []).filter((c) => c.frame === selectedFrame)
+      : [];
+  const visibleCands = showCandidates ? selectedFrameCands : [];
 
   // Synthetic "rest" entry shown as the first card in the grid: the
   // ball at its resting position two frames before impact. The
@@ -2637,10 +2652,13 @@ function TracerStep({
         url: out.tracer_url,
         frames: out.ball_track_frames || [],
         debugUrl: t?.debugUrl || null,
-            rawMotionUrl: t?.rawMotionUrl || null,
-            rawMotionArcUrl: t?.rawMotionArcUrl || null,
-            rawMotionFramesUrl: t?.rawMotionFramesUrl || null,
-            mog2OverlayUrl: t?.mog2OverlayUrl || null,
+        rawMotionUrl: t?.rawMotionUrl || null,
+        rawMotionArcUrl: t?.rawMotionArcUrl || null,
+        rawMotionFramesUrl: t?.rawMotionFramesUrl || null,
+        mog2OverlayUrl: t?.mog2OverlayUrl || null,
+        // Keep the clickable candidate dots across the cv2 fast
+        // re-render — the detections themselves haven't changed.
+        candidates: t?.candidates || [],
       }));
       setManualPositions({});
       setClearedFrames(new Set());
@@ -2683,33 +2701,38 @@ function TracerStep({
     };
   }
 
+  function commitPoint(pt) {
+    // Queue `pt` as the ball position for the selected frame — shared by
+    // free clicks on the frame and clicks on a MOG2 candidate dot.
+    setEditorBall(pt);
+    if (selectedFrame == null) return;
+    // Clicking on the REST card's frame moves the resting-ball anchor
+    // itself (the start of the tracer line), not a flight point.
+    if (selectedFrame === restFrame) {
+      setDraft?.((d) => ({ ...d, ball: { x: pt.x, y: pt.y }, ballManual: true }));
+      persistPatch?.({ ball: { x: pt.x, y: pt.y }, ball_manual: true });
+      return;
+    }
+    setManualPositions((m) => ({ ...m, [selectedFrame]: pt }));
+    // Marking a position un-clears the frame: the operator is
+    // putting a ball back, so we shouldn't tell the backend to
+    // drop it.
+    if (clearedFrames.has(selectedFrame)) {
+      setClearedFrames((s) => {
+        const next = new Set(s);
+        next.delete(selectedFrame);
+        return next;
+      });
+    }
+  }
+
   function onEditorPointerDown(e) {
     // Click auto-queues the position so navigating to another frame
     // doesn't drop the work. Add Frame button is just for explicit
     // confirmation now — clicking already commits.
     const pt = editorEventToFrame(e);
     if (!pt) return;
-    setEditorBall(pt);
-    // Clicking on the REST card's frame moves the resting-ball anchor
-    // itself (the start of the tracer line), not a flight point.
-    if (selectedFrame != null && selectedFrame === restFrame) {
-      setDraft?.((d) => ({ ...d, ball: { x: pt.x, y: pt.y }, ballManual: true }));
-      persistPatch?.({ ball: { x: pt.x, y: pt.y }, ball_manual: true });
-      return;
-    }
-    if (selectedFrame != null) {
-      setManualPositions((m) => ({ ...m, [selectedFrame]: pt }));
-      // Marking a position un-clears the frame: the operator is
-      // putting a ball back, so we shouldn't tell the backend to
-      // drop it.
-      if (clearedFrames.has(selectedFrame)) {
-        setClearedFrames((s) => {
-          const next = new Set(s);
-          next.delete(selectedFrame);
-          return next;
-        });
-      }
-    }
+    commitPoint(pt);
   }
 
 
@@ -2801,6 +2824,35 @@ function TracerStep({
                     Loading frame…
                   </div>
                 )}
+                {/* Clickable MOG2 candidate dots for THIS frame — click
+                    one to snap the ball mark exactly onto the detection
+                    instead of eyeballing it. Rendered before the green
+                    marker so the chosen point paints on top. */}
+                {hasDims &&
+                  visibleCands.map((c, i) => (
+                    <div
+                      key={`${c.x}-${c.y}-${i}`}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        commitPoint({ x: c.x, y: c.y });
+                      }}
+                      title={`MOG2 candidate at ${c.x}, ${c.y} — click to mark the ball here for frame ${selectedFrame}`}
+                      style={{
+                        position: "absolute",
+                        left: `${(c.x / frameW) * 100}%`,
+                        top: `${(c.y / frameH) * 100}%`,
+                        width: 16, height: 16,
+                        borderRadius: "50%",
+                        border: "2px solid #f59e0b",
+                        background: "rgba(245,158,11,0.28)",
+                        // Counter-scale so the target stays a constant
+                        // visual size (and hit area) at any zoom level.
+                        transform: `translate(-50%, -50%) scale(${1 / zoom})`,
+                        cursor: "pointer",
+                        boxShadow: "0 0 6px rgba(0,0,0,0.6)",
+                      }}
+                    />
+                  ))}
                 {hasDims && editorBall && (
                   <div
                     style={{
@@ -2877,6 +2929,21 @@ function TracerStep({
                     {detectorView ? "🔥 on" : "🔥 off"}
                   </button>
                 )}
+                {selectedFrameCands.length > 0 && (
+                  <button
+                    type="button"
+                    style={{
+                      ...zoomBtn, width: 48,
+                      background: showCandidates
+                        ? "rgba(245,158,11,0.85)"
+                        : zoomBtn.background,
+                    }}
+                    onClick={() => setShowCandidates((v) => !v)}
+                    title={`${selectedFrameCands.length} MOG2 motion candidate(s) detected on this frame — the amber dots are clickable: click one to mark the ball exactly there. This button toggles the dots.`}
+                  >
+                    ◎ {selectedFrameCands.length}
+                  </button>
+                )}
                 {/* Pan controls — only useful when zoomed past 1×.
                     Each press shifts the viewable area by ~30% of
                     the visible region in that direction. */}
@@ -2944,7 +3011,11 @@ function TracerStep({
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           {selectedFrame != null
-            ? "Click on the ball to queue this frame as a tracer point. Navigate to other frames and add more — including past the AI's 12-frame stop, all the way to the green. Re-generate tracer re-renders here (no AI calls)."
+            ? `Click on the ball to queue this frame as a tracer point.${
+                selectedFrameCands.length
+                  ? ` Amber ◎ dots are this frame's MOG2 motion candidates — click one to snap the mark exactly onto the detection.`
+                  : ""
+              } Navigate to other frames and add more — including past the AI's 12-frame stop, all the way to the green. Re-generate tracer re-renders here (no AI calls).`
             : "Click a frame card on the right to correct the AI's ball position."}
         </div>
       </div>

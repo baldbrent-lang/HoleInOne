@@ -4774,6 +4774,20 @@ def render_wizard_tracer(
             "raw_motion_arc_url": raw_motion_arc_url,
             "raw_motion_frames_url": raw_motion_frames_url,
             "arc_debug": info_c.get("arc_debug"),
+            # Per-frame MOG2 candidate detections (source-frame coords) so
+            # the Step-2 editor can draw them as clickable snap targets —
+            # click a dot to mark it as the ball for that frame. Flight
+            # frames only (impact − 2 onward) to keep the golfer's
+            # pre-swing body motion out of the editor.
+            "candidates": [
+                {
+                    "frame": int(c["frame"]) + offset_frames,
+                    "x": int(round(c["x"])),
+                    "y": int(round(c["y"])),
+                }
+                for c in (info_c.get("candidates") or [])
+                if _imp_cut is None or int(c["frame"]) >= _imp_cut - 2
+            ][:4000],
             "ball_at_rest": (
                 {"x": int(round(rest_used[0])), "y": int(round(rest_used[1]))}
                 if rest_used is not None
