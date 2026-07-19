@@ -2161,6 +2161,26 @@ def _process_long_upload_segments(
                 )
             if tracer_info.get("mog2"):
                 nsw["mog2_stats"] = tracer_info["mog2"]
+            # Timed transient dots (mapped to source frames) + the raw
+            # motion heat image — the wizard's click-to-plot view opens
+            # straight from these, no in-session re-render needed.
+            _tp = tracer_info.get("timed_points") or []
+            if _tp:
+                nsw["timed_points"] = [
+                    {
+                        "frame": int(p["frame"]) + offset,
+                        "x": int(round(float(p["x"]))),
+                        "y": int(round(float(p["y"]))),
+                    }
+                    for p in _tp
+                    if p.get("frame") is not None
+                ][:2000]
+            _rawm = tracer_info.get("raw_motion_image")
+            if _rawm and (CLIPS_DIR / _rawm).exists():
+                nsw["tracer_raw_motion_url"] = (
+                    f"{settings.app_base_url}/uploads/clips/{_rawm}"
+                    f"?v={int((CLIPS_DIR / _rawm).stat().st_mtime)}"
+                )
             if slot is not None:
                 swings[slot] = nsw
             else:
@@ -4689,6 +4709,16 @@ def render_wizard_tracer(
         raw_motion_url = _named_url(info_c.get("raw_motion_image"))
         raw_motion_arc_url = _named_url(info_c.get("raw_motion_arc_image"))
         raw_motion_frames_url = _named_url(info_c.get("raw_motion_frames_image"))
+        # Timed transient dots (source-frame mapped) — persisted so the
+        # Step-2 click-to-plot view survives closing/reopening the wizard.
+        timed_points_out = [
+            {
+                "frame": int(p["frame"]) + offset_frames,
+                "x": int(round(p["x"])),
+                "y": int(round(p["y"])),
+            }
+            for p in (info_c.get("timed_points") or [])
+        ][:2000]
         saved.update(
             {
                 "tracer_engine": engine,
@@ -4697,6 +4727,7 @@ def render_wizard_tracer(
                 "tracer_raw_motion_url": raw_motion_url,
                 "tracer_raw_motion_arc_url": raw_motion_arc_url,
                 "tracer_raw_motion_frames_url": raw_motion_frames_url,
+                "timed_points": timed_points_out,
                 "tracer_info": {
                     "engine": engine,
                     "ok": bool(info_c.get("ok")),
@@ -4792,14 +4823,7 @@ def render_wizard_tracer(
             # image labels — so the Step-2 "click-to-plot" view can draw
             # them as clickable targets: one click queues the ball at that
             # dot for that dot's frame.
-            "timed_points": [
-                {
-                    "frame": int(p["frame"]) + offset_frames,
-                    "x": int(round(p["x"])),
-                    "y": int(round(p["y"])),
-                }
-                for p in (info_c.get("timed_points") or [])
-            ][:2000],
+            "timed_points": timed_points_out,
             "ball_at_rest": (
                 {"x": int(round(rest_used[0])), "y": int(round(rest_used[1]))}
                 if rest_used is not None
@@ -4865,6 +4889,8 @@ def render_wizard_tracer(
     # full-length passes were blowing the HTTP proxy timeout (502).
     mog2_overlay_url = None
     mog2_stats = None
+    wiz_timed_points = []
+    wiz_raw_motion_url = None
     if engine == "ai_mog2":
         _imp_full = (
             pipe.get("impact_refined") or pipe.get("impact") or {}
@@ -4913,6 +4939,21 @@ def render_wizard_tracer(
                         _ovl = _layer.get("overlay_name")
                         if _ovl and (CLIPS_DIR / _ovl).exists():
                             mog2_overlay_url = _public_url(CLIPS_DIR / _ovl)
+                        # Timed heat dots (shifted back to source frames)
+                        # + raw-motion image for the click-to-plot view.
+                        wiz_timed_points = [
+                            {
+                                "frame": int(p["frame"]) + _off,
+                                "x": int(round(float(p["x"]))),
+                                "y": int(round(float(p["y"]))),
+                            }
+                            for p in (_layer.get("timed_points") or [])
+                        ][:2000]
+                        _rawm = _layer.get("raw_motion_image")
+                        if _rawm and (CLIPS_DIR / _rawm).exists():
+                            wiz_raw_motion_url = _public_url(
+                                CLIPS_DIR / _rawm,
+                            )
                         _added_back = [
                             {**r, "frame": int(r["frame"]) + _off}
                             for r in (_layer.get("merged") or [])
@@ -5010,6 +5051,8 @@ def render_wizard_tracer(
                 {
                     "mog2_overlay_url": mog2_overlay_url,
                     "mog2_stats": mog2_stats,
+                    "timed_points": wiz_timed_points,
+                    "tracer_raw_motion_url": wiz_raw_motion_url,
                 }
                 if engine == "ai_mog2" else {}
             ),
@@ -5042,6 +5085,8 @@ def render_wizard_tracer(
         "n_points": len(ball_track_frames_out),
         "mog2_overlay_url": mog2_overlay_url,
         "mog2_stats": mog2_stats,
+        "timed_points": wiz_timed_points,
+        "raw_motion_url": wiz_raw_motion_url,
         "edit_metrics": row.edit_metrics,
         "pipeline_error": pipe.get("error"),
     }
@@ -6947,6 +6992,12 @@ def _mog2_layer_for_ai_track(
             }
             if anchor_check and anchor_check.get("verified") else None
         ),
+        # Timed transient dots (cut-relative frames, native coords) +
+        # the raw-motion heat image — persisted per swing so the Edit
+        # wizard's click-to-plot view works straight from produce,
+        # without an in-session classical re-render.
+        "timed_points": list(cv_info.get("timed_points") or []),
+        "raw_motion_image": cv_info.get("raw_motion_image"),
     }
     if not added:
         log.info(
@@ -7175,6 +7226,13 @@ def _trace_segment(
                         info["mog2"] = _layer.get("stats")
                         if _layer.get("overlay_name"):
                             info["mog2_overlay_image"] = _layer["overlay_name"]
+                        # Timed heat dots + raw-motion image from the
+                        # layer's classical pass — persisted per swing so
+                        # the wizard's click-to-plot opens pre-loaded.
+                        if _layer.get("timed_points"):
+                            info["timed_points"] = _layer["timed_points"]
+                        if _layer.get("raw_motion_image"):
+                            info["raw_motion_image"] = _layer["raw_motion_image"]
                         # Pixel-verified anchors beat the vision
                         # estimates — persist the corrected rest ball +
                         # departure-frame impact for the wizard.

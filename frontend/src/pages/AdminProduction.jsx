@@ -444,11 +444,12 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       // Produce's MOG2 layer-in evidence: raw heat + AI picks (yellow)
       // + MOG2 chain (white) + points added to the arc (red).
       mog2OverlayUrl: s.mog2_overlay_url || null,
-      // Clickable MOG2 candidate dots + timed heat dots (classical/KNN
-      // renders only) are session-only — repopulated by the next render,
-      // not persisted.
+      // Clickable MOG2 candidate dots are session-only (single-frame
+      // snap targets, repopulated by the next classical/KNN render).
       candidates: [],
-      timedPoints: [],
+      // Timed heat dots ARE persisted — by produce's MOG2 layer and by
+      // wizard classical renders — so click-to-plot works on open.
+      timedPoints: s.timed_points || [],
     });
     // Start the engine toggle on whatever produced the saved tracer.
     setTracerEngine(s.tracer_engine || "ai");
@@ -822,6 +823,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 tracer_raw_motion_frames_url: out.raw_motion_frames_url || null,
                 mog2_overlay_url: out.mog2_overlay_url || null,
                 mog2_stats: out.mog2_stats || null,
+                timed_points: out.timed_points || [],
                 ...(out.ball_at_rest && !out.ball_manual
                   ? { ball: out.ball_at_rest }
                   : {}),
@@ -960,6 +962,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         tracer_raw_motion_frames_url: out.raw_motion_frames_url || null,
         mog2_overlay_url: out.mog2_overlay_url || null,
         mog2_stats: out.mog2_stats || null,
+        timed_points: out.timed_points || [],
         ...(out.ball_at_rest && !out.ball_manual
           ? { ball: out.ball_at_rest }
           : {}),
@@ -2840,7 +2843,11 @@ function TracerStep({
                 }}
               >
                 <img
-                  src={tracer?.rawMotionUrl || tracer?.rawMotionFramesUrl}
+                  src={
+                    tracer?.rawMotionUrl
+                    || tracer?.rawMotionFramesUrl
+                    || tracer?.mog2OverlayUrl
+                  }
                   alt="Raw motion heat"
                   draggable={false}
                   style={{
@@ -3422,7 +3429,9 @@ function TracerStep({
             </button>
           )}
           {(tracer?.timedPoints || []).length > 0 &&
-            (tracer?.rawMotionUrl || tracer?.rawMotionFramesUrl) && (
+            (tracer?.rawMotionUrl
+              || tracer?.rawMotionFramesUrl
+              || tracer?.mog2OverlayUrl) && (
             <button
               type="button"
               className={plotAll ? "small" : "ghost small"}
