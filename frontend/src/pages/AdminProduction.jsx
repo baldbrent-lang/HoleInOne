@@ -413,6 +413,8 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       );
       await api.saveEditMetrics(adminPassword, row.id, { swings: nextSwings });
       // 2. Re-finalize with the swing's saved graphics + frame window.
+      // `swing` gives this swing its OWN final file so it can't clobber
+      // the video behind another swing's committed clip.
       setBusyMsg("Applying graphics…");
       const fin = await api.finalizeWizardVideo(adminPassword, row.id, {
         player_name: swing.finalized_player_name || "Brent Baldwin",
@@ -421,6 +423,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
         start_frame: swing.start_frame ?? null,
         end_frame: swing.end_frame ?? null,
         cut_frame: swing.cut_frame ?? null,
+        swing: swing.idx ?? swingPos,
       });
       nextSwings = nextSwings.map((s, i) =>
         i === swingPos
@@ -434,9 +437,15 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           : s
       );
       await api.saveEditMetrics(adminPassword, row.id, { swings: nextSwings });
-      // 3. Commit to Produced Clips.
+      // 3. Commit to Produced Clips — target THIS swing's clip (clip
+      // order matches swing order). Without clip_id the backend updates
+      // the upload's most recent clip, i.e. some other swing.
       setBusyMsg("Updating Produced Clips…");
-      await api.commitWizardClip(adminPassword, row.id);
+      const clipId = row.produced_clips?.[swingPos]?.id ?? null;
+      await api.commitWizardClip(
+        adminPassword, row.id,
+        clipId != null ? { clip_id: clipId } : {},
+      );
       onSaved?.();
       onClose();
     } catch (e) {
@@ -1233,6 +1242,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         start_frame: draft.startFrame ?? null,
         end_frame: draft.endFrame ?? null,
         cut_frame: draft.cutFrame ?? null,
+        // Per-swing final file on multi-swing rows so finalizing one
+        // swing can't replace the video behind another swing's clip.
+        ...(isMulti
+          ? { swing: swings[selectedSwing]?.idx ?? selectedSwing }
+          : {}),
       });
       setFinalUrl(out.final_video_url);
       setFinalizedGraphics({ ...graphics });
@@ -1316,6 +1330,9 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
             start_frame: draft.startFrame ?? null,
             end_frame: draft.endFrame ?? null,
             cut_frame: draft.cutFrame ?? null,
+            ...(isMulti
+              ? { swing: swings[selectedSwing]?.idx ?? selectedSwing }
+              : {}),
           });
           setFinalUrl(fin.final_video_url);
           setFinalizedGraphics({ ...graphics });
@@ -1329,7 +1346,16 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           setFinalizing(false);
         }
       }
-      await api.commitWizardClip(adminPassword, row.id);
+      // Multi-swing: commit into THIS swing's produced clip (clip order
+      // matches swing order) — without clip_id the backend updates the
+      // upload's most recent clip, i.e. some other swing's video.
+      const _clipId = isMulti
+        ? row.produced_clips?.[selectedSwing]?.id ?? null
+        : null;
+      await api.commitWizardClip(
+        adminPassword, row.id,
+        _clipId != null ? { clip_id: _clipId } : {},
+      );
       onSaved?.();
     } catch (e) {
       setFinalError(e.message);

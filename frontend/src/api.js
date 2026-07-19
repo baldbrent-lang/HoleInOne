@@ -447,9 +447,12 @@ export const api = {
       adminPassword: key,
       timeoutMs: 2 * 60_000,
     }),
-  commitWizardClip: (key, uploadId) =>
+  commitWizardClip: (key, uploadId, payload = {}) =>
+    // payload.clip_id targets a specific produced clip — required on
+    // multi-swing uploads or the backend updates the most recent clip.
     request(`/api/admin/long-uploads/${uploadId}/commit`, {
       method: "POST",
+      body: payload,
       adminPassword: key,
     }),
   mirrorFromProd: (key) =>

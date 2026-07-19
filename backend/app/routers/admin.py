@@ -5332,7 +5332,16 @@ def finalize_wizard_video(
     if not tracer_path.exists():
         raise HTTPException(404, f"tracer file missing on disk: {fname}")
 
-    final_path = CLIPS_DIR / f"wizard-{upload_id}_final.mp4"
+    # Per-swing final file when the caller says which swing this is —
+    # multi-swing uploads would otherwise share ONE final file, so
+    # finalizing swing B silently replaced the video behind swing A's
+    # committed clip URL. Single-swing callers keep the legacy name.
+    _swing_no = payload.get("swing")
+    final_path = CLIPS_DIR / (
+        f"wizard-{upload_id}_final-s{int(_swing_no)}.mp4"
+        if _swing_no is not None
+        else f"wizard-{upload_id}_final.mp4"
+    )
 
     # Resolve the operator's trim / cut frames. Prefer payload values —
     # for multi-swing uploads the frame indices live inside
@@ -5636,12 +5645,19 @@ def finalize_wizard_video(
 @router.post("/long-uploads/{upload_id}/commit")
 def commit_wizard_clip(
     upload_id: int,
+    payload: dict = Body(default={}),
     db: Session = Depends(get_db),
 ):
     """Promote the wizard's finalized video to a real VideoClip so it
     shows up on Produced Clips and Broadcast. Idempotent: re-running
     after Save just updates the existing clip's tracer_url + sets
     delivered_at. Returns the clip id + URLs.
+
+    Optional body key `clip_id`: target EXACTLY that produced clip
+    (must belong to this upload). Without it the most recent clip on
+    the upload is updated — correct for single-swing rows, but on a
+    multi-swing upload that's whichever swing produced last, so
+    per-swing editors MUST pass the clip id.
     """
     row = db.get(LongVideoUpload, upload_id)
     if not row:
@@ -5652,14 +5668,27 @@ def commit_wizard_clip(
     if not final_url:
         raise HTTPException(400, "no finalized video — run Step 3 first")
 
-    # Re-use any existing wizard clip on this upload (avoids duplicates
-    # when the operator Save's twice).
-    clip = (
-        db.query(VideoClip)
-        .filter(VideoClip.long_upload_id == upload_id)
-        .order_by(VideoClip.created_at.desc())
-        .first()
-    )
+    clip_id = payload.get("clip_id")
+    if clip_id is not None:
+        clip = (
+            db.query(VideoClip)
+            .filter(
+                VideoClip.id == int(clip_id),
+                VideoClip.long_upload_id == upload_id,
+            )
+            .first()
+        )
+        if clip is None:
+            raise HTTPException(404, "clip not found on this upload")
+    else:
+        # Re-use any existing wizard clip on this upload (avoids
+        # duplicates when the operator Save's twice).
+        clip = (
+            db.query(VideoClip)
+            .filter(VideoClip.long_upload_id == upload_id)
+            .order_by(VideoClip.created_at.desc())
+            .first()
+        )
     hole_number = int(saved.get("finalized_hole_number") or 1)
 
     # Poster thumbnail for the Produced Video tile on /admin/production
@@ -5704,7 +5733,12 @@ def commit_wizard_clip(
         clip.tracer_url = final_url
         clip.source_url = final_url
         clip.tee_clip_url = tracer_url
-        clip.hole_number = hole_number
+        # Targeted commit: the clip already carries its swing's hole —
+        # don't overwrite it with the top-level finalized default.
+        clip.hole_number = (
+            hole_number if clip_id is None
+            else (clip.hole_number or hole_number)
+        )
         if thumb_url:
             clip.thumbnail_url = thumb_url
         if not clip.captured_at and row.base_captured_at:
@@ -5712,8 +5746,12 @@ def commit_wizard_clip(
     clip.delivered_at = _utcnow_naive()
     row.processing_status = "completed"
     row.processing_completed_at = _utcnow_naive()
-    row.last_n_segments = 1
-    row.last_n_succeeded = 1
+    if clip_id is None:
+        # Single-swing wizard commit owns the whole upload's counts.
+        # A targeted per-swing commit must NOT collapse a multi-swing
+        # row's "Produced · 6/6 clips" down to 1/1.
+        row.last_n_segments = 1
+        row.last_n_succeeded = 1
     db.add(row)
     db.flush()
 
