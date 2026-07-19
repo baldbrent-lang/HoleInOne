@@ -5335,6 +5335,107 @@ def render_tracer_fast(
     }
 
 
+@router.post("/long-uploads/{upload_id}/scan-region")
+def scan_plot_region(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """Deep-scan a region of the tee video for motion blobs — the
+    click-to-plot "give me buttons where I'm zoomed" pass.
+
+    Runs a plain frame-diff over the requested frame window, cropped to
+    the region, with gates FAR looser than the tracer's candidate
+    pipeline: every transient blob becomes a dot, because here the
+    OPERATOR is the filter — they can see the ball on the heat and just
+    need something clickable on it.
+
+    Body: x, y, w, h (native px), start_frame, end_frame (source
+    frames; end defaults to start+240, span hard-capped at 900).
+    Returns {dots: [{frame, x, y}, ...]} in source coords.
+    """
+    import cv2  # type: ignore
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "no tee video on this upload")
+    src = CLIPS_DIR / row.tee_filename
+    if not src.exists():
+        raise HTTPException(404, "tee video missing on disk")
+
+    cap = cv2.VideoCapture(str(src))
+    try:
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        nb = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if fw <= 0 or fh <= 0:
+            raise HTTPException(500, "could not read video dimensions")
+        try:
+            x = max(0, min(fw - 2, int(payload.get("x") or 0)))
+            y = max(0, min(fh - 2, int(payload.get("y") or 0)))
+            w = max(8, min(fw - x, int(payload.get("w") or fw)))
+            h = max(8, min(fh - y, int(payload.get("h") or fh)))
+            start = max(0, int(payload.get("start_frame") or 0))
+            _end_raw = payload.get("end_frame")
+            end = int(_end_raw) if _end_raw is not None else start + 240
+        except (TypeError, ValueError):
+            raise HTTPException(400, "bad region / frame values")
+        if nb > 0:
+            end = min(end, nb - 1)
+        end = min(end, start + 900)
+        if end <= start:
+            raise HTTPException(400, "empty frame window")
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, float(start))
+        prev = None
+        dots: list[dict] = []
+        for f in range(start, end + 1):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            crop = frame[y:y + h, x:x + w]
+            gray = cv2.GaussianBlur(
+                cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0,
+            )
+            if prev is not None:
+                diff = cv2.absdiff(gray, prev)
+                _, th = cv2.threshold(diff, 12, 255, cv2.THRESH_BINARY)
+                th = cv2.dilate(th, None, iterations=1)
+                n, _lbl, stats, cents = cv2.connectedComponentsWithStats(th)
+                frame_hits = []
+                for i in range(1, n):
+                    area = int(stats[i, cv2.CC_STAT_AREA])
+                    if 2 <= area <= 600:
+                        frame_hits.append(
+                            (area, float(cents[i][0]), float(cents[i][1])),
+                        )
+                # Largest few per frame — keeps foliage sparkle from
+                # burying the ball blob in a noisy region.
+                frame_hits.sort(reverse=True)
+                for _area, cx, cy in frame_hits[:6]:
+                    dots.append({
+                        "frame": int(f),
+                        "x": int(round(x + cx)),
+                        "y": int(round(y + cy)),
+                    })
+            prev = gray
+            if len(dots) >= 1200:
+                break
+    finally:
+        cap.release()
+    log.info(
+        "scan-region upload=%s region=(%d,%d %dx%d) f%d-%d -> %d dots",
+        upload_id, x, y, w, h, start, end, len(dots),
+    )
+    return {
+        "dots": dots[:1200],
+        "n_frames": end - start + 1,
+        "region": {"x": x, "y": y, "w": w, "h": h},
+    }
+
+
 @router.post("/long-uploads/{upload_id}/finalize")
 def finalize_wizard_video(
     upload_id: int,

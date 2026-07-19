@@ -447,6 +447,15 @@ export const api = {
       adminPassword: key,
       timeoutMs: 2 * 60_000,
     }),
+  scanPlotRegion: (key, uploadId, payload = {}) =>
+    // Frame-diff deep scan of a zoomed region — returns every motion
+    // blob as a plottable dot. Decodes real video, so give it time.
+    request(`/api/admin/long-uploads/${uploadId}/scan-region`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+      timeoutMs: 3 * 60_000,
+    }),
   commitWizardClip: (key, uploadId, payload = {}) =>
     // payload.clip_id targets a specific produced clip — required on
     // multi-swing uploads or the backend updates the most recent clip.

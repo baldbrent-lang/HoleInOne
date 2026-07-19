@@ -553,6 +553,20 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               frameH={frameH}
               marks={marks}
               onToggleDot={toggleDot}
+              scanRegion={async (region) => {
+                const out = await api.scanPlotRegion(adminPassword, row.id, {
+                  ...region,
+                  start_frame:
+                    swing.impact_frame != null
+                      ? Math.max(
+                          swing.start_frame ?? 0,
+                          swing.impact_frame - 2,
+                        )
+                      : swing.start_frame ?? 0,
+                  end_frame: swing.end_frame ?? null,
+                });
+                return out.dots || [];
+              }}
             />
           ) : (
             <div className="muted small" style={{ textAlign: "center", padding: 24 }}>
@@ -2700,13 +2714,19 @@ const DENSE_DOT_ZOOM = 2.5;
 
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
+  scanRegion,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
+  // Extra detections pulled by 🔍 Scan (frame-diff over the zoomed
+  // region) — merged into the dense layer for this session.
+  const [scanDots, setScanDots] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [scanNote, setScanNote] = useState(null);
   const hasDims = !!(frameW && frameH);
-  // Dense candidates that aren't already represented by a timed dot
-  // (same frame within 2px) — no doubled-up targets.
-  const extraDots = (denseDots || []).filter(
+  // Dense candidates + scanned dots that aren't already represented by
+  // a timed dot (same frame within 2px) — no doubled-up targets.
+  const extraDots = [...(denseDots || []), ...scanDots].filter(
     (c) =>
       !(dots || []).some(
         (p) =>
@@ -2716,6 +2736,48 @@ function PlotHeatCanvas({
       ),
   );
   const showDense = zoom >= DENSE_DOT_ZOOM;
+
+  async function doScan() {
+    if (!scanRegion || scanning || !hasDims || zoom < 1.99) return;
+    // Current viewport in native pixels. transform is scale(zoom) with
+    // origin (focus%), so the visible span is 1/zoom of the frame
+    // starting at origin*(1 - 1/zoom).
+    const x0 = Math.max(0, Math.round((focus.x / 100) * (1 - 1 / zoom) * frameW));
+    const y0 = Math.max(0, Math.round((focus.y / 100) * (1 - 1 / zoom) * frameH));
+    const region = {
+      x: x0, y: y0,
+      w: Math.round(frameW / zoom),
+      h: Math.round(frameH / zoom),
+    };
+    setScanning(true);
+    setScanNote(null);
+    try {
+      const found = await scanRegion(region);
+      const gk = (p) => `${p.frame}:${Math.round(p.x / 3)}:${Math.round(p.y / 3)}`;
+      setScanDots((prev) => {
+        const seen = new Set(
+          [...(dots || []), ...(denseDots || []), ...prev].map(gk),
+        );
+        const fresh = (found || []).filter((p) => {
+          const k = gk(p);
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+        setScanNote(
+          fresh.length
+            ? `+${fresh.length} new detections in view`
+            : "no new motion found in this area",
+        );
+        return [...prev, ...fresh];
+      });
+    } catch (e) {
+      console.warn("region scan failed", e);
+      setScanNote("scan failed — try again");
+    } finally {
+      setScanning(false);
+    }
+  }
   const zoomBtn = {
     background: "rgba(255,255,255,0.12)", color: "#fff",
     border: "1px solid rgba(255,255,255,0.3)", borderRadius: 4,
@@ -2894,6 +2956,26 @@ function PlotHeatCanvas({
           onClick={() => { setZoom(1); setFocus({ x: 50, y: 50 }); }}
           title="Fit full frame"
         >Fit</button>
+        {scanRegion && (
+          <button
+            type="button"
+            style={{
+              ...zoomBtn, width: "auto", padding: "0 8px",
+              background: scanning
+                ? "rgba(245,158,11,0.7)"
+                : zoomBtn.background,
+            }}
+            disabled={scanning || zoom < 1.99}
+            onClick={doScan}
+            title={
+              zoom < 1.99
+                ? "Zoom to at least 2× first, then Scan finds every motion blob in the visible area"
+                : "Deep-scan the visible area: frame-diff over the swing window with much looser gates than the tracer — every transient blob in view becomes a clickable dot. Takes a few seconds."
+            }
+          >
+            {scanning ? "Scanning…" : "🔍 Scan"}
+          </button>
+        )}
         <div style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, 22px)",
@@ -2940,7 +3022,7 @@ function PlotHeatCanvas({
           >Close</button>
         )}
       </div>
-      {extraDots.length > 0 && !showDense && (
+      {(scanNote || (extraDots.length > 0 && !showDense)) && (
         <div
           style={{
             position: "absolute", left: 8, bottom: 8,
@@ -2949,8 +3031,9 @@ function PlotHeatCanvas({
             pointerEvents: "none", backdropFilter: "blur(4px)",
           }}
         >
-          🔍 zoom to {DENSE_DOT_ZOOM}×+ to reveal {extraDots.length} more
-          clickable detections
+          {scanNote
+            ? `🔍 ${scanNote}`
+            : `🔍 zoom to ${DENSE_DOT_ZOOM}×+ to reveal ${extraDots.length} more clickable detections`}
         </div>
       )}
     </div>
@@ -3413,6 +3496,20 @@ function TracerStep({
               marks={manualPositions}
               onToggleDot={toggleTimedDot}
               onClose={() => setPlotAll(false)}
+              scanRegion={async (region) => {
+                const out = await api.scanPlotRegion(adminPassword, row.id, {
+                  ...region,
+                  start_frame:
+                    draft?.impactFrame != null
+                      ? Math.max(
+                          draft.startFrame ?? 0,
+                          draft.impactFrame - 2,
+                        )
+                      : draft?.startFrame ?? 0,
+                  end_frame: draft?.endFrame ?? null,
+                });
+                return out.dots || [];
+              }}
             />
           ) : selectedFrame != null ? (
             <div
