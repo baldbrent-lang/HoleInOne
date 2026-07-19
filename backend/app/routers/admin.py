@@ -6929,6 +6929,42 @@ def _mog2_layer_for_ai_track(
         )
         return out if (overlay_name or pool) else None
 
+    # FINAL physics pass over the assembled sequence (operator's rule,
+    # applied at merge): stray dots — foliage flicker etc. — hijack the
+    # render fit, which then dives to the junk and outlier-rejects the
+    # REAL descent. A ballistic flight is quadratic in frame, so fit
+    # x(f)/y(f) robustly and iteratively peel the worst outlier until
+    # everything left sits on one arc. (Local triple checks could not
+    # untangle strays interleaved with real descent dots.)
+    if len(added) >= 8:
+        _pts = sorted(added, key=lambda r: int(r["frame"]))
+        _n_removed = 0
+        for _ in range(20):
+            _fs = _np.array([float(p2["frame"]) for p2 in _pts])
+            _xs = _np.array([float(p2["x"]) for p2 in _pts])
+            _ys = _np.array([float(p2["y"]) for p2 in _pts])
+            _cx2 = _np.polyfit(_fs, _xs, 2 if len(_pts) >= 8 else 1)
+            _cy2 = _np.polyfit(_fs, _ys, 2)
+            _res = _np.hypot(
+                _xs - _np.polyval(_cx2, _fs),
+                _ys - _np.polyval(_cy2, _fs),
+            )
+            _w = int(_res.argmax())
+            if float(_res[_w]) <= 60.0:
+                break
+            _pts.pop(_w)
+            _n_removed += 1
+            if len(_pts) < 6:
+                break
+        if _n_removed:
+            log.info(
+                "mog2 layer: merge arc-fit prune removed %d stray "
+                "point(s)", _n_removed,
+            )
+            added = _pts
+            stats["n_added"] = len(added)
+            stats["n_pruned_tail"] = _n_removed
+
     # An added point beats an AI "not found" placeholder on the same
     # frame; found AI picks always win (added never lands on one).
     _added_frames = {int(a["frame"]) for a in added}
