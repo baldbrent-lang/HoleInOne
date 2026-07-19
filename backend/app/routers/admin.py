@@ -7452,6 +7452,81 @@ def _trace_segment(
     url, info, traced, dbg = _run_tracer(clip_path)
     if isinstance(info, dict) and not info.get("engine"):
         info["engine"] = "classical"
+    # Modern-render the fallback. The classical engine's own writer is
+    # the LEGACY red-dot style — every produced clip should get the same
+    # look as the AI+layer path, so re-draw its track (plus any launch-
+    # tracker points, which the layer would normally contribute) through
+    # render_tracer_video. Keeps the legacy file if the re-render fails.
+    try:
+        _rt = [
+            {
+                "frame": int(p["frame"]), "found": True,
+                "x": int(round(p["x"])), "y": int(round(p["y"])),
+            }
+            for p in ((info or {}).get("track") or [])
+        ]
+        _seen_f = {rec["frame"] for rec in _rt}
+        for lp in (launch_points or []):
+            _f = int(lp["frame"])
+            if _f not in _seen_f:
+                _rt.append({
+                    "frame": _f, "found": True,
+                    "x": int(round(float(lp["x"]))),
+                    "y": int(round(float(lp["y"]))),
+                })
+                _seen_f.add(_f)
+        _rt.sort(key=lambda rec: rec["frame"])
+        if len(_rt) >= 3:
+            _rest_m = None
+            if verified_rest_xy and len(verified_rest_xy) == 2:
+                _rest_m = (
+                    float(verified_rest_xy[0]), float(verified_rest_xy[1]),
+                )
+            elif ball_at_rest_override and len(ball_at_rest_override) == 2:
+                _rest_m = (
+                    float(ball_at_rest_override[0]),
+                    float(ball_at_rest_override[1]),
+                )
+            _imp_m = (
+                int(verified_impact_frame)
+                if verified_impact_frame is not None
+                else int(_rt[0]["frame"])
+            )
+            _mod_name = f"{clip_path.stem}_classical_modern.mp4"
+            _mod_path = CLIPS_DIR / _mod_name
+            _ri = render_tracer_video(
+                clip_path, _mod_path,
+                ball_rest_xy_native=_rest_m,
+                impact_frame_idx=_imp_m,
+                track_frames=_rt,
+            )
+            if (
+                _ri.get("ok")
+                and _mod_path.exists()
+                and _mod_path.stat().st_size > 0
+            ):
+                compress_for_email(_mod_path)
+                if _mod_path.exists() and _mod_path.stat().st_size > 0:
+                    url = (
+                        f"{settings.app_base_url}/uploads/clips/{_mod_name}"
+                        f"?v={int(_mod_path.stat().st_mtime)}"
+                    )
+                    traced = _mod_path
+                    if isinstance(info, dict):
+                        info["track"] = [
+                            {"frame": rec["frame"], "x": rec["x"], "y": rec["y"]}
+                            for rec in _rt
+                        ]
+            else:
+                log.warning(
+                    "produce: classical modern re-render not ok (%s) — "
+                    "keeping legacy render", _ri.get("error"),
+                )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "produce: classical modern re-render failed (%s) — keeping "
+            "legacy render", exc,
+        )
     return url, info, traced, dbg
 
 
