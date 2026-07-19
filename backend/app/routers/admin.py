@@ -6237,6 +6237,41 @@ def _flight_from_rest_lock(
     if not seeds:
         return [], info
 
+    def _physics_break(chain):
+        """First index whose SEQUENCE breaks ballistic physics —
+        operator's rule: a ball never turns hard, and never suddenly
+        slows or speeds up. Per-dot gates pass individually-plausible
+        club/body dots; the sequence gives them away. Returns the index
+        of the offending point, or None."""
+        # Two-segment averaged velocities: raw consecutive triples are
+        # jitter-dominated (±3px marks on 10px steps swing single-gap
+        # ratios past 2x) and truncated GOOD chains. Averaging halves
+        # the jitter; thresholds catch only egregious veers — branch
+        # exploration handles the subtle ones by outcome.
+        for i in range(4, len(chain)):
+            a, m1, m2, c = (
+                chain[i - 3], chain[i - 2], chain[i - 1], chain[i],
+            )
+            g1 = max(1, int(m2["frame"]) - int(a["frame"]))
+            g2 = max(1, int(c["frame"]) - int(m1["frame"]))
+            if g1 >= 12 or g2 >= 12:
+                continue  # re-acquisition jump — not a kinematic read
+            v1x = (m2["x"] - a["x"]) / g1
+            v1y = (m2["y"] - a["y"]) / g1
+            v2x = (c["x"] - m1["x"]) / g2
+            v2y = (c["y"] - m1["y"]) / g2
+            s1 = (v1x * v1x + v1y * v1y) ** 0.5
+            s2 = (v2x * v2x + v2y * v2y) ** 0.5
+            if s1 < 5.0 or s2 < 5.0:
+                continue  # apex regime — direction/speed undefined
+            _cos = (v1x * v2x + v1y * v2y) / (s1 * s2)
+            if _cos < 0.35:  # > ~70 degrees — flight never does this
+                return i
+            r = s2 / s1
+            if r > 2.5 or r < 0.4:
+                return i
+        return None
+
     def _follow(seed):
         d1, d2, d3 = seed
         chain = [
@@ -6246,76 +6281,131 @@ def _flight_from_rest_lock(
             }
             for d in seed
         ]
-        _kf = [float(imp)] + [float(c["frame"]) for c in chain]
-        _kx = [rx] + [c["x"] for c in chain]
-        _ky = [ry] + [c["y"] for c in chain]
+        def _key(c):
+            return (int(c["frame"]), int(round(float(c["x"]))),
+                    int(round(float(c["y"]))))
 
-        def _fit():
-            _deg_x = 2 if len(_kf) >= 4 else 1
-            return _np.polyfit(_kf, _kx, _deg_x), _np.polyfit(_kf, _ky, 2)
+        def _extend(chain, blacklist):
+            """Trail-follow from the chain's current tail, skipping
+            blacklisted dots."""
+            _kf = [float(imp)] + [float(c["frame"]) for c in chain]
+            _kx = [rx] + [c["x"] for c in chain]
+            _ky = [ry] + [c["y"] for c in chain]
 
-        _cx, _cy = _fit()
-        prev_f = int(d3["frame"])
-        prev_x, prev_y = float(d3["x"]), float(d3["y"])
-        lock_f = prev_f
-        for c in pool:
-            f = int(c["frame"])
-            if f <= prev_f:
-                continue
-            if f_cap is not None and f > f_cap:
-                break
-            if f - prev_f > 45:
-                break  # trail went quiet
-            # Vacated-ball ghost at the rest spot.
-            if ((float(c["x"]) - rx) ** 2
-                    + (float(c["y"]) - ry) ** 2) ** 0.5 < 25.0:
-                continue
-            gap = f - prev_f
-            _vx = float(_np.polyval(_np.polyder(_cx), prev_f))
-            _vy = float(_np.polyval(_np.polyder(_cy), prev_f))
-            vel = float(_np.hypot(_vx, _vy))
-            step = ((float(c["x"]) - prev_x) ** 2
-                    + (float(c["y"]) - prev_y) ** 2) ** 0.5
-            if step > 30.0 + gap * max(9.0, 1.6 * vel):
-                continue
-            # Direction consistency (basic physics): gravity bends the
-            # flight a few degrees per frame — it never u-turns. A hop
-            # whose direction fights the fit velocity is the club
-            # follow-through / body motion, not the ball, even when a
-            # grown gap has widened the corridor enough to admit it.
-            if vel > 6.0 and step > 1.0:
-                _dp = ((float(c["x"]) - prev_x) * _vx
-                       + (float(c["y"]) - prev_y) * _vy)
-                if _dp < 0.2 * step * vel:
-                    continue
-            # Minimum progress: ghosts of vacated positions barely move
-            # (and drift a few px as they decay, evading a same-spot
-            # filter). Early flight ALWAYS moves — hard floor for the
-            # first 1.5s, velocity-scaled thereafter.
-            if f - lock_f <= int(round(1.5 * fps)) and step < 3.5 * gap:
-                continue
-            if vel > 8.0 and step < 0.3 * vel * gap:
-                continue
-            # Tight predictive corridor keyed to the GAP since the last
-            # accepted dot (refit on every accept, so the prediction is
-            # only ever `gap` frames of extrapolation).
-            pred_x = float(_np.polyval(_cx, f))
-            pred_y = float(_np.polyval(_cy, f))
-            tol = 20.0 + 6.0 * gap
-            d = ((float(c["x"]) - pred_x) ** 2
-                 + (float(c["y"]) - pred_y) ** 2) ** 0.5
-            if d > tol:
-                continue
-            chain.append({
-                "frame": f, "found": True,
-                "x": float(c["x"]), "y": float(c["y"]), "source": "mog2",
-            })
-            _kf.append(float(f))
-            _kx.append(float(c["x"]))
-            _ky.append(float(c["y"]))
+            def _fit():
+                _deg_x = 2 if len(_kf) >= 4 else 1
+                return (
+                    _np.polyfit(_kf, _kx, _deg_x),
+                    _np.polyfit(_kf, _ky, 2),
+                )
+
             _cx, _cy = _fit()
-            prev_f, prev_x, prev_y = f, float(c["x"]), float(c["y"])
-        return chain
+            prev_f = int(chain[-1]["frame"])
+            prev_x, prev_y = float(chain[-1]["x"]), float(chain[-1]["y"])
+            lock_f = int(chain[min(2, len(chain) - 1)]["frame"])
+            for c in pool:
+                f = int(c["frame"])
+                if f <= prev_f:
+                    continue
+                if f_cap is not None and f > f_cap:
+                    break
+                if f - prev_f > 45:
+                    break  # trail went quiet
+                if _key(c) in blacklist:
+                    continue
+                # Vacated-ball ghost at the rest spot.
+                if ((float(c["x"]) - rx) ** 2
+                        + (float(c["y"]) - ry) ** 2) ** 0.5 < 25.0:
+                    continue
+                gap = f - prev_f
+                _vx = float(_np.polyval(_np.polyder(_cx), prev_f))
+                _vy = float(_np.polyval(_np.polyder(_cy), prev_f))
+                vel = float(_np.hypot(_vx, _vy))
+                step = ((float(c["x"]) - prev_x) ** 2
+                        + (float(c["y"]) - prev_y) ** 2) ** 0.5
+                if step > 30.0 + gap * max(9.0, 1.6 * vel):
+                    continue
+                # Direction consistency: flight never u-turns.
+                if vel > 6.0 and step > 1.0:
+                    _dp = ((float(c["x"]) - prev_x) * _vx
+                           + (float(c["y"]) - prev_y) * _vy)
+                    if _dp < 0.2 * step * vel:
+                        continue
+                # Minimum progress (ghost drift defence).
+                if f - lock_f <= int(round(1.5 * fps)) and step < 3.5 * gap:
+                    continue
+                if vel > 8.0 and step < 0.3 * vel * gap:
+                    continue
+                # Tight predictive corridor keyed to the gap.
+                pred_x = float(_np.polyval(_cx, f))
+                pred_y = float(_np.polyval(_cy, f))
+                tol = 20.0 + 6.0 * gap
+                d = ((float(c["x"]) - pred_x) ** 2
+                     + (float(c["y"]) - pred_y) ** 2) ** 0.5
+                if d > tol:
+                    continue
+                chain.append({
+                    "frame": f, "found": True,
+                    "x": float(c["x"]), "y": float(c["y"]),
+                    "source": "mog2",
+                })
+                _kf.append(float(f))
+                _kx.append(float(c["x"]))
+                _ky.append(float(c["y"]))
+                _cx, _cy = _fit()
+                prev_f, prev_x, prev_y = f, float(c["x"]), float(c["y"])
+            return chain
+
+        # BRANCH-AND-PRUNE (operator-designed): follow with a physics
+        # watchdog — on a sequence break (hard turn / sudden speed
+        # change) roll back, blacklist the offender, re-follow. Then
+        # BRANCH EXPLORATION: a straight club-shaft ladder at similar
+        # speed is physically plausible dot-by-dot, so ALSO try the
+        # path without each risky join (re-acquisition after a faint
+        # gap) — the true flight outlives the ladder, so the furthest,
+        # cleanest-fitting chain wins.
+        seed_chain = list(chain)
+
+        def _run(blacklist):
+            ch = list(seed_chain)
+            for _attempt in range(6):
+                ch = _extend(ch, blacklist)
+                bad_i = _physics_break(ch)
+                if bad_i is None:
+                    break
+                blacklist.add(_key(ch[bad_i]))
+                ch = ch[:bad_i]
+                if len(ch) < 3:
+                    break
+            return ch
+
+        def _score(ch):
+            if len(ch) < 4:
+                return (len(ch), 0.0)
+            _fs = _np.array([float(c["frame"]) for c in ch])
+            _ys = _np.array([float(c["y"]) for c in ch])
+            try:
+                _res = float(_np.mean(_np.abs(
+                    _ys - _np.polyval(_np.polyfit(_fs, _ys, 2), _fs),
+                )))
+            except Exception:  # noqa: BLE001
+                _res = 1e9
+            return (len(ch), -_res)
+
+        base = _run(set())
+        best = base
+        # Risky joins: dots accepted after a >=2 frame silence — where
+        # a wrong branch (club ladder) can be grabbed. Try without each
+        # branch (the join dot AND everything after it).
+        _joins = [
+            i for i in range(3, len(base))
+            if int(base[i]["frame"]) - int(base[i - 1]["frame"]) >= 2
+        ][:3]
+        for ji in _joins:
+            alt = _run({_key(c) for c in base[ji:]})
+            if _score(alt) > _score(best):
+                best = alt
+        return best
 
     best_chain, best_seed = [], None
     for sd in seeds:
@@ -6652,6 +6742,36 @@ def _mog2_layer_for_ai_track(
                     pf, px, py = f, float(c["x"]), float(c["y"])
                 if dbg.get("stopped") is None:
                     dbg["stopped"] = "end of pool"
+                # Physics prune (same rule as the rest-lock follower):
+                # truncate at the first sequence break — hard turn or
+                # sudden speed change is club/body, not ball.
+                _ctx = [
+                    {"frame": last_f, "x": float(_known[-1]["x"]),
+                     "y": float(_known[-1]["y"])}
+                ] + picked
+                for i in range(4, len(_ctx)):
+                    a, m1, m2, c2 = (
+                        _ctx[i - 3], _ctx[i - 2], _ctx[i - 1], _ctx[i],
+                    )
+                    g1 = max(1, int(m2["frame"]) - int(a["frame"]))
+                    g2 = max(1, int(c2["frame"]) - int(m1["frame"]))
+                    if g1 >= 12 or g2 >= 12:
+                        continue
+                    v1x = (m2["x"] - a["x"]) / g1
+                    v1y = (m2["y"] - a["y"]) / g1
+                    v2x = (c2["x"] - m1["x"]) / g2
+                    v2y = (c2["y"] - m1["y"]) / g2
+                    s1 = (v1x * v1x + v1y * v1y) ** 0.5
+                    s2 = (v2x * v2x + v2y * v2y) ** 0.5
+                    if s1 < 5.0 or s2 < 5.0:
+                        continue
+                    _cosv = (v1x * v2x + v1y * v2y) / (s1 * s2)
+                    if _cosv < 0.35 or s2 / s1 > 2.5 or s2 / s1 < 0.4:
+                        dbg["stopped"] = (
+                            f"physics prune at f{int(c2['frame'])}"
+                        )
+                        picked = _ctx[1:i]
+                        break
                 return picked
 
             _desc_dbg = {
