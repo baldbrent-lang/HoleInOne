@@ -350,13 +350,38 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot }) {
 function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   const swings = row.edit_metrics?.swings || [];
   const swing = swings[swingPos] || {};
-  const [marks, setMarks] = useState({});
+  const dots = swing.timed_points || [];
+  const denseDots = swing.cand_points || [];
+  // Dots that are ALREADY in the swing's saved ball track (from an
+  // earlier Save here, or from the tracer itself) start out green —
+  // so reopening the modal shows what's plotted, and Save only sends
+  // the diff (new clicks as manual points, un-clicks as cleared).
+  const [baked] = useState(() => {
+    const init = {};
+    const byFrame = new Map(
+      (swing.ball_track_frames || [])
+        .filter((r) => r.found && r.x != null && r.y != null)
+        .map((r) => [r.frame, r]),
+    );
+    for (const p of [...dots, ...denseDots]) {
+      const rec = byFrame.get(p.frame);
+      if (
+        rec &&
+        Math.abs(rec.x - p.x) <= 2 &&
+        Math.abs(rec.y - p.y) <= 2 &&
+        init[p.frame] === undefined
+      ) {
+        init[p.frame] = { x: p.x, y: p.y };
+      }
+    }
+    return init;
+  });
+  const [marks, setMarks] = useState(() => ({ ...baked }));
   const [busy, setBusy] = useState(false);
   const [busyMsg, setBusyMsg] = useState(null);
   const [error, setError] = useState(null);
   const frameW = row.edit_metrics?.frame_width ?? row.tee_width ?? null;
   const frameH = row.edit_metrics?.frame_height ?? row.tee_height ?? null;
-  const dots = swing.timed_points || [];
   const bgUrl = swing.tracer_raw_motion_url || swing.mog2_overlay_url;
   const holeNumber = Number(
     swing.finalized_hole_number
@@ -377,11 +402,24 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
     });
   }
 
+  // Diff vs the baked state: new/moved picks become manual points,
+  // un-clicked baked dots become cleared frames.
+  function pendingChanges() {
+    const overrides = Object.entries(marks)
+      .filter(([f, p]) => {
+        const b = baked[f];
+        return !(b && b.x === p.x && b.y === p.y);
+      })
+      .map(([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y }));
+    const cleared = Object.keys(baked)
+      .filter((f) => !marks[f])
+      .map((f) => parseInt(f, 10));
+    return { overrides, cleared };
+  }
+
   async function saveAndClose() {
-    const overrides = Object.entries(marks).map(([f, p]) => ({
-      frame: parseInt(f, 10), x: p.x, y: p.y,
-    }));
-    if (overrides.length === 0) {
+    const { overrides, cleared } = pendingChanges();
+    if (overrides.length === 0 && cleared.length === 0) {
       onClose();
       return;
     }
@@ -394,6 +432,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
         swing.start_frame != null && swing.end_frame != null;
       const fast = await api.renderWizardTracerFast(adminPassword, row.id, {
         manual_positions: overrides,
+        cleared_frames: cleared,
         base_track_frames: swing.ball_track_frames || [],
         impact_frame: swing.impact_frame ?? null,
         ball_at_rest: swing.ball || null,
@@ -456,7 +495,8 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
     }
   }
 
-  const nQueued = Object.keys(marks).length;
+  const { overrides: pendAdd, cleared: pendClear } = pendingChanges();
+  const nChanged = pendAdd.length + pendClear.length;
   return (
     <div
       role="dialog"
@@ -489,6 +529,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
             <div className="small muted">
               Upload #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
               {holeNumber} · {dots.length} timed dots
+              {denseDots.length > 0 && ` · ${denseDots.length} candidates`}
             </div>
           </div>
           <button
@@ -503,10 +544,11 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
         </div>
 
         <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          {dots.length > 0 && bgUrl ? (
+          {(dots.length > 0 || denseDots.length > 0) && bgUrl ? (
             <PlotHeatCanvas
               bgUrl={bgUrl}
               dots={dots}
+              denseDots={denseDots}
               frameW={frameW}
               frameH={frameH}
               marks={marks}
@@ -522,10 +564,13 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           )}
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
-          Click a dot to queue the ball at exactly that spot for that
-          frame — click again to un-queue, a different dot on the same
-          frame replaces the pick. Save &amp; close re-renders the tracer
-          with your picks (no AI calls) and updates the produced clip.
+          Green dots are already in the saved ball track; amber are
+          unused detections. Click a dot to add the ball at exactly that
+          spot for that frame — click a green one to remove it, a
+          different dot on the same frame replaces the pick. Zoom past
+          {" "}{DENSE_DOT_ZOOM}× to reveal the denser candidate layer.
+          Save &amp; close re-renders the tracer with the changes (no AI
+          calls) and updates the produced clip.
         </div>
 
         {error && <div className="err-text small" style={{ marginTop: 6 }}>{error}</div>}
@@ -537,9 +582,11 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               {busyMsg}
             </span>
           )}
-          {!busy && nQueued > 0 && (
+          {!busy && nChanged > 0 && (
             <span className="small" style={{ marginRight: "auto", color: "var(--emerald-700)" }}>
-              {nQueued} point{nQueued === 1 ? "" : "s"} queued
+              {pendAdd.length > 0 && `${pendAdd.length} new`}
+              {pendAdd.length > 0 && pendClear.length > 0 && " · "}
+              {pendClear.length > 0 && `${pendClear.length} removed`}
             </span>
           )}
           <button
@@ -555,11 +602,11 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
             type="button"
             onClick={saveAndClose}
             style={{ width: "auto" }}
-            disabled={busy || nQueued === 0}
+            disabled={busy || nChanged === 0}
             title={
-              nQueued === 0
-                ? "Click dots on the heat to queue ball points first"
-                : "Re-render the tracer with the queued points, re-apply graphics, and update Produced Clips"
+              nChanged === 0
+                ? "Click dots on the heat to add/remove ball points first — green dots are already in the saved track"
+                : "Re-render the tracer with the changes, re-apply graphics, and update Produced Clips"
             }
           >
             {busy ? "Saving…" : "Save & close"}
@@ -686,9 +733,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       // Produce's MOG2 layer-in evidence: raw heat + AI picks (yellow)
       // + MOG2 chain (white) + points added to the arc (red).
       mog2OverlayUrl: s.mog2_overlay_url || null,
-      // Clickable MOG2 candidate dots are session-only (single-frame
-      // snap targets, repopulated by the next classical/KNN render).
-      candidates: [],
+      // Clickable MOG2 candidate dots — hydrated from the persisted
+      // (capped) pool; a fresh classical/KNN render replaces them with
+      // its full session set.
+      candidates: s.cand_points || [],
       // Timed heat dots ARE persisted — by produce's MOG2 layer and by
       // wizard classical renders — so click-to-plot works on open.
       timedPoints: s.timed_points || [],
@@ -1066,6 +1114,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 mog2_overlay_url: out.mog2_overlay_url || null,
                 mog2_stats: out.mog2_stats || null,
                 timed_points: out.timed_points || [],
+                cand_points: (out.candidates || []).slice(0, 1500),
                 ...(out.ball_at_rest && !out.ball_manual
                   ? { ball: out.ball_at_rest }
                   : {}),
@@ -1205,6 +1254,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         mog2_overlay_url: out.mog2_overlay_url || null,
         mog2_stats: out.mog2_stats || null,
         timed_points: out.timed_points || [],
+        cand_points: (out.candidates || []).slice(0, 1500),
         ...(out.ball_at_rest && !out.ball_manual
           ? { ball: out.ball_at_rest }
           : {}),
@@ -2641,12 +2691,31 @@ function ImageLightbox({ url, title, onClose }) {
  * Zoomable heat canvas with clickable timed dots — the interactive
  * frames-on-heat view. Self-contained zoom/pan; `marks` is a
  * {frame: {x,y}} map of queued picks, `onToggleDot(p)` queues/unqueues.
+ * `denseDots` (optional) is the raw per-frame candidate pool — hidden
+ * at low zoom, revealed as smaller clickable dots once zoomed past 2.5×
+ * so a sparse timed chain can be filled in from the full detection set.
  * Used by the wizard's Step-2 plot view AND the standalone card modal.
  */
-function PlotHeatCanvas({ bgUrl, dots, frameW, frameH, marks, onToggleDot, onClose }) {
+const DENSE_DOT_ZOOM = 2.5;
+
+function PlotHeatCanvas({
+  bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
+}) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
   const hasDims = !!(frameW && frameH);
+  // Dense candidates that aren't already represented by a timed dot
+  // (same frame within 2px) — no doubled-up targets.
+  const extraDots = (denseDots || []).filter(
+    (c) =>
+      !(dots || []).some(
+        (p) =>
+          p.frame === c.frame &&
+          Math.abs(p.x - c.x) <= 2 &&
+          Math.abs(p.y - c.y) <= 2,
+      ),
+  );
+  const showDense = zoom >= DENSE_DOT_ZOOM;
   const zoomBtn = {
     background: "rgba(255,255,255,0.12)", color: "#fff",
     border: "1px solid rgba(255,255,255,0.3)", borderRadius: 4,
@@ -2688,6 +2757,59 @@ function PlotHeatCanvas({ bgUrl, dots, frameW, frameH, marks, onToggleDot, onClo
             pointerEvents: "none",
           }}
         />
+        {/* Dense candidate layer — smaller, dimmer targets that only
+            appear once zoomed in, so the fit view stays readable. */}
+        {hasDims && showDense &&
+          extraDots.map((p, i) => {
+            const q = marks[p.frame];
+            const isQueued =
+              !!q && Math.abs(q.x - p.x) <= 2 && Math.abs(q.y - p.y) <= 2;
+            return (
+              <div
+                key={`d-${p.frame}-${i}`}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onToggleDot(p);
+                }}
+                title={`Frame ${p.frame} · ${p.x}, ${p.y} (candidate) — ${
+                  isQueued
+                    ? "queued (click to un-queue)"
+                    : "click to queue the ball here for this frame"
+                }`}
+                style={{
+                  position: "absolute",
+                  left: `${(p.x / frameW) * 100}%`,
+                  top: `${(p.y / frameH) * 100}%`,
+                  width: 10, height: 10,
+                  borderRadius: "50%",
+                  border: isQueued
+                    ? "2px solid #fff"
+                    : "1px solid rgba(245,158,11,0.9)",
+                  background: isQueued
+                    ? "#22c55e"
+                    : "rgba(245,158,11,0.18)",
+                  transform: `translate(-50%, -50%) scale(${1 / zoom})`,
+                  cursor: "pointer",
+                  boxShadow: "0 0 4px rgba(0,0,0,0.6)",
+                }}
+              >
+                <span
+                  style={{
+                    position: "absolute",
+                    left: 10,
+                    top: i % 2 === 0 ? -11 : 9,
+                    fontSize: 9,
+                    color: isQueued ? "#4ade80" : "rgba(253,224,71,0.85)",
+                    textShadow: "0 0 3px #000, 0 0 3px #000",
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                  }}
+                >
+                  {p.frame}
+                </span>
+              </div>
+            );
+          })}
         {hasDims &&
           (dots || []).map((p, i) => {
             const q = marks[p.frame];
@@ -2818,6 +2940,19 @@ function PlotHeatCanvas({ bgUrl, dots, frameW, frameH, marks, onToggleDot, onClo
           >Close</button>
         )}
       </div>
+      {extraDots.length > 0 && !showDense && (
+        <div
+          style={{
+            position: "absolute", left: 8, bottom: 8,
+            background: "rgba(0,0,0,0.55)", color: "#fde047",
+            padding: "3px 10px", borderRadius: 6, fontSize: 12,
+            pointerEvents: "none", backdropFilter: "blur(4px)",
+          }}
+        >
+          🔍 zoom to {DENSE_DOT_ZOOM}×+ to reveal {extraDots.length} more
+          clickable detections
+        </div>
+      )}
     </div>
   );
 }
@@ -3272,6 +3407,7 @@ function TracerStep({
                 || tracer?.mog2OverlayUrl
               }
               dots={tracer?.timedPoints || []}
+              denseDots={tracer?.candidates || []}
               frameW={frameW}
               frameH={frameH}
               marks={manualPositions}

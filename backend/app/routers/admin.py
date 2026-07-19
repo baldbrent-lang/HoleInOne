@@ -2175,6 +2175,24 @@ def _process_long_upload_segments(
                     for p in _tp
                     if p.get("frame") is not None
                 ][:2000]
+            # Denser candidate pool for click-to-plot's zoomed-in layer.
+            # The classical fallback's tracer info carries "candidates"
+            # natively; the AI path gets them from the MOG2 layer.
+            # Flight-window only (impact − 2 on) — the fallback path's
+            # pool isn't heat-windowed, and without the filter the 1500
+            # cap would fill up with pre-swing body motion.
+            _cp = tracer_info.get("candidates") or []
+            if _cp:
+                nsw["cand_points"] = [
+                    {
+                        "frame": int(p["frame"]) + offset,
+                        "x": int(round(float(p["x"]))),
+                        "y": int(round(float(p["y"]))),
+                    }
+                    for p in _cp
+                    if p.get("frame") is not None
+                    and (_imp is None or int(p["frame"]) >= int(_imp) - 2)
+                ][:1500]
             _rawm = tracer_info.get("raw_motion_image")
             if _rawm and (CLIPS_DIR / _rawm).exists():
                 nsw["tracer_raw_motion_url"] = (
@@ -4719,6 +4737,15 @@ def render_wizard_tracer(
             }
             for p in (info_c.get("timed_points") or [])
         ][:2000]
+        candidates_out = [
+            {
+                "frame": int(c["frame"]) + offset_frames,
+                "x": int(round(c["x"])),
+                "y": int(round(c["y"])),
+            }
+            for c in (info_c.get("candidates") or [])
+            if _imp_cut is None or int(c["frame"]) >= _imp_cut - 2
+        ][:4000]
         saved.update(
             {
                 "tracer_engine": engine,
@@ -4728,6 +4755,7 @@ def render_wizard_tracer(
                 "tracer_raw_motion_arc_url": raw_motion_arc_url,
                 "tracer_raw_motion_frames_url": raw_motion_frames_url,
                 "timed_points": timed_points_out,
+                "cand_points": candidates_out[:1500],
                 "tracer_info": {
                     "engine": engine,
                     "ok": bool(info_c.get("ok")),
@@ -4810,15 +4838,7 @@ def render_wizard_tracer(
             # click a dot to mark it as the ball for that frame. Flight
             # frames only (impact − 2 onward) to keep the golfer's
             # pre-swing body motion out of the editor.
-            "candidates": [
-                {
-                    "frame": int(c["frame"]) + offset_frames,
-                    "x": int(round(c["x"])),
-                    "y": int(round(c["y"])),
-                }
-                for c in (info_c.get("candidates") or [])
-                if _imp_cut is None or int(c["frame"]) >= _imp_cut - 2
-            ][:4000],
+            "candidates": candidates_out,
             # The timed transient dots — the SAME dots the frames-on-heat
             # image labels — so the Step-2 "click-to-plot" view can draw
             # them as clickable targets: one click queues the ball at that
@@ -4890,6 +4910,7 @@ def render_wizard_tracer(
     mog2_overlay_url = None
     mog2_stats = None
     wiz_timed_points = []
+    wiz_cand_points = []
     wiz_raw_motion_url = None
     if engine == "ai_mog2":
         _imp_full = (
@@ -4949,6 +4970,14 @@ def render_wizard_tracer(
                             }
                             for p in (_layer.get("timed_points") or [])
                         ][:2000]
+                        wiz_cand_points = [
+                            {
+                                "frame": int(p["frame"]) + _off,
+                                "x": int(round(float(p["x"]))),
+                                "y": int(round(float(p["y"]))),
+                            }
+                            for p in (_layer.get("candidates") or [])
+                        ][:1500]
                         _rawm = _layer.get("raw_motion_image")
                         if _rawm and (CLIPS_DIR / _rawm).exists():
                             wiz_raw_motion_url = _public_url(
@@ -5052,6 +5081,7 @@ def render_wizard_tracer(
                     "mog2_overlay_url": mog2_overlay_url,
                     "mog2_stats": mog2_stats,
                     "timed_points": wiz_timed_points,
+                    "cand_points": wiz_cand_points,
                     "tracer_raw_motion_url": wiz_raw_motion_url,
                 }
                 if engine == "ai_mog2" else {}
@@ -5086,6 +5116,7 @@ def render_wizard_tracer(
         "mog2_overlay_url": mog2_overlay_url,
         "mog2_stats": mog2_stats,
         "timed_points": wiz_timed_points,
+        "candidates": wiz_cand_points,
         "raw_motion_url": wiz_raw_motion_url,
         "edit_metrics": row.edit_metrics,
         "pipeline_error": pipe.get("error"),
@@ -7035,6 +7066,9 @@ def _mog2_layer_for_ai_track(
         # wizard's click-to-plot view works straight from produce,
         # without an in-session classical re-render.
         "timed_points": list(cv_info.get("timed_points") or []),
+        # The denser per-frame candidate pool — click-to-plot reveals
+        # these as extra clickable dots when zoomed in.
+        "candidates": list(cv_info.get("candidates") or []),
         "raw_motion_image": cv_info.get("raw_motion_image"),
     }
     if not added:
@@ -7264,11 +7298,14 @@ def _trace_segment(
                         info["mog2"] = _layer.get("stats")
                         if _layer.get("overlay_name"):
                             info["mog2_overlay_image"] = _layer["overlay_name"]
-                        # Timed heat dots + raw-motion image from the
-                        # layer's classical pass — persisted per swing so
-                        # the wizard's click-to-plot opens pre-loaded.
+                        # Timed heat dots + candidate pool + raw-motion
+                        # image from the layer's classical pass —
+                        # persisted per swing so the wizard's
+                        # click-to-plot opens pre-loaded.
                         if _layer.get("timed_points"):
                             info["timed_points"] = _layer["timed_points"]
+                        if _layer.get("candidates"):
+                            info["candidates"] = _layer["candidates"]
                         if _layer.get("raw_motion_image"):
                             info["raw_motion_image"] = _layer["raw_motion_image"]
                         # Pixel-verified anchors beat the vision
