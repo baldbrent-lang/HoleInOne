@@ -340,6 +340,228 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot }) {
 }
 
 /**
+ * Standalone click-to-plot modal, opened from a production card's
+ * 🖱 Click-to-plot button. Big zoomable heat view with every timed dot
+ * clickable; Save & close bakes the queued picks into the swing's
+ * tracer (cv2 fast render, no AI), re-finalizes the video with the
+ * saved graphics, and commits it to Produced Clips — the same
+ * pipeline as the wizard's Produce, minus the wizard.
+ */
+function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
+  const swings = row.edit_metrics?.swings || [];
+  const swing = swings[swingPos] || {};
+  const [marks, setMarks] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [busyMsg, setBusyMsg] = useState(null);
+  const [error, setError] = useState(null);
+  const frameW = row.edit_metrics?.frame_width ?? row.tee_width ?? null;
+  const frameH = row.edit_metrics?.frame_height ?? row.tee_height ?? null;
+  const dots = swing.timed_points || [];
+  const bgUrl = swing.tracer_raw_motion_url || swing.mog2_overlay_url;
+  const holeNumber = Number(
+    swing.finalized_hole_number
+      ?? row.produced_clips?.[swingPos]?.hole_number
+      ?? 1,
+  ) || 1;
+
+  function toggleDot(p) {
+    const f = p.frame;
+    setMarks((m) => {
+      const cur = m[f];
+      if (cur && Math.abs(cur.x - p.x) <= 2 && Math.abs(cur.y - p.y) <= 2) {
+        const next = { ...m };
+        delete next[f];
+        return next;
+      }
+      return { ...m, [f]: { x: p.x, y: p.y } };
+    });
+  }
+
+  async function saveAndClose() {
+    const overrides = Object.entries(marks).map(([f, p]) => ({
+      frame: parseInt(f, 10), x: p.x, y: p.y,
+    }));
+    if (overrides.length === 0) {
+      onClose();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      // 1. Bake the picks into the swing's track (cv2 only, no AI).
+      setBusyMsg("Re-rendering tracer…");
+      const hasWindow =
+        swing.start_frame != null && swing.end_frame != null;
+      const fast = await api.renderWizardTracerFast(adminPassword, row.id, {
+        manual_positions: overrides,
+        base_track_frames: swing.ball_track_frames || [],
+        impact_frame: swing.impact_frame ?? null,
+        ball_at_rest: swing.ball || null,
+        target: swing.target || null,
+        render_window: hasWindow
+          ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
+          : null,
+      });
+      let nextSwings = swings.map((s, i) =>
+        i === swingPos
+          ? {
+              ...s,
+              tracer_url: fast.tracer_url,
+              ball_track_frames: fast.ball_track_frames || [],
+            }
+          : s
+      );
+      await api.saveEditMetrics(adminPassword, row.id, { swings: nextSwings });
+      // 2. Re-finalize with the swing's saved graphics + frame window.
+      setBusyMsg("Applying graphics…");
+      const fin = await api.finalizeWizardVideo(adminPassword, row.id, {
+        player_name: swing.finalized_player_name || "Brent Baldwin",
+        hole_number: holeNumber,
+        yardage: swing.finalized_yardage ?? null,
+        start_frame: swing.start_frame ?? null,
+        end_frame: swing.end_frame ?? null,
+        cut_frame: swing.cut_frame ?? null,
+      });
+      nextSwings = nextSwings.map((s, i) =>
+        i === swingPos
+          ? {
+              ...s,
+              finalized_video_url: fin.final_video_url,
+              finalized_hole_number: holeNumber,
+              finalized_player_name:
+                swing.finalized_player_name || "Brent Baldwin",
+            }
+          : s
+      );
+      await api.saveEditMetrics(adminPassword, row.id, { swings: nextSwings });
+      // 3. Commit to Produced Clips.
+      setBusyMsg("Updating Produced Clips…");
+      await api.commitWizardClip(adminPassword, row.id);
+      onSaved?.();
+      onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+      setBusyMsg(null);
+    }
+  }
+
+  const nQueued = Object.keys(marks).length;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Click-to-plot for upload ${row.id}`}
+      onClick={busy ? undefined : onClose}
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.85)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000, padding: 16, cursor: "zoom-out",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="card"
+        style={{
+          maxWidth: "min(1500px, 98vw)", width: "100%",
+          maxHeight: "96vh", height: "96vh", overflow: "hidden",
+          cursor: "default", margin: 0,
+          display: "flex", flexDirection: "column",
+        }}
+      >
+        <div
+          className="row"
+          style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}
+        >
+          <div>
+            <h3 style={{ margin: 0 }}>🖱 Click-to-plot</h3>
+            <div className="small muted">
+              Upload #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
+              {holeNumber} · {dots.length} timed dots
+            </div>
+          </div>
+          <button
+            type="button"
+            className="ghost"
+            onClick={onClose}
+            style={{ width: "auto" }}
+            disabled={busy}
+          >
+            Close ✕
+          </button>
+        </div>
+
+        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          {dots.length > 0 && bgUrl ? (
+            <PlotHeatCanvas
+              bgUrl={bgUrl}
+              dots={dots}
+              frameW={frameW}
+              frameH={frameH}
+              marks={marks}
+              onToggleDot={toggleDot}
+            />
+          ) : (
+            <div className="muted small" style={{ textAlign: "center", padding: 24 }}>
+              No timed motion dots saved for this swing yet.
+              <br />
+              Re-Produce the upload (or run a Classical render in the Edit
+              wizard) to populate them.
+            </div>
+          )}
+        </div>
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          Click a dot to queue the ball at exactly that spot for that
+          frame — click again to un-queue, a different dot on the same
+          frame replaces the pick. Save &amp; close re-renders the tracer
+          with your picks (no AI calls) and updates the produced clip.
+        </div>
+
+        {error && <div className="err-text small" style={{ marginTop: 6 }}>{error}</div>}
+
+        <div className="row" style={{ gap: 8, justifyContent: "flex-end", alignItems: "center", marginTop: 8 }}>
+          {busy && busyMsg && (
+            <span className="small muted" style={{ marginRight: "auto" }}>
+              <span className="shimmer" style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", marginRight: 6, verticalAlign: "middle" }} />
+              {busyMsg}
+            </span>
+          )}
+          {!busy && nQueued > 0 && (
+            <span className="small" style={{ marginRight: "auto", color: "var(--emerald-700)" }}>
+              {nQueued} point{nQueued === 1 ? "" : "s"} queued
+            </span>
+          )}
+          <button
+            type="button"
+            className="ghost"
+            onClick={onClose}
+            style={{ width: "auto" }}
+            disabled={busy}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={saveAndClose}
+            style={{ width: "auto" }}
+            disabled={busy || nQueued === 0}
+            title={
+              nQueued === 0
+                ? "Click dots on the heat to queue ball points first"
+                : "Re-render the tracer with the queued points, re-apply graphics, and update Produced Clips"
+            }
+          >
+            {busy ? "Saving…" : "Save & close"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Edit wizard for single-swing uploads.
  *
  * On mount we auto-detect handedness / address / impact / ball /
@@ -358,7 +580,7 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot }) {
  * a stub — wiring the draft back to the production pipeline lands
  * next.
  */
-function EditWizard({ row, adminPassword, onClose, onSaved, initialTarget }) {
+function EditWizard({ row, adminPassword, onClose, onSaved }) {
   // Hydrate from whatever was already persisted: only auto-detect on
   // the very first Edit. Subsequent re-opens skip the AI call and
   // pre-fill the wizard from row.edit_metrics.
@@ -373,9 +595,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved, initialTarget }) {
   const [editing, setEditing] = useState(null);
   // 'metrics' = step 1 (handedness/frames/ball/ROI/target);
   // 'tracer'  = step 2 (rendered tracer + per-frame ball editor).
-  // Opened via a card's 🖱 Click-to-plot button → land straight on
-  // Step 2 (TracerStep auto-opens the plot view when dots exist).
-  const [step, setStep] = useState(initialTarget ? "tracer" : "metrics");
+  const [step, setStep] = useState("metrics");
   const [tracer, setTracer] = useState(null); // { url, frames }
   const [renderingTracer, setRenderingTracer] = useState(false);
   const [tracerError, setTracerError] = useState(null);
@@ -400,9 +620,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved, initialTarget }) {
   // wizard. Both unused for single-swing rows.
   const isMulti = row?.swing_count === "multiple";
   const [swings, setSwings] = useState([]);
-  const [selectedSwing, setSelectedSwing] = useState(
-    initialTarget?.swingIdx ?? 0,
-  );
+  const [selectedSwing, setSelectedSwing] = useState(0);
   const [detectingSwings, setDetectingSwings] = useState(false);
   // Mirror of selectedSwing readable inside async callbacks without
   // re-creating them, so a render that finishes after the operator
@@ -1318,7 +1536,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved, initialTarget }) {
               persistPatch={persistPatch}
               manualPositions={manualPositions}
               setManualPositions={setManualPositions}
-              autoPlotAll={!!initialTarget?.plotAll}
             />
           )}
           {!running && !error && draft && step === "finalize" && (
@@ -2394,11 +2611,196 @@ function ImageLightbox({ url, title, onClose }) {
   );
 }
 
+/**
+ * Zoomable heat canvas with clickable timed dots — the interactive
+ * frames-on-heat view. Self-contained zoom/pan; `marks` is a
+ * {frame: {x,y}} map of queued picks, `onToggleDot(p)` queues/unqueues.
+ * Used by the wizard's Step-2 plot view AND the standalone card modal.
+ */
+function PlotHeatCanvas({ bgUrl, dots, frameW, frameH, marks, onToggleDot, onClose }) {
+  const [zoom, setZoom] = useState(1);
+  const [focus, setFocus] = useState({ x: 50, y: 50 });
+  const hasDims = !!(frameW && frameH);
+  const zoomBtn = {
+    background: "rgba(255,255,255,0.12)", color: "#fff",
+    border: "1px solid rgba(255,255,255,0.3)", borderRadius: 4,
+    width: 28, height: 26, fontSize: 13, fontWeight: 600,
+    cursor: "pointer", padding: 0,
+  };
+  const panBy = (dx, dy) => {
+    const step = 30 / Math.max(1, zoom);
+    setFocus((c) => ({
+      x: Math.max(0, Math.min(100, c.x + dx * step)),
+      y: Math.max(0, Math.min(100, c.y + dy * step)),
+    }));
+  };
+  return (
+    <div
+      style={{
+        position: "relative",
+        height: "100%", maxHeight: "100%", maxWidth: "100%",
+        aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+        background: "var(--border, #222)",
+        borderRadius: 6, overflow: "hidden",
+        userSelect: "none",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute", inset: 0,
+          transform: `scale(${zoom})`,
+          transformOrigin: `${focus.x}% ${focus.y}%`,
+          transition: "transform 120ms ease",
+        }}
+      >
+        <img
+          src={bgUrl}
+          alt="Raw motion heat"
+          draggable={false}
+          style={{
+            width: "100%", height: "100%", objectFit: "cover",
+            pointerEvents: "none",
+          }}
+        />
+        {hasDims &&
+          (dots || []).map((p, i) => {
+            const q = marks[p.frame];
+            const isQueued =
+              !!q && Math.abs(q.x - p.x) <= 2 && Math.abs(q.y - p.y) <= 2;
+            return (
+              <div
+                key={`${p.frame}-${i}`}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onToggleDot(p);
+                }}
+                title={`Frame ${p.frame} · ${p.x}, ${p.y} — ${
+                  isQueued
+                    ? "queued (click to un-queue)"
+                    : "click to queue the ball here for this frame"
+                }`}
+                style={{
+                  position: "absolute",
+                  left: `${(p.x / frameW) * 100}%`,
+                  top: `${(p.y / frameH) * 100}%`,
+                  width: 14, height: 14,
+                  borderRadius: "50%",
+                  border: isQueued ? "2px solid #fff" : "2px solid #f59e0b",
+                  background: isQueued ? "#22c55e" : "rgba(245,158,11,0.35)",
+                  transform: `translate(-50%, -50%) scale(${1 / zoom})`,
+                  cursor: "pointer",
+                  boxShadow: "0 0 6px rgba(0,0,0,0.7)",
+                }}
+              >
+                {/* Frame label — alternates above/below like the baked
+                    frames-on-heat image, so dense stretches stay
+                    readable. Inherits the counter-scale. */}
+                <span
+                  style={{
+                    position: "absolute",
+                    left: 13,
+                    top: i % 2 === 0 ? -13 : 11,
+                    fontSize: 10, fontWeight: 600,
+                    color: isQueued ? "#4ade80" : "#fde047",
+                    textShadow: "0 0 3px #000, 0 0 3px #000, 0 0 3px #000",
+                    whiteSpace: "nowrap",
+                    pointerEvents: "none",
+                  }}
+                >
+                  {p.frame}
+                </span>
+              </div>
+            );
+          })}
+      </div>
+      <div
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: "absolute", right: 8, top: 8,
+          display: "flex", gap: 6,
+          background: "rgba(0,0,0,0.45)", padding: "4px 6px",
+          borderRadius: 6, backdropFilter: "blur(4px)",
+        }}
+      >
+        <button
+          type="button"
+          style={zoomBtn}
+          disabled={zoom <= 1.05}
+          onClick={() => setZoom((z) => Math.max(1, z / 1.4))}
+          title="Zoom out"
+        >−</button>
+        <span style={{ color: "#fff", fontSize: 12, padding: "0 6px", alignSelf: "center" }}>
+          {zoom.toFixed(1)}×
+        </span>
+        <button
+          type="button"
+          style={zoomBtn}
+          disabled={zoom >= 15.9}
+          onClick={() => setZoom((z) => Math.min(16, z * 1.4))}
+          title="Zoom in"
+        >+</button>
+        <button
+          type="button"
+          style={{ ...zoomBtn, width: 36 }}
+          onClick={() => { setZoom(1); setFocus({ x: 50, y: 50 }); }}
+          title="Fit full frame"
+        >Fit</button>
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 22px)",
+          gridTemplateRows: "22px 22px",
+          gap: 2, marginLeft: 4,
+        }}>
+          <span />
+          <button
+            type="button"
+            style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+            disabled={zoom <= 1.05 || focus.y <= 0.1}
+            onClick={() => panBy(0, -1)}
+            title="Pan up"
+          >↑</button>
+          <span />
+          <button
+            type="button"
+            style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+            disabled={zoom <= 1.05 || focus.x <= 0.1}
+            onClick={() => panBy(-1, 0)}
+            title="Pan left"
+          >←</button>
+          <button
+            type="button"
+            style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+            disabled={zoom <= 1.05 || focus.y >= 99.9}
+            onClick={() => panBy(0, 1)}
+            title="Pan down"
+          >↓</button>
+          <button
+            type="button"
+            style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
+            disabled={zoom <= 1.05 || focus.x >= 99.9}
+            onClick={() => panBy(1, 0)}
+            title="Pan right"
+          >→</button>
+        </div>
+        {onClose && (
+          <button
+            type="button"
+            style={{ ...zoomBtn, width: 48 }}
+            onClick={onClose}
+            title="Close this view"
+          >Close</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TracerStep({
   row, adminPassword, draft, setDraft, tracer, setTracer,
   rendering, setRendering, error, setError,
   frameW, frameH, totalFrames, onSaved, persistPatch,
-  manualPositions, setManualPositions, autoPlotAll,
+  manualPositions, setManualPositions,
 }) {
   // manualPositions / setManualPositions are hoisted to the wizard so
   // Step 3 can see the queued edits (red note) and pass them to
@@ -2793,23 +3195,7 @@ function TracerStep({
     setSelectedFrame(null);
     setEditorBg(null);
     setEditorBall(null);
-    // Whole-arc view: start at Fit so every dot is on screen.
-    setZoom(1);
-    setFocusOverride(null);
   }
-
-  // Opened via a card's 🖱 Click-to-plot button: drop straight into the
-  // plot view as soon as the swing's timed dots are hydrated. Fires at
-  // most once so navigating away inside the wizard sticks.
-  const autoPlotDone = useRef(false);
-  useEffect(() => {
-    if (!autoPlotAll || autoPlotDone.current) return;
-    if ((tracer?.timedPoints || []).length > 0) {
-      autoPlotDone.current = true;
-      openPlotAll();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoPlotAll, tracer?.timedPoints]);
 
 
   const zoomBtn = {
@@ -2853,173 +3239,19 @@ function TracerStep({
           }}
         >
           {plotAll ? (
-            <div
-              style={{
-                position: "relative",
-                height: "100%", maxHeight: "100%", maxWidth: "100%",
-                aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
-                background: "var(--border, #222)",
-                borderRadius: 6, overflow: "hidden",
-                userSelect: "none",
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute", inset: 0,
-                  transform: `scale(${zoom})`,
-                  transformOrigin: `${focusPct.x}% ${focusPct.y}%`,
-                  transition: "transform 120ms ease",
-                }}
-              >
-                <img
-                  src={
-                    tracer?.rawMotionUrl
-                    || tracer?.rawMotionFramesUrl
-                    || tracer?.mog2OverlayUrl
-                  }
-                  alt="Raw motion heat"
-                  draggable={false}
-                  style={{
-                    width: "100%", height: "100%", objectFit: "cover",
-                    pointerEvents: "none",
-                  }}
-                />
-                {hasDims &&
-                  (tracer?.timedPoints || []).map((p, i) => {
-                    const q = manualPositions[p.frame];
-                    const isQueued =
-                      !!q &&
-                      Math.abs(q.x - p.x) <= 2 &&
-                      Math.abs(q.y - p.y) <= 2;
-                    return (
-                      <div
-                        key={`${p.frame}-${i}`}
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                          toggleTimedDot(p);
-                        }}
-                        title={`Frame ${p.frame} · ${p.x}, ${p.y} — ${
-                          isQueued
-                            ? "queued (click to un-queue)"
-                            : "click to queue the ball here for this frame"
-                        }`}
-                        style={{
-                          position: "absolute",
-                          left: `${(p.x / frameW) * 100}%`,
-                          top: `${(p.y / frameH) * 100}%`,
-                          width: 14, height: 14,
-                          borderRadius: "50%",
-                          border: isQueued
-                            ? "2px solid #fff"
-                            : "2px solid #f59e0b",
-                          background: isQueued
-                            ? "#22c55e"
-                            : "rgba(245,158,11,0.35)",
-                          transform: `translate(-50%, -50%) scale(${1 / zoom})`,
-                          cursor: "pointer",
-                          boxShadow: "0 0 6px rgba(0,0,0,0.7)",
-                        }}
-                      >
-                        {/* Frame label — alternates above/below like the
-                            baked frames-on-heat image, so dense stretches
-                            stay readable. Inherits the counter-scale. */}
-                        <span
-                          style={{
-                            position: "absolute",
-                            left: 13,
-                            top: i % 2 === 0 ? -13 : 11,
-                            fontSize: 10, fontWeight: 600,
-                            color: isQueued ? "#4ade80" : "#fde047",
-                            textShadow:
-                              "0 0 3px #000, 0 0 3px #000, 0 0 3px #000",
-                            whiteSpace: "nowrap",
-                            pointerEvents: "none",
-                          }}
-                        >
-                          {p.frame}
-                        </span>
-                      </div>
-                    );
-                  })}
-              </div>
-              <div
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => e.stopPropagation()}
-                style={{
-                  position: "absolute", right: 8, top: 8,
-                  display: "flex", gap: 6,
-                  background: "rgba(0,0,0,0.45)", padding: "4px 6px",
-                  borderRadius: 6, backdropFilter: "blur(4px)",
-                }}
-              >
-                <button
-                  type="button"
-                  style={zoomBtn}
-                  disabled={zoom <= 1.05}
-                  onClick={() => setZoom((z) => Math.max(1, z / 1.4))}
-                  title="Zoom out"
-                >−</button>
-                <span style={{ color: "#fff", fontSize: 12, padding: "0 6px", alignSelf: "center" }}>
-                  {zoom.toFixed(1)}×
-                </span>
-                <button
-                  type="button"
-                  style={zoomBtn}
-                  disabled={zoom >= 15.9}
-                  onClick={() => setZoom((z) => Math.min(16, z * 1.4))}
-                  title="Zoom in"
-                >+</button>
-                <button
-                  type="button"
-                  style={{ ...zoomBtn, width: 36 }}
-                  onClick={() => { setZoom(1); setFocusOverride(null); }}
-                  title="Fit full frame"
-                >Fit</button>
-                <div style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(3, 22px)",
-                  gridTemplateRows: "22px 22px",
-                  gap: 2, marginLeft: 4,
-                }}>
-                  <span />
-                  <button
-                    type="button"
-                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
-                    disabled={zoom <= 1.05 || focusPct.y <= 0.1}
-                    onClick={() => panBy(0, -1)}
-                    title="Pan up"
-                  >↑</button>
-                  <span />
-                  <button
-                    type="button"
-                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
-                    disabled={zoom <= 1.05 || focusPct.x <= 0.1}
-                    onClick={() => panBy(-1, 0)}
-                    title="Pan left"
-                  >←</button>
-                  <button
-                    type="button"
-                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
-                    disabled={zoom <= 1.05 || focusPct.y >= 99.9}
-                    onClick={() => panBy(0, 1)}
-                    title="Pan down"
-                  >↓</button>
-                  <button
-                    type="button"
-                    style={{ ...zoomBtn, width: 22, height: 22, fontSize: 12 }}
-                    disabled={zoom <= 1.05 || focusPct.x >= 99.9}
-                    onClick={() => panBy(1, 0)}
-                    title="Pan right"
-                  >→</button>
-                </div>
-                <button
-                  type="button"
-                  style={{ ...zoomBtn, width: 48 }}
-                  onClick={() => setPlotAll(false)}
-                  title="Close the click-to-plot view"
-                >Close</button>
-              </div>
-            </div>
+            <PlotHeatCanvas
+              bgUrl={
+                tracer?.rawMotionUrl
+                || tracer?.rawMotionFramesUrl
+                || tracer?.mog2OverlayUrl
+              }
+              dots={tracer?.timedPoints || []}
+              frameW={frameW}
+              frameH={frameH}
+              marks={manualPositions}
+              onToggleDot={toggleTimedDot}
+              onClose={() => setPlotAll(false)}
+            />
           ) : selectedFrame != null ? (
             <div
               ref={editorRef}
@@ -5115,9 +5347,9 @@ export default function AdminProduction() {
   const [busyEventId, setBusyEventId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title, startedAt, fps}
   const [editingRow, setEditingRow] = useState(null);
-  // When the wizard is opened from a card's 🖱 Click-to-plot button:
-  // which swing to land on and that Step 2 should open in plot mode.
-  const [editTarget, setEditTarget] = useState(null);
+  // Standalone click-to-plot modal opened from a card's 🖱 button:
+  // {row, swingPos} — swingPos is the index into edit_metrics.swings.
+  const [plotModal, setPlotModal] = useState(null);
   // Bulk-delete selection: a Set of long-upload row ids the operator
   // has ticked. Cleared after a bulk delete completes.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
@@ -5775,11 +6007,10 @@ export default function AdminProduction() {
                     // swings array (they diverge if a swing was deleted).
                     const arr = row.edit_metrics?.swings || [];
                     const pos = arr.findIndex((s) => s?.idx === swingIdx);
-                    setEditTarget({
-                      swingIdx: pos >= 0 ? pos : swingIdx,
-                      plotAll: true,
+                    setPlotModal({
+                      row,
+                      swingPos: pos >= 0 ? pos : swingIdx,
                     });
-                    setEditingRow(row);
                   }}
                 />
               </div>
@@ -5947,12 +6178,17 @@ export default function AdminProduction() {
         <EditWizard
           row={editingRow}
           adminPassword={adminPassword}
-          initialTarget={editTarget}
-          onClose={() => {
-            setEditingRow(null);
-            setEditTarget(null);
-            refreshAll();
-          }}
+          onClose={() => { setEditingRow(null); refreshAll(); }}
+          onSaved={refreshAll}
+        />
+      )}
+
+      {plotModal && (
+        <ClickToPlotModal
+          row={plotModal.row}
+          swingPos={plotModal.swingPos}
+          adminPassword={adminPassword}
+          onClose={() => { setPlotModal(null); refreshAll(); }}
           onSaved={refreshAll}
         />
       )}
