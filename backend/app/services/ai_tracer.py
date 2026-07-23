@@ -4178,6 +4178,7 @@ def verify_rest_and_impact(
         "snapped": False, "snap_px": None,
         "impact_frame": None, "impact_delta": None,
         "present_ratio_pre": None, "reason": None, "image": None,
+        "image_mog2": None,
     }
     if not HAS_CV or not HAS_NP:
         out["reason"] = "opencv/numpy not installed"
@@ -4403,6 +4404,12 @@ def verify_rest_and_impact(
                     [int(cv2.IMWRITE_JPEG_QUALITY), 88],
                 )
                 out["image"] = name
+                # MOG2 twin of the same tiles (frame-diff heat).
+                out["image_mog2"] = _write_anchor_mog2_strip(
+                    crops, sel, base, (scx, scy), r,
+                    out.get("impact_frame"), debug_dir, debug_prefix,
+                    "pixel anchor check (MOG2 view)",
+                )
             except Exception as exc:  # noqa: BLE001
                 log.warning("anchor check: debug strip failed: %s", exc)
         return out
@@ -4515,6 +4522,52 @@ def _anchor_strip_image(
     return cv2.vconcat(rows)
 
 
+def _anchor_mog2_tiles(crops: dict, frames: list[int], base_gray) -> dict:
+    """Frame-diff (MOG2-style) twins of the photo tiles: per-frame
+    absdiff against the pre-impact baseline, amplified and TURBO-
+    colormapped so the ball's presence/absence pops as motion energy.
+    Accepts gray or BGR crops; returns {frame: BGR tile}."""
+    tiles: dict[int, "np.ndarray"] = {}
+    for f in frames:
+        c = crops[f]
+        g = c if c.ndim == 2 else cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
+        diff = cv2.absdiff(g, base_gray)
+        amp = np.clip(diff.astype(np.int32) * 4, 0, 255).astype(np.uint8)
+        tiles[f] = cv2.applyColorMap(amp, cv2.COLORMAP_TURBO)
+    return tiles
+
+
+def _write_anchor_mog2_strip(
+    crops: dict, dbg_fs: list[int], base_gray, ring, r,
+    highlight, debug_dir: Path, debug_prefix: str, label: str,
+) -> str | None:
+    """Build + save the MOG2 twin of an anchor debug strip. Returns the
+    filename or None. Never raises."""
+    try:
+        mog_tiles = _anchor_mog2_tiles(crops, dbg_fs, base_gray)
+        strip = _anchor_strip_image(
+            mog_tiles, dbg_fs, ring, r, highlight=highlight,
+        )
+        bar = np.zeros((34, strip.shape[1], 3), np.uint8)
+        cv2.putText(
+            bar,
+            f"{label} - frame-diff vs pre-impact baseline (TURBO): tiles "
+            "stay dark while the ball rests; the VACATED spot lights up "
+            "from the departure frame on",
+            (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+            (255, 255, 255), 1, cv2.LINE_AA,
+        )
+        name = f"{debug_prefix}-mog2.jpg"
+        cv2.imwrite(
+            str(Path(debug_dir) / name), cv2.vconcat([bar, strip]),
+            [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+        )
+        return name
+    except Exception as exc:  # noqa: BLE001
+        log.warning("anchor mog2 strip failed: %s", exc)
+        return None
+
+
 def _anchor_strip_ask(client, imgs, extra_text: str, model: str) -> dict | None:
     """Strip image(s) → one JSON round trip. `imgs` may be a single
     array or a list — MULTIPLE smaller images beat one big grid: the
@@ -4591,7 +4644,7 @@ def verify_rest_and_impact_ai(
         "snapped": False, "snap_px": None,
         "impact_frame": None, "impact_delta": None,
         "present_ratio_pre": None, "reason": None, "image": None,
-        "engine": "ai", "api_error": False,
+        "image_mog2": None, "engine": "ai", "api_error": False,
     }
     if not HAS_CV or not HAS_NP:
         out["reason"] = "opencv/numpy not installed"
@@ -4828,6 +4881,24 @@ def verify_rest_and_impact_ai(
                     [int(cv2.IMWRITE_JPEG_QUALITY), 88],
                 )
                 out["image"] = name
+                # MOG2 twin: same tiles as frame-diff heat, so the
+                # operator can eyeball the motion evidence next to the
+                # photo tiles the model judged.
+                _pre = fs_sorted[: max(4, len(fs_sorted) // 6)]
+                _base_g = np.median(
+                    np.stack([
+                        cv2.cvtColor(
+                            crops[f], cv2.COLOR_BGR2GRAY,
+                        ).astype(np.float32)
+                        for f in _pre
+                    ]),
+                    axis=0,
+                ).astype(np.uint8)
+                out["image_mog2"] = _write_anchor_mog2_strip(
+                    crops, dbg_fs, _base_g, ring, r,
+                    out.get("impact_frame"), debug_dir, debug_prefix,
+                    "AI anchor check (MOG2 view)",
+                )
             except Exception as exc:  # noqa: BLE001
                 log.warning("anchor ai: debug strip failed: %s", exc)
         return out

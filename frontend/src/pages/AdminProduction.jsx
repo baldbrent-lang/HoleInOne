@@ -1638,6 +1638,19 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                       </a>
                     </>
                   )}
+                  {tracerStats.anchor_check.image_mog2_url && (
+                    <>
+                      {" · "}
+                      <a
+                        href={tracerStats.anchor_check.image_mog2_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="The same anchor tiles as MOG2 frame-diff heat"
+                      >
+                        🔥 mog2
+                      </a>
+                    </>
+                  )}
                 </>
               )}
               {" · "}{tracerStats.n_points ?? "—"} points plotted
@@ -5056,6 +5069,9 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
   // Per-swing 🔥 toggle for the launch-tracker film-strip (plain vs
   // motion-mask tint).
   const [launchHeat, setLaunchHeat] = useState({});
+  // Per-swing toggle for the anchor-check strip: photo tiles (what the
+  // AI judged) vs the MOG2 frame-diff twin of the same tiles.
+  const [anchorHeat, setAnchorHeat] = useState({});
   const swings = data.swings || [];
   const okBadge = (ok) => (
     <span
@@ -5208,19 +5224,49 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                             </span>
                           )}
                           {s.anchor.image_url && (
-                            <a
-                              href={s.anchor.image_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{ display: "block", marginTop: 3 }}
-                              title="Departure film-strip: green=ball present, red=absent, yellow box=the frame the ball left (impact)"
-                            >
-                              <img
-                                src={s.anchor.image_url}
-                                alt="departure film-strip"
-                                style={{ maxWidth: "100%", borderRadius: 6 }}
-                              />
-                            </a>
+                            <div style={{ marginTop: 3 }}>
+                              {s.anchor.image_mog2_url && (
+                                <button
+                                  type="button"
+                                  className={
+                                    anchorHeat[s.swing]
+                                      ? "small"
+                                      : "ghost small"
+                                  }
+                                  style={{ width: "auto", padding: "1px 8px", marginBottom: 3 }}
+                                  onClick={() =>
+                                    setAnchorHeat((m) => ({
+                                      ...m,
+                                      [s.swing]: !m[s.swing],
+                                    }))
+                                  }
+                                  title="Toggle the MOG2 view — the same tiles as frame-diff heat vs the pre-impact baseline. Tiles stay dark while the ball rests; the vacated spot lights up from the departure frame on."
+                                >
+                                  🔥 mog2 {anchorHeat[s.swing] ? "on" : "off"}
+                                </button>
+                              )}
+                              <a
+                                href={
+                                  anchorHeat[s.swing] && s.anchor.image_mog2_url
+                                    ? s.anchor.image_mog2_url
+                                    : s.anchor.image_url
+                                }
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ display: "block" }}
+                                title="Departure film-strip: numbered tiles of the rest patch, yellow box=the frame the ball left (impact), ring=watched spot"
+                              >
+                                <img
+                                  src={
+                                    anchorHeat[s.swing] && s.anchor.image_mog2_url
+                                      ? s.anchor.image_mog2_url
+                                      : s.anchor.image_url
+                                  }
+                                  alt="departure film-strip"
+                                  style={{ maxWidth: "100%", borderRadius: 6 }}
+                                />
+                              </a>
+                            </div>
                           )}
                           {s.anchor.launch_n != null && (
                             <div style={{ marginTop: 3 }}>
@@ -5544,19 +5590,51 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       </span>
                     )}
                     {s.ai.anchor_check.image_url && (
-                      <a
-                        href={s.ai.anchor_check.image_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ display: "block", marginTop: 4 }}
-                        title="Anchor-check film-strip — each rest-patch crop across impact: green border = ball present, red = absent, yellow box = the departure frame (impact), ring = watched spot. Click to open full size."
-                      >
-                        <img
-                          src={s.ai.anchor_check.image_url}
-                          alt="anchor check film-strip"
-                          style={{ maxWidth: "100%", borderRadius: 6 }}
-                        />
-                      </a>
+                      <div style={{ marginTop: 4 }}>
+                        {s.ai.anchor_check.image_mog2_url && (
+                          <button
+                            type="button"
+                            className={
+                              anchorHeat[`ai-${s.swing}`]
+                                ? "small"
+                                : "ghost small"
+                            }
+                            style={{ width: "auto", padding: "1px 8px", marginBottom: 3 }}
+                            onClick={() =>
+                              setAnchorHeat((m) => ({
+                                ...m,
+                                [`ai-${s.swing}`]: !m[`ai-${s.swing}`],
+                              }))
+                            }
+                            title="Toggle the MOG2 view — the same tiles as frame-diff heat vs the pre-impact baseline."
+                          >
+                            🔥 mog2 {anchorHeat[`ai-${s.swing}`] ? "on" : "off"}
+                          </button>
+                        )}
+                        <a
+                          href={
+                            anchorHeat[`ai-${s.swing}`] &&
+                            s.ai.anchor_check.image_mog2_url
+                              ? s.ai.anchor_check.image_mog2_url
+                              : s.ai.anchor_check.image_url
+                          }
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ display: "block" }}
+                          title="Anchor-check film-strip — numbered rest-patch crops across impact, yellow box = the departure frame (impact), ring = watched spot. Click to open full size."
+                        >
+                          <img
+                            src={
+                              anchorHeat[`ai-${s.swing}`] &&
+                              s.ai.anchor_check.image_mog2_url
+                                ? s.ai.anchor_check.image_mog2_url
+                                : s.ai.anchor_check.image_url
+                            }
+                            alt="anchor check film-strip"
+                            style={{ maxWidth: "100%", borderRadius: 6 }}
+                          />
+                        </a>
+                      </div>
                     )}
                   </div>
                 )}

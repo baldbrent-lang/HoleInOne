@@ -1680,7 +1680,8 @@ def _run_long_upload_job(
                                             "verified", "snapped",
                                             "snap_px", "impact_frame",
                                             "impact_delta", "reason",
-                                            "image", "launch_n",
+                                            "image", "image_mog2",
+                                            "launch_n",
                                             "launch_reason", "launch_image",
                                             "launch_image_heat",
                                         )
@@ -1722,7 +1723,8 @@ def _run_long_upload_job(
                                     for k in (
                                         "verified", "snapped", "snap_px",
                                         "impact_frame", "impact_delta",
-                                        "reason", "image", "launch_n",
+                                        "reason", "image", "image_mog2",
+                                        "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
                                     )
@@ -2178,6 +2180,14 @@ def _process_long_upload_segments(
                     _ac_entry["image_url"] = (
                         f"{settings.app_base_url}/uploads/clips/"
                         f"{_acp.name}?v={int(_acp.stat().st_mtime)}"
+                    )
+                if _ac.get("image_mog2") and (
+                    CLIPS_DIR / _ac["image_mog2"]
+                ).exists():
+                    _acp2 = CLIPS_DIR / _ac["image_mog2"]
+                    _ac_entry["image_mog2_url"] = (
+                        f"{settings.app_base_url}/uploads/clips/"
+                        f"{_acp2.name}?v={int(_acp2.stat().st_mtime)}"
                     )
                 nsw["anchor_check"] = _ac_entry
             # MOG2 layer-in evidence: overlay image (raw motion heat +
@@ -4876,6 +4886,9 @@ def render_wizard_tracer(
                     ),
                     "rest_xy": anchor_check_c.get("rest_xy"),
                     "image_url": _named_url(anchor_check_c.get("image")),
+                    "image_mog2_url": _named_url(
+                        anchor_check_c.get("image_mog2"),
+                    ),
                 }
                 if anchor_check_c else None
             ),
@@ -8048,6 +8061,7 @@ def _run_produce_debug_job(
                     _anc = dict(_anc)
                     for _ik, _uk in (
                         ("image", "image_url"),
+                        ("image_mog2", "image_mog2_url"),
                         ("launch_image", "launch_image_url"),
                         ("launch_image_heat", "launch_image_heat_url"),
                     ):
