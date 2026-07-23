@@ -5076,6 +5076,103 @@ function PoseChart({ pose }) {
 // Dev-only diagnostic overlay. Shows, per detected swing, what the
 // classical-CV tracer found (motion heatmap + ball/candidate counts) next
 // to the AI tracer's result on the same swing, so the two can be compared.
+/**
+ * Static (non-interactive) flight map for the debug report: the raw
+ * motion heat as background, the timed dots with frame labels, and a
+ * magenta line drawn from the resting ball through the AI-plotted
+ * launch points — the direction the flight starts, at a glance.
+ */
+function FlightMapStatic({
+  bgUrl, dots, restBall, aiPoints, frameW, frameH, impactFrame,
+}) {
+  if (!bgUrl || !frameW || !frameH) return null;
+  const ds = (dots || []).filter(
+    (p) => impactFrame == null || p.frame >= impactFrame,
+  );
+  const line = [];
+  if (restBall?.x != null && restBall?.y != null) {
+    line.push([restBall.x, restBall.y]);
+  }
+  for (const p of aiPoints || []) {
+    if (p?.x != null && p?.y != null) line.push([p.x, p.y]);
+  }
+  return (
+    <div
+      style={{
+        position: "relative", marginTop: 3,
+        pointerEvents: "none", userSelect: "none",
+      }}
+    >
+      <img
+        src={bgUrl}
+        alt="flight map"
+        style={{ width: "100%", display: "block", borderRadius: 6 }}
+      />
+      {ds.map((p, i) => (
+        <div
+          key={`${p.frame}-${i}`}
+          style={{
+            position: "absolute",
+            left: `${(p.x / frameW) * 100}%`,
+            top: `${(p.y / frameH) * 100}%`,
+            transform: "translate(-50%, -50%)",
+          }}
+        >
+          <div
+            style={{
+              width: 7, height: 7, borderRadius: "50%",
+              border: "1px solid #f59e0b",
+              background: "rgba(245,158,11,0.35)",
+            }}
+          />
+          <span
+            style={{
+              position: "absolute", left: 8,
+              top: i % 2 === 0 ? -11 : 5,
+              fontSize: 8.5, fontWeight: 600, color: "#fde047",
+              textShadow: "0 0 3px #000, 0 0 3px #000",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {p.frame}
+          </span>
+        </div>
+      ))}
+      {line.length >= 2 && (
+        <svg
+          viewBox={`0 0 ${frameW} ${frameH}`}
+          preserveAspectRatio="none"
+          style={{
+            position: "absolute", inset: 0,
+            width: "100%", height: "100%",
+          }}
+        >
+          <polyline
+            points={line.map(([x, y]) => `${x},${y}`).join(" ")}
+            fill="none"
+            stroke="#ff00ff"
+            strokeWidth={Math.max(2, frameW / 480)}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            opacity={0.9}
+          />
+          {line.map(([x, y], i) => (
+            <circle
+              key={i}
+              cx={x}
+              cy={y}
+              r={Math.max(3, frameW / 260)}
+              fill={i === 0 ? "#22d3ee" : "#ff00ff"}
+              stroke="#fff"
+              strokeWidth={Math.max(1, frameW / 1200)}
+            />
+          ))}
+        </svg>
+      )}
+    </div>
+  );
+}
+
 function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
   // Per-swing 🔥 toggle for the launch-tracker film-strip (plain vs
   // motion-mask tint).
@@ -5691,6 +5788,27 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                         </a>
                       </div>
                     )}
+                  </div>
+                )}
+                {s.ai?.raw_motion_url &&
+                  ((s.ai.timed_points || []).length > 0 ||
+                    (s.ai.anchor_check?.ai_launch_points || []).length >
+                      0) && (
+                  <div style={{ marginTop: 4 }}>
+                    <div className="tiny muted">
+                      🗺 flight map — heat + dot frame labels · magenta
+                      line = rest ball → AI launch points (cyan dot =
+                      rest)
+                    </div>
+                    <FlightMapStatic
+                      bgUrl={s.ai.raw_motion_url}
+                      dots={s.ai.timed_points}
+                      restBall={s.ai.ball}
+                      aiPoints={s.ai.anchor_check?.ai_launch_points}
+                      frameW={s.ai.frame_w}
+                      frameH={s.ai.frame_h}
+                      impactFrame={s.ai.impact_frame}
+                    />
                   </div>
                 )}
                 {s.ai?.error && (

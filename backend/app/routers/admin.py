@@ -1636,58 +1636,12 @@ def _run_long_upload_job(
                                         _anchor_rec["rest_xy"],
                                     )
                                     d["impact_pinned"] = True
-                                    # LAUNCH TRACKER (operator-designed,
-                                    # pure pixels): adaptive square from
-                                    # the pinned ball — up, widen on
-                                    # miss, shrink on find. Its points
-                                    # feed the tracer's dot pool.
-                                    try:
-                                        from ..services.ai_tracer import (
-                                            track_launch_from_rest,
-                                        )
-
-                                        _lt = track_launch_from_rest(
-                                            src_path,
-                                            tuple(_anchor_rec["rest_xy"]),
-                                            int(_anchor_rec["impact_frame"]),
-                                            tee_fps,
-                                            debug_dir=CLIPS_DIR,
-                                            debug_prefix=(
-                                                f"launchtrk-{upload_id}-"
-                                                f"{secrets.token_hex(3)}"
-                                            ),
-                                        )
-                                        if _lt.get("points"):
-                                            d["launch_points"] = _lt["points"]
-                                        _anchor_rec["launch_n"] = _lt.get(
-                                            "n_found",
-                                        )
-                                        _anchor_rec["launch_reason"] = (
-                                            _lt.get("reason")
-                                        )
-                                        _anchor_rec["launch_image"] = (
-                                            _lt.get("image")
-                                        )
-                                        _anchor_rec["launch_image_heat"] = (
-                                            _lt.get("image_heat")
-                                        )
-                                        log.info(
-                                            "long-upload worker: launch "
-                                            "tracker found %s point(s) (%s)",
-                                            _lt.get("n_found"),
-                                            _lt.get("reason"),
-                                        )
-                                    except Exception as exc:  # noqa: BLE001
-                                        log.warning(
-                                            "launch tracker failed: %s", exc,
-                                        )
-                                    # AI LAUNCH PLOT: one vision call
-                                    # reads the first 5 post-impact
-                                    # frames — the motion-blur zone the
-                                    # pixel tracker struggles in. Its
-                                    # points OVERRIDE the tracker's on
-                                    # those frames; MOG2 owns the rest
-                                    # of the flight.
+                                    # AI LAUNCH PLOT first: sequential
+                                    # vision chase over the first 5
+                                    # post-impact frames — the motion-
+                                    # blur zone the pixel tracker
+                                    # struggles in.
+                                    _ai_pts: list = []
                                     try:
                                         from ..services.ai_tracer import (
                                             plot_launch_frames_ai,
@@ -1704,24 +1658,9 @@ def _run_long_upload_job(
                                                 f"{secrets.token_hex(3)}"
                                             ),
                                         )
-                                        if _alp.get("points"):
-                                            _byf = {
-                                                int(p["frame"]): dict(p)
-                                                for p in (
-                                                    d.get("launch_points")
-                                                    or []
-                                                )
-                                            }
-                                            for p in _alp["points"]:
-                                                _byf[int(p["frame"])] = {
-                                                    "frame": int(p["frame"]),
-                                                    "x": p["x"],
-                                                    "y": p["y"],
-                                                }
-                                            d["launch_points"] = [
-                                                _byf[k]
-                                                for k in sorted(_byf)
-                                            ]
+                                        _ai_pts = list(
+                                            _alp.get("points") or [],
+                                        )
                                         _anchor_rec["ai_launch_n"] = (
                                             _alp.get("n_found")
                                         )
@@ -1730,6 +1669,9 @@ def _run_long_upload_job(
                                         )
                                         _anchor_rec["ai_launch_image"] = (
                                             _alp.get("image")
+                                        )
+                                        _anchor_rec["ai_launch_points"] = (
+                                            _ai_pts
                                         )
                                         log.info(
                                             "long-upload worker: AI launch "
@@ -1741,6 +1683,80 @@ def _run_long_upload_job(
                                         log.warning(
                                             "ai launch plot failed: %s", exc,
                                         )
+                                    # LAUNCH TRACKER (operator-designed,
+                                    # pure pixels): adaptive square,
+                                    # SEEDED from the AI's last point so
+                                    # MOG2 takes over on the next frame
+                                    # — one continuous AI→MOG2 chain in
+                                    # the debug strips.
+                                    try:
+                                        from ..services.ai_tracer import (
+                                            track_launch_from_rest,
+                                        )
+
+                                        _lt = track_launch_from_rest(
+                                            src_path,
+                                            tuple(_anchor_rec["rest_xy"]),
+                                            int(_anchor_rec["impact_frame"]),
+                                            tee_fps,
+                                            debug_dir=CLIPS_DIR,
+                                            debug_prefix=(
+                                                f"launchtrk-{upload_id}-"
+                                                f"{secrets.token_hex(3)}"
+                                            ),
+                                            seed_points=_ai_pts or None,
+                                        )
+                                        _merged_lp = {
+                                            int(p["frame"]): {
+                                                "frame": int(p["frame"]),
+                                                "x": p["x"], "y": p["y"],
+                                            }
+                                            for p in _ai_pts
+                                        }
+                                        for p in (_lt.get("points") or []):
+                                            _merged_lp.setdefault(
+                                                int(p["frame"]), {
+                                                    "frame": int(p["frame"]),
+                                                    "x": p["x"], "y": p["y"],
+                                                },
+                                            )
+                                        if _merged_lp:
+                                            d["launch_points"] = [
+                                                _merged_lp[k]
+                                                for k in sorted(_merged_lp)
+                                            ]
+                                        _anchor_rec["launch_n"] = _lt.get(
+                                            "n_found",
+                                        )
+                                        _anchor_rec["launch_reason"] = (
+                                            _lt.get("reason")
+                                        )
+                                        _anchor_rec["launch_image"] = (
+                                            _lt.get("image")
+                                        )
+                                        _anchor_rec["launch_image_heat"] = (
+                                            _lt.get("image_heat")
+                                        )
+                                        log.info(
+                                            "long-upload worker: launch "
+                                            "tracker found %s point(s) (%s)"
+                                            "%s",
+                                            _lt.get("n_found"),
+                                            _lt.get("reason"),
+                                            (
+                                                f" [seeded from {len(_ai_pts)}"
+                                                " AI points]"
+                                                if _ai_pts else ""
+                                            ),
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        log.warning(
+                                            "launch tracker failed: %s", exc,
+                                        )
+                                        if _ai_pts and not d.get(
+                                            "launch_points",
+                                        ):
+                                            d["launch_points"] = _ai_pts
                                     d["anchor_rec"] = {
                                         k: _anchor_rec.get(k)
                                         for k in (
@@ -1755,6 +1771,7 @@ def _run_long_upload_job(
                                             "ai_launch_n",
                                             "ai_launch_reason",
                                             "ai_launch_image",
+                                            "ai_launch_points",
                                         )
                                     }
                                     d["peak_time_sec"] = (
@@ -1802,6 +1819,7 @@ def _run_long_upload_job(
                                         "ai_launch_n",
                                         "ai_launch_reason",
                                         "ai_launch_image",
+                                        "ai_launch_points",
                                     )
                                 }
                                 if _anchor_rec else None
@@ -2248,7 +2266,7 @@ def _process_long_upload_segments(
                     for k in (
                         "verified", "snapped", "snap_px", "impact_delta",
                         "present_ratio_pre", "reason",
-                        "ai_fallback_reason",
+                        "ai_fallback_reason", "ai_launch_points",
                     )
                 }
                 if _ac.get("image") and (CLIPS_DIR / _ac["image"]).exists():
@@ -8416,6 +8434,19 @@ def _run_produce_debug_job(
                             "traced_url": _sw.get("tracer_url"),
                             "mog2_overlay_url": _sw.get("mog2_overlay_url"),
                             "anchor_check": _sw.get("anchor_check"),
+                            # Flight-map ingredients: heat background,
+                            # labelled dots, rest ball, native dims.
+                            "raw_motion_url": _sw.get(
+                                "tracer_raw_motion_url",
+                            ),
+                            "timed_points": _sw.get("timed_points"),
+                            "ball": _sw.get("ball"),
+                            "frame_w": (
+                                _row2.tee_width if _row2 else None
+                            ),
+                            "frame_h": (
+                                _row2.tee_height if _row2 else None
+                            ),
                             "production": True,
                         }
                         break

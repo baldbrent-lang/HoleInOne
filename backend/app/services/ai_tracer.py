@@ -5259,6 +5259,7 @@ def track_launch_from_rest(
     debug_dir: Path | None = None,
     debug_prefix: str = "launchtrk",
     max_seconds: float = 4.0,
+    seed_points: list | None = None,
 ) -> dict:
     """Adaptive launch tracker (operator-designed; pure pixels, no AI).
 
@@ -5300,7 +5301,22 @@ def track_launch_from_rest(
         f_end = f0 + int(round(float(max_seconds) * fps))
         rx, ry = float(rest_xy[0]), float(rest_xy[1])
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, f0 - 1))
+        # Seeded continuation (the AI launch plot hands off here): start
+        # right AFTER the last seed point with its position + velocity,
+        # so the tracker CONTINUES the frame sequence instead of
+        # re-covering the AI's frames — the debug strips read as one
+        # AI→MOG2 chain.
+        _seeds = sorted(
+            (
+                p for p in (seed_points or [])
+                if p.get("frame") is not None
+                and p.get("x") is not None and p.get("y") is not None
+            ),
+            key=lambda p: int(p["frame"]),
+        )
+        _start_prev = int(_seeds[-1]["frame"]) if _seeds else max(0, f0 - 1)
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, _start_prev)
         ok, prev = cap.read()
         if not ok or prev is None:
             out["reason"] = "could not read pre-impact frame"
@@ -5310,7 +5326,20 @@ def track_launch_from_rest(
 
         last_x, last_y, last_f = rx, ry, f0 - 1
         vx = vy = None
-        recent_marks: list = []  # last few FOUND marks — the operator's
+        _n_seeded = len(_seeds)
+        if _seeds:
+            last_x = float(_seeds[-1]["x"])
+            last_y = float(_seeds[-1]["y"])
+            last_f = int(_seeds[-1]["frame"])
+            if len(_seeds) >= 2:
+                _pa, _pb = _seeds[-2], _seeds[-1]
+                _dfr = max(1, int(_pb["frame"]) - int(_pa["frame"]))
+                vx = (float(_pb["x"]) - float(_pa["x"])) / _dfr
+                vy = (float(_pb["y"]) - float(_pa["y"])) / _dfr
+        recent_marks: list = [
+            (int(p["frame"]), float(p["x"]), float(p["y"]))
+            for p in _seeds[-4:]
+        ]  # last few FOUND marks — the operator's
         # 'marks nearly on top of each other' apex signal is their NET
         # drift over the window (single-hop spacing is jitter-inflated
         # by diff-crescent centroids exactly when true motion is tiny)
@@ -5320,7 +5349,8 @@ def track_launch_from_rest(
         apex_anchor = None  # position where apex mode engaged — a real
         # hang stays near it; the lowering club glides hundreds of px
         tiles = []  # (frame, crop_bgr, found, fx, fy, bw, bh)
-        f = f0
+        # last_f+1 == f0 unseeded; continues after the AI points seeded.
+        f = last_f + 1
         while f <= f_end:
             ok, cur = cap.read()
             if not ok or cur is None:
@@ -5422,7 +5452,7 @@ def track_launch_from_rest(
                 # the crop average (real miss at f493: dark-trees crop
                 # turned sky-white and the gate killed the visible ball,
                 # then the widened box chained canopy sparkle instead).
-                if len(out["points"]) < 3 or apex_mode:
+                if len(out["points"]) + _n_seeded < 3 or apex_mode:
                     # Also required in APEX mode: diffing against the
                     # last-found frame lights up the VACATED old spot
                     # (dark background now) as well as the ball — the
