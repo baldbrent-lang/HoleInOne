@@ -8441,11 +8441,19 @@ def _run_produce_debug_job(
                             ),
                             "timed_points": _sw.get("timed_points"),
                             "ball": _sw.get("ball"),
+                            # Native dims from edit_metrics (the model
+                            # has no width/height columns); the
+                            # frontend also falls back to the heat
+                            # image's natural size.
                             "frame_w": (
-                                _row2.tee_width if _row2 else None
+                                (_row2.edit_metrics or {}).get(
+                                    "frame_width",
+                                ) if _row2 else None
                             ),
                             "frame_h": (
-                                _row2.tee_height if _row2 else None
+                                (_row2.edit_metrics or {}).get(
+                                    "frame_height",
+                                ) if _row2 else None
                             ),
                             "production": True,
                         }

@@ -563,25 +563,54 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       >
         <div
           className="row"
-          style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}
+          style={{ alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}
         >
-          <div>
-            <h3 style={{ margin: 0 }}>🖱 Click-to-plot</h3>
-            <div className="small muted">
-              Upload #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
-              {holeNumber} · {dots.length} timed dots
+          <div className="small">
+            <b>🖱 Click-to-plot</b>
+            <span className="muted">
+              {" "}· #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
+              {holeNumber} · {dots.length} dots
               {denseDots.length > 0 && ` · ${denseDots.length} candidates`}
-            </div>
+            </span>
           </div>
-          <button
-            type="button"
-            className="ghost"
-            onClick={onClose}
-            style={{ width: "auto" }}
-            disabled={busy}
-          >
-            Close ✕
-          </button>
+          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+            {busy && busyMsg && (
+              <span className="small muted">
+                <span className="shimmer" style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", marginRight: 6, verticalAlign: "middle" }} />
+                {busyMsg}
+              </span>
+            )}
+            {!busy && nChanged > 0 && (
+              <span className="small" style={{ color: "var(--emerald-700)" }}>
+                {pendAdd.length > 0 && `${pendAdd.length} new`}
+                {pendAdd.length > 0 && pendClear.length > 0 && " · "}
+                {pendClear.length > 0 && `${pendClear.length} removed`}
+              </span>
+            )}
+            <button
+              type="button"
+              className="ghost small"
+              onClick={onClose}
+              style={{ width: "auto" }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="small"
+              onClick={saveAndClose}
+              style={{ width: "auto" }}
+              disabled={busy || nChanged === 0}
+              title={
+                nChanged === 0
+                  ? "Click dots on the heat to add/remove ball points first — green dots are already in the saved track"
+                  : "Re-render the tracer with the changes, re-apply graphics, and update Produced Clips"
+              }
+            >
+              {busy ? "Saving…" : "Save & close"}
+            </button>
+          </div>
         </div>
 
         <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -628,45 +657,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           calls) and updates the produced clip.
         </div>
 
-        {error && <div className="err-text small" style={{ marginTop: 6 }}>{error}</div>}
-
-        <div className="row" style={{ gap: 8, justifyContent: "flex-end", alignItems: "center", marginTop: 8 }}>
-          {busy && busyMsg && (
-            <span className="small muted" style={{ marginRight: "auto" }}>
-              <span className="shimmer" style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", marginRight: 6, verticalAlign: "middle" }} />
-              {busyMsg}
-            </span>
-          )}
-          {!busy && nChanged > 0 && (
-            <span className="small" style={{ marginRight: "auto", color: "var(--emerald-700)" }}>
-              {pendAdd.length > 0 && `${pendAdd.length} new`}
-              {pendAdd.length > 0 && pendClear.length > 0 && " · "}
-              {pendClear.length > 0 && `${pendClear.length} removed`}
-            </span>
-          )}
-          <button
-            type="button"
-            className="ghost"
-            onClick={onClose}
-            style={{ width: "auto" }}
-            disabled={busy}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={saveAndClose}
-            style={{ width: "auto" }}
-            disabled={busy || nChanged === 0}
-            title={
-              nChanged === 0
-                ? "Click dots on the heat to add/remove ball points first — green dots are already in the saved track"
-                : "Re-render the tracer with the changes, re-apply graphics, and update Produced Clips"
-            }
-          >
-            {busy ? "Saving…" : "Save & close"}
-          </button>
-        </div>
+        {error && <div className="err-text small" style={{ marginTop: 4 }}>{error}</div>}
       </div>
     </div>
   );
@@ -2855,14 +2846,24 @@ function PlotHeatCanvas({
   return (
     <div
       style={{
-        position: "relative",
-        height: "100%", maxHeight: "100%", maxWidth: "100%",
-        aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
-        background: "var(--border, #222)",
-        borderRadius: 6, overflow: "hidden",
-        userSelect: "none",
+        display: "flex", flexDirection: "column", gap: 6,
+        height: "100%", minHeight: 0, maxWidth: "100%", width: "100%",
+        alignItems: "stretch",
       }}
     >
+      {/* Image area. The toolbar is a SIBLING rendered above it
+          (order:-1), so controls never cover the map. */}
+      <div
+        style={{
+          position: "relative",
+          flex: 1, minHeight: 0, alignSelf: "center",
+          maxHeight: "100%", maxWidth: "100%",
+          aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+          background: "var(--border, #222)",
+          borderRadius: 6, overflow: "hidden",
+          userSelect: "none",
+        }}
+      >
       <div
         style={{
           position: "absolute", inset: 0,
@@ -2984,14 +2985,29 @@ function PlotHeatCanvas({
             );
           })}
       </div>
+      {(scanNote || (extraDots.length > 0 && !showDense)) && (
+        <div
+          style={{
+            position: "absolute", left: 8, bottom: 8,
+            background: "rgba(0,0,0,0.55)", color: "#fde047",
+            padding: "3px 10px", borderRadius: 6, fontSize: 12,
+            pointerEvents: "none", backdropFilter: "blur(4px)",
+          }}
+        >
+          {scanNote
+            ? `🔍 ${scanNote}`
+            : `🔍 zoom to ${DENSE_DOT_ZOOM}×+ to reveal ${extraDots.length} more clickable detections`}
+        </div>
+      )}
+      </div>
       <div
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
         style={{
-          position: "absolute", right: 8, top: 8,
-          display: "flex", gap: 6,
+          order: -1, alignSelf: "flex-end",
+          display: "flex", gap: 6, flexWrap: "wrap",
           background: "rgba(0,0,0,0.45)", padding: "4px 6px",
-          borderRadius: 6, backdropFilter: "blur(4px)",
+          borderRadius: 6,
         }}
       >
         <button
@@ -3083,20 +3099,6 @@ function PlotHeatCanvas({
           >Close</button>
         )}
       </div>
-      {(scanNote || (extraDots.length > 0 && !showDense)) && (
-        <div
-          style={{
-            position: "absolute", left: 8, bottom: 8,
-            background: "rgba(0,0,0,0.55)", color: "#fde047",
-            padding: "3px 10px", borderRadius: 6, fontSize: 12,
-            pointerEvents: "none", backdropFilter: "blur(4px)",
-          }}
-        >
-          {scanNote
-            ? `🔍 ${scanNote}`
-            : `🔍 zoom to ${DENSE_DOT_ZOOM}×+ to reveal ${extraDots.length} more clickable detections`}
-        </div>
-      )}
     </div>
   );
 }
@@ -5085,7 +5087,12 @@ function PoseChart({ pose }) {
 function FlightMapStatic({
   bgUrl, dots, restBall, aiPoints, frameW, frameH, impactFrame,
 }) {
-  if (!bgUrl || !frameW || !frameH) return null;
+  // Native dims: prop when the backend knows them, else measured off
+  // the heat image itself (it's rendered at native resolution).
+  const [imgDims, setImgDims] = useState(null);
+  const fw = frameW || imgDims?.w || null;
+  const fh = frameH || imgDims?.h || null;
+  if (!bgUrl) return null;
   const ds = (dots || []).filter(
     (p) => impactFrame == null || p.frame >= impactFrame,
   );
@@ -5107,14 +5114,22 @@ function FlightMapStatic({
         src={bgUrl}
         alt="flight map"
         style={{ width: "100%", display: "block", borderRadius: 6 }}
+        onLoad={(e) => {
+          if (!imgDims && e.target.naturalWidth) {
+            setImgDims({
+              w: e.target.naturalWidth,
+              h: e.target.naturalHeight,
+            });
+          }
+        }}
       />
-      {ds.map((p, i) => (
+      {fw && fh && ds.map((p, i) => (
         <div
           key={`${p.frame}-${i}`}
           style={{
             position: "absolute",
-            left: `${(p.x / frameW) * 100}%`,
-            top: `${(p.y / frameH) * 100}%`,
+            left: `${(p.x / fw) * 100}%`,
+            top: `${(p.y / fh) * 100}%`,
             transform: "translate(-50%, -50%)",
           }}
         >
@@ -5138,9 +5153,9 @@ function FlightMapStatic({
           </span>
         </div>
       ))}
-      {line.length >= 2 && (
+      {fw && fh && line.length >= 2 && (
         <svg
-          viewBox={`0 0 ${frameW} ${frameH}`}
+          viewBox={`0 0 ${fw} ${fh}`}
           preserveAspectRatio="none"
           style={{
             position: "absolute", inset: 0,
@@ -5151,7 +5166,7 @@ function FlightMapStatic({
             points={line.map(([x, y]) => `${x},${y}`).join(" ")}
             fill="none"
             stroke="#ff00ff"
-            strokeWidth={Math.max(2, frameW / 480)}
+            strokeWidth={Math.max(2, fw / 480)}
             strokeLinejoin="round"
             strokeLinecap="round"
             opacity={0.9}
@@ -5161,10 +5176,10 @@ function FlightMapStatic({
               key={i}
               cx={x}
               cy={y}
-              r={Math.max(3, frameW / 260)}
+              r={Math.max(3, fw / 260)}
               fill={i === 0 ? "#22d3ee" : "#ff00ff"}
               stroke="#fff"
-              strokeWidth={Math.max(1, frameW / 1200)}
+              strokeWidth={Math.max(1, fw / 1200)}
             />
           ))}
         </svg>
