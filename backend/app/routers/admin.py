@@ -2790,6 +2790,63 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
     }
 
 
+def _screen_non_golf_upload(upload_id: int, tee_name: str | None) -> bool:
+    """Auto-screen an uploaded clip with the pose swing detector; when
+    it contains NO golf swing, delete the upload (row + files + linked
+    camera event) and return True. Runs on the upload's background
+    thread before any processing spends time or API money on garbage
+    (kitchen walk-bys, pets, empty frames).
+
+    Fail-safe by construction: classification errors or a missing file
+    KEEP the upload. Disable per-deployment with
+    AUTO_DELETE_NON_GOLF=0."""
+    if not settings.auto_delete_non_golf or not tee_name:
+        return False
+    try:
+        from ..services import golf_scene
+
+        path = CLIPS_DIR / tee_name
+        if not path.exists():
+            return False
+        verdict = golf_scene.classify_clip(path)
+        if verdict.get("is_golf", True):
+            return False
+        reason = verdict.get("reason") or "no golf swing detected"
+        db = SessionLocal()
+        try:
+            delete_long_upload(upload_id, db)
+            db.add(
+                AuditLog(
+                    actor="system",
+                    action="auto_delete_non_golf",
+                    target=f"long_upload:{upload_id}",
+                    detail=reason,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+        log.info(
+            "auto-screen: deleted non-golf upload %s (%s)",
+            upload_id, reason,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "auto-screen failed for upload %s (%s) — keeping it",
+            upload_id, exc,
+        )
+        return False
+
+
+def _screen_then_run(upload_id, tee_name, target, kwargs):
+    """Background-thread wrapper: non-golf screen first, then the real
+    processing job (skipped entirely when the upload was deleted)."""
+    if _screen_non_golf_upload(upload_id, tee_name):
+        return
+    target(**kwargs)
+
+
 @router.post("/clips/quick-upload")
 async def quick_upload_videos(
     course_id: int = Form(...),
@@ -2927,14 +2984,17 @@ async def quick_upload_videos(
     # target already populated — no detection round-trip on open.
     if auto_process:
         threading.Thread(
-            target=_run_long_upload_job,
-            kwargs={
-                "upload_id": upload_row.id,
-                "seg_list": [],
-                "auto_detect_swings": True,
-                "starting_hole": 1,
-                "ai_tracer_model": None,
-            },
+            target=_screen_then_run,
+            args=(
+                upload_row.id, src_name, _run_long_upload_job,
+                {
+                    "upload_id": upload_row.id,
+                    "seg_list": [],
+                    "auto_detect_swings": True,
+                    "starting_hole": 1,
+                    "ai_tracer_model": None,
+                },
+            ),
             daemon=True,
             name=f"long-upload-{upload_row.id}",
         ).start()
@@ -2945,8 +3005,11 @@ async def quick_upload_videos(
         )
     else:
         threading.Thread(
-            target=_run_auto_detect_seed,
-            args=(upload_row.id,),
+            target=_screen_then_run,
+            args=(
+                upload_row.id, src_name, _run_auto_detect_seed,
+                {"upload_id": upload_row.id},
+            ),
             daemon=True,
             name=f"auto-detect-{upload_row.id}",
         ).start()

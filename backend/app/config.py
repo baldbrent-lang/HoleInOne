@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     # can be bulk-deleted. Only CHECKS boxes; never deletes. Set env
     # SCAN_NON_GOLF_ENABLED=1 on the DEV deployment to show the button.
     scan_non_golf_enabled: bool = False
+    # Auto-screen every new upload with the pose swing detector and
+    # DELETE it when no golf swing is found (kitchen walk-bys, pets,
+    # empty frames). Fail-safe: classification errors keep the upload.
+    auto_delete_non_golf: bool = True
 
     # "Produce (debug)" — a dev course-testing tool. Alongside a normal
     # produce, it runs a per-swing diagnostic that shows each step's result,

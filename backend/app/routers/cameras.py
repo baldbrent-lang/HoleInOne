@@ -653,6 +653,20 @@ def _process_camera_event_job(event_id: int) -> None:
                 "to paired", event.id, lvu.id,
             )
 
+        # NON-GOLF SCREEN: motion-triggered cameras capture plenty of
+        # garbage (walk-bys, pets, wind). Classify the tee clip with
+        # the pose swing detector; no swing anywhere → auto-delete the
+        # upload, its files and this event (delete_long_upload removes
+        # the linked CameraEvent too). Fail-safe: errors keep it.
+        from .admin import _screen_non_golf_upload
+
+        if _screen_non_golf_upload(lvu.id, event.tee_clip_filename):
+            log.info(
+                "cameras: event %s auto-deleted — no golf swing in the "
+                "capture", event_id,
+            )
+            return
+
         log.info(
             "cameras: event %s -> long-upload %s (auto-detect swings)",
             event.id, lvu.id,
