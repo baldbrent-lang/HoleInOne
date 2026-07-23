@@ -7431,14 +7431,17 @@ def _mog2_layer_for_ai_track(
                     best = ch
             # 2/3-descent cap (operator's rule): trim chained dots that
             # sit lower than apex + 2/3 of the ascent height — the
-            # renderer stops the line there anyway.
+            # renderer stops the line there anyway. EXCEPTION: an apex
+            # hugging the top edge means the flight went off-screen —
+            # the true apex is unknown, so keep the whole descent (the
+            # renderer skips its cap in that case too).
             if best and _rest and len(_rest) == 2:
                 _ys_all = [q["y"] for q in _fit_pts] + [
                     float(d["y"]) for d in best
                 ]
                 _apx_y = min(_ys_all)
                 _asc_h = float(_rest[1]) - _apx_y
-                if _asc_h > 60:
+                if _asc_h > 60 and _apx_y > 0.04 * _vh:
                     _cap_y = _apx_y + (2.0 / 3.0) * _asc_h
                     best = [d for d in best if float(d["y"]) <= _cap_y]
             if len(best) >= 3:

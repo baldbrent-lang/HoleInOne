@@ -3021,29 +3021,6 @@ def _draw_dashed_tracer(
             roi = img[y0:y1, x0:x1]
             shifted = [(p[0] - x0, p[1] - y0) for p in pts_i]
 
-            # --- Drop shadow ------------------------------------------------
-            # A dark, soft copy of the stroke offset down-right, faded
-            # with the line — cheap depth cue, drawn FIRST so glow and
-            # core sit on top of it.
-            sdx = max(2, int(round(base * 1.1)))
-            sdy = max(4, int(round(base * 2.4)))
-            smask = np.zeros(roi.shape[:2], np.uint8)
-            for i in range(1, len(shifted)):
-                cv2.line(
-                    smask,
-                    (shifted[i - 1][0] + sdx, shifted[i - 1][1] + sdy),
-                    (shifted[i][0] + sdx, shifted[i][1] + sdy),
-                    int(round(220 * _fade(i))),
-                    max(2, int(round(_core_t(i) * 1.1))),
-                    cv2.LINE_AA,
-                )
-            ks = max(5, (int(base * 3) | 1))
-            smask = cv2.GaussianBlur(smask, (ks, ks), 0)
-            roi[:] = (
-                roi.astype(np.float32)
-                * (1.0 - 0.32 * (smask.astype(np.float32) / 255.0))[..., None]
-            ).astype(np.uint8)
-
             # --- Soft outer glow (screen blend), faded per segment ---------
             glow = np.zeros_like(roi)
             for i in range(1, len(shifted)):
@@ -3070,32 +3047,86 @@ def _draw_dashed_tracer(
             for i in range(1, len(shifted)):
                 a = round(_fade(i) * 5) / 5.0
                 buckets.setdefault(max(0.2, min(1.0, a)), []).append(i)
-            for a in sorted(buckets):
-                idxs = buckets[a]
-                if a >= 0.999:
-                    for i in idxs:
-                        cv2.line(
-                            roi, shifted[i - 1], shifted[i],
-                            TRACER_CORE_BGR, _core_t(i), cv2.LINE_AA,
+            # SOLID stroke: consecutive segments that share the same
+            # (alpha bucket, thickness) are drawn as ONE polyline, and
+            # the core pass fully completes before the highlight pass.
+            # Per-segment cv2.line calls left a rounded cap at every
+            # sample joint (and interleaved core/highlight overpainted
+            # each other there), which read as a beaded "chain" instead
+            # of one continuous line.
+            def _runs_by(key_fn):
+                groups: list[tuple[tuple, list[int]]] = []
+                for i in range(1, len(shifted)):
+                    k2 = key_fn(i)
+                    if groups and groups[-1][0] == k2 and (
+                        groups[-1][1][-1] == i - 1
+                    ):
+                        groups[-1][1].append(i)
+                    else:
+                        groups.append((k2, [i]))
+                return groups
+
+            def _poly(canvas, idxs, color, thickness):
+                # Overlap one segment into the NEXT group: OpenCV's
+                # thick strokes have flat caps, so back-to-back
+                # polylines on a curve leave a background wedge at
+                # every boundary — the last visible "tick" marks.
+                ext = list(idxs)
+                if ext[-1] + 1 < len(shifted):
+                    ext.append(ext[-1] + 1)
+                pts = np.array(
+                    [shifted[ext[0] - 1]] + [shifted[i] for i in ext],
+                    dtype=np.int32,
+                )
+                cv2.polylines(
+                    canvas, [pts], False, color, thickness, cv2.LINE_AA,
+                )
+
+            def _abucket(i):
+                return max(0.2, min(1.0, round(_fade(i) * 5) / 5.0))
+
+            core_groups = _runs_by(lambda i: (_abucket(i), _core_t(i)))
+            inner_groups = _runs_by(
+                lambda i: (
+                    _abucket(i), max(1, int(round(_core_t(i) * 0.4))),
+                ),
+            )
+            # Render the full stroke on an OFFSCREEN layer, then
+            # composite once with a per-pixel alpha (AA coverage x
+            # fade). Any incremental blending on the live frame left
+            # visible seams at group boundaries; overdraw on the
+            # offscreen layer is invisible because compositing only
+            # sees the finished stroke.
+            line_layer = np.zeros_like(roi)
+            for (_a, t), idxs in core_groups:
+                _poly(line_layer, idxs, TRACER_CORE_BGR, t)
+            for (_a, t), idxs in inner_groups:
+                _poly(line_layer, idxs, TRACER_INNER_BGR, t)
+            # AA-aware coverage of the stroke itself.
+            cov = line_layer.max(axis=2).astype(np.float32) / 255.0
+            # Fade values painted over the stroke area (wide, no AA —
+            # coverage supplies the soft edges). Ascending order so an
+            # overlap keeps the higher opacity.
+            fade_map = np.zeros(roi.shape[:2], np.float32)
+            for a in sorted({g[0][0] for g in core_groups}):
+                for (a2, t), idxs in core_groups:
+                    if abs(a2 - a) < 1e-6:
+                        ext = list(idxs)
+                        if ext[-1] + 1 < len(shifted):
+                            ext.append(ext[-1] + 1)
+                        pts = np.array(
+                            [shifted[ext[0] - 1]]
+                            + [shifted[i] for i in ext],
+                            dtype=np.int32,
                         )
-                        it = max(1, int(round(_core_t(i) * 0.4)))
-                        cv2.line(
-                            roi, shifted[i - 1], shifted[i],
-                            TRACER_INNER_BGR, it, cv2.LINE_AA,
+                        cv2.polylines(
+                            fade_map, [pts], False, float(a), t + 6,
                         )
-                else:
-                    ov = roi.copy()
-                    for i in idxs:
-                        cv2.line(
-                            ov, shifted[i - 1], shifted[i],
-                            TRACER_CORE_BGR, _core_t(i), cv2.LINE_AA,
-                        )
-                        it = max(1, int(round(_core_t(i) * 0.4)))
-                        cv2.line(
-                            ov, shifted[i - 1], shifted[i],
-                            TRACER_INNER_BGR, it, cv2.LINE_AA,
-                        )
-                    cv2.addWeighted(ov, a, roi, 1.0 - a, 0, dst=roi)
+            m = (cov * fade_map)[..., None]
+            roi[:] = (
+                roi.astype(np.float32) * (1.0 - m)
+                + line_layer.astype(np.float32) * m
+            ).astype(np.uint8)
             return
 
     # numpy-less fallback: halo + core drawn directly, no shadow/alpha.
@@ -3632,7 +3663,22 @@ def render_tracer_video(
     # than 2/3 of the ascent height. The ball lands far downrange, so a
     # line reaching back toward tee-ground level reads wrong — stop it
     # about where a broadcast tracer would.
+    #
+    # EXCEPTION: when the flight exits the TOP of the frame and
+    # re-enters on the way down, the true apex is off-screen — the
+    # visible "apex" is just the frame edge, so the 2/3 math would chop
+    # the descent mid-air. Skip the cap and draw the descent to the end
+    # of the mapped points. Detected by a frame gap in the samples (the
+    # off-screen stretch is skipped during sampling) or by the highest
+    # sample hugging the top edge.
     if smoothed_points:
+        _fs_seq = [int(p[0]) for p in smoothed_points]
+        _went_off_top = any(
+            b - a > 2 for a, b in zip(_fs_seq, _fs_seq[1:])
+        ) or min(float(p[2]) for p in smoothed_points) < 0.04 * height
+    else:
+        _went_off_top = False
+    if smoothed_points and not _went_off_top:
         _rest_y_ref = (
             float(ball_rest_xy_native[1])
             if ball_rest_xy_native is not None
