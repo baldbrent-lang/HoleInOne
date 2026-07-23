@@ -210,7 +210,7 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
   );
 }
 
-function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot }) {
+function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip }) {
   // Right-most tile on the Production card: thumbnail + summary of every
   // produced clip cut from this upload. With multiple swings, toggle
   // through each produced clip (◀/▶); the thumbnail + play follow the
@@ -256,35 +256,55 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot }) {
         placeholder={has ? "No preview" : "Not produced"}
         onClick={cur?.video_url ? () => play(cur) : undefined}
       />
-      {has && clips.length > 1 && (
+      {has && (clips.length > 1 || onDeleteClip) && (
         <div
           style={{
             display: "flex", alignItems: "center", justifyContent: "center",
             gap: 8, marginTop: 4,
           }}
         >
-          <button
-            type="button"
-            className="ghost"
-            style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
-            onClick={() => nav(-1)}
-            title="Previous clip"
-          >
-            ◀
-          </button>
+          {clips.length > 1 && (
+            <button
+              type="button"
+              className="ghost"
+              style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
+              onClick={() => nav(-1)}
+              title="Previous clip"
+            >
+              ◀
+            </button>
+          )}
           <span className="tiny">
             clip {idx + 1}/{clips.length}
             {cur?.hole_number != null ? ` · hole ${cur.hole_number}` : ""}
           </span>
-          <button
-            type="button"
-            className="ghost"
-            style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
-            onClick={() => nav(1)}
-            title="Next clip"
-          >
-            ▶
-          </button>
+          {clips.length > 1 && (
+            <button
+              type="button"
+              className="ghost"
+              style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
+              onClick={() => nav(1)}
+              title="Next clip"
+            >
+              ▶
+            </button>
+          )}
+          {onDeleteClip && cur && (
+            <button
+              type="button"
+              className="ghost"
+              style={{
+                width: "auto", padding: "1px 6px", fontSize: "0.9rem",
+                color: "var(--danger)",
+              }}
+              onClick={() => onDeleteClip(cur, idx)}
+              title={`Delete this produced clip (clip ${idx + 1}${
+                cur?.hole_number != null ? ` · hole ${cur.hole_number}` : ""
+              }) and its files. The raw upload and other clips stay; Re-Produce can recreate it.`}
+            >
+              🗑
+            </button>
+          )}
         </div>
       )}
       {curSwing && (
@@ -479,15 +499,28 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           : s
       );
       await api.saveEditMetrics(adminPassword, row.id, { swings: nextSwings });
-      // 3. Commit to Produced Clips — target THIS swing's clip (clip
-      // order matches swing order). Without clip_id the backend updates
-      // the upload's most recent clip, i.e. some other swing.
+      // 3. Commit to Produced Clips — target THIS swing's clip. Prefer
+      // the clip id recorded on the swing (survives clip deletions that
+      // shift positions); fall back to position (clip order matches
+      // swing order on an untouched row). Without clip_id the backend
+      // updates the upload's most recent clip, i.e. some other swing.
       setBusyMsg("Updating Produced Clips…");
-      const clipId = row.produced_clips?.[swingPos]?.id ?? null;
-      await api.commitWizardClip(
+      const clipId =
+        swing.clip_id ?? row.produced_clips?.[swingPos]?.id ?? null;
+      const committed = await api.commitWizardClip(
         adminPassword, row.id,
         clipId != null ? { clip_id: clipId } : {},
       );
+      // Remember which clip this swing committed into so later saves
+      // target it directly even after other clips are deleted.
+      if (committed?.clip_id != null) {
+        const withClip = nextSwings.map((s, i) =>
+          i === swingPos ? { ...s, clip_id: committed.clip_id } : s
+        );
+        await api.saveEditMetrics(adminPassword, row.id, {
+          swings: withClip,
+        });
+      }
       onSaved?.();
       onClose();
     } catch (e) {
@@ -1413,16 +1446,23 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           setFinalizing(false);
         }
       }
-      // Multi-swing: commit into THIS swing's produced clip (clip order
-      // matches swing order) — without clip_id the backend updates the
-      // upload's most recent clip, i.e. some other swing's video.
+      // Multi-swing: commit into THIS swing's produced clip. Prefer the
+      // clip id recorded on the swing (survives clip deletions that
+      // shift positions); fall back to position — without clip_id the
+      // backend updates the upload's most recent clip, i.e. some other
+      // swing's video.
       const _clipId = isMulti
-        ? row.produced_clips?.[selectedSwing]?.id ?? null
+        ? swings[selectedSwing]?.clip_id
+          ?? row.produced_clips?.[selectedSwing]?.id
+          ?? null
         : null;
-      await api.commitWizardClip(
+      const _committed = await api.commitWizardClip(
         adminPassword, row.id,
         _clipId != null ? { clip_id: _clipId } : {},
       );
+      if (isMulti && _committed?.clip_id != null) {
+        await persistPatch({ clip_id: _committed.clip_id });
+      }
       onSaved?.();
     } catch (e) {
       setFinalError(e.message);
@@ -6273,6 +6313,27 @@ export default function AdminProduction() {
                       row,
                       swingPos: pos >= 0 ? pos : swingIdx,
                     });
+                  }}
+                  onDeleteClip={async (clip, clipIdx) => {
+                    const label = clip.hole_number != null
+                      ? `clip ${clipIdx + 1} (hole ${clip.hole_number})`
+                      : `clip ${clipIdx + 1}`;
+                    if (!window.confirm(
+                      `Delete produced ${label}? The video and its files ` +
+                      `are removed; the raw upload and the other clips ` +
+                      `stay, and Re-Produce can recreate it.`
+                    )) {
+                      return;
+                    }
+                    setBusyId(row.id);
+                    try {
+                      await api.deleteClip(adminPassword, clip.id);
+                      await refreshAll();
+                    } catch (e) {
+                      setError(e.message);
+                    } finally {
+                      setBusyId(null);
+                    }
                   }}
                 />
               </div>

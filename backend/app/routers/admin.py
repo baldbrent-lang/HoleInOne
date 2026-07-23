@@ -2039,6 +2039,7 @@ def _process_long_upload_segments(
 
     def _persist_swing_track(
         swing_idx, tracer_info, tracer_url, cut_start_sec, cut_end_sec=None,
+        clip_id=None,
     ):
         """Save everything this swing's production run figured out into
         edit_metrics.swings, so the Edit wizard opens fully pre-populated
@@ -2099,6 +2100,12 @@ def _process_long_upload_segments(
             if cut_end_sec is not None:
                 nsw["end_frame"] = int(round(float(cut_end_sec) * _src_fps))
             nsw["fps"] = round(_src_fps, 2)
+            # The VideoClip this swing produced into — per-swing editors
+            # (click-to-plot, wizard Produce) commit against this id, so
+            # the mapping survives individual clip deletions that would
+            # break position-based matching.
+            if clip_id is not None:
+                nsw["clip_id"] = int(clip_id)
             _imp = tracer_info.get("impact_frame")
             if _imp is not None:
                 nsw["impact_frame"] = int(_imp) + offset
@@ -2457,6 +2464,7 @@ def _process_long_upload_segments(
                 tracer_info.setdefault("anchor_check", seg["anchor_rec"])
             _persist_swing_track(
                 idx, tracer_info, _tracer_url, tee_cut_start, tee_cut_end,
+                clip_id=clip.id,
             )
 
             results.append(
@@ -2543,6 +2551,7 @@ def _process_long_upload_segments(
             tracer_info.setdefault("anchor_check", seg["anchor_rec"])
         _persist_swing_track(
             idx, tracer_info, tracer_url, tee_cut_start, tee_cut_end,
+            clip_id=clip.id,
         )
 
         results.append(
