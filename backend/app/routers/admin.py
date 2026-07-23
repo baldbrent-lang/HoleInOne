@@ -2218,6 +2218,12 @@ def _process_long_upload_segments(
             if cut_end_sec is not None:
                 nsw["end_frame"] = int(round(float(cut_end_sec) * _src_fps))
             nsw["fps"] = round(_src_fps, 2)
+            # Stamp WHEN this record was written: the debug report's
+            # production-tracer poll uses it to reject a previous run's
+            # leftover entry (same swing idx, valid tracer_url) that
+            # would otherwise satisfy the poll instantly and show stale
+            # anchors/errors next to the fresh run's panels.
+            nsw["persisted_at"] = round(time.time(), 2)
             # The VideoClip this swing produced into — per-swing editors
             # (click-to-plot, wizard Produce) commit against this id, so
             # the mapping survives individual clip deletions that would
@@ -8511,7 +8517,18 @@ def _run_produce_debug_job(
                         ):
                             _sw = s
                             break
-                    if _sw and (
+                    # Only accept an entry persisted by THIS produce run
+                    # — a previous run's leftover satisfies the URL
+                    # check instantly and shows stale anchors/errors.
+                    # Entries with no stamp (pre-stamp data) are only
+                    # trusted once produce has finished.
+                    _run_t0 = float(work.get("run_started") or 0.0)
+                    _fresh = (
+                        float(_sw.get("persisted_at") or 0.0)
+                        >= _run_t0 - 1.0
+                        if _sw else False
+                    ) or (_sw is not None and _done_row)
+                    if _sw and _fresh and (
                         _sw.get("tracer_url") or _sw.get("ball_track_frames")
                     ):
                         ai = {
