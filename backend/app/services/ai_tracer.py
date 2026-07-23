@@ -4413,16 +4413,20 @@ def verify_rest_and_impact(
 
 
 # Model for the anchor-verification vision calls (film-strip "which
-# frame does the ball leave?" lookups). A spot-the-ball task — the
-# cheap fast tier handles it; override via env if needed.
-ANCHOR_AI_MODEL = os.environ.get("ANCHOR_AI_MODEL", "claude-haiku-4-5-20251001")
+# frame does the ball leave?" lookups). Spotting a ~7px ball across
+# dozens of tiles proved beyond the fast tier on real footage (it
+# answered the last tile / missed the ring correction), so default to
+# Sonnet — still only ~1-2 cents per swing. Override via env.
+ANCHOR_AI_MODEL = os.environ.get("ANCHOR_AI_MODEL", "claude-sonnet-5")
 
 _ANCHOR_STRIP_PROMPT = (
     "You are looking at a film strip of small crops from a FIXED golf "
     "camera. Every tile shows the SAME patch of ground across "
     "consecutive video frames; each tile's frame number is printed at "
     "its top-left. A golf ball initially sits at rest at ONE exact "
-    "spot (near the cyan ring).\n"
+    "spot (near the cyan ring). The ball is SMALL — a bright white "
+    "dot of just a few pixels; look closely at the ring area in every "
+    "tile, and note the ring may be slightly OFF the actual ball.\n"
     "Task: identify when the ball leaves that exact resting spot "
     "(it was struck). Rules:\n"
     "- 'Present' means the ball is sitting AT its resting spot. A "
@@ -4511,18 +4515,34 @@ def _anchor_strip_image(
     return cv2.vconcat(rows)
 
 
-def _anchor_strip_ask(client, img, extra_text: str, model: str) -> dict | None:
-    """One strip → JSON round trip. Returns parsed dict or None."""
-    send = img
-    if send.shape[1] > 1568:
-        sc = 1568.0 / send.shape[1]
-        send = cv2.resize(
-            send, (1568, int(round(send.shape[0] * sc))),
-            interpolation=cv2.INTER_AREA,
+def _anchor_strip_ask(client, imgs, extra_text: str, model: str) -> dict | None:
+    """Strip image(s) → one JSON round trip. `imgs` may be a single
+    array or a list — MULTIPLE smaller images beat one big grid: the
+    API budgets resolution per image, so chunking keeps each tile (and
+    the few-pixel ball) legible instead of downscaling 30 tiles into
+    mush. Returns parsed dict or None."""
+    if not isinstance(imgs, (list, tuple)):
+        imgs = [imgs]
+    content = [{"type": "text", "text": extra_text + " JSON only."}]
+    for img in imgs:
+        send = img
+        if send.shape[1] > 1568:
+            sc = 1568.0 / send.shape[1]
+            send = cv2.resize(
+                send, (1568, int(round(send.shape[0] * sc))),
+                interpolation=cv2.INTER_AREA,
+            )
+        ok, buf = cv2.imencode(
+            ".jpg", send, [int(cv2.IMWRITE_JPEG_QUALITY), 88],
         )
-    ok, buf = cv2.imencode(".jpg", send, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-    if not ok:
-        return None
+        if not ok:
+            return None
+        content.append({
+            "type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(bytes(buf)).decode("ascii"),
+            },
+        })
     resp = client.messages.create(
         model=model,
         max_tokens=200,
@@ -4531,13 +4551,7 @@ def _anchor_strip_ask(client, img, extra_text: str, model: str) -> dict | None:
             "text": _ANCHOR_STRIP_PROMPT,
             "cache_control": {"type": "ephemeral"},
         }],
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": extra_text + " JSON only."},
-            {"type": "image", "source": {
-                "type": "base64", "media_type": "image/jpeg",
-                "data": base64.standard_b64encode(bytes(buf)).decode("ascii"),
-            }},
-        ]}],
+        messages=[{"role": "user", "content": content}],
     )
     text = "".join(
         c.text for c in resp.content if getattr(c, "type", None) == "text"
@@ -4624,16 +4638,26 @@ def verify_rest_and_impact_ai(
         client = _anthropic_client()
         use_model = model or ANCHOR_AI_MODEL
 
-        # COARSE: every ~3rd frame across the whole window.
+        # COARSE: every ~3rd frame across the whole window. Chunked
+        # into images of 12 tiles (2 rows x 6) so each tile stays at
+        # native resolution through the API — one 30-tile grid got
+        # downscaled until the ball was unreadable.
         stride = max(1, int(round(fps / 10.0)))
         coarse_fs = fs_sorted[::stride]
         if coarse_fs[-1] != fs_sorted[-1]:
             coarse_fs.append(fs_sorted[-1])
-        coarse_img = _anchor_strip_image(crops, coarse_fs, ring, r)
+        _CHUNK = 12
+        coarse_imgs = [
+            _anchor_strip_image(
+                crops, coarse_fs[i:i + _CHUNK], ring, r, per_row=6,
+            )
+            for i in range(0, len(coarse_fs), _CHUNK)
+        ][:4]
         try:
             coarse = _anchor_strip_ask(
-                client, coarse_img,
-                f"Strip covers frames {coarse_fs[0]}-{coarse_fs[-1]} "
+                client, coarse_imgs,
+                f"{len(coarse_imgs)} strip image(s) in chronological "
+                f"order, covering frames {coarse_fs[0]}-{coarse_fs[-1]} "
                 f"(every {stride}).",
                 use_model,
             )
@@ -4707,12 +4731,14 @@ def verify_rest_and_impact_ai(
                 if tail_absent >= 4:
                     try:
                         retry = _anchor_strip_ask(
-                            client, coarse_img,
-                            f"Strip covers frames {coarse_fs[0]}-"
-                            f"{coarse_fs[-1]} (every {stride}). The "
-                            "resting spot IS empty by the end of the "
-                            "strip — the ball did depart. Find "
-                            "last_present_frame and departure_frame.",
+                            client, coarse_imgs,
+                            f"{len(coarse_imgs)} strip image(s) in "
+                            f"chronological order, frames "
+                            f"{coarse_fs[0]}-{coarse_fs[-1]} (every "
+                            f"{stride}). The resting spot IS empty by "
+                            "the end of the strip — the ball did "
+                            "depart. Find last_present_frame and "
+                            "departure_frame.",
                             use_model,
                         )
                     except Exception:  # noqa: BLE001
