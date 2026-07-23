@@ -4605,18 +4605,33 @@ def _anchor_strip_ask(client, imgs, extra_text: str, model: str) -> dict | None:
         })
     resp = client.messages.create(
         model=model,
-        max_tokens=200,
+        max_tokens=500,
         system=[{
             "type": "text",
             "text": _ANCHOR_STRIP_PROMPT,
             "cache_control": {"type": "ephemeral"},
         }],
-        messages=[{"role": "user", "content": content}],
+        messages=[
+            {"role": "user", "content": content},
+            # Prefill forces the reply to BE the JSON object — without
+            # it the model can spend the token budget on prose and the
+            # truncated JSON parses as nothing ('no parseable answer').
+            {"role": "assistant", "content": "{"},
+        ],
     )
-    text = "".join(
+    _raw = "".join(
         c.text for c in resp.content if getattr(c, "type", None) == "text"
     )
-    return _extract_json(text)
+    text = "{" + _raw
+    # Fallback on the unprefixed text: a model that ignores the prefill
+    # and emits a complete object would double the opening brace.
+    parsed = _extract_json(text) or _extract_json(_raw)
+    if parsed is None:
+        log.warning(
+            "anchor strip ask: unparseable answer (stop=%s): %.300s",
+            getattr(resp, "stop_reason", None), text,
+        )
+    return parsed
 
 
 def verify_rest_and_impact_ai(
@@ -5037,19 +5052,21 @@ def plot_launch_frames_ai(
         api_fails = 0
         for i, f in enumerate(frames):
             fr = fulls[f]
-            if i == 0:
-                # First frame: the ball can be anywhere along the early
-                # path (the impact pin can run a frame late and launch
-                # speed is huge) - wide around the rest, TALL above it.
-                bx0 = max(0, int(rx - 14 * r))
-                bx1 = min(w, int(rx + 14 * r))
-                by0 = max(0, int(ry - 30 * r))
+            if vel is None:
+                # No lock yet (first frame, or every frame so far
+                # missed): the ball is SOMEWHERE up the launch path and
+                # only gets HIGHER each frame — keep the region
+                # anchored at the rest but reach taller and wider on
+                # every miss instead of re-searching the same ground.
+                _wx = (14 + 4 * misses) * r
+                _up = (30 + 12 * misses) * r
+                bx0 = max(0, int(rx - _wx))
+                bx1 = min(w, int(rx + _wx))
+                by0 = max(0, int(ry - _up))
                 by1 = min(h, int(ry + 4 * r))
             else:
                 half = int((10 + 4 * misses) * r)
-                pcx, pcy = prev
-                if vel is not None:
-                    pcx, pcy = prev[0] + vel[0], prev[1] + vel[1]
+                pcx, pcy = prev[0] + vel[0], prev[1] + vel[1]
                 bx0 = max(0, int(pcx - half))
                 bx1 = min(w, int(pcx + half))
                 by0 = max(0, int(pcy - half))
@@ -5093,42 +5110,51 @@ def plot_launch_frames_ai(
                 try:
                     resp = client.messages.create(
                         model=use_model,
-                        max_tokens=200,
+                        max_tokens=300,
                         system=[{
                             "type": "text",
                             "text": _LAUNCH_PLOT_PROMPT,
                             "cache_control": {"type": "ephemeral"},
                         }],
-                        messages=[{"role": "user", "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    f"Frame {f}. Crop origin "
-                                    f"({bx0},{by0}) size "
-                                    f"{bx1 - bx0}x{by1 - by0}. "
-                                    "JSON only."
-                                ),
-                            },
-                            {"type": "image", "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": base64.standard_b64encode(
-                                    bytes(buf),
-                                ).decode("ascii"),
-                            }},
-                        ]}],
+                        messages=[
+                            {"role": "user", "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        f"Frame {f}. Crop origin "
+                                        f"({bx0},{by0}) size "
+                                        f"{bx1 - bx0}x{by1 - by0}. "
+                                        "JSON only."
+                                    ),
+                                },
+                                {"type": "image", "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": base64.standard_b64encode(
+                                        bytes(buf),
+                                    ).decode("ascii"),
+                                }},
+                            ]},
+                            # Prefill: the reply IS the JSON object.
+                            {"role": "assistant", "content": "{"},
+                        ],
                     )
                 except Exception as exc:  # noqa: BLE001
                     err = f"api_failed: {exc}"
                     continue
-                text = "".join(
+                _raw = "".join(
                     c.text for c in resp.content
                     if getattr(c, "type", None) == "text"
                 )
-                data = _extract_json(text)
+                text = "{" + _raw
+                data = _extract_json(text) or _extract_json(_raw)
                 if data:
                     break
                 err = "no parseable answer"
+                log.warning(
+                    "ai launch plot f%d: unparseable (stop=%s): %.200s",
+                    f, getattr(resp, "stop_reason", None), text,
+                )
             status = None
             accepted = None
             if data is None:
