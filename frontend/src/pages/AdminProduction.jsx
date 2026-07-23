@@ -5085,7 +5085,8 @@ function PoseChart({ pose }) {
  * launch points — the direction the flight starts, at a glance.
  */
 function FlightMapStatic({
-  bgUrl, dots, restBall, aiPoints, frameW, frameH, impactFrame,
+  bgUrl, dots, restBall, aiPoints, trackPoints, frameW, frameH,
+  impactFrame,
 }) {
   // Native dims: prop when the backend knows them, else measured off
   // the heat image itself (it's rendered at native resolution).
@@ -5103,6 +5104,14 @@ function FlightMapStatic({
   for (const p of aiPoints || []) {
     if (p?.x != null && p?.y != null) line.push([p.x, p.y]);
   }
+  // The FULL mapped track (AI + launch tracker + MOG2 chain + arc
+  // completion), sorted by frame — the whole-arc line.
+  const track = [...(trackPoints || [])].sort((a, b) => a.frame - b.frame);
+  const trackLine = [];
+  if (restBall?.x != null && restBall?.y != null) {
+    trackLine.push([restBall.x, restBall.y]);
+  }
+  for (const p of track) trackLine.push([p.x, p.y]);
   return (
     <div
       style={{
@@ -5153,7 +5162,7 @@ function FlightMapStatic({
           </span>
         </div>
       ))}
-      {fw && fh && line.length >= 2 && (
+      {fw && fh && (line.length >= 2 || trackLine.length >= 2) && (
         <svg
           viewBox={`0 0 ${fw} ${fh}`}
           preserveAspectRatio="none"
@@ -5162,15 +5171,47 @@ function FlightMapStatic({
             width: "100%", height: "100%",
           }}
         >
-          <polyline
-            points={line.map(([x, y]) => `${x},${y}`).join(" ")}
-            fill="none"
-            stroke="#ff00ff"
-            strokeWidth={Math.max(2, fw / 480)}
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            opacity={0.9}
-          />
+          {trackLine.length >= 2 && (
+            <polyline
+              points={trackLine.map(([x, y]) => `${x},${y}`).join(" ")}
+              fill="none"
+              stroke="#38bdf8"
+              strokeWidth={Math.max(2, fw / 520)}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              opacity={0.85}
+            />
+          )}
+          {track.map((p, i) => (
+            <circle
+              key={`t${i}`}
+              cx={p.x}
+              cy={p.y}
+              r={
+                p.source === "arc"
+                  ? Math.max(4, fw / 220)
+                  : Math.max(2.5, fw / 340)
+              }
+              fill={p.source === "arc" ? "none" : "#38bdf8"}
+              stroke={p.source === "arc" ? "#fb923c" : "#fff"}
+              strokeWidth={
+                p.source === "arc"
+                  ? Math.max(2, fw / 640)
+                  : Math.max(0.8, fw / 1600)
+              }
+            />
+          ))}
+          {line.length >= 2 && (
+            <polyline
+              points={line.map(([x, y]) => `${x},${y}`).join(" ")}
+              fill="none"
+              stroke="#ff00ff"
+              strokeWidth={Math.max(2, fw / 480)}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              opacity={0.9}
+            />
+          )}
           {line.map(([x, y], i) => (
             <circle
               key={i}
@@ -5811,15 +5852,18 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       0) && (
                   <div style={{ marginTop: 4 }}>
                     <div className="tiny muted">
-                      🗺 flight map — heat + dot frame labels · magenta
-                      line = rest ball → AI launch points (cyan dot =
-                      rest)
+                      🗺 flight map — blue line = the FULL mapped arc
+                      (AI + launch + MOG2), orange rings = pool dots
+                      added by arc completion, magenta = rest → AI
+                      launch (cyan dot = rest), amber = unused pool
+                      dots with frame labels
                     </div>
                     <FlightMapStatic
                       bgUrl={s.ai.raw_motion_url}
                       dots={s.ai.timed_points}
                       restBall={s.ai.ball}
                       aiPoints={s.ai.anchor_check?.ai_launch_points}
+                      trackPoints={s.ai.track_points}
                       frameW={s.ai.frame_w}
                       frameH={s.ai.frame_h}
                       impactFrame={s.ai.impact_frame}

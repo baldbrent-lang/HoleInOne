@@ -5149,7 +5149,7 @@ def render_wizard_tracer(
                         _added_back = [
                             {**r, "frame": int(r["frame"]) + _off}
                             for r in (_layer.get("merged") or [])
-                            if r.get("source") == "mog2"
+                            if r.get("source") in ("mog2", "launch", "arc")
                         ]
                         if _added_back:
                             _addf = {r["frame"] for r in _added_back}
@@ -7237,6 +7237,98 @@ def _mog2_layer_for_ai_track(
         key=lambda r: int(r["frame"]),
     )
 
+    # ARC COMPLETION (operator's rule): fit the FULL mapped arc (AI +
+    # launch tracker + chain) and project where the remaining flight
+    # logically is — the descent continues the ascent's x-trend (to
+    # its side) and frames get HIGHER as the ball gets LOWER in the
+    # image. Sweep the pool for dots sitting in that predicted
+    # corridor beyond the last mapped frame and add them
+    # (source='arc'); the final physics prune still applies.
+    n_arc = 0
+    try:
+        _seenf: set = set()
+        _fit_pts: list[dict] = []
+        for p in sorted(
+            [
+                {"frame": int(pp["frame"]), "x": float(pp["x"]),
+                 "y": float(pp["y"])}
+                for pp in ai_pts
+            ] + [
+                {"frame": int(a["frame"]), "x": float(a["x"]),
+                 "y": float(a["y"])}
+                for a in added
+            ],
+            key=lambda p2: p2["frame"],
+        ):
+            if p["frame"] in _seenf:
+                continue
+            _seenf.add(p["frame"])
+            _fit_pts.append(p)
+        if len(_fit_pts) >= 6:
+            _usedf = set(_seenf)
+            for _ in range(80):
+                _fs = _np.array([p["frame"] for p in _fit_pts], float)
+                _xs = _np.array([p["x"] for p in _fit_pts], float)
+                _ys = _np.array([p["y"] for p in _fit_pts], float)
+                _cx2 = _np.polyfit(
+                    _fs, _xs, 2 if len(_fit_pts) >= 8 else 1,
+                )
+                _cy2 = _np.polyfit(_fs, _ys, 2)
+                _lastp = _fit_pts[-1]
+                _apex_f = (
+                    -_cy2[1] / (2.0 * _cy2[0])
+                    if abs(float(_cy2[0])) > 1e-9 else None
+                )
+                _best = None
+                for dpt in sorted(pool, key=lambda d: d["frame"]):
+                    fno = int(dpt["frame"])
+                    if fno <= _lastp["frame"] or fno in _usedf:
+                        continue
+                    if _f_cap is not None and fno > _f_cap:
+                        break
+                    gap = fno - _lastp["frame"]
+                    if gap > 15:
+                        break
+                    pxp = float(_np.polyval(_cx2, fno))
+                    pyp = float(_np.polyval(_cy2, fno))
+                    tol = 30.0 + 6.0 * gap
+                    if ((float(dpt["x"]) - pxp) ** 2
+                            + (float(dpt["y"]) - pyp) ** 2) ** 0.5 > tol:
+                        continue
+                    # Descent rule: past the apex, a dot must not jump
+                    # back UP the image.
+                    if (
+                        float(_cy2[0]) > 0 and _apex_f is not None
+                        and fno > _apex_f
+                        and float(dpt["y"]) < _lastp["y"] - 15.0
+                    ):
+                        continue
+                    _best = dpt
+                    break
+                if _best is None:
+                    break
+                _newp = {
+                    "frame": int(_best["frame"]),
+                    "x": float(_best["x"]), "y": float(_best["y"]),
+                }
+                _fit_pts.append(_newp)
+                _usedf.add(_newp["frame"])
+                added.append({
+                    "frame": _newp["frame"], "found": True,
+                    "x": int(round(_newp["x"])),
+                    "y": int(round(_newp["y"])),
+                    "source": "arc",
+                })
+                n_arc += 1
+        if n_arc:
+            added.sort(key=lambda rec: int(rec["frame"]))
+            log.info(
+                "mog2 layer: arc completion added %d pool dot(s) along "
+                "the projected flight", n_arc,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mog2 layer: arc completion failed: %s", exc)
+
     stats = {
         "n_ai": len(ai_pts),
         "n_cv": len(pool),
@@ -7246,6 +7338,7 @@ def _mog2_layer_for_ai_track(
         "n_added_launch": len(added_launch),
         "n_added_mid": len(added_mid),
         "n_added_descent": len(added_descent),
+        "n_arc_completed": n_arc,
         "corresponds": bool(n_matched >= 2),
         "lock": lock_info,
         "anchor_check": anchor_check,
@@ -8440,6 +8533,22 @@ def _run_produce_debug_job(
                                 "tracer_raw_motion_url",
                             ),
                             "timed_points": _sw.get("timed_points"),
+                            # Full mapped track (all sources) so the
+                            # flight map can draw the whole arc line.
+                            "track_points": [
+                                {
+                                    "frame": rec.get("frame"),
+                                    "x": rec.get("x"),
+                                    "y": rec.get("y"),
+                                    "source": rec.get("source"),
+                                }
+                                for rec in (
+                                    _sw.get("ball_track_frames") or []
+                                )
+                                if rec.get("found")
+                                and rec.get("x") is not None
+                                and rec.get("y") is not None
+                            ][:1200],
                             "ball": _sw.get("ball"),
                             # Native dims from edit_metrics (the model
                             # has no width/height columns); the
