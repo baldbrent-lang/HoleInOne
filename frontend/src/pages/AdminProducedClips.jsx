@@ -69,6 +69,28 @@ export default function AdminProducedClips() {
     }
   }
 
+  async function deleteClip(clip) {
+    const label = `#${clip.id}${
+      clip.hole_number != null ? ` (hole ${clip.hole_number})` : ""
+    }`;
+    if (!window.confirm(
+      `Delete produced clip ${label}? The video and its files are ` +
+      `removed${clip.is_highlight ? " and it comes off Broadcast" : ""}. ` +
+      `The raw upload stays on Production, so Re-Produce can recreate it.`
+    )) {
+      return;
+    }
+    setBusyId(clip.id);
+    try {
+      await api.deleteClip(adminPassword, clip.id);
+      setClips((cs) => (cs || []).filter((c) => c.id !== clip.id));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   if (!adminPassword) {
     return (
       <div className="wrap">
@@ -159,20 +181,32 @@ export default function AdminProducedClips() {
                 {fmtDateTime(c.captured_at)}
                 {c.fps != null && <> · <code>{c.fps}</code> fps</>}
               </div>
-              <button
-                type="button"
-                className={c.is_highlight ? "" : "ghost"}
-                style={{ width: "100%", marginTop: 8 }}
-                onClick={() => toggleBroadcast(c)}
-                disabled={busyId === c.id}
-                title={c.is_highlight
-                  ? "Remove from the Broadcast channel"
-                  : "Send this clip to the Broadcast channel"}
-              >
-                {busyId === c.id
-                  ? "…"
-                  : c.is_highlight ? "On Broadcast" : "Broadcast"}
-              </button>
+              <div className="row" style={{ gap: 6, marginTop: 8 }}>
+                <button
+                  type="button"
+                  className={c.is_highlight ? "" : "ghost"}
+                  style={{ flex: 1 }}
+                  onClick={() => toggleBroadcast(c)}
+                  disabled={busyId === c.id}
+                  title={c.is_highlight
+                    ? "Remove from the Broadcast channel"
+                    : "Send this clip to the Broadcast channel"}
+                >
+                  {busyId === c.id
+                    ? "…"
+                    : c.is_highlight ? "On Broadcast" : "Broadcast"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ width: "auto", color: "var(--danger)" }}
+                  onClick={() => deleteClip(c)}
+                  disabled={busyId === c.id}
+                  title="Delete this produced clip and its files. The raw upload stays on Production; Re-Produce can recreate it."
+                >
+                  🗑
+                </button>
+              </div>
             </div>
           );
         })}
