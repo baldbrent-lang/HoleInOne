@@ -4421,22 +4421,55 @@ _ANCHOR_STRIP_PROMPT = (
     "You are looking at a film strip of small crops from a FIXED golf "
     "camera. Every tile shows the SAME patch of ground across "
     "consecutive video frames; each tile's frame number is printed at "
-    "its top-left. A golf ball initially sits at rest near the cyan "
-    "ring.\n"
-    "Task: find the FIRST frame where the ball has DEPARTED — it is no "
-    "longer at its resting spot because it was struck. A club head, "
-    "shadow, or the golfer may briefly cover the ball; if the ball is "
-    "visible at the spot again in LATER tiles, it had NOT departed "
-    "yet. Choose only from the printed frame numbers.\n"
+    "its top-left. A golf ball initially sits at rest at ONE exact "
+    "spot (near the cyan ring).\n"
+    "Task: identify when the ball leaves that exact resting spot "
+    "(it was struck). Rules:\n"
+    "- 'Present' means the ball is sitting AT its resting spot. A "
+    "white object anywhere ELSE in a tile does NOT count — a ball in "
+    "flight, a deflected ball, a club-head glint, or another ball are "
+    "all irrelevant. Judge only the resting spot.\n"
+    "- The club head or a shadow may briefly COVER the ball; if the "
+    "ball is clearly sitting at the SAME spot again in later tiles, "
+    "it was covered, not departed.\n"
+    "- If the resting spot is empty from some tile onward THROUGH THE "
+    "END of the strip, the ball HAS departed.\n"
+    "- Choose only printed frame numbers.\n"
     "Respond with JSON only:\n"
     "{\"ball_visible_initially\": true|false,"
     " \"ball_x_pct\": number|null, \"ball_y_pct\": number|null,"
+    " \"last_present_frame\": int|null,"
     " \"departure_frame\": int|null, \"confidence\": 0.0-1.0}\n"
     "ball_x_pct/ball_y_pct = the ball centre in the FIRST tile as "
     "percentages (0-100) of that tile's width/height (null if no ball "
-    "is visible initially). departure_frame = null if the ball never "
-    "leaves its spot in this strip."
+    "is visible initially). last_present_frame = the LAST tile where "
+    "the ball is still at its resting spot. departure_frame = the "
+    "FIRST tile where it is gone (and stays gone). Both null only if "
+    "the ball is still at its spot in the final tiles."
 )
+
+
+def _dep_from_answer(data: dict, strip_frames: list[int]) -> int | None:
+    """Departure frame from a strip answer. Prefer the model's explicit
+    departure_frame; else derive it as the tile AFTER last_present_frame
+    — models are more reliable at pointing to the ball being there
+    (positive evidence) than at naming the first empty tile."""
+    dep = data.get("departure_frame")
+    try:
+        dep = int(dep) if dep is not None else None
+    except (TypeError, ValueError):
+        dep = None
+    if dep is None:
+        lp = data.get("last_present_frame")
+        try:
+            lp = int(lp) if lp is not None else None
+        except (TypeError, ValueError):
+            lp = None
+        if lp is not None and lp < strip_frames[-1]:
+            later = [f for f in strip_frames if f > lp]
+            if later:
+                dep = later[0]
+    return dep
 
 
 def _anchor_strip_image(
@@ -4634,11 +4667,58 @@ def verify_rest_and_impact_ai(
                         out["snap_px"] = float(round(d, 1))
                 except (TypeError, ValueError):
                     pass
-            dep = coarse.get("departure_frame")
-            try:
-                dep = int(dep) if dep is not None else None
-            except (TypeError, ValueError):
-                dep = None
+            dep = _dep_from_answer(coarse, coarse_fs)
+            if dep is None:
+                # Cross-check the model's "never left" with a cheap
+                # pixel look at the tail tiles: bright ball-sized
+                # cluster at the ring? If the spot is plainly empty at
+                # the end, the ball DID depart — re-ask once with that
+                # stated (a white blob elsewhere in a tile fooled the
+                # first pass on real footage).
+                # Watch the CORRECTED spot (the model may have just
+                # fixed an off-by-30px ring), not the original claim.
+                spot = (
+                    float(out["rest_xy"][0]) - x0,
+                    float(out["rest_xy"][1]) - y0,
+                )
+
+                def _spot_has_ball(bgr) -> bool:
+                    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                    mean = float(g.mean())
+                    thr = max(mean + 25.0, float(np.percentile(g, 92)))
+                    mask = (g >= thr).astype(np.uint8)
+                    n, _l, stats_, cent = cv2.connectedComponentsWithStats(
+                        mask,
+                    )
+                    for i in range(1, n):
+                        area = int(stats_[i, cv2.CC_STAT_AREA])
+                        if area < 4 or area > (1.8 * r) ** 2:
+                            continue
+                        d = ((cent[i][0] - spot[0]) ** 2
+                             + (cent[i][1] - spot[1]) ** 2) ** 0.5
+                        if d <= r * 1.2:
+                            return True
+                    return False
+
+                tail = fs_sorted[-5:]
+                tail_absent = sum(
+                    1 for f in tail if not _spot_has_ball(crops[f])
+                )
+                if tail_absent >= 4:
+                    try:
+                        retry = _anchor_strip_ask(
+                            client, coarse_img,
+                            f"Strip covers frames {coarse_fs[0]}-"
+                            f"{coarse_fs[-1]} (every {stride}). The "
+                            "resting spot IS empty by the end of the "
+                            "strip — the ball did depart. Find "
+                            "last_present_frame and departure_frame.",
+                            use_model,
+                        )
+                    except Exception:  # noqa: BLE001
+                        retry = None
+                    if retry:
+                        dep = _dep_from_answer(retry, coarse_fs)
             if dep is None or dep <= fs_sorted[0] or dep > fs_sorted[-1]:
                 out["verified"] = False
                 out["reason"] = (
@@ -4668,11 +4748,7 @@ def verify_rest_and_impact_ai(
                             "anchor ai: fine pass failed (%s) — keeping "
                             "coarse departure f%d", exc, dep,
                         )
-                    fdep = (fine or {}).get("departure_frame")
-                    try:
-                        fdep = int(fdep) if fdep is not None else None
-                    except (TypeError, ValueError):
-                        fdep = None
+                    fdep = _dep_from_answer(fine, fine_fs) if fine else None
                     if fdep is not None and fine_lo <= fdep <= fine_hi:
                         dep = fdep
                 out["verified"] = True
