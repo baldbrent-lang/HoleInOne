@@ -489,12 +489,44 @@ def _extract_json(text: str) -> dict | None:
     if not text:
         return None
     m = _JSON_OBJECT_RE.search(text)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+    # Balanced-brace fallback: the greedy regex fails when prose or a
+    # second brace follows the object (or the object is embedded in
+    # text). Walk from each opening brace and take the first balanced,
+    # parseable object.
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+        start = text.find("{", start + 1)
+    return None
 
 
 def _sample_frame_indices(total_frames: int, n_samples: int) -> list[int]:
@@ -4463,7 +4495,8 @@ _ANCHOR_STRIP_PROMPT = (
     "ball_x_pct/ball_y_pct = the ball centre in the FIRST tile as "
     "percentages (0-100) of that tile's width/height (null if no ball "
     "is visible initially). Both frame fields null only if the ball "
-    "is still at its spot in the final tiles."
+    "is still at its spot in the final tiles. Your ENTIRE reply must "
+    "be that single JSON object — no text before or after it."
 )
 
 
@@ -4611,21 +4644,12 @@ def _anchor_strip_ask(client, imgs, extra_text: str, model: str) -> dict | None:
             "text": _ANCHOR_STRIP_PROMPT,
             "cache_control": {"type": "ephemeral"},
         }],
-        messages=[
-            {"role": "user", "content": content},
-            # Prefill forces the reply to BE the JSON object — without
-            # it the model can spend the token budget on prose and the
-            # truncated JSON parses as nothing ('no parseable answer').
-            {"role": "assistant", "content": "{"},
-        ],
+        messages=[{"role": "user", "content": content}],
     )
-    _raw = "".join(
+    text = "".join(
         c.text for c in resp.content if getattr(c, "type", None) == "text"
     )
-    text = "{" + _raw
-    # Fallback on the unprefixed text: a model that ignores the prefill
-    # and emits a complete object would double the opening brace.
-    parsed = _extract_json(text) or _extract_json(_raw)
+    parsed = _extract_json(text)
     if parsed is None:
         log.warning(
             "anchor strip ask: unparseable answer (stop=%s): %.300s",
@@ -4980,7 +5004,8 @@ _LAUNCH_PLOT_PROMPT = (
     " \"y_pct\": number|null, \"note\": string}\n"
     "x_pct/y_pct = the ball centre as percentages (0-100) of THIS "
     "image's width/height. found=false if no ball is visible in this "
-    "crop."
+    "crop. Your ENTIRE reply must be that single JSON object — no "
+    "text before or after it."
 )
 
 
@@ -5135,19 +5160,16 @@ def plot_launch_frames_ai(
                                     ).decode("ascii"),
                                 }},
                             ]},
-                            # Prefill: the reply IS the JSON object.
-                            {"role": "assistant", "content": "{"},
                         ],
                     )
                 except Exception as exc:  # noqa: BLE001
                     err = f"api_failed: {exc}"
                     continue
-                _raw = "".join(
+                text = "".join(
                     c.text for c in resp.content
                     if getattr(c, "type", None) == "text"
                 )
-                text = "{" + _raw
-                data = _extract_json(text) or _extract_json(_raw)
+                data = _extract_json(text)
                 if data:
                     break
                 err = "no parseable answer"
