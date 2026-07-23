@@ -1,5 +1,6 @@
 import os
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -113,6 +114,19 @@ class Settings(BaseSettings):
     # The AI half needs ANTHROPIC_API_KEY set (else it reports unavailable).
     # Set env PRODUCE_DEBUG_ENABLED=1 on the DEV deployment to show the button.
     produce_debug_enabled: bool = False
+
+    @model_validator(mode="after")
+    def _strip_dev_only_in_production(self) -> "Settings":
+        # REPLIT_DEPLOYMENT is injected automatically by Replit in every
+        # production deployment. When it's present, force all dev-only
+        # feature flags off regardless of any secret/env-var that may
+        # be leaking in from the global secrets store.
+        if os.environ.get("REPLIT_DEPLOYMENT"):
+            self.produce_debug_enabled = False
+            self.mirror_course_id = 0
+            self.mirror_source_url = ""
+            self.mirror_source_password = ""
+        return self
 
     # Swing detector for the produce pipeline. "pose" (default) = the
     # MediaPipe wrist-speed + back-bend detector; "motion" = the old
