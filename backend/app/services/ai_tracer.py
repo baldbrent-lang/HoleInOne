@@ -3025,6 +3025,64 @@ def _draw_dashed_tracer(
         )
 
 
+def _tip_reveal_schedule(
+    samples: list[tuple[int, int, int]],
+    anchors: list[tuple[int, int, int]],
+) -> tuple[int, int, list[int]] | None:
+    """Per-frame reveal counts so the drawn tip follows the ball's
+    OBSERVED progress along the smooth curve.
+
+    The parametric render samples the fitted parabola once per integer
+    frame with a linear x(f) — i.e. constant apparent speed for the
+    whole flight. A real shot is heavily front-loaded on screen (huge
+    px/frame right after impact, tiny near the apex from distance +
+    perspective), so a constant-rate tip visibly LAGS the ball early
+    and catches up late. The anchors carry the true timing: project
+    each one onto the sampled curve and reveal samples piecewise-
+    linearly between those (frame → curve index) knots — geometry stays
+    the smooth parabola, timing follows the ball.
+
+    Returns (first_frame, last_frame, counts) where counts[i] is the
+    number of samples visible at frame first_frame+i; before
+    first_frame nothing shows, from last_frame on everything shows.
+    None = not enough signal, caller keeps the constant-rate timing."""
+    if len(samples) < 3 or len(anchors) < 2:
+        return None
+    xs = [p[1] for p in samples]
+    ys = [p[2] for p in samples]
+
+    def _proj(x: float, y: float) -> int:
+        best, best_d = 0, None
+        for j in range(len(samples)):
+            d = (xs[j] - x) ** 2 + (ys[j] - y) ** 2
+            if best_d is None or d < best_d:
+                best_d, best = d, j
+        return best
+
+    # Knots: (source frame, curve sample index), strictly increasing in
+    # both. Start at the first sample (the launch/rest point); anchors
+    # whose projection runs backward (jitter, near-apex cluster) are
+    # skipped rather than allowed to rewind the tip.
+    knots: list[tuple[int, int]] = [(int(samples[0][0]), 0)]
+    for fa, xa, ya in sorted(anchors, key=lambda a: a[0]):
+        j = _proj(float(xa), float(ya))
+        if int(fa) > knots[-1][0] and j > knots[-1][1]:
+            knots.append((int(fa), j))
+    if len(knots) < 2:
+        return None
+    first_f = knots[0][0]
+    last_f = knots[-1][0]
+    counts: list[int] = []
+    for (f1, j1), (f2, j2) in zip(knots, knots[1:]):
+        for f in range(f1, f2):
+            t = (f - f1) / float(f2 - f1)
+            counts.append(int(round(j1 + t * (j2 - j1))) + 1)
+    # From the last knot's frame on, the whole curve is visible (any
+    # tail past the final anchor's projection appears with it).
+    counts.append(len(samples))
+    return first_f, last_f, counts
+
+
 def render_tracer_video(
     input_path: Path,
     output_path: Path,
@@ -3195,6 +3253,10 @@ def render_tracer_video(
     smoothed_points: list[tuple[int, int, int]] = []  # (frame, x, y)
     last_kept_frame_global: int | None = None
     rejected_frames: set[int] = set()
+    # Observed-progress tip timing (parametric-fit renders only) —
+    # (first_frame, last_frame, per-frame visible counts). None keeps
+    # the plain f<=frame_idx reveal.
+    reveal_sched: tuple[int, int, list[int]] | None = None
 
     # When the operator has manually plotted the trajectory, draw the line
     # straight THROUGH their points (per-frame linear interpolation between
@@ -3450,10 +3512,18 @@ def render_tracer_video(
                 if x < 0 or x >= width or y < 0 or y >= height:
                     continue
                 smoothed_points.append((f, x, y))
+            # Observed-progress timing: reveal the curve at the ball's
+            # actual per-frame pace (front-loaded) instead of the fit's
+            # constant rate, which visibly lagged the ball off the tee.
+            reveal_sched = _tip_reveal_schedule(smoothed_points, kept)
         log.info(
             "ai_tracer: tracer fit — %d anchors, %d rejected as outliers, "
-            "%d smoothed render points (parabola)",
+            "%d smoothed render points (parabola)%s",
             len(anchors), len(rejected_indices), len(smoothed_points),
+            (
+                f", tip timing remapped over {len(reveal_sched[2])} frames"
+                if reveal_sched else ""
+            ),
         )
     elif not manual_render:
         # Not enough anchors for a stable fit (or numpy missing).
@@ -3498,11 +3568,24 @@ def render_tracer_video(
             if write_start is not None and frame_idx < write_start:
                 frame_idx += 1
                 continue
-            # Draw the tracer once we've reached the impact frame.
-            if smoothed_points and frame_idx >= smoothed_points[0][0]:
+            # Draw the tracer once we've reached the impact frame. With a
+            # reveal schedule, the tip advances at the ball's observed
+            # per-frame pace along the curve; otherwise plain frame gating.
+            if smoothed_points and reveal_sched is not None:
+                _rs_first, _rs_last, _rs_counts = reveal_sched
+                if frame_idx < _rs_first:
+                    visible = []
+                elif frame_idx >= _rs_last:
+                    visible = smoothed_points
+                else:
+                    visible = smoothed_points[: _rs_counts[frame_idx - _rs_first]]
+            elif smoothed_points and frame_idx >= smoothed_points[0][0]:
                 visible = [
                     (f, x, y) for f, x, y in smoothed_points if f <= frame_idx
                 ]
+            else:
+                visible = []
+            if visible:
                 # Split into contiguous-frame runs. Off-screen (above the
                 # top edge) apex points are skipped during sampling, which
                 # leaves a frame gap; drawing one polyline across that gap
