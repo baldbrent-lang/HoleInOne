@@ -2968,19 +2968,17 @@ def _draw_dashed_tracer(
     total_points: int | None = None,
     start_thickness: int = TRACER_LINE_THICKNESS_START,
     end_thickness: int = TRACER_LINE_THICKNESS_END,
+    offset_points: int = 0,
 ) -> None:
-    """Draw a solid tapered polyline through `points` with a halo
-    behind it. No-op when fewer than 2 points are provided.
+    """Draw a solid tapered polyline through `points`: drop shadow,
+    soft glow, then a crisp core that FADES IN from the origin — the
+    broadcast look (faint at the tee, solid toward the ball).
+    No-op when fewer than 2 points are provided.
 
-    Despite the legacy name, this renderer is no longer dashed — the
-    operator preferred a continuous solid line so the tracer reads
-    as one stroke instead of a chain. Thickness linearly tapers from
-    `start_thickness` at the first point (the resting ball) to
-    `end_thickness` at the last (apex / end of flight). `total_points`
-    is the FULL final length of the polyline — passing it keeps the
-    per-frame growth tapered against the same reference span so
-    early frames don't briefly render as a thin stub before the full
-    taper develops.
+    `total_points` is the FULL final length of the polyline and
+    `offset_points` is this run's starting index within it — both keep
+    the taper and the fade anchored to the whole line while it builds
+    frame-by-frame (and across gap-split runs).
     """
     if len(points) < 2:
         return
@@ -2989,25 +2987,31 @@ def _draw_dashed_tracer(
 
     # Core stroke weight scales with frame height so the tracer reads the
     # same bold width at any resolution (broadcast lines are heavy). It
-    # tapers from ~1.35x near the ball to ~0.5x at the apex so the line
+    # tapers from ~1.5x near the ball to ~0.5x at the apex so the line
     # thins as the ball flies away — the classic TV-tracer cue.
     base = max(3.5, h * 0.008)
 
     def _core_t(i: int) -> int:
-        frac = max(0.0, min(1.0, i / float(full_n - 1)))
+        frac = max(0.0, min(1.0, (offset_points + i) / float(full_n - 1)))
         return max(2, int(round(base * (1.50 + (0.50 - 1.50) * frac))))
+
+    # Fade-in over the first ~35% of the full line: near-transparent at
+    # the resting ball, fully solid by a third of the flight.
+    _FADE_SPAN = 0.35
+
+    def _fade(i: int) -> float:
+        gf = (offset_points + i) / float(max(1, full_n - 1))
+        if gf >= _FADE_SPAN:
+            return 1.0
+        return 0.12 + 0.88 * (gf / _FADE_SPAN)
 
     pts_i = [(int(round(px)), int(round(py))) for px, py in points]
     xs = [p[0] for p in pts_i]
     ys = [p[1] for p in pts_i]
 
-    # --- Soft outer glow ---------------------------------------------------
-    # Draw the stroke thick on a padded ROI layer, Gaussian-blur it, then
-    # screen-blend it back onto the frame. Screen (rather than a straight
-    # add) keeps a bright sky from blowing out to white while still laying
-    # a luminous blue halo over darker trees / grandstands. Working on a
-    # cropped ROI keeps the per-frame blur cheap.
     if HAS_NP:
+        # Padded ROI so the per-frame blur work stays cheap; covers the
+        # shadow offset and the glow spread.
         glow_pad = int(base * 8) + 12
         x0 = max(0, min(xs) - glow_pad)
         y0 = max(0, min(ys) - glow_pad)
@@ -3015,36 +3019,91 @@ def _draw_dashed_tracer(
         y1 = min(h, max(ys) + glow_pad)
         if x1 > x0 and y1 > y0:
             roi = img[y0:y1, x0:x1]
-            glow = np.zeros_like(roi)
             shifted = [(p[0] - x0, p[1] - y0) for p in pts_i]
+
+            # --- Drop shadow ------------------------------------------------
+            # A dark, soft copy of the stroke offset down-right, faded
+            # with the line — cheap depth cue, drawn FIRST so glow and
+            # core sit on top of it.
+            sdx = max(2, int(round(base * 1.1)))
+            sdy = max(4, int(round(base * 2.4)))
+            smask = np.zeros(roi.shape[:2], np.uint8)
             for i in range(1, len(shifted)):
                 cv2.line(
+                    smask,
+                    (shifted[i - 1][0] + sdx, shifted[i - 1][1] + sdy),
+                    (shifted[i][0] + sdx, shifted[i][1] + sdy),
+                    int(round(220 * _fade(i))),
+                    max(2, int(round(_core_t(i) * 1.1))),
+                    cv2.LINE_AA,
+                )
+            ks = max(5, (int(base * 3) | 1))
+            smask = cv2.GaussianBlur(smask, (ks, ks), 0)
+            roi[:] = (
+                roi.astype(np.float32)
+                * (1.0 - 0.32 * (smask.astype(np.float32) / 255.0))[..., None]
+            ).astype(np.uint8)
+
+            # --- Soft outer glow (screen blend), faded per segment ---------
+            glow = np.zeros_like(roi)
+            for i in range(1, len(shifted)):
+                fcol = tuple(int(c * _fade(i)) for c in TRACER_GLOW_BGR)
+                cv2.line(
                     glow, shifted[i - 1], shifted[i],
-                    TRACER_GLOW_BGR, max(4, int(round(_core_t(i) * 2.8))),
+                    fcol, max(4, int(round(_core_t(i) * 2.8))),
                     cv2.LINE_AA,
                 )
             k = max(5, (int(base * 4) | 1))  # odd kernel for GaussianBlur
             glow = cv2.GaussianBlur(glow, (k, k), 0)
-            # Screen blend: out = 255 - (255-roi)(255-glow)/255. Done with
-            # cv2 ops (bitwise_not = 255-x for uint8) so it's dtype-safe
-            # regardless of numpy's scalar-casting rules.
             inv = cv2.multiply(
                 cv2.bitwise_not(roi), cv2.bitwise_not(glow),
                 scale=1.0 / 255.0,
             )
             cv2.bitwise_not(inv, dst=roi)
-    else:
-        # numpy-less fallback: a couple of translucent-looking passes so
-        # the line still gets a halo, just without the blurred glow.
-        for i in range(1, len(pts_i)):
-            cv2.line(
-                img, pts_i[i - 1], pts_i[i],
-                TRACER_GLOW_BGR, _core_t(i) + 6, cv2.LINE_AA,
-            )
 
-    # --- Crisp core on top -------------------------------------------------
-    # Bright blue body, then a thin pale-azure highlight down the centre so
-    # the stroke reads as a rounded glossy tube rather than a flat band.
+            # --- Crisp core on top, alpha-faded in buckets ------------------
+            # Bright blue body + thin pale-azure centre highlight so the
+            # stroke reads as a glossy tube. Segments are grouped into
+            # opacity buckets and alpha-blended so the origin end is
+            # genuinely translucent rather than just dimmer.
+            buckets: dict[float, list[int]] = {}
+            for i in range(1, len(shifted)):
+                a = round(_fade(i) * 5) / 5.0
+                buckets.setdefault(max(0.2, min(1.0, a)), []).append(i)
+            for a in sorted(buckets):
+                idxs = buckets[a]
+                if a >= 0.999:
+                    for i in idxs:
+                        cv2.line(
+                            roi, shifted[i - 1], shifted[i],
+                            TRACER_CORE_BGR, _core_t(i), cv2.LINE_AA,
+                        )
+                        it = max(1, int(round(_core_t(i) * 0.4)))
+                        cv2.line(
+                            roi, shifted[i - 1], shifted[i],
+                            TRACER_INNER_BGR, it, cv2.LINE_AA,
+                        )
+                else:
+                    ov = roi.copy()
+                    for i in idxs:
+                        cv2.line(
+                            ov, shifted[i - 1], shifted[i],
+                            TRACER_CORE_BGR, _core_t(i), cv2.LINE_AA,
+                        )
+                        it = max(1, int(round(_core_t(i) * 0.4)))
+                        cv2.line(
+                            ov, shifted[i - 1], shifted[i],
+                            TRACER_INNER_BGR, it, cv2.LINE_AA,
+                        )
+                    cv2.addWeighted(ov, a, roi, 1.0 - a, 0, dst=roi)
+            return
+
+    # numpy-less fallback: halo + core drawn directly, no shadow/alpha.
+    for i in range(1, len(pts_i)):
+        cv2.line(
+            img, pts_i[i - 1], pts_i[i],
+            TRACER_GLOW_BGR, _core_t(i) + 6, cv2.LINE_AA,
+        )
     for i in range(1, len(pts_i)):
         cv2.line(
             img, pts_i[i - 1], pts_i[i],
@@ -3569,6 +3628,36 @@ def render_tracer_video(
             len(anchors),
         )
 
+    # DESCENT CAP (operator's rule): the drawn descent never drops more
+    # than 2/3 of the ascent height. The ball lands far downrange, so a
+    # line reaching back toward tee-ground level reads wrong — stop it
+    # about where a broadcast tracer would.
+    if smoothed_points:
+        _rest_y_ref = (
+            float(ball_rest_xy_native[1])
+            if ball_rest_xy_native is not None
+            else float(smoothed_points[0][2])
+        )
+        _ys_s = [float(p[2]) for p in smoothed_points]
+        _apex_y_s = min(_ys_s)
+        _ascent_h = _rest_y_ref - _apex_y_s
+        if _ascent_h > 60:
+            _cut_y = _apex_y_s + (2.0 / 3.0) * _ascent_h
+            _apex_i = _ys_s.index(_apex_y_s)
+            _cut_i = None
+            for j in range(_apex_i + 1, len(smoothed_points)):
+                if float(smoothed_points[j][2]) > _cut_y:
+                    _cut_i = j
+                    break
+            if _cut_i is not None and _cut_i >= 2:
+                info["descent_capped"] = {
+                    "cut_frame": int(smoothed_points[_cut_i][0]),
+                    "cut_y": round(_cut_y, 1),
+                    "n_dropped": len(smoothed_points) - _cut_i,
+                }
+                smoothed_points = smoothed_points[:_cut_i]
+                last_kept_frame_global = smoothed_points[-1][0]
+
     info["n_points"] = len(smoothed_points)
     if smoothed_points:
         info["frame_range"] = [int(smoothed_points[0][0]), int(smoothed_points[-1][0])]
@@ -3627,26 +3716,30 @@ def render_tracer_video(
                 # the line at the gap instead so a shot that peaks at/above
                 # the top edge shows the ascent and descent reaching the
                 # edge rather than a flat plateau.
-                runs: list[list[tuple[int, int]]] = []
+                runs: list[tuple[int, list[tuple[int, int]]]] = []
                 cur: list[tuple[int, int]] = []
+                cur_start = 0
                 prev_f = None
-                for f, x, y in visible:
+                for vi, (f, x, y) in enumerate(visible):
                     if prev_f is not None and (f - prev_f) > 2:
                         if len(cur) >= 2:
-                            runs.append(cur)
+                            runs.append((cur_start, cur))
                         cur = []
+                    if not cur:
+                        cur_start = vi
                     cur.append((x, y))
                     prev_f = f
                 if len(cur) >= 2:
-                    runs.append(cur)
-                for run in runs:
-                    # Pass the full final point count so the taper rate
-                    # stays consistent as the line builds frame-by-frame
-                    # (otherwise early frames briefly look like a thin
-                    # stub before the full taper develops).
+                    runs.append((cur_start, cur))
+                for run_off, run in runs:
+                    # Pass the full final point count AND this run's
+                    # start index so the taper and the origin fade-in
+                    # stay anchored to the whole line as it builds
+                    # frame-by-frame.
                     _draw_dashed_tracer(
                         frame, run,
                         total_points=len(smoothed_points),
+                        offset_points=run_off,
                     )
                 # Resting-ball indicator at the origin removed too — operator
                 # wants nothing but the smoothed tracer line in the final

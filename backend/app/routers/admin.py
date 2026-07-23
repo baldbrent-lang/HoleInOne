@@ -7366,6 +7366,18 @@ def _mog2_layer_for_ai_track(
                 ch = _greedy(si)
                 if len(ch) > len(best):
                     best = ch
+            # 2/3-descent cap (operator's rule): trim chained dots that
+            # sit lower than apex + 2/3 of the ascent height — the
+            # renderer stops the line there anyway.
+            if best and _rest and len(_rest) == 2:
+                _ys_all = [q["y"] for q in _fit_pts] + [
+                    float(d["y"]) for d in best
+                ]
+                _apx_y = min(_ys_all)
+                _asc_h = float(_rest[1]) - _apx_y
+                if _asc_h > 60:
+                    _cap_y = _apx_y + (2.0 / 3.0) * _asc_h
+                    best = [d for d in best if float(d["y"]) <= _cap_y]
             if len(best) >= 3:
                 for d in best:
                     added.append({
