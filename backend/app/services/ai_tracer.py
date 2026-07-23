@@ -4949,6 +4949,254 @@ def verify_rest_and_impact_ai(
         return out
 
 
+_LAUNCH_PLOT_PROMPT = (
+    "The images show the SAME region of a golf scene in consecutive "
+    "video frames immediately after a ball was struck; each image's "
+    "frame number is printed at its top-left, and the cyan ring marks "
+    "where the ball was RESTING before the strike.\n"
+    "In each frame, find the golf ball IN FLIGHT: a small bright white "
+    "dot or motion-blurred streak that separates from the ring area "
+    "and gets farther away frame by frame (usually upward/outward). "
+    "The club head and shaft also move through the region — the ball "
+    "is the round or streaked WHITE object leaving the ring, not the "
+    "club. For a streak, give the centre of the streak.\n"
+    "Respond with JSON only:\n"
+    "{\"points\": [{\"frame\": int, \"found\": true|false,"
+    " \"x_pct\": number|null, \"y_pct\": number|null}]}\n"
+    "x_pct/y_pct = the ball centre as percentages (0-100) of that "
+    "image's width/height. found=false when the ball is not visible "
+    "in that frame (occluded / out of view)."
+)
+
+
+def plot_launch_frames_ai(
+    input_path: Path,
+    rest_xy: tuple[float, float],
+    impact_frame: int,
+    fps: float,
+    n_frames: int = 5,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "ailaunch",
+    model: str | None = None,
+) -> dict:
+    """AI plots the ball for the first few frames after impact — the
+    motion-blur zone where the pixel launch tracker struggles most.
+    ONE vision call: each post-impact frame's launch region is sent as
+    its own full-resolution image; the model returns per-frame ball
+    positions, gated afterward (inside the crop, receding from rest).
+    MOG2 owns everything after these frames.
+
+    Returns {available, points: [{frame,x,y}], n_found, image, reason,
+    api_error}. Never raises."""
+    out = {
+        "available": False, "points": [], "n_found": 0,
+        "image": None, "reason": None, "api_error": False,
+    }
+    if not HAS_CV or not HAS_NP:
+        out["reason"] = "opencv/numpy not installed"
+        return out
+    if not HAS_ANTHROPIC or not os.environ.get("ANTHROPIC_API_KEY"):
+        out["reason"] = "ANTHROPIC_API_KEY not set"
+        out["api_error"] = True
+        return out
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open video"
+            return out
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        r = max(10, int(round(0.015 * h)))
+        rx, ry = float(rest_xy[0]), float(rest_xy[1])
+        # Launch region: wide around the rest, tall ABOVE it — 5 frames
+        # of early flight can cover a few hundred px upward.
+        x0 = max(0, int(rx - 14 * r))
+        x1 = min(w, int(rx + 14 * r))
+        y0 = max(0, int(ry - 24 * r))
+        y1 = min(h, int(ry + 4 * r))
+        if x1 - x0 < 4 * r or y1 - y0 < 4 * r:
+            out["reason"] = "launch region clipped by frame edge"
+            cap.release()
+            return out
+        f_first = int(impact_frame) + 1
+        frames = list(range(f_first, f_first + int(n_frames)))
+        crops: dict[int, "np.ndarray"] = {}
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f_first)
+        for f in frames:
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            crops[f] = fr[y0:y1, x0:x1].copy()
+        cap.release()
+        if len(crops) < 2:
+            out["reason"] = "could not read post-impact frames"
+            return out
+        out["available"] = True
+        frames = sorted(crops)
+        ring = (rx - x0, ry - y0)
+
+        content = [{
+            "type": "text",
+            "text": (
+                f"{len(frames)} images, frames {frames[0]}-{frames[-1]} "
+                "in order. JSON only."
+            ),
+        }]
+        for f in frames:
+            t = crops[f].copy()
+            cv2.circle(
+                t, (int(ring[0]), int(ring[1])), int(r * 0.9),
+                (255, 200, 0), 2, cv2.LINE_AA,
+            )
+            cv2.putText(
+                t, str(f), (5, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (0, 0, 0), 4, cv2.LINE_AA,
+            )
+            cv2.putText(
+                t, str(f), (5, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (255, 255, 255), 2, cv2.LINE_AA,
+            )
+            ok, buf = cv2.imencode(
+                ".jpg", t, [int(cv2.IMWRITE_JPEG_QUALITY), 90],
+            )
+            if not ok:
+                out["reason"] = "jpeg encode failed"
+                return out
+            content.append({
+                "type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg",
+                    "data": base64.standard_b64encode(
+                        bytes(buf),
+                    ).decode("ascii"),
+                },
+            })
+        client = _anthropic_client()
+        use_model = model or ANCHOR_AI_MODEL
+        data = None
+        for _attempt in range(2):
+            if _attempt:
+                time.sleep(1.5)
+            try:
+                resp = client.messages.create(
+                    model=use_model,
+                    max_tokens=400,
+                    system=[{
+                        "type": "text",
+                        "text": _LAUNCH_PLOT_PROMPT,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    messages=[{"role": "user", "content": content}],
+                )
+            except Exception as exc:  # noqa: BLE001
+                out["reason"] = f"api_failed: {exc}"
+                continue
+            text = "".join(
+                c.text for c in resp.content
+                if getattr(c, "type", None) == "text"
+            )
+            data = _extract_json(text)
+            if data:
+                break
+            out["reason"] = "no parseable answer"
+        if not data:
+            out["api_error"] = True
+            return out
+
+        # Gate: inside the crop, and receding from the rest position
+        # frame over frame (a club-head pick would come back toward
+        # the ring / jump around).
+        pts: list[dict] = []
+        last_d = -1.0
+        for rec in data.get("points") or []:
+            try:
+                f = int(rec.get("frame"))
+                if not rec.get("found"):
+                    continue
+                px = float(rec.get("x_pct"))
+                py = float(rec.get("y_pct"))
+            except (TypeError, ValueError):
+                continue
+            if f not in crops or not (0.0 <= px <= 100.0 and 0.0 <= py <= 100.0):
+                continue
+            nx = x0 + px / 100.0 * (x1 - x0)
+            ny = y0 + py / 100.0 * (y1 - y0)
+            d = ((nx - rx) ** 2 + (ny - ry) ** 2) ** 0.5
+            if d < 1.2 * r:  # still on the tee = not flight
+                continue
+            if d <= last_d - 2 * r:  # coming back toward the ring
+                continue
+            last_d = max(last_d, d)
+            pts.append({
+                "frame": f,
+                "x": int(round(nx)),
+                "y": int(round(ny)),
+            })
+        out["points"] = pts
+        out["n_found"] = len(pts)
+        out["reason"] = (
+            f"AI plotted {len(pts)}/{len(frames)} launch frames"
+            if pts else "AI saw no ball in the launch frames"
+        )
+
+        # Debug strip: the tiles with the AI's picks ringed magenta.
+        if debug_dir is not None:
+            try:
+                by_f = {p["frame"]: p for p in pts}
+                tiles = []
+                for f in frames:
+                    t = crops[f].copy()
+                    cv2.circle(
+                        t, (int(ring[0]), int(ring[1])), int(r * 0.9),
+                        (255, 200, 0), 2, cv2.LINE_AA,
+                    )
+                    p = by_f.get(f)
+                    if p is not None:
+                        cv2.circle(
+                            t,
+                            (int(p["x"] - x0), int(p["y"] - y0)),
+                            int(r * 1.2), (255, 0, 255), 2, cv2.LINE_AA,
+                        )
+                    cv2.rectangle(
+                        t, (0, 0), (t.shape[1] - 1, t.shape[0] - 1),
+                        (0, 200, 0) if p is not None else (0, 0, 230), 3,
+                    )
+                    cv2.putText(
+                        t, str(f), (5, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8, (0, 0, 0), 4, cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        t, str(f), (5, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8, (255, 255, 255), 2, cv2.LINE_AA,
+                    )
+                    tiles.append(t)
+                strip = cv2.hconcat(tiles)
+                bar = np.zeros((34, strip.shape[1], 3), np.uint8)
+                cv2.putText(
+                    bar,
+                    (
+                        f"AI launch plot [{use_model}] f{frames[0]}-"
+                        f"{frames[-1]} - {out['reason']} (magenta=AI "
+                        "pick, ring=rest, green=found, red=not found)"
+                    ),
+                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                name = f"{debug_prefix}.jpg"
+                cv2.imwrite(
+                    str(Path(debug_dir) / name),
+                    cv2.vconcat([bar, strip]),
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+                )
+                out["image"] = name
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ai launch plot: debug strip failed: %s", exc)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("plot_launch_frames_ai failed: %s", exc)
+        out["reason"] = str(exc)
+        return out
+
+
 def track_launch_from_rest(
     input_path: Path,
     rest_xy: tuple[float, float],

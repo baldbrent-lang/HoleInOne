@@ -373,8 +373,13 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip
 function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   const swings = row.edit_metrics?.swings || [];
   const swing = swings[swingPos] || {};
-  const dots = swing.timed_points || [];
-  const denseDots = swing.cand_points || [];
+  // Post-impact only: pre-swing motion (waggle, address, shadow) is
+  // noise on this map — the flight starts at impact.
+  const impactF = swing.impact_frame ?? null;
+  const postImpact = (arr) =>
+    impactF == null ? arr : arr.filter((p) => p.frame >= impactF);
+  const dots = postImpact(swing.timed_points || []);
+  const denseDots = postImpact(swing.cand_points || []);
   // Dots that are ALREADY in the swing's saved ball track (from an
   // earlier Save here, or from the tracer itself) start out green —
   // so reopening the modal shows what's plotted, and Save only sends
@@ -596,12 +601,12 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                     swing.impact_frame != null
                       ? Math.max(
                           swing.start_frame ?? 0,
-                          swing.impact_frame - 2,
+                          swing.impact_frame,
                         )
                       : swing.start_frame ?? 0,
                   end_frame: swing.end_frame ?? null,
                 });
-                return out.dots || [];
+                return postImpact(out.dots || []);
               }}
             />
           ) : (
@@ -3545,8 +3550,14 @@ function TracerStep({
                 || tracer?.rawMotionFramesUrl
                 || tracer?.mog2OverlayUrl
               }
-              dots={tracer?.timedPoints || []}
-              denseDots={tracer?.candidates || []}
+              dots={(tracer?.timedPoints || []).filter(
+                (p) => draft?.impactFrame == null
+                  || p.frame >= draft.impactFrame,
+              )}
+              denseDots={(tracer?.candidates || []).filter(
+                (p) => draft?.impactFrame == null
+                  || p.frame >= draft.impactFrame,
+              )}
               frameW={frameW}
               frameH={frameH}
               marks={manualPositions}
@@ -5275,6 +5286,35 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                                 />
                               </a>
                             </div>
+                          )}
+                          {s.anchor.ai_launch_n != null && (
+                            <div style={{ marginTop: 3 }}>
+                              \ud83e\udd16 AI launch plot:{" "}
+                              <span
+                                style={{
+                                  color: s.anchor.ai_launch_n > 0
+                                    ? "#1a9d55"
+                                    : "#b7791f",
+                                }}
+                              >
+                                {s.anchor.ai_launch_reason}
+                              </span>
+                            </div>
+                          )}
+                          {s.anchor.ai_launch_image_url && (
+                            <a
+                              href={s.anchor.ai_launch_image_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ display: "block", marginTop: 3 }}
+                              title="AI launch plot \u2014 the first 5 post-impact frames sent to the vision model. Magenta ring = its ball pick, cyan ring = the rest spot, green border = found, red = not found. These picks override the pixel tracker on their frames; MOG2 owns the rest of the flight."
+                            >
+                              <img
+                                src={s.anchor.ai_launch_image_url}
+                                alt="AI launch plot film-strip"
+                                style={{ maxWidth: "100%", borderRadius: 6 }}
+                              />
+                            </a>
                           )}
                           {s.anchor.launch_n != null && (
                             <div style={{ marginTop: 3 }}>

@@ -1681,6 +1681,66 @@ def _run_long_upload_job(
                                         log.warning(
                                             "launch tracker failed: %s", exc,
                                         )
+                                    # AI LAUNCH PLOT: one vision call
+                                    # reads the first 5 post-impact
+                                    # frames — the motion-blur zone the
+                                    # pixel tracker struggles in. Its
+                                    # points OVERRIDE the tracker's on
+                                    # those frames; MOG2 owns the rest
+                                    # of the flight.
+                                    try:
+                                        from ..services.ai_tracer import (
+                                            plot_launch_frames_ai,
+                                        )
+
+                                        _alp = plot_launch_frames_ai(
+                                            src_path,
+                                            tuple(_anchor_rec["rest_xy"]),
+                                            int(_anchor_rec["impact_frame"]),
+                                            tee_fps,
+                                            debug_dir=CLIPS_DIR,
+                                            debug_prefix=(
+                                                f"ailaunch-{upload_id}-"
+                                                f"{secrets.token_hex(3)}"
+                                            ),
+                                        )
+                                        if _alp.get("points"):
+                                            _byf = {
+                                                int(p["frame"]): dict(p)
+                                                for p in (
+                                                    d.get("launch_points")
+                                                    or []
+                                                )
+                                            }
+                                            for p in _alp["points"]:
+                                                _byf[int(p["frame"])] = {
+                                                    "frame": int(p["frame"]),
+                                                    "x": p["x"],
+                                                    "y": p["y"],
+                                                }
+                                            d["launch_points"] = [
+                                                _byf[k]
+                                                for k in sorted(_byf)
+                                            ]
+                                        _anchor_rec["ai_launch_n"] = (
+                                            _alp.get("n_found")
+                                        )
+                                        _anchor_rec["ai_launch_reason"] = (
+                                            _alp.get("reason")
+                                        )
+                                        _anchor_rec["ai_launch_image"] = (
+                                            _alp.get("image")
+                                        )
+                                        log.info(
+                                            "long-upload worker: AI launch "
+                                            "plot %s point(s) (%s)",
+                                            _alp.get("n_found"),
+                                            _alp.get("reason"),
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        log.warning(
+                                            "ai launch plot failed: %s", exc,
+                                        )
                                     d["anchor_rec"] = {
                                         k: _anchor_rec.get(k)
                                         for k in (
@@ -1692,6 +1752,9 @@ def _run_long_upload_job(
                                             "launch_n",
                                             "launch_reason", "launch_image",
                                             "launch_image_heat",
+                                            "ai_launch_n",
+                                            "ai_launch_reason",
+                                            "ai_launch_image",
                                         )
                                     }
                                     d["peak_time_sec"] = (
@@ -1736,6 +1799,9 @@ def _run_long_upload_job(
                                         "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
+                                        "ai_launch_n",
+                                        "ai_launch_reason",
+                                        "ai_launch_image",
                                     )
                                 }
                                 if _anchor_rec else None
@@ -2224,6 +2290,7 @@ def _process_long_upload_segments(
                     }
                     for p in _tp
                     if p.get("frame") is not None
+                    and (_imp is None or int(p["frame"]) >= int(_imp))
                 ][:2000]
             # Denser candidate pool for click-to-plot's zoomed-in layer.
             # The classical fallback's tracer info carries "candidates"
@@ -2241,7 +2308,7 @@ def _process_long_upload_segments(
                     }
                     for p in _cp
                     if p.get("frame") is not None
-                    and (_imp is None or int(p["frame"]) >= int(_imp) - 2)
+                    and (_imp is None or int(p["frame"]) >= int(_imp))
                 ][:1500]
             _rawm = tracer_info.get("raw_motion_image")
             if _rawm and (CLIPS_DIR / _rawm).exists():
@@ -4809,6 +4876,7 @@ def render_wizard_tracer(
                 "y": int(round(p["y"])),
             }
             for p in (info_c.get("timed_points") or [])
+            if _imp_cut is None or int(p["frame"]) >= _imp_cut
         ][:2000]
         candidates_out = [
             {
@@ -4817,7 +4885,7 @@ def render_wizard_tracer(
                 "y": int(round(c["y"])),
             }
             for c in (info_c.get("candidates") or [])
-            if _imp_cut is None or int(c["frame"]) >= _imp_cut - 2
+            if _imp_cut is None or int(c["frame"]) >= _imp_cut
         ][:4000]
         saved.update(
             {
@@ -8079,6 +8147,7 @@ def _run_produce_debug_job(
                         ("image_mog2", "image_mog2_url"),
                         ("launch_image", "launch_image_url"),
                         ("launch_image_heat", "launch_image_heat_url"),
+                        ("ai_launch_image", "ai_launch_image_url"),
                     ):
                         if _anc.get(_ik) and (
                             CLIPS_DIR / _anc[_ik]
