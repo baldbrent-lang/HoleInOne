@@ -4427,36 +4427,42 @@ def verify_rest_and_impact(
 ANCHOR_AI_MODEL = os.environ.get("ANCHOR_AI_MODEL", "claude-sonnet-5")
 
 _ANCHOR_STRIP_PROMPT = (
-    "You are looking at a film strip of small crops from a FIXED golf "
+    "You are looking at film strips of small crops from a FIXED golf "
     "camera. Every tile shows the SAME patch of ground across "
     "consecutive video frames; each tile's frame number is printed at "
-    "its top-left. A golf ball initially sits at rest at ONE exact "
-    "spot (near the cyan ring). The ball is SMALL — a bright white "
-    "dot of just a few pixels; look closely at the ring area in every "
-    "tile, and note the ring may be slightly OFF the actual ball.\n"
-    "Task: identify when the ball leaves that exact resting spot "
-    "(it was struck). Rules:\n"
-    "- 'Present' means the ball is sitting AT its resting spot. A "
-    "white object anywhere ELSE in a tile does NOT count — a ball in "
-    "flight, a deflected ball, a club-head glint, or another ball are "
-    "all irrelevant. Judge only the resting spot.\n"
-    "- The club head or a shadow may briefly COVER the ball; if the "
-    "ball is clearly sitting at the SAME spot again in later tiles, "
-    "it was covered, not departed.\n"
-    "- If the resting spot is empty from some tile onward THROUGH THE "
-    "END of the strip, the ball HAS departed.\n"
-    "- Choose only printed frame numbers.\n"
-    "Respond with JSON only:\n"
+    "its top-left. A golf ball sits at rest near the cyan ring (the "
+    "ring may be slightly OFF the actual ball).\n"
+    "You may receive two versions of the same tiles:\n"
+    "- PHOTO tiles (natural colors): the raw crops. The ball is a "
+    "small round dot, bright white in sunlight — but when the "
+    "golfer's SHADOW passes over it, it turns dim gray and is easy "
+    "to miss while still sitting at the same spot. A dim, shadowed "
+    "ball at the spot counts as PRESENT.\n"
+    "- HEAT tiles (false-color / colormap): frame-difference against "
+    "the pre-swing baseline. After the ball truly departs, its exact "
+    "vacated spot glows as a small persistent hot dot. A moving "
+    "shadow glows as a LARGE diffuse region — ignore broad glows, "
+    "trust only the small localized one at the spot.\n"
+    "Procedure:\n"
+    "1. Find the ball in the earliest PHOTO tiles — the small round "
+    "dot nearest the ring. That location is THE SPOT for every later "
+    "judgment; report it as ball_x_pct/ball_y_pct.\n"
+    "2. Work BACKWARD from the final tile: find the LAST tile where "
+    "the ball is visible at the spot — bright OR shadow-dimmed. A "
+    "club head or body briefly covering the spot is occlusion, not "
+    "departure: if the ball shows at the spot in any later tile, it "
+    "had not left.\n"
+    "3. departure_frame = the first tile AFTER that where the spot is "
+    "empty and stays empty through the end.\n"
+    "Choose only printed frame numbers. Respond with JSON only:\n"
     "{\"ball_visible_initially\": true|false,"
     " \"ball_x_pct\": number|null, \"ball_y_pct\": number|null,"
     " \"last_present_frame\": int|null,"
     " \"departure_frame\": int|null, \"confidence\": 0.0-1.0}\n"
     "ball_x_pct/ball_y_pct = the ball centre in the FIRST tile as "
     "percentages (0-100) of that tile's width/height (null if no ball "
-    "is visible initially). last_present_frame = the LAST tile where "
-    "the ball is still at its resting spot. departure_frame = the "
-    "FIRST tile where it is gone (and stays gone). Both null only if "
-    "the ball is still at its spot in the final tiles."
+    "is visible initially). Both frame fields null only if the ball "
+    "is still at its spot in the final tiles."
 )
 
 
@@ -4691,28 +4697,51 @@ def verify_rest_and_impact_ai(
         client = _anthropic_client()
         use_model = model or ANCHOR_AI_MODEL
 
+        # Pre-swing baseline (for the heat twins sent alongside the
+        # photo tiles — motion evidence that makes departure pop and
+        # disambiguates a shadow crossing the patch).
+        _pre_fs = fs_sorted[: max(4, len(fs_sorted) // 6)]
+        base_gray = np.median(
+            np.stack([
+                cv2.cvtColor(crops[f], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                for f in _pre_fs
+            ]),
+            axis=0,
+        ).astype(np.uint8)
+
         # COARSE: every ~3rd frame across the whole window. Chunked
         # into images of 12 tiles (2 rows x 6) so each tile stays at
         # native resolution through the API — one 30-tile grid got
-        # downscaled until the ball was unreadable.
+        # downscaled until the ball was unreadable. Photo chunks first,
+        # then the HEAT twins of the same tiles.
         stride = max(1, int(round(fps / 10.0)))
         coarse_fs = fs_sorted[::stride]
         if coarse_fs[-1] != fs_sorted[-1]:
             coarse_fs.append(fs_sorted[-1])
         _CHUNK = 12
-        coarse_imgs = [
+        _photo_chunks = [
             _anchor_strip_image(
                 crops, coarse_fs[i:i + _CHUNK], ring, r, per_row=6,
             )
             for i in range(0, len(coarse_fs), _CHUNK)
         ][:4]
+        _heat_tiles = _anchor_mog2_tiles(crops, coarse_fs, base_gray)
+        _heat_chunks = [
+            _anchor_strip_image(
+                _heat_tiles, coarse_fs[i:i + _CHUNK], ring, r, per_row=6,
+            )
+            for i in range(0, len(coarse_fs), _CHUNK)
+        ][:4]
+        coarse_imgs = _photo_chunks + _heat_chunks
+        _layout = (
+            f"Images 1-{len(_photo_chunks)}: PHOTO strips in "
+            f"chronological order, frames {coarse_fs[0]}-{coarse_fs[-1]} "
+            f"(every {stride}). Images {len(_photo_chunks) + 1}-"
+            f"{len(coarse_imgs)}: HEAT twins of the same tiles."
+        )
         try:
             coarse = _anchor_strip_ask(
-                client, coarse_imgs,
-                f"{len(coarse_imgs)} strip image(s) in chronological "
-                f"order, covering frames {coarse_fs[0]}-{coarse_fs[-1]} "
-                f"(every {stride}).",
-                use_model,
+                client, coarse_imgs, _layout, use_model,
             )
         except Exception as exc:  # noqa: BLE001
             out["reason"] = f"api_failed: {exc}"
@@ -4785,10 +4814,7 @@ def verify_rest_and_impact_ai(
                     try:
                         retry = _anchor_strip_ask(
                             client, coarse_imgs,
-                            f"{len(coarse_imgs)} strip image(s) in "
-                            f"chronological order, frames "
-                            f"{coarse_fs[0]}-{coarse_fs[-1]} (every "
-                            f"{stride}). The resting spot IS empty by "
+                            _layout + " The resting spot IS empty by "
                             "the end of the strip — the ball did "
                             "depart. Find last_present_frame and "
                             "departure_frame.",
@@ -4810,15 +4836,24 @@ def verify_rest_and_impact_ai(
                 fine_hi = min(fs_sorted[-1], dep + stride + 1)
                 fine_fs = [f for f in range(fine_lo, fine_hi + 1) if f in crops]
                 if stride > 1 and len(fine_fs) >= 3:
-                    fine_img = _anchor_strip_image(
-                        crops, fine_fs, ring, r,
-                        per_row=min(6, len(fine_fs)),
+                    _fine_heat = _anchor_mog2_tiles(
+                        crops, fine_fs, base_gray,
                     )
+                    fine_imgs = [
+                        _anchor_strip_image(
+                            crops, fine_fs, ring, r,
+                            per_row=min(6, len(fine_fs)),
+                        ),
+                        _anchor_strip_image(
+                            _fine_heat, fine_fs, ring, r,
+                            per_row=min(6, len(fine_fs)),
+                        ),
+                    ]
                     try:
                         fine = _anchor_strip_ask(
-                            client, fine_img,
-                            f"Zoomed strip, EVERY frame "
-                            f"{fine_fs[0]}-{fine_fs[-1]}.",
+                            client, fine_imgs,
+                            f"Zoomed: image 1 PHOTO, image 2 HEAT twin, "
+                            f"EVERY frame {fine_fs[0]}-{fine_fs[-1]}.",
                             use_model,
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -4883,19 +4918,10 @@ def verify_rest_and_impact_ai(
                 out["image"] = name
                 # MOG2 twin: same tiles as frame-diff heat, so the
                 # operator can eyeball the motion evidence next to the
-                # photo tiles the model judged.
-                _pre = fs_sorted[: max(4, len(fs_sorted) // 6)]
-                _base_g = np.median(
-                    np.stack([
-                        cv2.cvtColor(
-                            crops[f], cv2.COLOR_BGR2GRAY,
-                        ).astype(np.float32)
-                        for f in _pre
-                    ]),
-                    axis=0,
-                ).astype(np.uint8)
+                # photo tiles the model judged (the model now sees the
+                # heat twins too).
                 out["image_mog2"] = _write_anchor_mog2_strip(
-                    crops, dbg_fs, _base_g, ring, r,
+                    crops, dbg_fs, base_gray, ring, r,
                     out.get("impact_frame"), debug_dir, debug_prefix,
                     "AI anchor check (MOG2 view)",
                 )
