@@ -4412,6 +4412,329 @@ def verify_rest_and_impact(
         return out
 
 
+# Model for the anchor-verification vision calls (film-strip "which
+# frame does the ball leave?" lookups). A spot-the-ball task — the
+# cheap fast tier handles it; override via env if needed.
+ANCHOR_AI_MODEL = os.environ.get("ANCHOR_AI_MODEL", "claude-haiku-4-5-20251001")
+
+_ANCHOR_STRIP_PROMPT = (
+    "You are looking at a film strip of small crops from a FIXED golf "
+    "camera. Every tile shows the SAME patch of ground across "
+    "consecutive video frames; each tile's frame number is printed at "
+    "its top-left. A golf ball initially sits at rest near the cyan "
+    "ring.\n"
+    "Task: find the FIRST frame where the ball has DEPARTED — it is no "
+    "longer at its resting spot because it was struck. A club head, "
+    "shadow, or the golfer may briefly cover the ball; if the ball is "
+    "visible at the spot again in LATER tiles, it had NOT departed "
+    "yet. Choose only from the printed frame numbers.\n"
+    "Respond with JSON only:\n"
+    "{\"ball_visible_initially\": true|false,"
+    " \"ball_x_pct\": number|null, \"ball_y_pct\": number|null,"
+    " \"departure_frame\": int|null, \"confidence\": 0.0-1.0}\n"
+    "ball_x_pct/ball_y_pct = the ball centre in the FIRST tile as "
+    "percentages (0-100) of that tile's width/height (null if no ball "
+    "is visible initially). departure_frame = null if the ball never "
+    "leaves its spot in this strip."
+)
+
+
+def _anchor_strip_image(
+    crops: dict, frames: list[int], ring_xy: tuple[float, float], r: int,
+    highlight: int | None = None, per_row: int = 10,
+):
+    """Numbered tile grid of rest-patch crops (BGR) — the image sent to
+    the vision model and saved as the debug artifact."""
+    tiles = []
+    for f in frames:
+        t = crops[f].copy()
+        cv2.circle(
+            t, (int(ring_xy[0]), int(ring_xy[1])), int(r * 0.9),
+            (255, 200, 0), 2, cv2.LINE_AA,
+        )
+        if highlight == f:
+            cv2.rectangle(
+                t, (3, 3), (t.shape[1] - 4, t.shape[0] - 4),
+                (0, 255, 255), 3,
+            )
+        cv2.rectangle(
+            t, (0, 0), (t.shape[1] - 1, t.shape[0] - 1), (90, 90, 90), 1,
+        )
+        cv2.putText(
+            t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
+            0.7, (0, 0, 0), 4, cv2.LINE_AA,
+        )
+        cv2.putText(
+            t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
+            0.7, (255, 255, 255), 2, cv2.LINE_AA,
+        )
+        tiles.append(t)
+    rows = []
+    for i in range(0, len(tiles), per_row):
+        row = tiles[i:i + per_row]
+        while len(row) < per_row:
+            row.append(np.zeros_like(tiles[0]))
+        rows.append(cv2.hconcat(row))
+    return cv2.vconcat(rows)
+
+
+def _anchor_strip_ask(client, img, extra_text: str, model: str) -> dict | None:
+    """One strip → JSON round trip. Returns parsed dict or None."""
+    send = img
+    if send.shape[1] > 1568:
+        sc = 1568.0 / send.shape[1]
+        send = cv2.resize(
+            send, (1568, int(round(send.shape[0] * sc))),
+            interpolation=cv2.INTER_AREA,
+        )
+    ok, buf = cv2.imencode(".jpg", send, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        return None
+    resp = client.messages.create(
+        model=model,
+        max_tokens=200,
+        system=[{
+            "type": "text",
+            "text": _ANCHOR_STRIP_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": extra_text + " JSON only."},
+            {"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64.standard_b64encode(bytes(buf)).decode("ascii"),
+            }},
+        ]}],
+    )
+    text = "".join(
+        c.text for c in resp.content if getattr(c, "type", None) == "text"
+    )
+    return _extract_json(text)
+
+
+def verify_rest_and_impact_ai(
+    input_path: Path,
+    rest_xy: tuple[float, float],
+    approx_impact_frame: int,
+    fps: float,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "anchorai",
+    window_sec: float = 1.5,
+    model: str | None = None,
+) -> dict:
+    """AI-verified anchors: same contract as verify_rest_and_impact, but
+    the DEPARTURE decision (and a rest-position correction) come from
+    vision instead of the pixel presence gate — which flaps when the
+    watched ring is slightly off the ball or shadows brighten the patch.
+
+    Two small calls per swing on the cheap model tier:
+      1. COARSE: a numbered film strip of the rest patch every ~3rd
+         frame across the window — "first frame the ball has departed?"
+         (also returns the ball's position in the first tile, correcting
+         a mis-snapped ring).
+      2. FINE: 1-frame-step strip around the coarse answer → exact
+         departure frame.
+
+    Returns the verify_rest_and_impact dict shape plus engine='ai' and
+    api_error=True when the failure was the API (caller should fall
+    back to the pixel check) rather than the scene."""
+    out = {
+        "available": False, "verified": None,
+        "rest_xy": [float(rest_xy[0]), float(rest_xy[1])],
+        "snapped": False, "snap_px": None,
+        "impact_frame": None, "impact_delta": None,
+        "present_ratio_pre": None, "reason": None, "image": None,
+        "engine": "ai", "api_error": False,
+    }
+    if not HAS_CV or not HAS_NP:
+        out["reason"] = "opencv/numpy not installed"
+        return out
+    if not HAS_ANTHROPIC or not os.environ.get("ANTHROPIC_API_KEY"):
+        out["reason"] = "ANTHROPIC_API_KEY not set"
+        out["api_error"] = True
+        return out
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open video"
+            return out
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(fps or 30.0)
+        imp = int(approx_impact_frame)
+        r = max(10, int(round(0.015 * h)))
+        m = 8 * r
+        cx0, cy0 = float(rest_xy[0]), float(rest_xy[1])
+        x0, x1 = max(0, int(cx0 - m)), min(w, int(cx0 + m + 1))
+        y0, y1 = max(0, int(cy0 - m)), min(h, int(cy0 + m + 1))
+        if x1 - x0 < 3 * r or y1 - y0 < 3 * r:
+            out["reason"] = "rest patch clipped by frame edge"
+            cap.release()
+            return out
+        f_lo = max(0, imp - int(round(float(window_sec) * fps)))
+        f_hi = imp + int(round(float(window_sec) * fps))
+        crops: dict[int, "np.ndarray"] = {}
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f_lo)
+        for f in range(f_lo, f_hi + 1):
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            crops[f] = fr[y0:y1, x0:x1].copy()
+        cap.release()
+        if len(crops) < 10:
+            out["reason"] = "window too short / read failed"
+            return out
+        out["available"] = True
+
+        ring = (cx0 - x0, cy0 - y0)
+        fs_sorted = sorted(crops)
+        client = _anthropic_client()
+        use_model = model or ANCHOR_AI_MODEL
+
+        # COARSE: every ~3rd frame across the whole window.
+        stride = max(1, int(round(fps / 10.0)))
+        coarse_fs = fs_sorted[::stride]
+        if coarse_fs[-1] != fs_sorted[-1]:
+            coarse_fs.append(fs_sorted[-1])
+        coarse_img = _anchor_strip_image(crops, coarse_fs, ring, r)
+        try:
+            coarse = _anchor_strip_ask(
+                client, coarse_img,
+                f"Strip covers frames {coarse_fs[0]}-{coarse_fs[-1]} "
+                f"(every {stride}).",
+                use_model,
+            )
+        except Exception as exc:  # noqa: BLE001
+            out["reason"] = f"api_failed: {exc}"
+            out["api_error"] = True
+            return out
+        if not coarse:
+            out["reason"] = "coarse strip: no parseable answer"
+            out["api_error"] = True
+            return out
+
+        # Rest correction from the first tile (bounded like the pixel
+        # snap so a hallucinated position can't drag the anchor away).
+        if not coarse.get("ball_visible_initially"):
+            out["verified"] = False
+            out["reason"] = (
+                "AI sees no ball at the claimed rest spot in the "
+                "pre-impact tiles — rest position likely wrong"
+            )
+        else:
+            bx_pct, by_pct = coarse.get("ball_x_pct"), coarse.get("ball_y_pct")
+            if bx_pct is not None and by_pct is not None:
+                try:
+                    bx = x0 + float(bx_pct) / 100.0 * (x1 - x0)
+                    by = y0 + float(by_pct) / 100.0 * (y1 - y0)
+                    d = ((bx - cx0) ** 2 + (by - cy0) ** 2) ** 0.5
+                    if 2.0 < d <= 6.0 * r:
+                        out["rest_xy"] = [round(bx, 1), round(by, 1)]
+                        out["snapped"] = True
+                        out["snap_px"] = float(round(d, 1))
+                except (TypeError, ValueError):
+                    pass
+            dep = coarse.get("departure_frame")
+            try:
+                dep = int(dep) if dep is not None else None
+            except (TypeError, ValueError):
+                dep = None
+            if dep is None or dep <= fs_sorted[0] or dep > fs_sorted[-1]:
+                out["verified"] = False
+                out["reason"] = (
+                    "AI: ball never leaves the rest spot in this window "
+                    "(practice swing, or impact estimate far off)"
+                )
+            else:
+                # FINE: 1-frame steps around the coarse answer.
+                fine_lo = max(fs_sorted[0], dep - stride - 1)
+                fine_hi = min(fs_sorted[-1], dep + stride + 1)
+                fine_fs = [f for f in range(fine_lo, fine_hi + 1) if f in crops]
+                if stride > 1 and len(fine_fs) >= 3:
+                    fine_img = _anchor_strip_image(
+                        crops, fine_fs, ring, r,
+                        per_row=min(6, len(fine_fs)),
+                    )
+                    try:
+                        fine = _anchor_strip_ask(
+                            client, fine_img,
+                            f"Zoomed strip, EVERY frame "
+                            f"{fine_fs[0]}-{fine_fs[-1]}.",
+                            use_model,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        fine = None
+                        log.warning(
+                            "anchor ai: fine pass failed (%s) — keeping "
+                            "coarse departure f%d", exc, dep,
+                        )
+                    fdep = (fine or {}).get("departure_frame")
+                    try:
+                        fdep = int(fdep) if fdep is not None else None
+                    except (TypeError, ValueError):
+                        fdep = None
+                    if fdep is not None and fine_lo <= fdep <= fine_hi:
+                        dep = fdep
+                out["verified"] = True
+                out["impact_frame"] = int(dep)
+                out["impact_delta"] = int(dep - imp)
+                out["reason"] = (
+                    f"AI: ball departed the rest spot at f{dep} "
+                    f"({dep - imp:+d} vs estimate)"
+                )
+
+        # Debug strip = the coarse image with the final answer flagged.
+        if debug_dir is not None:
+            try:
+                dbg_fs = list(coarse_fs)
+                if out.get("impact_frame") is not None:
+                    for extra in range(
+                        out["impact_frame"] - 2, out["impact_frame"] + 3,
+                    ):
+                        if extra in crops and extra not in dbg_fs:
+                            dbg_fs.append(extra)
+                    dbg_fs = sorted(set(dbg_fs))
+                dbg = _anchor_strip_image(
+                    crops, dbg_fs, ring, r, highlight=out.get("impact_frame"),
+                )
+                bar = np.zeros((56, dbg.shape[1], 3), np.uint8)
+                cv2.putText(
+                    bar,
+                    (
+                        f"AI anchor check [{use_model}] @ rest "
+                        f"({out['rest_xy'][0]:.0f},{out['rest_xy'][1]:.0f})"
+                        + (
+                            f" corrected {out['snap_px']}px"
+                            if out["snapped"] else ""
+                        )
+                        + f" - {out['reason']}"
+                    ),
+                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    bar,
+                    "numbered tiles sent to the model; yellow box = its "
+                    "departure (impact) answer, ring = claimed rest",
+                    (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
+                    (180, 180, 180), 1, cv2.LINE_AA,
+                )
+                img = cv2.vconcat([bar, dbg])
+                name = f"{debug_prefix}.jpg"
+                cv2.imwrite(
+                    str(Path(debug_dir) / name), img,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+                )
+                out["image"] = name
+            except Exception as exc:  # noqa: BLE001
+                log.warning("anchor ai: debug strip failed: %s", exc)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("verify_rest_and_impact_ai failed: %s", exc)
+        out["reason"] = str(exc)
+        return out
+
+
 def track_launch_from_rest(
     input_path: Path,
     rest_xy: tuple[float, float],

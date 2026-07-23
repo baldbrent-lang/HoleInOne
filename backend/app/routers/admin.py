@@ -1584,23 +1584,46 @@ def _run_long_upload_job(
                             try:
                                 from ..services.ai_tracer import (
                                     verify_rest_and_impact,
+                                    verify_rest_and_impact_ai,
                                 )
 
                                 _pk_f = int(round(
                                     float(d.get("peak_time_sec") or 0.0)
                                     * tee_fps,
                                 ))
-                                _anchor_rec = verify_rest_and_impact(
+                                # AI-first anchor check: the film-strip
+                                # vision lookup reads departure straight
+                                # off the tiles (~2 cheap calls/swing),
+                                # where the pixel presence gate flapped
+                                # when the ring was slightly off the
+                                # ball or shadows brightened the patch.
+                                # Pixel check remains the fallback on
+                                # API failure / no key.
+                                _anchor_rec = verify_rest_and_impact_ai(
                                     src_path,
                                     (float(_bf["x"]), float(_bf["y"])),
                                     _pk_f, tee_fps,
                                     debug_dir=CLIPS_DIR,
                                     debug_prefix=(
-                                        f"anchorchk-prod-{upload_id}-"
+                                        f"anchorai-prod-{upload_id}-"
                                         f"{secrets.token_hex(3)}"
                                     ),
                                     window_sec=1.5,
                                 )
+                                if _anchor_rec.get("api_error") or not (
+                                    _anchor_rec.get("available")
+                                ):
+                                    _anchor_rec = verify_rest_and_impact(
+                                        src_path,
+                                        (float(_bf["x"]), float(_bf["y"])),
+                                        _pk_f, tee_fps,
+                                        debug_dir=CLIPS_DIR,
+                                        debug_prefix=(
+                                            f"anchorchk-prod-{upload_id}-"
+                                            f"{secrets.token_hex(3)}"
+                                        ),
+                                        window_sec=1.5,
+                                    )
                                 if _anchor_rec.get("verified"):
                                     d["ball_rest_xy"] = list(
                                         _anchor_rec["rest_xy"],
@@ -4219,13 +4242,16 @@ def render_wizard_tracer(
         _lock_rest = ball_at_rest_override
         if ball_at_rest_override is not None and _imp_cut is not None:
             try:
-                # ANCHOR CHECK first (pixel-verify, no API): snap the
-                # rest ball to the bright-blob centroid; pin impact to
-                # the frame the ball departs the rest patch. Verified
-                # corrections feed the rest-lock cone below.
-                from ..services.ai_tracer import verify_rest_and_impact
+                # ANCHOR CHECK first: AI film-strip departure lookup
+                # (2 cheap vision calls), pixel presence check as the
+                # fallback. Verified corrections feed the rest-lock
+                # cone below.
+                from ..services.ai_tracer import (
+                    verify_rest_and_impact,
+                    verify_rest_and_impact_ai,
+                )
 
-                anchor_check_c = verify_rest_and_impact(
+                anchor_check_c = verify_rest_and_impact_ai(
                     src_for_trace,
                     (
                         float(ball_at_rest_override[0]),
@@ -4234,9 +4260,25 @@ def render_wizard_tracer(
                     _imp_cut, fps_c,
                     debug_dir=CLIPS_DIR,
                     debug_prefix=(
-                        f"anchorchk-wiz-{upload_id}-{secrets.token_hex(3)}"
+                        f"anchorai-wiz-{upload_id}-{secrets.token_hex(3)}"
                     ),
                 )
+                if anchor_check_c.get("api_error") or not (
+                    anchor_check_c.get("available")
+                ):
+                    anchor_check_c = verify_rest_and_impact(
+                        src_for_trace,
+                        (
+                            float(ball_at_rest_override[0]),
+                            float(ball_at_rest_override[1]),
+                        ),
+                        _imp_cut, fps_c,
+                        debug_dir=CLIPS_DIR,
+                        debug_prefix=(
+                            f"anchorchk-wiz-{upload_id}-"
+                            f"{secrets.token_hex(3)}"
+                        ),
+                    )
                 if anchor_check_c.get("verified"):
                     _lock_rest = (
                         float(anchor_check_c["rest_xy"][0]),
@@ -6721,15 +6763,28 @@ def _mog2_layer_for_ai_track(
         and not pipe.get("anchors_preverified")
     ):
         try:
-            from ..services.ai_tracer import verify_rest_and_impact
+            from ..services.ai_tracer import (
+                verify_rest_and_impact,
+                verify_rest_and_impact_ai,
+            )
 
-            anchor_check = verify_rest_and_impact(
+            anchor_check = verify_rest_and_impact_ai(
                 clip_path,
                 (float(_rest[0]), float(_rest[1])),
                 int(_imp), _fps,
                 debug_dir=CLIPS_DIR,
-                debug_prefix=f"anchorchk-{clip_path.stem}",
+                debug_prefix=f"anchorai-{clip_path.stem}",
             )
+            if anchor_check.get("api_error") or not anchor_check.get(
+                "available",
+            ):
+                anchor_check = verify_rest_and_impact(
+                    clip_path,
+                    (float(_rest[0]), float(_rest[1])),
+                    int(_imp), _fps,
+                    debug_dir=CLIPS_DIR,
+                    debug_prefix=f"anchorchk-{clip_path.stem}",
+                )
             if anchor_check.get("verified"):
                 _rest = (
                     float(anchor_check["rest_xy"][0]),
