@@ -5086,7 +5086,7 @@ function PoseChart({ pose }) {
  */
 function FlightMapStatic({
   bgUrl, dots, restBall, aiPoints, trackPoints, frameW, frameH,
-  impactFrame,
+  impactFrame, region,
 }) {
   // Native dims: prop when the backend knows them, else measured off
   // the heat image itself (it's rendered at native resolution).
@@ -5171,6 +5171,19 @@ function FlightMapStatic({
             width: "100%", height: "100%",
           }}
         >
+          {region && region.length === 4 && (
+            <rect
+              x={region[0]}
+              y={region[1]}
+              width={region[2] - region[0]}
+              height={region[3] - region[1]}
+              fill="none"
+              stroke="#ef4444"
+              strokeWidth={Math.max(2, fw / 600)}
+              strokeDasharray={`${fw / 80} ${fw / 160}`}
+              opacity={0.85}
+            />
+          )}
           {trackLine.length >= 2 && (
             <polyline
               points={trackLine.map(([x, y]) => `${x},${y}`).join(" ")}
@@ -5854,8 +5867,9 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                     <div className="tiny muted">
                       🗺 flight map — blue line = the FULL mapped arc
                       (AI + launch + MOG2), orange rings = pool dots
-                      added by arc completion, magenta = rest → AI
-                      launch (cyan dot = rest), amber = unused pool
+                      added by arc completion, dashed red = the
+                      arc-completion search region, magenta = rest →
+                      AI launch (cyan dot = rest), amber = unused pool
                       dots with frame labels
                     </div>
                     <FlightMapStatic
@@ -5867,6 +5881,7 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       frameW={s.ai.frame_w}
                       frameH={s.ai.frame_h}
                       impactFrame={s.ai.impact_frame}
+                      region={s.ai.arc_region}
                     />
                   </div>
                 )}

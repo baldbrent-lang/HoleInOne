@@ -7243,14 +7243,17 @@ def _mog2_layer_for_ai_track(
         key=lambda r: int(r["frame"]),
     )
 
-    # ARC COMPLETION (operator's rule): fit the FULL mapped arc (AI +
-    # launch tracker + chain) and project where the remaining flight
-    # logically is — the descent continues the ascent's x-trend (to
-    # its side) and frames get HIGHER as the ball gets LOWER in the
-    # image. Sweep the pool for dots sitting in that predicted
-    # corridor beyond the last mapped frame and add them
-    # (source='arc'); the final physics prune still applies.
+    # ARC COMPLETION (operator's rule): the mapped arc tells us its
+    # travel direction — continuation lives in a RECTANGLE from the
+    # arc's end toward that side of the frame: up to the top (ascent /
+    # apex, possibly exiting), down to the ground line (descent). Zoom
+    # into that region (noise outside is ignored) and find the chain
+    # of pool dots that rises along the trajectory with frame numbers
+    # INCREASING, tops out, then descends with frames still increasing
+    # — the completion pattern. Long frame gaps are allowed (the ball
+    # hides behind trees); spatial steps scale with the gap.
     n_arc = 0
+    arc_region = None
     try:
         _seenf: set = set()
         _fit_pts: list[dict] = []
@@ -7270,68 +7273,115 @@ def _mog2_layer_for_ai_track(
                 continue
             _seenf.add(p["frame"])
             _fit_pts.append(p)
-        if len(_fit_pts) >= 6:
-            _usedf = set(_seenf)
-            for _ in range(80):
-                _fs = _np.array([p["frame"] for p in _fit_pts], float)
-                _xs = _np.array([p["x"] for p in _fit_pts], float)
-                _ys = _np.array([p["y"] for p in _fit_pts], float)
-                _cx2 = _np.polyfit(
-                    _fs, _xs, 2 if len(_fit_pts) >= 8 else 1,
-                )
-                _cy2 = _np.polyfit(_fs, _ys, 2)
-                _lastp = _fit_pts[-1]
-                _apex_f = (
-                    -_cy2[1] / (2.0 * _cy2[0])
-                    if abs(float(_cy2[0])) > 1e-9 else None
-                )
-                _best = None
-                for dpt in sorted(pool, key=lambda d: d["frame"]):
-                    fno = int(dpt["frame"])
-                    if fno <= _lastp["frame"] or fno in _usedf:
-                        continue
-                    if _f_cap is not None and fno > _f_cap:
-                        break
-                    gap = fno - _lastp["frame"]
-                    if gap > 15:
-                        break
-                    pxp = float(_np.polyval(_cx2, fno))
-                    pyp = float(_np.polyval(_cy2, fno))
-                    tol = 30.0 + 6.0 * gap
-                    if ((float(dpt["x"]) - pxp) ** 2
-                            + (float(dpt["y"]) - pyp) ** 2) ** 0.5 > tol:
-                        continue
-                    # Descent rule: past the apex, a dot must not jump
-                    # back UP the image.
-                    if (
-                        float(_cy2[0]) > 0 and _apex_f is not None
-                        and fno > _apex_f
-                        and float(dpt["y"]) < _lastp["y"] - 15.0
-                    ):
-                        continue
-                    _best = dpt
-                    break
-                if _best is None:
-                    break
-                _newp = {
-                    "frame": int(_best["frame"]),
-                    "x": float(_best["x"]), "y": float(_best["y"]),
-                }
-                _fit_pts.append(_newp)
-                _usedf.add(_newp["frame"])
-                added.append({
-                    "frame": _newp["frame"], "found": True,
-                    "x": int(round(_newp["x"])),
-                    "y": int(round(_newp["y"])),
-                    "source": "arc",
-                })
-                n_arc += 1
-        if n_arc:
-            added.sort(key=lambda rec: int(rec["frame"]))
-            log.info(
-                "mog2 layer: arc completion added %d pool dot(s) along "
-                "the projected flight", n_arc,
+        _vw = _vh = None
+        if len(_fit_pts) >= 5:
+            _capv = cv2.VideoCapture(str(clip_path))
+            _vw = int(_capv.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            _vh = int(_capv.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            _capv.release()
+        if len(_fit_pts) >= 5 and _vw and _vh:
+            _r2 = max(10, int(round(0.015 * _vh)))
+            _lastp = _fit_pts[-1]
+            _lastf = int(_lastp["frame"])
+            _dx_tot = _fit_pts[-1]["x"] - _fit_pts[0]["x"]
+            _dirx = 1.0 if _dx_tot >= 0 else -1.0
+            if abs(_dx_tot) < 3 * _r2:
+                x_lo = _lastp["x"] - 20 * _r2
+                x_hi = _lastp["x"] + 20 * _r2
+            elif _dirx > 0:
+                x_lo, x_hi = _lastp["x"] - 10 * _r2, float(_vw)
+            else:
+                x_lo, x_hi = 0.0, _lastp["x"] + 10 * _r2
+            _gy = float(_rest[1]) if (_rest and len(_rest) == 2) else (
+                _lastp["y"]
             )
+            arc_region = [
+                int(max(0, x_lo)), 0,
+                int(min(_vw, x_hi)),
+                int(min(_vh, _gy + 2 * _r2)),
+            ]
+            cands = sorted(
+                [
+                    d for d in pool
+                    if int(d["frame"]) > _lastf
+                    and int(d["frame"]) not in _seenf
+                    and (_f_cap is None or int(d["frame"]) <= _f_cap)
+                    and arc_region[0] <= float(d["x"]) <= arc_region[2]
+                    and arc_region[1] <= float(d["y"]) <= arc_region[3]
+                ],
+                key=lambda d: int(d["frame"]),
+            )
+            # Was the mapped arc already descending at its end?
+            _tail = _fit_pts[-3:]
+            _phase0 = (
+                "down"
+                if len(_tail) == 3 and _tail[2]["y"] > _tail[0]["y"] + 4
+                else "up"
+            )
+
+            def _accept(prev, phase, d):
+                fno, pf = int(d["frame"]), int(prev["frame"])
+                if fno <= pf:
+                    return None
+                gap = fno - pf
+                if gap > 45:  # ~1.5s hidden is the most we bridge
+                    return None
+                dx = float(d["x"]) - float(prev["x"])
+                dy = float(d["y"]) - float(prev["y"])
+                if (dx * _dirx) < -3 * _r2:
+                    return None  # backward vs travel direction
+                if (dx * dx + dy * dy) ** 0.5 > (6 + 2.5 * gap) * _r2:
+                    return None  # too far for the frame gap
+                if phase == "up":
+                    if dy <= 2 * _r2:
+                        return "up"
+                    phase = "down"  # first drop = past the apex
+                if dy >= -2 * _r2:
+                    return "down"
+                return None  # descending chain must not jump back up
+
+            def _greedy(first_i):
+                prev = {"frame": _lastf, "x": _lastp["x"],
+                        "y": _lastp["y"]}
+                phase = _phase0
+                first_ph = _accept(prev, phase, cands[first_i])
+                if first_ph is None:
+                    return []
+                ch = [cands[first_i]]
+                phase = first_ph
+                prev = cands[first_i]
+                for d in cands[first_i + 1:]:
+                    nph = _accept(prev, phase, d)
+                    if nph is None:
+                        continue
+                    ch.append(d)
+                    phase = nph
+                    prev = d
+                return ch
+
+            best: list = []
+            for si in range(len(cands)):
+                if len(cands) - si <= len(best):
+                    break
+                ch = _greedy(si)
+                if len(ch) > len(best):
+                    best = ch
+            if len(best) >= 3:
+                for d in best:
+                    added.append({
+                        "frame": int(d["frame"]), "found": True,
+                        "x": int(round(float(d["x"]))),
+                        "y": int(round(float(d["y"]))),
+                        "source": "arc",
+                    })
+                    n_arc += 1
+                added.sort(key=lambda rec: int(rec["frame"]))
+                log.info(
+                    "mog2 layer: arc completion chained %d region dot(s) "
+                    "f%d-%d (region %s, dir %s)",
+                    n_arc, int(best[0]["frame"]), int(best[-1]["frame"]),
+                    arc_region, "right" if _dirx > 0 else "left",
+                )
     except Exception as exc:  # noqa: BLE001
         log.warning("mog2 layer: arc completion failed: %s", exc)
 
@@ -7345,6 +7395,7 @@ def _mog2_layer_for_ai_track(
         "n_added_mid": len(added_mid),
         "n_added_descent": len(added_descent),
         "n_arc_completed": n_arc,
+        "arc_region": arc_region,
         "corresponds": bool(n_matched >= 2),
         "lock": lock_info,
         "anchor_check": anchor_check,
@@ -7377,6 +7428,18 @@ def _mog2_layer_for_ai_track(
                         (int(float(_rest[0])), int(float(_rest[1]))),
                         (int(_s3["x"]), int(_s3["y"])),
                         (255, 0, 255), 2, cv2.LINE_AA,
+                    )
+                if arc_region:
+                    cv2.rectangle(
+                        img, (arc_region[0], arc_region[1]),
+                        (arc_region[2], arc_region[3]),
+                        (0, 0, 255), 2,
+                    )
+                    cv2.putText(
+                        img, "arc-completion search region",
+                        (arc_region[0] + 6, arc_region[1] + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2,
+                        cv2.LINE_AA,
                     )
                 for cp in pool:
                     cv2.circle(
@@ -8567,6 +8630,11 @@ def _run_produce_debug_job(
                                 and rec.get("y") is not None
                             ][:1200],
                             "ball": _sw.get("ball"),
+                            "arc_region": (
+                                (_sw.get("mog2_stats") or {}).get(
+                                    "arc_region",
+                                )
+                            ),
                             # Native dims from edit_metrics (the model
                             # has no width/height columns); the
                             # frontend also falls back to the heat
