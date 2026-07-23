@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -4739,16 +4740,30 @@ def verify_rest_and_impact_ai(
             f"(every {stride}). Images {len(_photo_chunks) + 1}-"
             f"{len(coarse_imgs)}: HEAT twins of the same tiles."
         )
-        try:
-            coarse = _anchor_strip_ask(
-                client, coarse_imgs, _layout, use_model,
-            )
-        except Exception as exc:  # noqa: BLE001
-            out["reason"] = f"api_failed: {exc}"
-            out["api_error"] = True
-            return out
+        # The coarse ask is the make-or-break call — retry transient
+        # API failures (overloaded / timeout / unparseable) instead of
+        # dumping straight to the flaky pixel fallback.
+        coarse = None
+        _last_err: str | None = None
+        for _attempt in range(3):
+            if _attempt:
+                time.sleep(1.5 * _attempt)
+            try:
+                coarse = _anchor_strip_ask(
+                    client, coarse_imgs, _layout, use_model,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _last_err = f"api_failed: {exc}"
+                log.warning(
+                    "anchor ai: coarse attempt %d failed: %s",
+                    _attempt + 1, exc,
+                )
+                continue
+            if coarse:
+                break
+            _last_err = "coarse strip: no parseable answer"
         if not coarse:
-            out["reason"] = "coarse strip: no parseable answer"
+            out["reason"] = _last_err or "coarse strip: no answer"
             out["api_error"] = True
             return out
 

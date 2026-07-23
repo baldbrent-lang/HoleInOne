@@ -1613,6 +1613,7 @@ def _run_long_upload_job(
                                 if _anchor_rec.get("api_error") or not (
                                     _anchor_rec.get("available")
                                 ):
+                                    _ai_fail = _anchor_rec.get("reason")
                                     _anchor_rec = verify_rest_and_impact(
                                         src_path,
                                         (float(_bf["x"]), float(_bf["y"])),
@@ -1623,6 +1624,12 @@ def _run_long_upload_job(
                                             f"{secrets.token_hex(3)}"
                                         ),
                                         window_sec=1.5,
+                                    )
+                                    # Debug must SHOW that the AI check
+                                    # bailed and why — a silent pixel
+                                    # fallback looks like the AI answer.
+                                    _anchor_rec["ai_fallback_reason"] = (
+                                        _ai_fail
                                     )
                                 if _anchor_rec.get("verified"):
                                     d["ball_rest_xy"] = list(
@@ -1681,6 +1688,7 @@ def _run_long_upload_job(
                                             "snap_px", "impact_frame",
                                             "impact_delta", "reason",
                                             "image", "image_mog2",
+                                            "ai_fallback_reason",
                                             "launch_n",
                                             "launch_reason", "launch_image",
                                             "launch_image_heat",
@@ -1724,6 +1732,7 @@ def _run_long_upload_job(
                                         "verified", "snapped", "snap_px",
                                         "impact_frame", "impact_delta",
                                         "reason", "image", "image_mog2",
+                                        "ai_fallback_reason",
                                         "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
@@ -2173,6 +2182,7 @@ def _process_long_upload_segments(
                     for k in (
                         "verified", "snapped", "snap_px", "impact_delta",
                         "present_ratio_pre", "reason",
+                        "ai_fallback_reason",
                     )
                 }
                 if _ac.get("image") and (CLIPS_DIR / _ac["image"]).exists():
@@ -4276,6 +4286,7 @@ def render_wizard_tracer(
                 if anchor_check_c.get("api_error") or not (
                     anchor_check_c.get("available")
                 ):
+                    _ai_fail_c = anchor_check_c.get("reason")
                     anchor_check_c = verify_rest_and_impact(
                         src_for_trace,
                         (
@@ -4289,6 +4300,7 @@ def render_wizard_tracer(
                             f"{secrets.token_hex(3)}"
                         ),
                     )
+                    anchor_check_c["ai_fallback_reason"] = _ai_fail_c
                 if anchor_check_c.get("verified"):
                     _lock_rest = (
                         float(anchor_check_c["rest_xy"][0]),
@@ -4877,6 +4889,7 @@ def render_wizard_tracer(
                         for k in (
                             "verified", "snapped", "snap_px",
                             "impact_delta", "present_ratio_pre", "reason",
+                            "ai_fallback_reason",
                         )
                     },
                     "impact_frame": (
@@ -6791,6 +6804,7 @@ def _mog2_layer_for_ai_track(
             if anchor_check.get("api_error") or not anchor_check.get(
                 "available",
             ):
+                _ai_fail = anchor_check.get("reason")
                 anchor_check = verify_rest_and_impact(
                     clip_path,
                     (float(_rest[0]), float(_rest[1])),
@@ -6798,6 +6812,7 @@ def _mog2_layer_for_ai_track(
                     debug_dir=CLIPS_DIR,
                     debug_prefix=f"anchorchk-{clip_path.stem}",
                 )
+                anchor_check["ai_fallback_reason"] = _ai_fail
             if anchor_check.get("verified"):
                 _rest = (
                     float(anchor_check["rest_xy"][0]),

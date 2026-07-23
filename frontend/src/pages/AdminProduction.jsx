@@ -5223,6 +5223,14 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                               departure pin failed — {s.anchor.reason}
                             </span>
                           )}
+                          {s.anchor.ai_fallback_reason != null && (
+                            <div className="tiny" style={{ color: "#b7791f" }}>
+                              ⚠ AI anchor check bailed (
+                              {s.anchor.ai_fallback_reason}) — the strip
+                              below is the PIXEL fallback, not the AI's
+                              read
+                            </div>
+                          )}
                           {s.anchor.image_url && (
                             <div style={{ marginTop: 3 }}>
                               {s.anchor.image_mog2_url && (
@@ -5588,6 +5596,13 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       <span style={{ color: "#b7791f" }}>
                         unverified — {s.ai.anchor_check.reason}
                       </span>
+                    )}
+                    {s.ai.anchor_check.ai_fallback_reason != null && (
+                      <div className="tiny" style={{ color: "#b7791f" }}>
+                        ⚠ AI check bailed (
+                        {s.ai.anchor_check.ai_fallback_reason}) — pixel
+                        fallback shown
+                      </div>
                     )}
                     {s.ai.anchor_check.image_url && (
                       <div style={{ marginTop: 4 }}>
