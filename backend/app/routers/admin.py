@@ -1915,54 +1915,67 @@ def _run_long_upload_job(
             )
 
             # Publish total + reset progress so the polling UI can show
-            # "X/Y processed" while the heavy work runs.
-            row.last_n_segments = len(segs)
-            row.last_n_succeeded = 0
-            # Persist the swing windows into edit_metrics so the
-            # Edit-wizard for multi-swing uploads can hydrate without
-            # re-running detect-swings. Each entry mirrors the shape
-            # the wizard expects: idx + frame indices + fps.
-            saved_em = dict(row.edit_metrics or {})
-            existing_swings = saved_em.get("swings") or []
-            by_idx = {
-                int(s.get("idx", -1)): s for s in existing_swings if isinstance(s, dict)
-            }
-            for i, seg in enumerate(segs):
-                if i in by_idx:
-                    continue
-                start_sec = float(seg.get("start_sec") or 0.0)
-                end_sec = float(seg.get("end_sec") or start_sec)
-                start_frame = int(round(start_sec * (tee_fps or 30.0)))
-                end_frame = int(round(end_sec * (tee_fps or 30.0)))
-                # Impact frame from the detector's peak_time_sec if available;
-                # falls back to CLIP_SECONDS_BEFORE_IMPACT into the window.
-                _peak_t = float(
-                    seg.get("peak_time_sec") or (start_sec + CLIP_SECONDS_BEFORE_IMPACT)
-                )
-                impact_frame = int(round(_peak_t * (tee_fps or 30.0)))
-                address_frame = max(
-                    start_frame,
-                    impact_frame - int(round(1.5 * (tee_fps or 30.0))),
-                )
-                by_idx[i] = {
-                    "idx": i,
-                    "start_frame": start_frame,
-                    "end_frame": end_frame,
-                    "address_frame": address_frame,
-                    "impact_frame": impact_frame,
-                    "fps": round(tee_fps, 2) if tee_fps else None,
+            # "X/Y processed" while the heavy work runs. Wrapped in the
+            # dead-connection retry: minutes of pose/anchor work ran
+            # since the last DB touch, and Postgres (Neon) kills a
+            # connection that idled inside an open transaction — the
+            # retry re-fetches on a fresh connection and re-applies.
+            def _publish_segments(s):
+                r2 = s.get(LongVideoUpload, upload_id)
+                if r2 is None:
+                    return
+                r2.last_n_segments = len(segs)
+                r2.last_n_succeeded = 0
+                # Persist the swing windows into edit_metrics so the
+                # Edit-wizard for multi-swing uploads can hydrate
+                # without re-running detect-swings.
+                saved_em = dict(r2.edit_metrics or {})
+                existing_swings = saved_em.get("swings") or []
+                by_idx = {
+                    int(sw.get("idx", -1)): sw
+                    for sw in existing_swings if isinstance(sw, dict)
                 }
-            saved_em["swings"] = [by_idx[i] for i in sorted(by_idx)]
-            # Audit trail of this produce run's per-swing filter decisions
-            # (pose ratio/bend, heat verdict, AI judge, practice verdict,
-            # what dropped it) — the ground truth for "why did produce cut
-            # these clips?".
-            try:
-                saved_em["produce_decisions"] = _decisions
-            except NameError:
-                pass
-            row.edit_metrics = saved_em
-            db.commit()
+                for i, seg in enumerate(segs):
+                    if i in by_idx:
+                        continue
+                    start_sec = float(seg.get("start_sec") or 0.0)
+                    end_sec = float(seg.get("end_sec") or start_sec)
+                    start_frame = int(round(start_sec * (tee_fps or 30.0)))
+                    end_frame = int(round(end_sec * (tee_fps or 30.0)))
+                    _peak_t = float(
+                        seg.get("peak_time_sec")
+                        or (start_sec + CLIP_SECONDS_BEFORE_IMPACT)
+                    )
+                    impact_frame = int(round(_peak_t * (tee_fps or 30.0)))
+                    address_frame = max(
+                        start_frame,
+                        impact_frame - int(round(1.5 * (tee_fps or 30.0))),
+                    )
+                    by_idx[i] = {
+                        "idx": i,
+                        "start_frame": start_frame,
+                        "end_frame": end_frame,
+                        "address_frame": address_frame,
+                        "impact_frame": impact_frame,
+                        "fps": round(tee_fps, 2) if tee_fps else None,
+                    }
+                saved_em["swings"] = [by_idx[i] for i in sorted(by_idx)]
+                # Audit trail of this produce run's per-swing filter
+                # decisions — the ground truth for "why did produce cut
+                # these clips?".
+                try:
+                    saved_em["produce_decisions"] = _decisions
+                except NameError:
+                    pass
+                r2.edit_metrics = saved_em
+
+            _commit_retry(db, _publish_segments, "publish segments")
+            row = db.get(LongVideoUpload, upload_id)
+            if row is None:
+                log.warning(
+                    "long-upload worker: row %s deleted mid-run", upload_id,
+                )
+                return
 
             results = _process_long_upload_segments(
                 db,
@@ -1981,26 +1994,35 @@ def _run_long_upload_job(
                 clip_after=(settings.pose_clip_after_sec if used_pose else None),
             )
 
-            # Re-fetch in case the session was rolled back during segment work.
-            row = db.get(LongVideoUpload, upload_id)
-            if row is None:
-                log.warning("long-upload worker: row %s deleted mid-run", upload_id)
-                return
-            row.last_n_segments = len(segs)
-            row.last_n_succeeded = sum(1 for r in results if r.get("ok"))
-            row.processing_status = "completed"
-            row.processing_completed_at = _utcnow_naive()
-            row.last_error = None
-            db.commit()
+            # Final bookkeeping — dead-connection-retried like the
+            # publish above (the segment loop can run for many minutes).
+            _n_ok = sum(1 for r in results if r.get("ok"))
+
+            def _mark_completed(s):
+                r2 = s.get(LongVideoUpload, upload_id)
+                if r2 is None:
+                    return
+                r2.last_n_segments = len(segs)
+                r2.last_n_succeeded = _n_ok
+                r2.processing_status = "completed"
+                r2.processing_completed_at = _utcnow_naive()
+                r2.last_error = None
+
+            _commit_retry(db, _mark_completed, "mark completed")
         except Exception as exc:
             log.exception("long-upload worker %s failed: %s", upload_id, exc)
             db.rollback()
-            row = db.get(LongVideoUpload, upload_id)
-            if row is not None:
-                row.processing_status = "failed"
-                row.processing_completed_at = _utcnow_naive()
-                row.last_error = str(exc)[:2000]
-                db.commit()
+            _err_txt = str(exc)[:2000]
+
+            def _mark_failed(s):
+                r2 = s.get(LongVideoUpload, upload_id)
+                if r2 is None:
+                    return
+                r2.processing_status = "failed"
+                r2.processing_completed_at = _utcnow_naive()
+                r2.last_error = _err_txt
+
+            _commit_retry(db, _mark_failed, "mark failed")
     finally:
         db.close()
 
@@ -2085,10 +2107,13 @@ def _process_long_upload_segments(
     def _bump_progress(done_so_far: int) -> None:
         if progress_upload_id is None:
             return
-        row = db.get(LongVideoUpload, progress_upload_id)
-        if row is not None:
-            row.last_n_succeeded = done_so_far
-            db.commit()
+
+        def _apply(s):
+            r2 = s.get(LongVideoUpload, progress_upload_id)
+            if r2 is not None:
+                r2.last_n_succeeded = done_so_far
+
+        _commit_retry(db, _apply, "bump progress")
 
     # Cache the course once per call — _intro_overlay_for_clip needs
     # course.name / par3_holes / hole_yardages for every segment.
@@ -2788,6 +2813,39 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
         "freed_bytes": freed,
         "files_unlinked": deleted_files,
     }
+
+
+def _commit_retry(db, apply_fn, what: str, retries: int = 2) -> bool:
+    """Apply `apply_fn(db)` and commit, retrying on a dead connection.
+
+    Long-running workers (produce spends minutes on tracer/AI work
+    between DB touches) can find their connection killed by Postgres's
+    idle-in-transaction timeout — the commit then dies with
+    'SSL connection has been closed unexpectedly'. rollback() discards
+    the dead connection; pool_pre_ping hands the retry a live one, and
+    apply_fn re-fetches + re-applies so nothing depends on the dead
+    session state. Returns True on success."""
+    from sqlalchemy.exc import InterfaceError, OperationalError
+
+    for attempt in range(retries + 1):
+        try:
+            apply_fn(db)
+            db.commit()
+            return True
+        except (OperationalError, InterfaceError) as exc:
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt >= retries:
+                log.error("%s: commit failed after retries: %s", what, exc)
+                return False
+            log.warning(
+                "%s: dead DB connection (%s) — retrying on a fresh one",
+                what, exc,
+            )
+            time.sleep(1.0 + attempt)
+    return False
 
 
 def _screen_non_golf_upload(upload_id: int, tee_name: str | None) -> bool:
@@ -8618,6 +8676,12 @@ def _run_produce_debug_job(
             seg_path = CLIPS_DIR / seg_name
 
             classical = {"ok": False, "error": "cut failed"}
+            # Close any open read transaction before the minutes-long
+            # classical run (Postgres idle-in-transaction timeout).
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
             if cut_segment(src_path, seg_path, cut_start, cut_end):
                 try:
                     c_url, c_info, _c_traced, c_debug_url = _run_tracer(
@@ -8745,6 +8809,13 @@ def _run_produce_debug_job(
                         ),
                     }
                     break
+                # End the read transaction before sleeping — Postgres
+                # kills connections that idle INSIDE a transaction, and
+                # this poll can run for many minutes.
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
                 time.sleep(5.0)
 
             entry = {

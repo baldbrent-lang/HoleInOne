@@ -33,7 +33,15 @@ if not db_url.startswith("sqlite"):
     engine_kwargs["pool_recycle"] = 300  # seconds
 
 engine = create_engine(db_url, **engine_kwargs)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+# expire_on_commit=False: after a commit, ORM objects keep their loaded
+# values instead of re-SELECTing on next attribute access. The re-SELECT
+# silently OPENED A NEW TRANSACTION inside long-running workers (produce
+# spends minutes on tracer work between DB touches), and Postgres then
+# killed the connection with 'idle-in-transaction timeout'.
+SessionLocal = sessionmaker(
+    bind=engine, autoflush=False, autocommit=False, future=True,
+    expire_on_commit=False,
+)
 
 
 class Base(DeclarativeBase):
