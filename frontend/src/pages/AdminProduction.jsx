@@ -226,10 +226,19 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip
   const hasEvidence = (s) =>
     s?.mog2_overlay_url || (s?.timed_points || []).length > 0;
   const withOverlay = (swings || []).filter(hasEvidence);
+  // Match the SELECTED CLIP to its swing by the stored clip_id first —
+  // positional (idx) matching breaks the moment a clip is deleted (the
+  // remaining clips shift position but the swings keep their idx, so
+  // clip 1 showed the DELETED swing's click-to-plot). Positional match
+  // stays as the fallback for rows produced before clip_id stamping.
   const curSwing =
-    withOverlay.length === 1 && (clips || []).length <= 1
+    (cur &&
+      (swings || []).find(
+        (s) => s?.clip_id != null && s.clip_id === cur.id && hasEvidence(s),
+      )) ||
+    (withOverlay.length === 1 && (clips || []).length <= 1
       ? withOverlay[0]
-      : (swings || []).find((s) => s?.idx === idx && hasEvidence(s));
+      : (swings || []).find((s) => s?.idx === idx && hasEvidence(s)));
   const aces = has ? clips.filter((c) => c.ball_in_cup).length : 0;
   const holes = has
     ? clips.map((c) => c.hole_number).filter((h, i, a) => h != null && a.indexOf(h) === i)
@@ -411,9 +420,15 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   const frameW = row.edit_metrics?.frame_width ?? row.tee_width ?? null;
   const frameH = row.edit_metrics?.frame_height ?? row.tee_height ?? null;
   const bgUrl = swing.tracer_raw_motion_url || swing.mog2_overlay_url;
+  // Resolve this swing's produced clip by IDENTITY (clip_id) first —
+  // positional lookup goes stale as soon as a clip is deleted.
+  const clipForSwing =
+    (row.produced_clips || []).find(
+      (c) => swing.clip_id != null && c.id === swing.clip_id,
+    ) ?? row.produced_clips?.[swingPos];
   const holeNumber = Number(
     swing.finalized_hole_number
-      ?? row.produced_clips?.[swingPos]?.hole_number
+      ?? clipForSwing?.hole_number
       ?? 1,
   ) || 1;
 
@@ -510,8 +525,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       // swing order on an untouched row). Without clip_id the backend
       // updates the upload's most recent clip, i.e. some other swing.
       setBusyMsg("Updating Produced Clips…");
-      const clipId =
-        swing.clip_id ?? row.produced_clips?.[swingPos]?.id ?? null;
+      const clipId = swing.clip_id ?? clipForSwing?.id ?? null;
       const committed = await api.commitWizardClip(
         adminPassword, row.id,
         clipId != null ? { clip_id: clipId } : {},
