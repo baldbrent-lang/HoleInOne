@@ -4905,6 +4905,7 @@ def verify_rest_and_impact_ai(
     window_sec: float = 1.5,
     model: str | None = None,
     start_frame: int | None = None,
+    end_frame: int | None = None,
 ) -> dict:
     """AI anchor check, SEQUENTIAL version (operator's design).
 
@@ -4956,6 +4957,13 @@ def verify_rest_and_impact_ai(
             else max(0, imp - int(round(float(window_sec) * fps)))
         )
         f_hi = imp + int(round(float(window_sec) * fps))
+        # The classifier's AFTER frame is a hard bound — the ball IS
+        # gone by then. Extending the window to it means an early pose
+        # peak (waggle detected as the swing) can't strand the walk
+        # before the real strike ('never left' with a visibly departed
+        # ball).
+        if end_frame is not None:
+            f_hi = max(f_hi, int(end_frame))
         crops: dict[int, "np.ndarray"] = {}
         cap.set(cv2.CAP_PROP_POS_FRAMES, f_lo)
         for f in range(f_lo, f_hi + 1):

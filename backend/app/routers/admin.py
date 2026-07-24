@@ -1627,11 +1627,19 @@ def _run_long_upload_job(
                                     int(round(float(_bf_t) * tee_fps))
                                     if _bf_t is not None else None
                                 )
+                                # The classifier's AFTER frame bounds
+                                # the walk — ball is gone by then.
+                                _af_t = (v.get("after") or {}).get("t")
+                                _end_f = (
+                                    int(round(float(_af_t) * tee_fps))
+                                    if _af_t is not None else None
+                                )
                                 _anchor_rec = verify_rest_and_impact_ai(
                                     src_path,
                                     (float(_bf["x"]), float(_bf["y"])),
                                     _pk_f, tee_fps,
                                     start_frame=_start_f,
+                                    end_frame=_end_f,
                                     debug_dir=_dbg_dir,
                                     debug_prefix=(
                                         f"anchorai-prod-{upload_id}-"
