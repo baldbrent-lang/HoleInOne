@@ -3148,6 +3148,28 @@ def _draw_dashed_tracer(
         )
 
 
+def _clip_point_to_frame(ax, ay, bx, by, w, h):
+    """Point where segment A(inside)->B(outside) crosses the frame
+    rect boundary — used to run the tracer exactly to the screen edge
+    instead of stopping at the last in-frame sample."""
+    t_min = 1.0
+    if bx != ax:
+        for edge in (0.0, float(w - 1)):
+            t = (edge - ax) / (bx - ax)
+            if 0.0 < t < t_min:
+                yy = ay + (by - ay) * t
+                if 0.0 <= yy <= h - 1:
+                    t_min = t
+    if by != ay:
+        for edge in (0.0, float(h - 1)):
+            t = (edge - ay) / (by - ay)
+            if 0.0 < t < t_min:
+                xx = ax + (bx - ax) * t
+                if 0.0 <= xx <= w - 1:
+                    t_min = t
+    return ax + (bx - ax) * t_min, ay + (by - ay) * t_min
+
+
 def _tip_reveal_schedule(
     samples: list[tuple[int, int, int]],
     anchors: list[tuple[int, int, int]],
@@ -3404,6 +3426,7 @@ def render_tracer_video(
         manual_render = True
         pts = sorted(anchors, key=lambda a: a[0])
         n = len(pts)
+        _mprev = None  # (x, y, inside) for frame-edge clipping
 
         def _catmull(p0, p1, p2, p3, t):
             # Standard Catmull-Rom basis; p1→p2 is the drawn segment,
@@ -3427,10 +3450,28 @@ def render_tracer_video(
                 continue
             for ff in range(f1, f2):
                 t = (ff - f1) / float(span)
-                xi = int(round(_catmull(x0, x1, x2, x3, t)))
-                yi = int(round(_catmull(y0, y1, y2, y3, t)))
-                if 0 <= xi < width and 0 <= yi < height:
-                    smoothed_points.append((ff, xi, yi))
+                xi = float(_catmull(x0, x1, x2, x3, t))
+                yi = float(_catmull(y0, y1, y2, y3, t))
+                inside = 0 <= xi < width and 0 <= yi < height
+                if inside:
+                    if _mprev is not None and not _mprev[2]:
+                        cxr, cyr = _clip_point_to_frame(
+                            xi, yi, _mprev[0], _mprev[1], width, height,
+                        )
+                        smoothed_points.append(
+                            (ff, int(round(cxr)), int(round(cyr))),
+                        )
+                    smoothed_points.append(
+                        (ff, int(round(xi)), int(round(yi))),
+                    )
+                elif _mprev is not None and _mprev[2]:
+                    cxr, cyr = _clip_point_to_frame(
+                        _mprev[0], _mprev[1], xi, yi, width, height,
+                    )
+                    smoothed_points.append(
+                        (ff, int(round(cxr)), int(round(cyr))),
+                    )
+                _mprev = (xi, yi, inside)
         f_last, x_last, y_last = pts[-1]
         if 0 <= x_last < width and 0 <= y_last < height:
             smoothed_points.append((f_last, x_last, y_last))
@@ -3629,12 +3670,36 @@ def render_tracer_video(
             # briefly off-screen near the apex, and breaking there killed
             # the entire line "on the way up". Skipping lets it draw up to
             # the edge and resume on the descent.
+            _prev_raw = None  # (x, y, inside)
             for f in range(first_frame, render_end + 1):
-                x = int(round(float(np.polyval(x_coef, f))))
-                y = int(round(float(np.polyval(y_coef, f))))
-                if x < 0 or x >= width or y < 0 or y >= height:
-                    continue
-                smoothed_points.append((f, x, y))
+                xf = float(np.polyval(x_coef, f))
+                yf = float(np.polyval(y_coef, f))
+                inside = 0 <= xf < width and 0 <= yf < height
+                if inside:
+                    if _prev_raw is not None and not _prev_raw[2]:
+                        # Re-entry: start the run exactly ON the frame
+                        # edge, not at the first in-frame sample.
+                        cxr, cyr = _clip_point_to_frame(
+                            xf, yf, _prev_raw[0], _prev_raw[1],
+                            width, height,
+                        )
+                        smoothed_points.append(
+                            (f, int(round(cxr)), int(round(cyr))),
+                        )
+                    smoothed_points.append(
+                        (f, int(round(xf)), int(round(yf))),
+                    )
+                elif _prev_raw is not None and _prev_raw[2]:
+                    # Exit: run the line to the frame edge before the
+                    # off-screen gap.
+                    cxr, cyr = _clip_point_to_frame(
+                        _prev_raw[0], _prev_raw[1], xf, yf,
+                        width, height,
+                    )
+                    smoothed_points.append(
+                        (f, int(round(cxr)), int(round(cyr))),
+                    )
+                _prev_raw = (xf, yf, inside)
             # Observed-progress timing: reveal the curve at the ball's
             # actual per-frame pace (front-loaded) instead of the fit's
             # constant rate, which visibly lagged the ball off the tee.
