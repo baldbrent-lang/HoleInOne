@@ -1256,6 +1256,7 @@ def _run_long_upload_job(
     tee_green_delta_sec: float = 0.0,
     single_hole: bool = False,
     motion_only: bool = False,
+    debug_artifacts: bool = False,
 ) -> None:
     """Background worker for the long-upload cut / splice / AI-tracer
     pipeline.
@@ -1267,6 +1268,12 @@ def _run_long_upload_job(
     and auto_detect_swings is true, peaks are detected from the tee
     audio inside this worker.
     """
+    # Diagnostic film-strips (anchor walk, launch tracker, AI launch
+    # plot) are only written when the run came from the Debug button —
+    # plain Produce / Re-Produce skips them (they were the bulk of the
+    # artifact spam). Product images (raw motion heat, MOG2 overlay,
+    # click-to-plot dots) stay.
+    _dbg_dir = CLIPS_DIR if debug_artifacts else None
     db = SessionLocal()
     try:
         row = db.get(LongVideoUpload, upload_id)
@@ -1378,6 +1385,20 @@ def _run_long_upload_job(
                         pair_window_sec=float(combined_pair_window_sec),
                         debug=_detect_debug,
                     )
+
+                # NON-GOLF: the detector doubles as the screen — a
+                # video with zero swing candidates is a walk-by / pet /
+                # empty capture. Delete it instead of failing the run.
+                if not detected and settings.auto_delete_non_golf:
+                    try:
+                        db.rollback()  # release our txn before deleting
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _auto_delete_upload(
+                        upload_id,
+                        "no golf swing detected by the produce detector",
+                    )
+                    return
 
                 # Per-swing audit trail. Every filter decision lands here,
                 # is logged as one JSON line, and is persisted to
@@ -1599,11 +1620,19 @@ def _run_long_upload_job(
                                 # ball or shadows brightened the patch.
                                 # Pixel check remains the fallback on
                                 # API failure / no key.
+                                # Sequential walk starts at the BEFORE
+                                # frame (ball known present there).
+                                _bf_t = _bf.get("t")
+                                _start_f = (
+                                    int(round(float(_bf_t) * tee_fps))
+                                    if _bf_t is not None else None
+                                )
                                 _anchor_rec = verify_rest_and_impact_ai(
                                     src_path,
                                     (float(_bf["x"]), float(_bf["y"])),
                                     _pk_f, tee_fps,
-                                    debug_dir=CLIPS_DIR,
+                                    start_frame=_start_f,
+                                    debug_dir=_dbg_dir,
                                     debug_prefix=(
                                         f"anchorai-prod-{upload_id}-"
                                         f"{secrets.token_hex(3)}"
@@ -1618,7 +1647,7 @@ def _run_long_upload_job(
                                         src_path,
                                         (float(_bf["x"]), float(_bf["y"])),
                                         _pk_f, tee_fps,
-                                        debug_dir=CLIPS_DIR,
+                                        debug_dir=_dbg_dir,
                                         debug_prefix=(
                                             f"anchorchk-prod-{upload_id}-"
                                             f"{secrets.token_hex(3)}"
@@ -1652,7 +1681,7 @@ def _run_long_upload_job(
                                             tuple(_anchor_rec["rest_xy"]),
                                             int(_anchor_rec["impact_frame"]),
                                             tee_fps,
-                                            debug_dir=CLIPS_DIR,
+                                            debug_dir=_dbg_dir,
                                             debug_prefix=(
                                                 f"ailaunch-{upload_id}-"
                                                 f"{secrets.token_hex(3)}"
@@ -1699,7 +1728,7 @@ def _run_long_upload_job(
                                             tuple(_anchor_rec["rest_xy"]),
                                             int(_anchor_rec["impact_frame"]),
                                             tee_fps,
-                                            debug_dir=CLIPS_DIR,
+                                            debug_dir=_dbg_dir,
                                             debug_prefix=(
                                                 f"launchtrk-{upload_id}-"
                                                 f"{secrets.token_hex(3)}"
@@ -2848,6 +2877,34 @@ def _commit_retry(db, apply_fn, what: str, retries: int = 2) -> bool:
     return False
 
 
+def _auto_delete_upload(upload_id: int, reason: str) -> None:
+    """Delete a non-golf upload (row + files + linked camera event) with
+    an audit entry. Owns its session; never raises."""
+    try:
+        db = SessionLocal()
+        try:
+            delete_long_upload(upload_id, db)
+            db.add(
+                AuditLog(
+                    actor="system",
+                    action="auto_delete_non_golf",
+                    target=f"long_upload:{upload_id}",
+                    detail=reason,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+        log.info(
+            "auto-delete: removed non-golf upload %s (%s)",
+            upload_id, reason,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "auto-delete failed for upload %s: %s", upload_id, exc,
+        )
+
+
 def _screen_non_golf_upload(upload_id: int, tee_name: str | None) -> bool:
     """Auto-screen an uploaded clip with the pose swing detector; when
     it contains NO golf swing, delete the upload (row + files + linked
@@ -2870,24 +2927,7 @@ def _screen_non_golf_upload(upload_id: int, tee_name: str | None) -> bool:
         if verdict.get("is_golf", True):
             return False
         reason = verdict.get("reason") or "no golf swing detected"
-        db = SessionLocal()
-        try:
-            delete_long_upload(upload_id, db)
-            db.add(
-                AuditLog(
-                    actor="system",
-                    action="auto_delete_non_golf",
-                    target=f"long_upload:{upload_id}",
-                    detail=reason,
-                )
-            )
-            db.commit()
-        finally:
-            db.close()
-        log.info(
-            "auto-screen: deleted non-golf upload %s (%s)",
-            upload_id, reason,
-        )
+        _auto_delete_upload(upload_id, reason)
         return True
     except Exception as exc:  # noqa: BLE001
         log.warning(
@@ -3041,18 +3081,18 @@ async def quick_upload_videos(
     # wizard opens with handedness / address / impact / ball / ROI /
     # target already populated — no detection round-trip on open.
     if auto_process:
+        # No pre-screen here: produce's own pose pass IS the non-golf
+        # screen (zero swings detected -> the job auto-deletes), so a
+        # separate mediapipe scan would just duplicate the work.
         threading.Thread(
-            target=_screen_then_run,
-            args=(
-                upload_row.id, src_name, _run_long_upload_job,
-                {
-                    "upload_id": upload_row.id,
-                    "seg_list": [],
-                    "auto_detect_swings": True,
-                    "starting_hole": 1,
-                    "ai_tracer_model": None,
-                },
-            ),
+            target=_run_long_upload_job,
+            kwargs={
+                "upload_id": upload_row.id,
+                "seg_list": [],
+                "auto_detect_swings": True,
+                "starting_hole": 1,
+                "ai_tracer_model": None,
+            },
             daemon=True,
             name=f"long-upload-{upload_row.id}",
         ).start()
@@ -8886,6 +8926,7 @@ def produce_debug(
             kwargs={
                 "upload_id": row.id, "seg_list": [], "auto_detect_swings": True,
                 "starting_hole": 1, "ai_tracer_model": None,
+                "debug_artifacts": True,
             },
             daemon=True, name=f"produce-debug-produce-{row.id}",
         ).start()

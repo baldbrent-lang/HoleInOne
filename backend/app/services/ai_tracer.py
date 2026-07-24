@@ -4797,6 +4797,27 @@ def _anchor_strip_ask(client, imgs, extra_text: str, model: str) -> dict | None:
     return parsed
 
 
+_ANCHOR_FRAME_PROMPT = (
+    "One cropped frame from a FIXED golf camera. The cyan ring marks "
+    "the exact spot where a golf ball has been RESTING. The ball is a "
+    "small bright white dot; a passing shadow can dim it to gray "
+    "(still PRESENT), and the club head or golfer can briefly cover "
+    "it. A white object anywhere ELSE in the crop (ball in flight, "
+    "glint) does not count.\n"
+    "Question: is the ball still sitting AT that spot in THIS frame?\n"
+    "Respond with JSON only:\n"
+    "{\"present\": true|false, \"x_pct\": number|null,"
+    " \"y_pct\": number|null}\n"
+    "x_pct/y_pct = the ball centre as percentages (0-100) of this "
+    "image's width/height when present (null otherwise). Your ENTIRE "
+    "reply must be that single JSON object."
+)
+
+
+class _AnchorApiError(RuntimeError):
+    pass
+
+
 def verify_rest_and_impact_ai(
     input_path: Path,
     rest_xy: tuple[float, float],
@@ -4806,23 +4827,20 @@ def verify_rest_and_impact_ai(
     debug_prefix: str = "anchorai",
     window_sec: float = 1.5,
     model: str | None = None,
+    start_frame: int | None = None,
 ) -> dict:
-    """AI-verified anchors: same contract as verify_rest_and_impact, but
-    the DEPARTURE decision (and a rest-position correction) come from
-    vision instead of the pixel presence gate — which flaps when the
-    watched ring is slightly off the ball or shadows brighten the patch.
+    """AI anchor check, SEQUENTIAL version (operator's design).
 
-    Two small calls per swing on the cheap model tier:
-      1. COARSE: a numbered film strip of the rest patch every ~3rd
-         frame across the window — "first frame the ball has departed?"
-         (also returns the ball's position in the first tile, correcting
-         a mis-snapped ring).
-      2. FINE: 1-frame-step strip around the coarse answer → exact
-         departure frame.
-
-    Returns the verify_rest_and_impact dict shape plus engine='ai' and
-    api_error=True when the failure was the API (caller should fall
-    back to the pixel check) rather than the scene."""
+    Start at the BEFORE frame where the ball is known to be resting
+    (the practice classifier's 'before' capture), confirm + snap the
+    ball there with one look, then walk forward asking 'is the ball
+    still at the spot?' one crop at a time — stride 3 with an
+    occlusion check (club covering the ball for a frame or two), then
+    a frame-exact backward refine at the first confirmed absence. The
+    moment departure is confirmed we STOP; no other frames are
+    examined. Same contract as before: {available, verified, rest_xy,
+    snapped, snap_px, impact_frame, impact_delta, reason, image,
+    image_mog2, engine='ai', api_error}."""
     out = {
         "available": False, "verified": None,
         "rest_xy": [float(rest_xy[0]), float(rest_xy[1])],
@@ -4856,7 +4874,10 @@ def verify_rest_and_impact_ai(
             out["reason"] = "rest patch clipped by frame edge"
             cap.release()
             return out
-        f_lo = max(0, imp - int(round(float(window_sec) * fps)))
+        f_lo = (
+            max(0, int(start_frame)) if start_frame is not None
+            else max(0, imp - int(round(float(window_sec) * fps)))
+        )
         f_hi = imp + int(round(float(window_sec) * fps))
         crops: dict[int, "np.ndarray"] = {}
         cap.set(cv2.CAP_PROP_POS_FRAMES, f_lo)
@@ -4866,260 +4887,226 @@ def verify_rest_and_impact_ai(
                 break
             crops[f] = fr[y0:y1, x0:x1].copy()
         cap.release()
-        if len(crops) < 10:
+        if len(crops) < 6:
             out["reason"] = "window too short / read failed"
             return out
         out["available"] = True
-
-        ring = (cx0 - x0, cy0 - y0)
         fs_sorted = sorted(crops)
+        f_hi = fs_sorted[-1]
+        ring = [cx0 - x0, cy0 - y0]
         client = _anthropic_client()
         use_model = model or ANCHOR_AI_MODEL
 
-        # Pre-swing baseline (for the heat twins sent alongside the
-        # photo tiles — motion evidence that makes departure pop and
-        # disambiguates a shadow crossing the patch).
-        _pre_fs = fs_sorted[: max(4, len(fs_sorted) // 6)]
-        base_gray = np.median(
-            np.stack([
-                cv2.cvtColor(crops[f], cv2.COLOR_BGR2GRAY).astype(np.float32)
-                for f in _pre_fs
-            ]),
-            axis=0,
-        ).astype(np.uint8)
+        checked: dict[int, bool] = {}  # frame -> present (walk record)
 
-        # COARSE: every ~3rd frame across the whole window. Chunked
-        # into images of 12 tiles (2 rows x 6) so each tile stays at
-        # native resolution through the API — one 30-tile grid got
-        # downscaled until the ball was unreadable. Photo chunks first,
-        # then the HEAT twins of the same tiles.
-        stride = max(1, int(round(fps / 10.0)))
-        coarse_fs = fs_sorted[::stride]
-        if coarse_fs[-1] != fs_sorted[-1]:
-            coarse_fs.append(fs_sorted[-1])
-        _CHUNK = 12
-        _photo_chunks = [
-            _anchor_strip_image(
-                crops, coarse_fs[i:i + _CHUNK], ring, r, per_row=6,
+        def _ask(f: int) -> dict:
+            t = crops[f].copy()
+            cv2.circle(
+                t, (int(ring[0]), int(ring[1])), int(r * 0.9),
+                (255, 200, 0), 2, cv2.LINE_AA,
             )
-            for i in range(0, len(coarse_fs), _CHUNK)
-        ][:4]
-        _heat_tiles = _anchor_mog2_tiles(crops, coarse_fs, base_gray)
-        _heat_chunks = [
-            _anchor_strip_image(
-                _heat_tiles, coarse_fs[i:i + _CHUNK], ring, r, per_row=6,
+            cv2.putText(
+                t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, (0, 0, 0), 4, cv2.LINE_AA,
             )
-            for i in range(0, len(coarse_fs), _CHUNK)
-        ][:4]
-        coarse_imgs = _photo_chunks + _heat_chunks
-        _layout = (
-            f"Images 1-{len(_photo_chunks)}: PHOTO strips in "
-            f"chronological order, frames {coarse_fs[0]}-{coarse_fs[-1]} "
-            f"(every {stride}). Images {len(_photo_chunks) + 1}-"
-            f"{len(coarse_imgs)}: HEAT twins of the same tiles."
-        )
-        # The coarse ask is the make-or-break call — retry transient
-        # API failures (overloaded / timeout / unparseable) instead of
-        # dumping straight to the flaky pixel fallback.
-        coarse = None
-        _last_err: str | None = None
-        for _attempt in range(3):
-            if _attempt:
-                time.sleep(1.5 * _attempt)
-            try:
-                coarse = _anchor_strip_ask(
-                    client, coarse_imgs, _layout, use_model,
+            cv2.putText(
+                t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, (255, 255, 255), 2, cv2.LINE_AA,
+            )
+            ok2, buf = cv2.imencode(
+                ".jpg", t, [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+            )
+            if not ok2:
+                raise _AnchorApiError("jpeg encode failed")
+            last = None
+            for attempt in range(2):
+                if attempt:
+                    time.sleep(1.0)
+                try:
+                    resp = client.messages.create(
+                        model=use_model,
+                        max_tokens=150,
+                        system=[{
+                            "type": "text",
+                            "text": _ANCHOR_FRAME_PROMPT,
+                            "cache_control": {"type": "ephemeral"},
+                        }],
+                        messages=[{"role": "user", "content": [
+                            {"type": "text",
+                             "text": f"Frame {f}. JSON only."},
+                            {"type": "image", "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": base64.standard_b64encode(
+                                    bytes(buf),
+                                ).decode("ascii"),
+                            }},
+                        ]}],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last = f"api_failed: {exc}"
+                    continue
+                text = "".join(
+                    c.text for c in resp.content
+                    if getattr(c, "type", None) == "text"
                 )
-            except Exception as exc:  # noqa: BLE001
-                _last_err = f"api_failed: {exc}"
-                log.warning(
-                    "anchor ai: coarse attempt %d failed: %s",
-                    _attempt + 1, exc,
-                )
-                continue
-            if coarse:
-                break
-            _last_err = "coarse strip: no parseable answer"
-        if not coarse:
-            out["reason"] = _last_err or "coarse strip: no answer"
-            out["api_error"] = True
-            return out
+                data = _extract_json(text)
+                if data is not None:
+                    return data
+                last = "no parseable answer"
+            raise _AnchorApiError(last or "no answer")
 
-        # Rest correction from the first tile (bounded like the pixel
-        # snap so a hallucinated position can't drag the anchor away).
-        if not coarse.get("ball_visible_initially"):
+        def _present(f: int) -> bool:
+            if f in checked:
+                return checked[f]
+            p = bool(_ask(f).get("present"))
+            checked[f] = p
+            return p
+
+        # 1. CONFIRM + SNAP on the before frame: the ball is known to
+        # sit here; the answer's position corrects an off ring.
+        first = _ask(f_lo)
+        checked[f_lo] = bool(first.get("present"))
+        if not first.get("present"):
             out["verified"] = False
             out["reason"] = (
-                "AI sees no ball at the claimed rest spot in the "
-                "pre-impact tiles — rest position likely wrong"
+                "AI sees no ball at the claimed rest spot on the "
+                "before frame — rest position likely wrong"
             )
         else:
-            bx_pct, by_pct = coarse.get("ball_x_pct"), coarse.get("ball_y_pct")
-            if bx_pct is not None and by_pct is not None:
-                try:
-                    bx = x0 + float(bx_pct) / 100.0 * (x1 - x0)
-                    by = y0 + float(by_pct) / 100.0 * (y1 - y0)
+            try:
+                px, py = float(first.get("x_pct")), float(first.get("y_pct"))
+                if 0.0 <= px <= 100.0 and 0.0 <= py <= 100.0:
+                    bx = x0 + px / 100.0 * (x1 - x0)
+                    by = y0 + py / 100.0 * (y1 - y0)
                     d = ((bx - cx0) ** 2 + (by - cy0) ** 2) ** 0.5
                     if 2.0 < d <= 6.0 * r:
                         out["rest_xy"] = [round(bx, 1), round(by, 1)]
                         out["snapped"] = True
                         out["snap_px"] = float(round(d, 1))
-                except (TypeError, ValueError):
-                    pass
-            dep = _dep_from_answer(coarse, coarse_fs)
+                        ring[0], ring[1] = bx - x0, by - y0
+            except (TypeError, ValueError):
+                pass
+
+            # 2. WALK forward until the ball is confirmed gone.
+            stride = 3
+            last_present = f_lo
+            dep = None
+            f = f_lo + stride
+            while f <= f_hi:
+                if f not in crops:
+                    break
+                if _present(f):
+                    last_present = f
+                    f += stride
+                    continue
+                # Absent — persistence check rides out a club briefly
+                # covering the ball.
+                fc = min(f + 3, f_hi)
+                if fc != f and fc in crops and _present(fc):
+                    last_present = fc
+                    f = fc + stride
+                    continue
+                # Confirmed gone: frame-exact backward refine.
+                dep = f
+                for g in range(last_present + 1, f):
+                    if g in crops and not _present(g):
+                        dep = g
+                        break
+                break
             if dep is None:
-                # Cross-check the model's "never left" with a cheap
-                # pixel look at the tail tiles: bright ball-sized
-                # cluster at the ring? If the spot is plainly empty at
-                # the end, the ball DID depart — re-ask once with that
-                # stated (a white blob elsewhere in a tile fooled the
-                # first pass on real footage).
-                # Watch the CORRECTED spot (the model may have just
-                # fixed an off-by-30px ring), not the original claim.
-                spot = (
-                    float(out["rest_xy"][0]) - x0,
-                    float(out["rest_xy"][1]) - y0,
-                )
-
-                def _spot_has_ball(bgr) -> bool:
-                    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-                    mean = float(g.mean())
-                    thr = max(mean + 25.0, float(np.percentile(g, 92)))
-                    mask = (g >= thr).astype(np.uint8)
-                    n, _l, stats_, cent = cv2.connectedComponentsWithStats(
-                        mask,
-                    )
-                    for i in range(1, n):
-                        area = int(stats_[i, cv2.CC_STAT_AREA])
-                        if area < 4 or area > (1.8 * r) ** 2:
-                            continue
-                        d = ((cent[i][0] - spot[0]) ** 2
-                             + (cent[i][1] - spot[1]) ** 2) ** 0.5
-                        if d <= r * 1.2:
-                            return True
-                    return False
-
-                tail = fs_sorted[-5:]
-                tail_absent = sum(
-                    1 for f in tail if not _spot_has_ball(crops[f])
-                )
-                if tail_absent >= 4:
-                    try:
-                        retry = _anchor_strip_ask(
-                            client, coarse_imgs,
-                            _layout + " The resting spot IS empty by "
-                            "the end of the strip — the ball did "
-                            "depart. Find last_present_frame and "
-                            "departure_frame.",
-                            use_model,
-                        )
-                    except Exception:  # noqa: BLE001
-                        retry = None
-                    if retry:
-                        dep = _dep_from_answer(retry, coarse_fs)
-            if dep is None or dep <= fs_sorted[0] or dep > fs_sorted[-1]:
                 out["verified"] = False
                 out["reason"] = (
-                    "AI: ball never leaves the rest spot in this window "
-                    "(practice swing, or impact estimate far off)"
+                    "AI walk: ball never left the rest spot in the "
+                    "window (practice swing, or impact estimate far off)"
                 )
             else:
-                # FINE: 1-frame steps around the coarse answer.
-                fine_lo = max(fs_sorted[0], dep - stride - 1)
-                fine_hi = min(fs_sorted[-1], dep + stride + 1)
-                fine_fs = [f for f in range(fine_lo, fine_hi + 1) if f in crops]
-                if stride > 1 and len(fine_fs) >= 3:
-                    _fine_heat = _anchor_mog2_tiles(
-                        crops, fine_fs, base_gray,
-                    )
-                    fine_imgs = [
-                        _anchor_strip_image(
-                            crops, fine_fs, ring, r,
-                            per_row=min(6, len(fine_fs)),
-                        ),
-                        _anchor_strip_image(
-                            _fine_heat, fine_fs, ring, r,
-                            per_row=min(6, len(fine_fs)),
-                        ),
-                    ]
-                    try:
-                        fine = _anchor_strip_ask(
-                            client, fine_imgs,
-                            f"Zoomed: image 1 PHOTO, image 2 HEAT twin, "
-                            f"EVERY frame {fine_fs[0]}-{fine_fs[-1]}.",
-                            use_model,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        fine = None
-                        log.warning(
-                            "anchor ai: fine pass failed (%s) — keeping "
-                            "coarse departure f%d", exc, dep,
-                        )
-                    fdep = _dep_from_answer(fine, fine_fs) if fine else None
-                    if fdep is not None and fine_lo <= fdep <= fine_hi:
-                        dep = fdep
                 out["verified"] = True
                 out["impact_frame"] = int(dep)
                 out["impact_delta"] = int(dep - imp)
                 out["reason"] = (
-                    f"AI: ball departed the rest spot at f{dep} "
-                    f"({dep - imp:+d} vs estimate)"
+                    f"AI walk: ball gone at f{dep} ({dep - imp:+d} vs "
+                    f"estimate, {len(checked)} frames checked)"
                 )
 
-        # Debug strip = the coarse image with the final answer flagged.
-        if debug_dir is not None:
+        # Debug strip (Debug-button runs only): the frames the walk
+        # actually looked at, green=present / red=absent, departure
+        # boxed — plus the MOG2 twin.
+        if debug_dir is not None and checked:
             try:
-                dbg_fs = list(coarse_fs)
-                if out.get("impact_frame") is not None:
-                    for extra in range(
-                        out["impact_frame"] - 2, out["impact_frame"] + 3,
-                    ):
-                        if extra in crops and extra not in dbg_fs:
-                            dbg_fs.append(extra)
-                    dbg_fs = sorted(set(dbg_fs))
-                dbg = _anchor_strip_image(
-                    crops, dbg_fs, ring, r, highlight=out.get("impact_frame"),
-                )
-                bar = np.zeros((56, dbg.shape[1], 3), np.uint8)
+                sel = sorted(checked)
+                tiles = []
+                for f in sel:
+                    t = crops[f].copy()
+                    cv2.circle(
+                        t, (int(ring[0]), int(ring[1])), int(r * 0.9),
+                        (255, 200, 0), 2, cv2.LINE_AA,
+                    )
+                    col = (0, 200, 0) if checked[f] else (0, 0, 230)
+                    cv2.rectangle(
+                        t, (0, 0), (t.shape[1] - 1, t.shape[0] - 1),
+                        col, 3,
+                    )
+                    if out.get("impact_frame") == f:
+                        cv2.rectangle(
+                            t, (4, 4), (t.shape[1] - 5, t.shape[0] - 5),
+                            (0, 255, 255), 3,
+                        )
+                    cv2.putText(
+                        t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (0, 0, 0), 4, cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7, (255, 255, 255), 2, cv2.LINE_AA,
+                    )
+                    tiles.append(t)
+                per_row = 10
+                rows = []
+                for i in range(0, len(tiles), per_row):
+                    rowt = tiles[i:i + per_row]
+                    while len(rowt) < per_row:
+                        rowt.append(np.zeros_like(tiles[0]))
+                    rows.append(cv2.hconcat(rowt))
+                strip = cv2.vconcat(rows)
+                bar = np.zeros((40, strip.shape[1], 3), np.uint8)
                 cv2.putText(
                     bar,
                     (
-                        f"AI anchor check [{use_model}] @ rest "
-                        f"({out['rest_xy'][0]:.0f},{out['rest_xy'][1]:.0f})"
-                        + (
-                            f" corrected {out['snap_px']}px"
-                            if out["snapped"] else ""
-                        )
-                        + f" - {out['reason']}"
+                        f"AI anchor walk [{use_model}] — only the "
+                        f"frames checked are shown; {out['reason']}"
                     ),
-                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (255, 255, 255), 1, cv2.LINE_AA,
                 )
-                cv2.putText(
-                    bar,
-                    "numbered tiles sent to the model; yellow box = its "
-                    "departure (impact) answer, ring = claimed rest",
-                    (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
-                    (180, 180, 180), 1, cv2.LINE_AA,
-                )
-                img = cv2.vconcat([bar, dbg])
                 name = f"{debug_prefix}.jpg"
                 cv2.imwrite(
-                    str(Path(debug_dir) / name), img,
+                    str(Path(debug_dir) / name),
+                    cv2.vconcat([bar, strip]),
                     [int(cv2.IMWRITE_JPEG_QUALITY), 88],
                 )
                 out["image"] = name
-                # MOG2 twin: same tiles as frame-diff heat, so the
-                # operator can eyeball the motion evidence next to the
-                # photo tiles the model judged (the model now sees the
-                # heat twins too).
+                _pre = fs_sorted[: max(4, len(fs_sorted) // 6)]
+                _base_g = np.median(
+                    np.stack([
+                        cv2.cvtColor(
+                            crops[f], cv2.COLOR_BGR2GRAY,
+                        ).astype(np.float32)
+                        for f in _pre
+                    ]),
+                    axis=0,
+                ).astype(np.uint8)
                 out["image_mog2"] = _write_anchor_mog2_strip(
-                    crops, dbg_fs, base_gray, ring, r,
+                    crops, sel, _base_g, (ring[0], ring[1]), r,
                     out.get("impact_frame"), debug_dir, debug_prefix,
-                    "AI anchor check (MOG2 view)",
+                    "AI anchor walk (MOG2 view)",
                 )
             except Exception as exc:  # noqa: BLE001
-                log.warning("anchor ai: debug strip failed: %s", exc)
+                log.warning("anchor walk: debug strip failed: %s", exc)
+        return out
+    except _AnchorApiError as exc:
+        out["reason"] = str(exc)
+        out["api_error"] = True
         return out
     except Exception as exc:  # noqa: BLE001
         log.warning("verify_rest_and_impact_ai failed: %s", exc)
@@ -5153,7 +5140,7 @@ def plot_launch_frames_ai(
     rest_xy: tuple[float, float],
     impact_frame: int,
     fps: float,
-    n_frames: int = 5,
+    n_frames: int = 6,
     debug_dir: Path | None = None,
     debug_prefix: str = "ailaunch",
     model: str | None = None,
@@ -5190,7 +5177,9 @@ def plot_launch_frames_ai(
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         r = max(10, int(round(0.015 * h)))
         rx, ry = float(rest_xy[0]), float(rest_xy[1])
-        f_first = int(impact_frame) + 1
+        # Operator's spec: check the impact frame itself, then the next
+        # five — 6 frames total.
+        f_first = int(impact_frame)
         frames = list(range(f_first, f_first + int(n_frames)))
         fulls: dict[int, "np.ndarray"] = {}
         cap.set(cv2.CAP_PROP_POS_FRAMES, f_first)
