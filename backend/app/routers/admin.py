@@ -1400,6 +1400,57 @@ def _run_long_upload_job(
                     )
                     return
 
+                # RATIO-RESCUE (distance fix): a candidate the pose
+                # gate dropped ONLY for a low wrist-speed ratio, but
+                # with a confirmed swing-posture bend, gets resurrected
+                # — from a course-distance camera the landmark jitter
+                # floor eats the speed ratio, so a real swing can read
+                # "below 5x". Rescued candidates skip the heat-judge
+                # veto and live or die purely on the ball-departure
+                # check downstream (the one signal distance can't
+                # dilute).
+                try:
+                    _existing_ts = {
+                        round(float(d.get("peak_time_sec") or 0.0), 2)
+                        for d in (detected or [])
+                    }
+                    _resc = [
+                        b for b in (
+                            _detect_debug.get("bursts_detail") or []
+                        )
+                        if b.get("status") == "ratio_low"
+                        and b.get("bend") is not None
+                        and float(b["bend"]) >= 15.0
+                        and round(float(b["t"]), 2) not in _existing_ts
+                    ]
+                    _resc.sort(
+                        key=lambda b: -float(b.get("ratio") or 0.0),
+                    )
+                    for b in _resc[:4]:
+                        detected.append({
+                            "peak_time_sec": float(b["t"]),
+                            "start_sec": max(0.0, float(b["t"]) - 3.5),
+                            "end_sec": float(b["t"]) + 5.0,
+                            "ratio": b.get("ratio"),
+                            "back_bend_deg": b.get("bend"),
+                            "confidence": 0.3,
+                            "rescued": True,
+                        })
+                    if _resc:
+                        detected.sort(
+                            key=lambda d: float(
+                                d.get("peak_time_sec") or 0.0,
+                            ),
+                        )
+                        log.info(
+                            "long-upload worker: upload=%s ratio-rescue "
+                            "resurrected %d candidate(s) at %s",
+                            upload_id, min(len(_resc), 4),
+                            [b["t"] for b in _resc[:4]],
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("ratio-rescue failed: %s", exc)
+
                 # Per-swing audit trail. Every filter decision lands here,
                 # is logged as one JSON line, and is persisted to
                 # edit_metrics.produce_decisions — so "debug said X but
@@ -1513,7 +1564,23 @@ def _run_long_upload_job(
                             _e["heat"] = chk.get("verdict")
                             _e["ai_judge"] = chk.get("ai_judge")
                             _e["ai_reason"] = chk.get("ai_reason")
+                            if d.get("rescued"):
+                                _e["rescued"] = True
                             if (
+                                d.get("rescued")
+                                and chk.get("verdict") == "no_swing"
+                            ):
+                                # Rescued candidates bypass the judge's
+                                # veto — the ball-departure check is
+                                # their arbiter.
+                                log.info(
+                                    "long-upload worker: upload=%s "
+                                    "rescued swing @ %.1fs kept past the "
+                                    "judge — ball departure decides",
+                                    upload_id,
+                                    float(d.get("peak_time_sec") or 0.0),
+                                )
+                            elif (
                                 chk.get("available")
                                 and chk.get("verdict") == "no_swing"
                             ):

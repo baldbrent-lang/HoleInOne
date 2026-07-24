@@ -241,6 +241,61 @@ def detect_swings_from_pose(
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
         max_scan_frames = int(max_scan_sec * src_fps) if max_scan_sec else None
         idx = start_frame - 1
+
+        # PERSON-CROP ZOOM (distance fix): once the golfer is found, run
+        # pose on a crop around them instead of the full frame. From a
+        # course-distance camera the golfer is a small figure — landmark
+        # jitter stays constant while true wrist motion shrinks, so the
+        # swing's speed ratio collapses below the gate. Cropping makes
+        # the golfer full-size again for the model; landmarks are mapped
+        # back to FULL-FRAME normalized coords so every downstream
+        # number (speed ratio, spine angle, wrist anchor) keeps its
+        # exact meaning. static_image_mode=True means per-frame crops
+        # are safe (no internal tracker to confuse).
+        crop = None            # (x0, y0, x1, y1) px, or None = full frame
+        crop_misses = 0
+        n_crop = 0
+
+        class _P:
+            __slots__ = ("x", "y", "visibility")
+
+            def __init__(self, x, y, v):
+                self.x = x
+                self.y = y
+                self.visibility = v
+
+        _KEY_LMS = (0, 11, 12, 15, 16, 23, 24, 25, 26, 27, 28)
+
+        def _crop_from(ptsl):
+            xs, ys = [], []
+            for i in _KEY_LMS:
+                pp = ptsl[i]
+                if getattr(pp, "visibility", 0.0) >= 0.3:
+                    xs.append(pp.x * vid_w)
+                    ys.append(pp.y * vid_h)
+            if len(xs) < 4:
+                return None
+            bx0, bx1 = min(xs), max(xs)
+            by0, by1 = min(ys), max(ys)
+            bw = max(bx1 - bx0, 1.0)
+            bh = max(by1 - by0, 1.0)
+            ccx = (bx0 + bx1) / 2.0
+            ccy = (by0 + by1) / 2.0
+            # Generous pad: the wrists + club sweep well outside the
+            # standing bbox during a swing.
+            half_w = max(1.5 * bw, 0.9 * bh, 128.0)
+            half_h = max(1.3 * bh, 128.0)
+            cx0 = max(0, int(ccx - half_w))
+            cx1 = min(vid_w, int(ccx + half_w))
+            cy0 = max(0, int(ccy - half_h))
+            cy1 = min(vid_h, int(ccy + half_h))
+            if cx1 - cx0 < 64 or cy1 - cy0 < 64:
+                return None
+            # Person already fills the frame — cropping buys nothing.
+            if (cx1 - cx0) > 0.85 * vid_w and (cy1 - cy0) > 0.85 * vid_h:
+                return None
+            return (cx0, cy0, cx1, cy1)
+
         while True:
             idx += 1
             if max_scan_frames is not None and (idx - start_frame) >= max_scan_frames:
@@ -252,15 +307,44 @@ def detect_swings_from_pose(
             if idx % step != 0:
                 continue
             times.append(idx / src_fps)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            with _pose_lock:
-                res = pose.process(rgb)
-            lm = getattr(res, "pose_landmarks", None)
-            if lm is None:
+            pts = None
+            if crop is not None:
+                cx0, cy0, cx1, cy1 = crop
+                sub = frame[cy0:cy1, cx0:cx1]
+                with _pose_lock:
+                    res = pose.process(cv2.cvtColor(sub, cv2.COLOR_BGR2RGB))
+                lm = getattr(res, "pose_landmarks", None)
+                if lm is not None:
+                    cw = float(cx1 - cx0)
+                    ch = float(cy1 - cy0)
+                    pts = [
+                        _P(
+                            (cx0 + pp.x * cw) / vid_w,
+                            (cy0 + pp.y * ch) / vid_h,
+                            getattr(pp, "visibility", 0.0),
+                        )
+                        for pp in lm.landmark
+                    ]
+                    n_crop += 1
+            if pts is None:
+                with _pose_lock:
+                    res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                lm = getattr(res, "pose_landmarks", None)
+                if lm is not None:
+                    pts = [
+                        _P(pp.x, pp.y, getattr(pp, "visibility", 0.0))
+                        for pp in lm.landmark
+                    ]
+                    crop_misses = 0
+                else:
+                    crop_misses += 1
+                    if crop_misses >= 2:
+                        crop = None
+            if pts is None:
                 wrist.append(None)
                 bend.append(None)
                 continue
-            pts = lm.landmark
+            crop = _crop_from(pts)
             bend.append(_spine_deg(pts))
             cands = []
             for wi in (_LEFT_WRIST, _RIGHT_WRIST):
@@ -497,6 +581,7 @@ def detect_swings_from_pose(
             "n_samples": int(len(times)),
             "coverage": round(n_pose / len(times), 2) if times else 0.0,
             "n_bridged": int(n_bridged),
+            "n_crop_frames": int(n_crop),
             "median": float(median),
             "threshold": float(threshold),
             "n_raw_bursts": len(bursts),
