@@ -4797,22 +4797,32 @@ def _anchor_strip_ask(client, imgs, extra_text: str, model: str) -> dict | None:
     return parsed
 
 
-_ANCHOR_FRAME_PROMPT = (
-    "One cropped frame from a FIXED golf camera. The cyan ring marks "
-    "the exact spot where a golf ball has been RESTING. The ball is a "
-    "small ROUND ball-sized object: bright white in sunlight, but in "
-    "shadow or backlight it can look gray or even nearly BLACK - "
-    "judge by the round object sitting at the spot, NOT by its "
-    "brightness. The club head or golfer can briefly cover it. A "
-    "ball-like object anywhere ELSE in the crop (ball in flight, "
-    "glint) does not count.\n"
-    "Question: is the ball still sitting AT that spot in THIS frame?\n"
+_ANCHOR_SNAP_PROMPT = (
+    "One cropped frame from a FIXED golf camera, zoomed on the spot "
+    "where a golf ball is resting near the cyan ring. The ball is a "
+    "small ROUND object: bright white in sunlight, but gray or even "
+    "nearly BLACK in shadow or backlight - judge by the round shape, "
+    "not brightness.\n"
     "Respond with JSON only:\n"
     "{\"present\": true|false, \"x_pct\": number|null,"
     " \"y_pct\": number|null}\n"
     "x_pct/y_pct = the ball centre as percentages (0-100) of this "
-    "image's width/height when present (null otherwise). Your ENTIRE "
-    "reply must be that single JSON object."
+    "image when present. Your ENTIRE reply must be that JSON object."
+)
+
+_ANCHOR_FRAME_PROMPT = (
+    "You are watching one exact SPOT on a golf tee from a fixed "
+    "camera. Image 1 is the REFERENCE: the golf ball is sitting at "
+    "the spot inside the cyan ring - note exactly what it looks like "
+    "there (it may be white, gray, or nearly black in shadow). "
+    "Image 2 shows the SAME spot a moment later.\n"
+    "Question: comparing image 2 with image 1, is that ball STILL "
+    "sitting at the spot? The club head or the golfer may briefly "
+    "cover it. Judge the round ball-shaped object at the ring - if "
+    "the same round object from image 1 is still there, it is "
+    "present, no matter how dim.\n"
+    "Respond with JSON only: {\"present\": true|false}. Your ENTIRE "
+    "reply must be that JSON object."
 )
 
 
@@ -4901,25 +4911,55 @@ def verify_rest_and_impact_ai(
 
         checked: dict[int, bool] = {}  # frame -> present (walk record)
 
-        def _ask(f: int) -> dict:
-            t = crops[f].copy()
+        # TIGHT tiles for the AI: a ~10-ball-radii window around the
+        # ring, upscaled 2x — in the wide crop a shadowed ball is a
+        # ~10px smudge the model can't resolve reliably.
+        TIGHT = 5 * r
+
+        def _tight_tile(f: int):
+            rcx, rcy = ring
+            tx0 = max(0, int(rcx - TIGHT))
+            ty0 = max(0, int(rcy - TIGHT))
+            tx1 = min(crops[f].shape[1], int(rcx + TIGHT))
+            ty1 = min(crops[f].shape[0], int(rcy + TIGHT))
+            t = crops[f][ty0:ty1, tx0:tx1].copy()
+            t = cv2.resize(
+                t, (t.shape[1] * 2, t.shape[0] * 2),
+                interpolation=cv2.INTER_CUBIC,
+            )
             cv2.circle(
-                t, (int(ring[0]), int(ring[1])), int(r * 0.9),
-                (255, 200, 0), 2, cv2.LINE_AA,
+                t, (int((rcx - tx0) * 2), int((rcy - ty0) * 2)),
+                int(r * 0.9 * 2), (255, 200, 0), 2, cv2.LINE_AA,
             )
             cv2.putText(
-                t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (0, 0, 0), 4, cv2.LINE_AA,
+                t, str(f), (5, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (0, 0, 0), 4, cv2.LINE_AA,
             )
             cv2.putText(
-                t, str(f), (5, 22), cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (255, 255, 255), 2, cv2.LINE_AA,
+                t, str(f), (5, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (255, 255, 255), 2, cv2.LINE_AA,
             )
+            return t, (tx0, ty0, tx1 - tx0, ty1 - ty0)
+
+        def _jpeg(img) -> bytes:
             ok2, buf = cv2.imencode(
-                ".jpg", t, [int(cv2.IMWRITE_JPEG_QUALITY), 88],
+                ".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90],
             )
             if not ok2:
                 raise _AnchorApiError("jpeg encode failed")
+            return bytes(buf)
+
+        def _call(system_text: str, user_text: str, imgs) -> dict:
+            content = [{"type": "text", "text": user_text}]
+            for im in imgs:
+                content.append({
+                    "type": "image", "source": {
+                        "type": "base64", "media_type": "image/jpeg",
+                        "data": base64.standard_b64encode(
+                            _jpeg(im),
+                        ).decode("ascii"),
+                    },
+                })
             last = None
             for attempt in range(2):
                 if attempt:
@@ -4930,20 +4970,10 @@ def verify_rest_and_impact_ai(
                         max_tokens=150,
                         system=[{
                             "type": "text",
-                            "text": _ANCHOR_FRAME_PROMPT,
+                            "text": system_text,
                             "cache_control": {"type": "ephemeral"},
                         }],
-                        messages=[{"role": "user", "content": [
-                            {"type": "text",
-                             "text": f"Frame {f}. JSON only."},
-                            {"type": "image", "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": base64.standard_b64encode(
-                                    bytes(buf),
-                                ).decode("ascii"),
-                            }},
-                        ]}],
+                        messages=[{"role": "user", "content": content}],
                     )
                 except Exception as exc:  # noqa: BLE001
                     last = f"api_failed: {exc}"
@@ -4958,16 +4988,35 @@ def verify_rest_and_impact_ai(
                 last = "no parseable answer"
             raise _AnchorApiError(last or "no answer")
 
+        # Reference tile: the before frame with the ball KNOWN present.
+        # Every presence check COMPARES against it — spot-the-difference
+        # on a zoomed pair is far more reliable than detecting a dim
+        # gray ball outright. Rebuilt after the snap so the ring (and
+        # tile centre) sit exactly on the ball.
+        ref_tile = None
+
         def _present(f: int) -> bool:
             if f in checked:
                 return checked[f]
-            p = bool(_ask(f).get("present"))
+            cur, _box = _tight_tile(f)
+            ans = _call(
+                _ANCHOR_FRAME_PROMPT,
+                f"Image 1 = reference (ball present). Image 2 = "
+                f"Frame {f}. JSON only.",
+                [ref_tile, cur],
+            )
+            p = bool(ans.get("present"))
             checked[f] = p
             return p
 
         # 1. CONFIRM + SNAP on the before frame: the ball is known to
         # sit here; the answer's position corrects an off ring.
-        first = _ask(f_lo)
+        _snap_tile, _snap_box = _tight_tile(f_lo)
+        first = _call(
+            _ANCHOR_SNAP_PROMPT,
+            f"Frame {f_lo}. JSON only.",
+            [_snap_tile],
+        )
         checked[f_lo] = bool(first.get("present"))
         if not first.get("present"):
             out["verified"] = False
@@ -4979,8 +5028,8 @@ def verify_rest_and_impact_ai(
             try:
                 px, py = float(first.get("x_pct")), float(first.get("y_pct"))
                 if 0.0 <= px <= 100.0 and 0.0 <= py <= 100.0:
-                    bx = x0 + px / 100.0 * (x1 - x0)
-                    by = y0 + py / 100.0 * (y1 - y0)
+                    bx = x0 + _snap_box[0] + px / 100.0 * _snap_box[2]
+                    by = y0 + _snap_box[1] + py / 100.0 * _snap_box[3]
                     d = ((bx - cx0) ** 2 + (by - cy0) ** 2) ** 0.5
                     if 2.0 < d <= 6.0 * r:
                         out["rest_xy"] = [round(bx, 1), round(by, 1)]
@@ -4989,6 +5038,7 @@ def verify_rest_and_impact_ai(
                         ring[0], ring[1] = bx - x0, by - y0
             except (TypeError, ValueError):
                 pass
+            ref_tile, _ = _tight_tile(f_lo)
 
             # 2. WALK forward until the ball is confirmed gone.
             stride = 3
