@@ -7479,6 +7479,21 @@ def _mog2_layer_for_ai_track(
                 if len(_tail) == 3 and _tail[2]["y"] > _tail[0]["y"] + 4
                 else "up"
             )
+            # Ascent steepness of the mapped arc: vertical rise per
+            # horizontal drift. The descent must be roughly the
+            # INVERSE of the ascent — a chain that tops out and then
+            # runs sideways (a physics-defying right-angle turn) must
+            # never be used.
+            _rise0 = max(
+                1.0,
+                float(_fit_pts[0]["y"])
+                - min(float(q["y"]) for q in _fit_pts),
+            )
+            _drift0 = max(
+                1.0,
+                abs(float(_fit_pts[-1]["x"]) - float(_fit_pts[0]["x"])),
+            )
+            _A = max(0.35, min(6.0, _rise0 / _drift0))
 
             def _accept(prev, phase, d):
                 fno, pf = int(d["frame"]), int(prev["frame"])
@@ -7498,6 +7513,13 @@ def _mog2_layer_for_ai_track(
                         return "up"
                     phase = "down"  # first drop = past the apex
                 if dy >= -2 * _r2:
+                    # INVERSE-SLOPE rule: a falling ball's horizontal
+                    # drift per unit of drop is bounded by (a relaxed
+                    # multiple of) the ascent's inverse slope. A
+                    # near-horizontal step after the apex is the club /
+                    # a bird / sparkle — never the ball.
+                    if abs(dx) > (max(dy, 0.0) / _A) * 2.5 + 2 * _r2:
+                        return None
                     return "down"
                 return None  # descending chain must not jump back up
 
