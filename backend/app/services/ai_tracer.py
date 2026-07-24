@@ -4800,9 +4800,11 @@ def _anchor_strip_ask(client, imgs, extra_text: str, model: str) -> dict | None:
 _ANCHOR_FRAME_PROMPT = (
     "One cropped frame from a FIXED golf camera. The cyan ring marks "
     "the exact spot where a golf ball has been RESTING. The ball is a "
-    "small bright white dot; a passing shadow can dim it to gray "
-    "(still PRESENT), and the club head or golfer can briefly cover "
-    "it. A white object anywhere ELSE in the crop (ball in flight, "
+    "small ROUND ball-sized object: bright white in sunlight, but in "
+    "shadow or backlight it can look gray or even nearly BLACK - "
+    "judge by the round object sitting at the spot, NOT by its "
+    "brightness. The club head or golfer can briefly cover it. A "
+    "ball-like object anywhere ELSE in the crop (ball in flight, "
     "glint) does not count.\n"
     "Question: is the ball still sitting AT that spot in THIS frame?\n"
     "Respond with JSON only:\n"
@@ -4971,7 +4973,7 @@ def verify_rest_and_impact_ai(
             out["verified"] = False
             out["reason"] = (
                 "AI sees no ball at the claimed rest spot on the "
-                "before frame — rest position likely wrong"
+                "before frame - rest position likely wrong"
             )
         else:
             try:
@@ -5073,7 +5075,7 @@ def verify_rest_and_impact_ai(
                 cv2.putText(
                     bar,
                     (
-                        f"AI anchor walk [{use_model}] — only the "
+                        f"AI anchor walk [{use_model}] - only the "
                         f"frames checked are shown; {out['reason']}"
                     ),
                     (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
@@ -5119,8 +5121,10 @@ _LAUNCH_PLOT_PROMPT = (
     "struck. Each request shows ONE video frame, cropped around where "
     "the ball is expected. The cyan ring marks the ball's position in "
     "the PREVIOUS frame (or its resting spot before the strike).\n"
-    "Find the ball NOW: a small bright white dot or a motion-blurred "
-    "white streak, farther along its flight path than the ring. Early "
+    "Find the ball NOW: a small round dot or a motion-blurred "
+    "streak - bright white in sunlight, but possibly gray or dark "
+    "when in shadow or backlit - farther along its flight path than "
+    "the ring. Early "
     "flight is FAST - the ball may be far from the ring, often high "
     "in the crop. The club head/shaft may also be in frame - the ball "
     "is the round or streaked WHITE object, not the club. For a "
@@ -5218,7 +5222,10 @@ def plot_launch_frames_ai(
                 by0 = max(0, int(ry - _up))
                 by1 = min(h, int(ry + 4 * r))
             else:
-                half = int((10 + 4 * misses) * r)
+                # Operator's floor: never zoom tighter than ~22 ball
+                # radii (the over-tight 10r crops cut the ball out of
+                # frame / lost all context right after the first find).
+                half = int((22 + 4 * misses) * r)
                 pcx, pcy = prev[0] + vel[0], prev[1] + vel[1]
                 bx0 = max(0, int(pcx - half))
                 bx1 = min(w, int(pcx + half))
