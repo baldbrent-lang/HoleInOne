@@ -7306,6 +7306,9 @@ def _mog2_layer_for_ai_track(
 
     cv_info = cv_info or {}
     pool = _mog2_dot_pool(cv_info)
+    # Pure-MOG2 pool (no tracker points) — kept for lane arbitration
+    # below: physical motion streaks, uncontaminated by the chase.
+    _pure_pool = list(pool)
     launch_pts = [
         {"frame": int(pt["frame"]), "x": float(pt["x"]), "y": float(pt["y"])}
         for pt in (pipe.get("launch_points") or [])
@@ -7333,6 +7336,91 @@ def _mog2_layer_for_ai_track(
         int(_imp) + int(round(MOG2_LAYER_POST_IMPACT_SEC * _fps))
         if _imp is not None else None
     )
+
+    # ── LANE ARBITRATION (phantom-chase guard) ──────────────────────
+    # Failure mode this kills: the AI launch chase grabs the club head
+    # / a glint right after impact, the pixel tracker inherits that
+    # velocity and "finds" tree noise for dozens of frames, and the
+    # dense phantom lane then out-seeds the REAL flight in every
+    # downstream phase (rest-lock, corridor, arc completion) — the
+    # rendered tracer draws a perfect arc in the wrong place while the
+    # true streaks sit unused in the pool.
+    # Arbiter: chain the PURE MOG2 pool from the resting ball (physical
+    # motion evidence, tracker-free). If it locks a solid chain and the
+    # AI+tracker lane mostly DISAGREES with it, the chase lane is
+    # phantom — drop the disagreeing points and let the pool chain
+    # drive the arc.
+    lane_override = None
+    if (
+        _rest and len(_rest) == 2 and _imp is not None
+        and (len(ai_pts) + len(launch_pts)) >= 4
+    ):
+        try:
+            _pure_chain, _pure_info = _flight_from_rest_lock(
+                _pure_pool, (float(_rest[0]), float(_rest[1])),
+                int(_imp), _fps, _f_cap,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _pure_chain, _pure_info = [], {"locked": False}
+            log.warning("mog2 layer: pure-pool lock failed: %s", exc)
+        _lane = ai_pts + launch_pts
+        if _pure_info.get("locked") and len(_pure_chain) >= 8 and _lane:
+            _n_agree = sum(
+                1 for p in _lane
+                if any(_near(p, cch, 3, 30.0) for cch in _pure_chain)
+            )
+            _frac = _n_agree / float(len(_lane))
+            if _frac < 0.34:
+                _keep_ai, _drop_f = [], set()
+                for p in ai_pts:
+                    if any(_near(p, cch, 3, 30.0) for cch in _pure_chain):
+                        _keep_ai.append(p)
+                    else:
+                        _drop_f.add(int(p["frame"]))
+                _keep_launch = [
+                    p for p in launch_pts
+                    if any(_near(p, cch, 3, 30.0) for cch in _pure_chain)
+                ]
+                lane_override = {
+                    "chain_len": len(_pure_chain),
+                    "lane_pts": len(_lane),
+                    "agree": _n_agree,
+                    "dropped_ai": len(ai_pts) - len(_keep_ai),
+                    "dropped_launch": len(launch_pts) - len(_keep_launch),
+                }
+                log.info(
+                    "mog2 layer: LANE OVERRIDE — pure MOG2 chain "
+                    "(%d dots from rest) disagrees with AI/tracker lane "
+                    "(%d/%d agree); dropping %d AI + %d tracker phantom "
+                    "point(s)",
+                    len(_pure_chain), _n_agree, len(_lane),
+                    lane_override["dropped_ai"],
+                    lane_override["dropped_launch"],
+                )
+                ai_pts = _keep_ai
+                launch_pts = _keep_launch
+                # Phantom AI frames must not survive into the merged
+                # arc via ai_all — swap in not-found placeholders
+                # (fresh dicts; pipe's own list stays untouched).
+                ai_all = [
+                    (
+                        {**rec, "found": False, "x": None, "y": None}
+                        if rec.get("found")
+                        and int(rec.get("frame") or -1) in _drop_f
+                        else rec
+                    )
+                    for rec in ai_all
+                ]
+                # Rebuild the working pool without the phantom lane so
+                # the rest-lock re-seeds on the real streaks.
+                pool = sorted(
+                    _pure_pool + list(launch_pts),
+                    key=lambda rec: rec["frame"],
+                )
+                n_matched = sum(
+                    1 for ap in ai_pts if any(_near(ap, cp) for cp in pool)
+                )
+
     added_launch: list[dict] = []
     added_mid: list[dict] = []
     added_descent: list[dict] = []
@@ -7790,6 +7878,7 @@ def _mog2_layer_for_ai_track(
         "n_arc_completed": n_arc,
         "arc_region": arc_region,
         "corresponds": bool(n_matched >= 2),
+        "lane_override": lane_override,
         "lock": lock_info,
         "anchor_check": anchor_check,
         "descent_debug": descent_debug,
