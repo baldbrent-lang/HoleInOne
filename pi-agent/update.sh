@@ -61,6 +61,12 @@ install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" \
 install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" \
   "$TMP_DIR/repo/pi-agent/README.md" \
   "$INSTALL_DIR/README.md"
+install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" \
+  "$TMP_DIR/repo/pi-agent/install.sh" \
+  "$INSTALL_DIR/install.sh"
+install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" \
+  "$TMP_DIR/repo/pi-agent/config.example.yaml" \
+  "$INSTALL_DIR/config.example.yaml"
 
 echo "==> pip: applying requirements.txt (failures non-fatal — see warnings)"
 if ! "$INSTALL_DIR/venv/bin/pip" install --quiet \
