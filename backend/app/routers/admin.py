@@ -9608,6 +9608,88 @@ def list_cameras(db: Session = Depends(get_db)):
     return out
 
 
+@router.get("/diagnostics")
+def environment_diagnostics(db: Session = Depends(get_db)):
+    """One-shot health readout of everything the produce pipeline needs,
+    so a broken DEPLOYMENT environment (missing ffmpeg, mediapipe that
+    can't load its native libs, absent API key, dead bucket) is visible
+    in one request instead of being inferred from silent failures.
+    Open /api/admin/diagnostics on the env that's misbehaving."""
+    import shutil as _sh
+    import subprocess as _sp
+
+    out: dict = {
+        "deployment": bool(os.environ.get("REPLIT_DEPLOYMENT")),
+        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "storage_bucket_enabled": storage.enabled(),
+        "auto_delete_non_golf": settings.auto_delete_non_golf,
+    }
+
+    ffmpeg = _sh.which("ffmpeg")
+    out["ffmpeg_path"] = ffmpeg
+    if ffmpeg:
+        try:
+            v = _sp.run(
+                [ffmpeg, "-version"], capture_output=True, text=True, timeout=10
+            )
+            out["ffmpeg_version"] = (v.stdout or "").splitlines()[0][:120]
+        except Exception as exc:  # noqa: BLE001
+            out["ffmpeg_version"] = f"ERROR: {exc}"
+    out["ffprobe_path"] = _sh.which("ffprobe")
+
+    try:
+        import cv2 as _cv2
+
+        out["opencv"] = _cv2.__version__
+    except Exception as exc:  # noqa: BLE001
+        out["opencv"] = f"ERROR: {type(exc).__name__}: {exc}"
+
+    try:
+        from ..services import pose_swing as _ps
+
+        pose = _ps._get_pose()
+        out["mediapipe_pose"] = (
+            "ok" if pose is not None else f"UNAVAILABLE: {_ps._pose_error}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        out["mediapipe_pose"] = f"ERROR: {type(exc).__name__}: {exc}"
+
+    try:
+        usage = _sh.disk_usage(CLIPS_DIR)
+        out["clips_dir"] = str(CLIPS_DIR)
+        out["clips_count"] = sum(1 for f in CLIPS_DIR.glob("*") if f.is_file())
+        out["disk_free_gb"] = round(usage.free / 1e9, 2)
+    except Exception as exc:  # noqa: BLE001
+        out["clips_dir"] = f"ERROR: {exc}"
+
+    # The most recent uploads + how their produce runs ended — surfaces
+    # the actual last_error instead of a silent "never completed".
+    try:
+        rows = (
+            db.query(LongVideoUpload)
+            .order_by(LongVideoUpload.id.desc())
+            .limit(5)
+            .all()
+        )
+        out["recent_uploads"] = [
+            {
+                "id": r.id,
+                "status": r.processing_status,
+                "started": (
+                    r.processing_started_at.isoformat()
+                    if r.processing_started_at
+                    else None
+                ),
+                "error": (r.last_error or "")[:300] or None,
+            }
+            for r in rows
+        ]
+    except Exception as exc:  # noqa: BLE001
+        out["recent_uploads"] = f"ERROR: {exc}"
+
+    return out
+
+
 @router.post("/cameras/{camera_id}/watch")
 def start_watch_camera(camera_id: int, db: Session = Depends(get_db)):
     """Admin clicked Watch. Mark this camera as actively watched."""
