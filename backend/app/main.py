@@ -509,6 +509,24 @@ def serve_clip(name: str):
     return FileResponse(local)
 
 
+# Serve showcase files (home page videos) with the same bucket-fallback
+# behaviour — they live in uploads/showcase/ which the sweeper doesn't cover,
+# so we upload them to the bucket on write and restore them here on demand.
+SHOWCASE_DIR = UPLOAD_ROOT / "showcase"
+SHOWCASE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.get("/uploads/showcase/{name}", include_in_schema=False)
+def serve_showcase(name: str):
+    safe = Path(name).name
+    local = SHOWCASE_DIR / safe
+    if not local.exists():
+        storage.download(f"showcase/{safe}", local)
+    if not local.exists():
+        raise StarletteHTTPException(status_code=404)
+    return FileResponse(local)
+
+
 app.mount("/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
 
 # Background mirror: push new clips into object storage so a redeploy can't

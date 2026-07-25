@@ -3553,11 +3553,14 @@ def list_long_uploads(
         size = path.stat().st_size
         info = probe_video_info(path)
         thumb = path.with_suffix(".jpg")
-        thumb_url = (
-            f"{settings.app_base_url}/uploads/clips/{thumb.name}"
-            if thumb.exists()
-            else None
-        )
+        if thumb.exists():
+            thumb_url = f"{settings.app_base_url}/uploads/clips/{thumb.name}"
+        elif storage.exists(thumb.name):
+            # Thumbnail is in the bucket (generated before this redeploy)
+            # but hasn't been rehydrated to local disk yet.
+            thumb_url = f"{settings.app_base_url}/uploads/clips/{thumb.name}"
+        else:
+            thumb_url = None
         return {
             "size_mb": round(size / 1024 / 1024, 1) if size else None,
             "duration_sec": round(info["duration"], 1)
@@ -3857,11 +3860,12 @@ def list_camera_events(
         size = path.stat().st_size
         info = probe_video_info(path) or {}
         thumb = path.with_suffix(".jpg")
-        thumb_url = (
-            f"{settings.app_base_url}/uploads/clips/{thumb.name}"
-            if thumb.exists()
-            else None
-        )
+        if thumb.exists():
+            thumb_url = f"{settings.app_base_url}/uploads/clips/{thumb.name}"
+        elif storage.exists(thumb.name):
+            thumb_url = f"{settings.app_base_url}/uploads/clips/{thumb.name}"
+        else:
+            thumb_url = None
         return {
             "url": f"{settings.app_base_url}/uploads/clips/{fname}",
             "thumbnail_url": thumb_url,
@@ -9506,6 +9510,14 @@ async def upload_showcase(
     # Compress + extract first-frame thumbnail (same pipeline as clip uploads)
     compress_for_email(fpath)
     thumb = extract_thumbnail(fpath)
+
+    # Persist to object storage immediately so the file survives a redeploy.
+    # Showcase files don't go through CLIPS_DIR so the sweeper won't pick
+    # them up — we push them here with a "showcase/" key prefix.
+    from ..services import storage as _storage
+    _storage.upload(f"showcase/{fname}", fpath)
+    if thumb:
+        _storage.upload(f"showcase/{thumb.name}", thumb)
 
     s.source_url = f"{settings.app_base_url}/uploads/showcase/{fname}"
     s.thumbnail_url = (
