@@ -636,6 +636,9 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               frameW={frameW}
               frameH={frameH}
               marks={marks}
+              track={(swing.ball_track_frames || []).filter(
+                (r) => r.found && r.x != null && r.y != null,
+              )}
               onToggleDot={toggleDot}
               scanRegion={async (region) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
@@ -662,10 +665,12 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           )}
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
-          Green dots are already in the saved ball track; amber are
-          unused detections. Click a dot to add the ball at exactly that
-          spot for that frame — click a green one to remove it, a
-          different dot on the same frame replaces the pick. Zoom past
+          The green line is the swing&apos;s CURRENT saved tracer path —
+          where the rendered tracer actually sits. Green dots are already
+          in the saved ball track; amber are unused detections. Click a
+          dot to add the ball at exactly that spot for that frame — click
+          a green one to remove it, a different dot on the same frame
+          replaces the pick. Zoom past
           {" "}{DENSE_DOT_ZOOM}× to reveal the denser candidate layer.
           Save &amp; close re-renders the tracer with the changes (no AI
           calls) and updates the produced clip.
@@ -2780,7 +2785,7 @@ const DENSE_DOT_ZOOM = 2.5;
 
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
-  scanRegion,
+  scanRegion, track,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -2895,6 +2900,66 @@ function PlotHeatCanvas({
             pointerEvents: "none",
           }}
         />
+        {/* Saved tracer path — the swing's CURRENT ball track drawn as a
+            green line so the operator can see where the rendered tracer
+            actually sits relative to the real motion streaks (and to the
+            clickable detections). Non-interactive. */}
+        {hasDims && (track || []).length > 0 && (
+          <svg
+            viewBox={`0 0 ${frameW} ${frameH}`}
+            preserveAspectRatio="none"
+            style={{
+              position: "absolute", inset: 0, width: "100%", height: "100%",
+              pointerEvents: "none",
+            }}
+          >
+            <polyline
+              points={track.map((t) => `${t.x},${t.y}`).join(" ")}
+              fill="none"
+              stroke="#22c55e"
+              strokeWidth={Math.max(2, frameW / 700)}
+              strokeOpacity={0.9}
+            />
+            {track.map((t, i) => (
+              <circle
+                key={`t-${t.frame}-${i}`}
+                cx={t.x}
+                cy={t.y}
+                r={Math.max(2.5, frameW / 500)}
+                fill="#22c55e"
+                fillOpacity={0.85}
+                stroke="#052e16"
+                strokeWidth={1}
+              />
+            ))}
+            {track.length > 0 && (
+              <text
+                x={track[0].x + frameW / 120}
+                y={track[0].y}
+                fontSize={Math.max(11, frameW / 110)}
+                fill="#4ade80"
+                stroke="#000"
+                strokeWidth={0.6}
+                paintOrder="stroke"
+              >
+                {`track f${track[0].frame}`}
+              </text>
+            )}
+            {track.length > 1 && (
+              <text
+                x={track[track.length - 1].x + frameW / 120}
+                y={track[track.length - 1].y}
+                fontSize={Math.max(11, frameW / 110)}
+                fill="#4ade80"
+                stroke="#000"
+                strokeWidth={0.6}
+                paintOrder="stroke"
+              >
+                {`f${track[track.length - 1].frame}`}
+              </text>
+            )}
+          </svg>
+        )}
         {/* Dense candidate layer — smaller, dimmer targets that only
             appear once zoomed in, so the fit view stays readable. */}
         {hasDims && showDense &&
