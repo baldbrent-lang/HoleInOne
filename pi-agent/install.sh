@@ -46,6 +46,20 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 # Service user needs access to /dev/video* via the 'video' group.
 usermod -aG video "$SERVICE_USER"
+# ...and to the INA226 battery sensor via the 'i2c' group.
+usermod -aG i2c "$SERVICE_USER" 2>/dev/null || true
+
+echo "==> i2c: enabling the I2C bus (battery telemetry sensor)"
+if command -v raspi-config >/dev/null 2>&1; then
+  raspi-config nonint do_i2c 0 || true
+fi
+
+echo "==> sudoers: allowing $SERVICE_USER to run rtcwake/shutdown (curfew)"
+cat > /etc/sudoers.d/golfreelz-curfew <<'SUDOERS'
+# Curfew sleep/wake: the agent arms the RTC and powers off at night.
+golfreelz ALL=(root) NOPASSWD: /usr/sbin/rtcwake, /usr/sbin/shutdown, /sbin/shutdown
+SUDOERS
+chmod 440 /etc/sudoers.d/golfreelz-curfew
 
 echo "==> venv: creating $INSTALL_DIR/venv if needed"
 if [[ ! -d "$INSTALL_DIR/venv" ]]; then

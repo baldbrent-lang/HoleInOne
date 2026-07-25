@@ -115,10 +115,15 @@ class BackendClient:
             delay = min(delay * 2, 30)
         raise RuntimeError(f"backend {method} {path} failed: {last_err}")
 
-    def heartbeat(self, firmware_version: str = "") -> dict:
+    def heartbeat(
+        self, firmware_version: str = "", extra: dict | None = None,
+    ) -> dict:
+        data = {"firmware_version": firmware_version}
+        if extra:
+            data.update(extra)
         return self._retry(
             "POST", "/heartbeat",
-            data={"firmware_version": firmware_version},
+            data=data,
             retries=2,
         )
 
@@ -198,19 +203,34 @@ class HeartbeatThread(threading.Thread):
     not fatal — the main capture loop keeps running even if the
     backend is briefly unreachable."""
 
-    def __init__(self, client: BackendClient, interval: int, firmware: str):
+    def __init__(
+        self, client: BackendClient, interval: int, firmware: str,
+        extra_fn=None,
+    ):
         super().__init__(daemon=True, name="heartbeat")
         self.client = client
         self.interval = max(15, int(interval))
         self.firmware = firmware
+        # Optional callable returning a dict of extra form fields to
+        # ride along on each heartbeat (e.g. battery telemetry).
+        # Failures inside it must never kill the heartbeat.
+        self.extra_fn = extra_fn
         self.stopping = threading.Event()
 
     def run(self) -> None:
         # First heartbeat immediately so admin UI sees the camera
         # come online without waiting a full interval.
         while not self.stopping.is_set():
+            extra = None
+            if self.extra_fn is not None:
+                try:
+                    extra = self.extra_fn()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("heartbeat extra_fn failed: %s", exc)
             try:
-                self.client.heartbeat(firmware_version=self.firmware)
+                self.client.heartbeat(
+                    firmware_version=self.firmware, extra=extra,
+                )
                 log.debug("heartbeat ok")
             except Exception as exc:  # pragma: no cover
                 log.warning("heartbeat failed: %s", exc)

@@ -107,6 +107,19 @@ class Settings(BaseSettings):
     # empty frames). Fail-safe: classification errors keep the upload.
     auto_delete_non_golf: bool = True
 
+    # ── Camera battery telemetry (INA226 heartbeat fields) ──────────
+    # Capacity of the field batteries, for the dashboard's rough
+    # "days remaining" estimate. 12.8V 100Ah LiFePO4 = 1280 Wh.
+    battery_capacity_wh: float = 1280.0
+    # Hours/day the rig actually draws power (curfew sleeps the rest).
+    battery_active_hours: float = 14.0
+    # Resting voltage that triggers the low-battery alert. LiFePO4
+    # falls off a cliff below ~12.8V — 12.85 gives ~1-2 days' warning.
+    battery_low_volts: float = 12.85
+    # Where low-battery (and other operator) alerts go. Empty = no
+    # email; the dashboard badge still shows the warning.
+    admin_alert_email: str = ""
+
     # "Produce (debug)" — a dev course-testing tool. Alongside a normal
     # produce, it runs a per-swing diagnostic that shows each step's result,
     # the classical-CV tracer's motion heatmap + whether it found the ball,

@@ -382,7 +382,19 @@ class TeeAgent:
 
         detector = self._build_detector(det_width)
 
-        hb = HeartbeatThread(self.client, self.heartbeat_seconds, FIRMWARE)
+        from .battery import BatteryMonitor
+
+        _batt = BatteryMonitor(self.cfg.get("battery"))
+        hb = HeartbeatThread(
+            self.client, self.heartbeat_seconds, FIRMWARE,
+            extra_fn=lambda: (
+                {
+                    "battery_voltage": r["voltage"],
+                    "battery_current_a": r["current_a"],
+                }
+                if (r := _batt.read_averaged()) else None
+            ),
+        )
         hb.start()
 
         streamer = LiveStreamer(self.client)

@@ -61,6 +61,7 @@ from ..config import settings
 from ..database import SessionLocal, get_db
 from ..deps import require_admin
 from .cameras import _LIVE_FRAMES, _WATCHERS, _LIVE_LOCK, WATCH_TTL, FRAME_TTL
+from .cameras import battery_status as _battery_status
 from ..models import (
     AuditLog,
     Camera,
@@ -9673,6 +9674,9 @@ def _camera_to_dict(c: Camera, last_event: CameraEvent | None = None) -> dict:
         "tee_box_roi": c.tee_box_roi,
         "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
         "firmware_version": c.firmware_version,
+        "battery": _battery_status(
+            c.battery_voltage, c.battery_current_a, c.battery_updated_at,
+        ),
         "enabled": bool(c.enabled),
         "triggering_enabled": bool(c.triggering_enabled),
         "note": c.note,

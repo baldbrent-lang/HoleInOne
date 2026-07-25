@@ -10,6 +10,9 @@ opencv-python-headless==4.10.0.84
 numpy>=1.26,<3
 requests>=2.31,<3
 PyYAML>=6.0,<7
+# INA226 battery telemetry over I2C (battery-powered deployments).
+# Harmless on rigs without the sensor — reads just return None.
+smbus2>=0.4,<1
 
 # MediaPipe is an OPTIONAL secondary detector (used only if the YOLO
 # model is missing). Pinned below Python 3.13 because no wheel exists for

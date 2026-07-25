@@ -70,6 +70,12 @@ def main(argv: list[str]) -> int:
         from agent.green import GreenAgent
         agent = GreenAgent(cfg)
 
+    # Curfew sleep/wake (battery deployments): halts the Pi at night
+    # and lets the RTC wake it at dawn. Off unless config enables it.
+    from agent.curfew import CurfewThread
+    curfew = CurfewThread(cfg.get("curfew"))
+    curfew.start()
+
     # Graceful Ctrl-C / systemd stop.
     def _shutdown(signum, _frame):
         log.info("signal %d received — shutting down", signum)

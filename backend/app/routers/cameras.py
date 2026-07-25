@@ -186,18 +186,112 @@ def _save_event_clip(
 # ---------------------------------------------------------------------
 
 
+def battery_status(
+    voltage: float | None,
+    current_a: float | None,
+    updated_at=None,
+) -> dict | None:
+    """Coarse battery readout for the dashboard from one voltage/current
+    sample. LiFePO4's discharge curve is famously flat mid-charge, so
+    the percent is honest-but-approximate — the buckets are what matter
+    (do I need to bring the charger?). None when no telemetry exists."""
+    if voltage is None:
+        return None
+    v = float(voltage)
+    # Resting-ish voltage -> approx % for a 4S LiFePO4 under light load.
+    curve = [
+        (13.35, 100), (13.25, 90), (13.18, 80), (13.10, 65),
+        (13.05, 55), (13.00, 40), (12.90, 30), (12.80, 20),
+        (12.60, 10), (12.10, 5),
+    ]
+    pct = 2
+    for thresh, p in curve:
+        if v >= thresh:
+            pct = p
+            break
+    level = (
+        "full" if pct >= 80
+        else "good" if pct >= 40
+        else "low" if pct >= 20
+        else "critical"
+    )
+    watts = (
+        round(v * float(current_a), 1)
+        if current_a is not None and float(current_a) > 0.05
+        else None
+    )
+    est_days = None
+    cap = float(settings.battery_capacity_wh or 0)
+    if cap > 0:
+        draw_w = watts if (watts and watts > 1.0) else 7.0
+        est_days = round(
+            (cap * pct / 100.0)
+            / (draw_w * max(1.0, float(settings.battery_active_hours))),
+            1,
+        )
+    return {
+        "voltage": round(v, 2),
+        "current_a": round(float(current_a), 2) if current_a is not None else None,
+        "watts": watts,
+        "percent": pct,
+        "level": level,
+        "est_days": est_days,
+        "low": bool(v < float(settings.battery_low_volts)),
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
 @router.post("/{token}/heartbeat")
 def heartbeat(
     token: str,
     firmware_version: str | None = Form(None),
+    battery_voltage: float | None = Form(None),
+    battery_current_a: float | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Cheap keepalive the Pi calls every ~60 s. Touches last_seen_at
     so the admin UI can flag offline cameras. Optionally captures the
-    Pi's firmware/git-commit version for diagnostics."""
+    Pi's firmware/git-commit version for diagnostics, plus battery
+    telemetry (INA226) on battery-powered rigs."""
     cam = _get_camera_by_token(token, db)
     if firmware_version:
         cam.firmware_version = firmware_version.strip()[:40]
+    if battery_voltage is not None:
+        cam.battery_voltage = float(battery_voltage)
+        cam.battery_current_a = (
+            float(battery_current_a) if battery_current_a is not None else None
+        )
+        cam.battery_updated_at = _utcnow_naive()
+        _thr = float(settings.battery_low_volts)
+        if cam.battery_voltage >= _thr + 0.15:
+            # Recharged / swapped — re-arm the one-shot alert.
+            cam.battery_low_notified_at = None
+        elif (
+            cam.battery_voltage < _thr
+            and cam.battery_low_notified_at is None
+        ):
+            cam.battery_low_notified_at = _utcnow_naive()
+            try:
+                from ..services import notifications
+
+                _name = cam.name or f"camera #{cam.id}"
+                notifications.send_email(
+                    settings.admin_alert_email or None,
+                    f"GolfReelz: low battery on {_name}",
+                    (
+                        f"{_name} (hole {cam.assigned_hole}, "
+                        f"{cam.assigned_role}) reported "
+                        f"{cam.battery_voltage:.2f}V — below the "
+                        f"{_thr:.2f}V alert threshold. Plan a battery "
+                        "swap in the next day or two."
+                    ),
+                )
+                log.info(
+                    "battery: LOW alert for camera %s (%.2fV)",
+                    cam.id, cam.battery_voltage,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("battery: low alert send failed: %s", exc)
     db.commit()
     return {
         "ok": True,

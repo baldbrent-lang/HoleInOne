@@ -133,6 +133,41 @@ heartbeat_seconds: 60
 poll_timeout_seconds: 25
 
 # ---------------------------------------------------------------------
+# Battery telemetry (INA226 on I2C) — battery-powered deployments
+# ---------------------------------------------------------------------
+# An INA226 breakout wired inline on the 12V feed reports voltage +
+# current draw on every heartbeat; the admin Cameras page shows a
+# battery badge and warns before the battery dies. Harmless to leave
+# enabled with no sensor attached (silently skipped).
+# One-time Pi setup:  sudo raspi-config nonint do_i2c 0
+
+battery:
+  enabled: true
+  i2c_bus: 1
+  i2c_address: 0x40
+  # Shunt resistance of YOUR board. The screw-terminal "0-36V 20A"
+  # breakout is 0.002; the small blue CJMCU-226 board is 0.1.
+  # Bench-check against a known load before trusting current numbers.
+  shunt_ohms: 0.002
+
+# ---------------------------------------------------------------------
+# Curfew sleep/wake — battery-powered deployments
+# ---------------------------------------------------------------------
+# Halt the Pi outside playing hours and wake it by RTC alarm. Sleeping
+# the dark hours roughly DOUBLES battery life (100Ah: ~5-6 days -> ~10-12),
+# and battery swaps at night cost zero footage. Requires the RTC coin
+# cell on the Pi 5's BAT connector. Times are the Pi's LOCAL time.
+# Safety: won't halt on an unsynced clock; boot_grace_seconds keeps a
+# freshly-booted Pi awake long enough to SSH in and disable this.
+
+curfew:
+  enabled: false          # flip to true on battery-powered rigs
+  sleep: "21:00"
+  wake: "06:00"
+  boot_grace_seconds: 600
+  # dry_run: true         # log what would happen, never power off
+
+# ---------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------
 

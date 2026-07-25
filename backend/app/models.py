@@ -9,6 +9,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -318,6 +319,14 @@ class Camera(Base):
     # Backend's offline alert watches this.
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     firmware_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # Battery telemetry (INA226 on the Pi's 12V feed), reported with
+    # each heartbeat on battery-powered rigs. Null = no sensor.
+    battery_voltage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    battery_current_a: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    battery_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Low-battery alert dedup — one notification per discharge, reset
+    # when the battery comes back above the threshold.
+    battery_low_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # Soft toggle distinct from `enabled`: when False the camera stays
     # online (heartbeats + live-watch still work) but the backend

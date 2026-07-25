@@ -457,6 +457,44 @@ export default function AdminCameras() {
                   {cam.assigned_role === "tee" && cam.triggering_enabled === false && (
                     <span className="pill small warn">triggering paused</span>
                   )}{" "}
+                  {cam.battery && (
+                    <span
+                      className={`pill small ${
+                        cam.battery.level === "critical" || cam.battery.low
+                          ? "warn"
+                          : cam.battery.level === "low"
+                            ? ""
+                            : "ok"
+                      }`}
+                      style={
+                        cam.battery.level === "critical" || cam.battery.low
+                          ? { background: "#dc2626", color: "#fff" }
+                          : cam.battery.level === "low"
+                            ? { background: "#f59e0b", color: "#1a1a1a" }
+                            : undefined
+                      }
+                      title={[
+                        `Battery ${cam.battery.voltage}V`,
+                        cam.battery.watts != null
+                          ? `drawing ${cam.battery.watts}W`
+                          : null,
+                        cam.battery.est_days != null
+                          ? `~${cam.battery.est_days} days left at current use`
+                          : null,
+                        cam.battery.updated_at
+                          ? `updated ${tsRel(cam.battery.updated_at)}`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    >
+                      🔋 {cam.battery.voltage}V · ~{cam.battery.percent}%
+                      {cam.battery.est_days != null && (
+                        <> · ~{cam.battery.est_days}d</>
+                      )}
+                      {cam.battery.low && <> · LOW</>}
+                    </span>
+                  )}{" "}
                   <span className="muted">
                     · hole {cam.assigned_hole}
                     {cam.name && <> · {cam.name}</>}
