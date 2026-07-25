@@ -51,6 +51,25 @@ def classify_clip(path: Path) -> dict:
             )
             if swings:
                 return {"is_golf": True, "reason": f"swing ~{swings[0]['peak_time_sec']:.0f}s"}
+            # RESCUE-AWARE (same rule as produce): a burst dropped ONLY
+            # by the wrist-speed ratio gate but with a swing-posture
+            # bend is very possibly a real swing seen from far away —
+            # NEVER classify (and delete) on that evidence. Produce's
+            # ratio-rescue + ball-departure check will arbitrate.
+            for b in (dbg.get("bursts_detail") or []):
+                if (
+                    b.get("status") == "ratio_low"
+                    and b.get("bend") is not None
+                    and float(b["bend"]) >= 15.0
+                ):
+                    return {
+                        "is_golf": True,
+                        "reason": (
+                            f"rescueable burst ~{b['t']:.0f}s (ratio "
+                            f"{b.get('ratio')}, bend {b.get('bend')}) — "
+                            "benefit of the doubt"
+                        ),
+                    }
             if dbg.get("reached_eof", True):
                 break  # scanned to the end with no swing
             t += _SCAN_CHUNK_SEC

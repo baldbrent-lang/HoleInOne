@@ -1386,10 +1386,38 @@ def _run_long_upload_job(
                         debug=_detect_debug,
                     )
 
+                # Rescueable near-miss bursts (dropped ONLY by the
+                # speed-ratio gate, with a swing-posture bend) — used
+                # both to VETO the non-golf delete below and to
+                # resurrect candidates for the pipeline.
+                _resc_all: list = []
+                try:
+                    _existing_ts0 = {
+                        round(float(d.get("peak_time_sec") or 0.0), 2)
+                        for d in (detected or [])
+                    }
+                    _resc_all = [
+                        b for b in (
+                            _detect_debug.get("bursts_detail") or []
+                        )
+                        if b.get("status") == "ratio_low"
+                        and b.get("bend") is not None
+                        and float(b["bend"]) >= 15.0
+                        and round(float(b["t"]), 2) not in _existing_ts0
+                    ]
+                except Exception:  # noqa: BLE001
+                    _resc_all = []
+
                 # NON-GOLF: the detector doubles as the screen — a
                 # video with zero swing candidates is a walk-by / pet /
                 # empty capture. Delete it instead of failing the run.
-                if not detected and settings.auto_delete_non_golf:
+                # A rescueable burst VETOES the delete: a distant real
+                # swing can read 'below 5x' (landmark jitter eats the
+                # ratio), and deletion is unrecoverable from the UI.
+                if (
+                    not detected and not _resc_all
+                    and settings.auto_delete_non_golf
+                ):
                     try:
                         db.rollback()  # release our txn before deleting
                     except Exception:  # noqa: BLE001
@@ -1410,19 +1438,7 @@ def _run_long_upload_job(
                 # check downstream (the one signal distance can't
                 # dilute).
                 try:
-                    _existing_ts = {
-                        round(float(d.get("peak_time_sec") or 0.0), 2)
-                        for d in (detected or [])
-                    }
-                    _resc = [
-                        b for b in (
-                            _detect_debug.get("bursts_detail") or []
-                        )
-                        if b.get("status") == "ratio_low"
-                        and b.get("bend") is not None
-                        and float(b["bend"]) >= 15.0
-                        and round(float(b["t"]), 2) not in _existing_ts
-                    ]
+                    _resc = list(_resc_all)
                     _resc.sort(
                         key=lambda b: -float(b.get("ratio") or 0.0),
                     )
@@ -2958,13 +2974,26 @@ def _auto_delete_upload(upload_id: int, reason: str) -> None:
     try:
         db = SessionLocal()
         try:
+            # Snapshot the source filenames BEFORE deleting the row so the
+            # audit trail is enough to recover the clip from object storage
+            # (scripts/recover_deleted_upload.py) if the screen was wrong.
+            _row = db.get(LongVideoUpload, upload_id)
+            _files = ""
+            if _row is not None:
+                _files = f" tee={_row.tee_filename}"
+                if _row.green_filename:
+                    _files += f" green={_row.green_filename}"
+                _files += (
+                    f" course={_row.course_id}"
+                    f" captured_at={_row.base_captured_at.isoformat()}"
+                )
             delete_long_upload(upload_id, db)
             db.add(
                 AuditLog(
                     actor="system",
                     action="auto_delete_non_golf",
                     target=f"long_upload:{upload_id}",
-                    detail=reason,
+                    detail=reason + _files,
                 )
             )
             db.commit()
