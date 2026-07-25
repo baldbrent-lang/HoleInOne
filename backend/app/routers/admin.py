@@ -3594,6 +3594,18 @@ def list_long_uploads(
         green_path = CLIPS_DIR / r.green_filename if r.green_filename else None
         tee_exists = bool(tee_path and tee_path.exists())
         green_exists = bool(green_path and green_path.exists())
+        # If not on local disk, check object storage — files survive in the
+        # bucket across redeploys even when the local CLIPS_DIR is fresh.
+        # We only need the boolean here (metadata probing requires a local file);
+        # ensure_local is called later by the produce job itself.
+        tee_in_bucket = (
+            bool(r.tee_filename and storage.exists(r.tee_filename))
+            if not tee_exists else False
+        )
+        green_in_bucket = (
+            bool(r.green_filename and storage.exists(r.green_filename))
+            if not green_exists else False
+        )
         tee_meta = _meta(tee_path, tee_exists)
         green_meta = _meta(green_path, green_exists)
         course = courses.get(r.course_id)
@@ -3661,7 +3673,7 @@ def list_long_uploads(
                 "tee_width": tee_meta["width"],
                 "tee_height": tee_meta["height"],
                 "tee_quality_label": tee_meta["quality_label"],
-                "tee_missing": (r.tee_filename is not None and not tee_exists),
+                "tee_missing": (r.tee_filename is not None and not tee_exists and not tee_in_bucket),
                 "green_filename": r.green_filename,
                 "green_original_filename": r.green_original_filename,
                 "green_url": (
@@ -3677,7 +3689,7 @@ def list_long_uploads(
                 "green_width": green_meta["width"],
                 "green_height": green_meta["height"],
                 "green_quality_label": green_meta["quality_label"],
-                "green_missing": (r.green_filename is not None and not green_exists),
+                "green_missing": (r.green_filename is not None and not green_exists and not green_in_bucket),
                 "dual_camera": r.green_filename is not None,
                 "produced_clips": produced,
                 "edit_metrics": r.edit_metrics,
@@ -3761,6 +3773,21 @@ def list_camera_events(
             }
         path = CLIPS_DIR / fname
         if not path.exists():
+            # Before declaring the file missing, check object storage — the
+            # file may have survived a redeploy in the bucket even though the
+            # local CLIPS_DIR was reset.
+            if storage.exists(fname):
+                return {
+                    "url": f"{settings.app_base_url}/uploads/clips/{fname}",
+                    "thumbnail_url": None,
+                    "size_mb": None,
+                    "duration_sec": None,
+                    "fps": None,
+                    "nb_frames": None,
+                    "width": None,
+                    "height": None,
+                    "missing": False,
+                }
             return {
                 "url": None,
                 "thumbnail_url": None,
@@ -3875,10 +3902,15 @@ def reprocess_camera_event(event_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "camera event not found")
     if not event.tee_clip_filename:
         raise HTTPException(409, "no tee clip on file to re-process")
+    # Rehydrate from object storage if the file landed in the bucket but
+    # the local CLIPS_DIR was reset by a redeploy.
+    storage.ensure_local(CLIPS_DIR, event.tee_clip_filename)
+    if event.green_clip_filename:
+        storage.ensure_local(CLIPS_DIR, event.green_clip_filename)
     tee_path = CLIPS_DIR / event.tee_clip_filename
     if not tee_path.exists():
         raise HTTPException(
-            404, f"tee clip missing on disk: {event.tee_clip_filename}",
+            404, f"tee clip missing on disk and in storage: {event.tee_clip_filename}",
         )
 
     # Reset status so the UI shows the run is restarting and any
