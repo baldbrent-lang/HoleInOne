@@ -126,6 +126,16 @@ class Settings(BaseSettings):
             self.mirror_course_id = 0
             self.mirror_source_url = ""
             self.mirror_source_password = ""
+            # Media URLs must point at THIS deployment. The workspace's
+            # APP_BASE_URL env (and the REPLIT_DEV_DOMAIN default) leak
+            # the DEV domain into deployments, stamping every produced
+            # clip/thumbnail with links that only resolve while the dev
+            # workspace happens to be awake. REPLIT_DOMAINS' first entry
+            # is the deployment's own public domain — always prefer it.
+            _domains = os.environ.get("REPLIT_DOMAINS", "")
+            _primary = _domains.split(",")[0].strip()
+            if _primary:
+                self.app_base_url = f"https://{_primary}"
         return self
 
     # Swing detector for the produce pipeline. "pose" (default) = the

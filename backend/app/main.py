@@ -304,10 +304,64 @@ def _reap_orphaned_jobs() -> None:
         db.close()
 
 
+def _heal_media_urls() -> None:
+    """Rewrite stored /uploads/clips media URLs whose origin doesn't match
+    this instance's app_base_url. Production historically stamped clips with
+    the DEV workspace domain (APP_BASE_URL leak — see the settings
+    validator), so thumbnails/videos only loaded while the dev workspace
+    was awake. The files themselves are fine (same names, shared bucket);
+    only the stored origins are wrong, and this makes them self-heal on
+    every boot."""
+    import json as _json
+    import re as _re
+
+    from .config import settings
+    from .database import SessionLocal
+    from .models import LongVideoUpload, VideoClip
+
+    base = (settings.app_base_url or "").rstrip("/")
+    if not base.startswith("https://"):
+        return  # local/dev-sandbox runs: don't rewrite anything
+    pat = _re.compile(r"https?://[^/\s\"']+/uploads/clips/")
+    want = base + "/uploads/clips/"
+
+    def _fix(text: str | None) -> str | None:
+        if not text or "/uploads/clips/" not in text:
+            return None
+        healed = pat.sub(want, text)
+        return healed if healed != text else None
+
+    db = SessionLocal()
+    try:
+        n = 0
+        for c in db.query(VideoClip).all():
+            for col in ("source_url", "thumbnail_url", "tracer_url", "tee_clip_url"):
+                healed = _fix(getattr(c, col))
+                if healed is not None:
+                    setattr(c, col, healed)
+                    n += 1
+        for u in db.query(LongVideoUpload).filter(
+            LongVideoUpload.edit_metrics.isnot(None)
+        ):
+            healed = _fix(_json.dumps(u.edit_metrics))
+            if healed is not None:
+                u.edit_metrics = _json.loads(healed)
+                n += 1
+        if n:
+            db.commit()
+            _glog.info("startup: healed %d media URL(s) to %s", n, base)
+    except Exception as exc:  # noqa: BLE001
+        _glog.warning("startup: media URL heal failed: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+
 @app.on_event("startup")
 def _startup() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate()
+    _heal_media_urls()
     _reap_orphaned_jobs()
     _remove_retired_courses()
     _seed_default_courses()
