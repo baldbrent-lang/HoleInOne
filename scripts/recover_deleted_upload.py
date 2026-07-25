@@ -70,7 +70,11 @@ from app.services import storage  # noqa: E402
 CLIPS_DIR = _REPO / "backend" / settings.upload_dir / "clips"
 
 
-_EVENT_RE = re.compile(r"^event-(\d+)-(tee|green)-[0-9a-f]+\.\w+$")
+# Videos only — the Pis also upload trigger-snapshot .jpgs under the same
+# event-<id>-<role>- naming, and those are not restorable clips.
+_EVENT_RE = re.compile(
+    r"^event-(\d+)-(tee|green)-[0-9a-f]+\.(mp4|mov|m4v|webm)$"
+)
 
 
 def _orphan_event_files(db) -> list[tuple[int, str, str]]:
