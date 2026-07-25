@@ -11,6 +11,39 @@ from pathlib import Path
 
 log = logging.getLogger("golfreelz.admin")
 
+# ---------------------------------------------------------------------------
+# Background source-file rehydration
+# ---------------------------------------------------------------------------
+# After a redeploy the local CLIPS_DIR is empty; source files live in object
+# storage.  When the list endpoint detects a file is in the bucket but not on
+# local disk it schedules a background download so subsequent page loads show
+# full metadata.  We keep a dedup set so the same file isn't downloaded twice
+# concurrently.
+_rehydrate_pending: set[str] = set()
+_rehydrate_lock = threading.Lock()
+
+
+def _rehydrate_background(clips_dir: Path, filename: str) -> None:
+    """Ensure `filename` is on local disk, downloading from the bucket in a
+    daemon thread.  Idempotent — ignores a request already in flight."""
+    from ..services import storage  # local import avoids circular at module load
+
+    with _rehydrate_lock:
+        if filename in _rehydrate_pending:
+            return
+        _rehydrate_pending.add(filename)
+
+    def _run() -> None:
+        try:
+            storage.ensure_local(clips_dir, filename)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("rehydrate: could not download %s: %s", filename, exc)
+        finally:
+            with _rehydrate_lock:
+                _rehydrate_pending.discard(filename)
+
+    threading.Thread(target=_run, name=f"rehydrate-{filename}", daemon=True).start()
+
 from fastapi import (
     APIRouter,
     Body,
@@ -3490,16 +3523,29 @@ def list_long_uploads(
             return "480p SD"
         return f"{height}p"
 
-    def _meta(path: Path | None, exists: bool) -> dict:
+    def _meta(path: Path | None, exists: bool, in_bucket: bool = False) -> dict:
         """Bundle probe + thumbnail lookup for one source video. Skipping the
         probe entirely when the file is missing keeps list responses fast."""
         if not (path and exists):
+            thumb_url = None
+            if in_bucket and path:
+                # Source video is in the bucket; check if its thumbnail JPG is
+                # there too so the production card can show a preview image
+                # even before the source is downloaded to local disk.
+                thumb_name = path.stem + ".jpg"
+                if storage.exists(thumb_name):
+                    thumb_url = (
+                        f"{settings.app_base_url}/uploads/clips/{thumb_name}"
+                    )
+                # Kick off background download of the source so the next page
+                # load can probe and show full metadata.
+                _rehydrate_background(CLIPS_DIR, path.name)
             return {
                 "size_mb": None,
                 "duration_sec": None,
                 "fps": None,
                 "nb_frames": None,
-                "thumbnail_url": None,
+                "thumbnail_url": thumb_url,
                 "width": None,
                 "height": None,
                 "quality_label": None,
@@ -3606,8 +3652,8 @@ def list_long_uploads(
             bool(r.green_filename and storage.exists(r.green_filename))
             if not green_exists else False
         )
-        tee_meta = _meta(tee_path, tee_exists)
-        green_meta = _meta(green_path, green_exists)
+        tee_meta = _meta(tee_path, tee_exists, in_bucket=tee_in_bucket)
+        green_meta = _meta(green_path, green_exists, in_bucket=green_in_bucket)
         course = courses.get(r.course_id)
         produced = _produced(r.id)
         cam_event = cam_events_by_id.get(r.camera_event_id) if r.camera_event_id else None
@@ -3777,9 +3823,18 @@ def list_camera_events(
             # file may have survived a redeploy in the bucket even though the
             # local CLIPS_DIR was reset.
             if storage.exists(fname):
+                # Also check for a pre-existing thumbnail JPG in the bucket.
+                thumb_name = Path(fname).stem + ".jpg"
+                thumb_url = (
+                    f"{settings.app_base_url}/uploads/clips/{thumb_name}"
+                    if storage.exists(thumb_name) else None
+                )
+                # Rehydrate source to local disk in the background so the next
+                # page load can probe and show full metadata.
+                _rehydrate_background(CLIPS_DIR, fname)
                 return {
                     "url": f"{settings.app_base_url}/uploads/clips/{fname}",
-                    "thumbnail_url": None,
+                    "thumbnail_url": thumb_url,
                     "size_mb": None,
                     "duration_sec": None,
                     "fps": None,
