@@ -146,9 +146,37 @@ def broadcast_next(
         _record_view(db, viewer_id, highlight)
         return _clip_payload(highlight, db, course_for_clip)
 
-    # 3. Nothing to play — tell the client to render a leaderboard slate
-    #    for a few seconds and ask again. The data shape is intentionally
-    #    minimal; /watch can fetch the full /contests payload separately.
+    # 3. Every highlight has been seen inside the dedup window — LOOP
+    #    instead of parking on a slate: replay the highlight this viewer
+    #    saw longest ago, so the channel runs clips on repeat forever.
+    from sqlalchemy import func
+
+    loop_q = db.query(VideoClip).filter(VideoClip.is_highlight.is_(True))
+    if course_id:
+        loop_q = loop_q.filter(VideoClip.course_id == course_id)
+    loop_pool = loop_q.order_by(desc(VideoClip.created_at)).limit(200).all()
+    if loop_pool:
+        last_shown = dict(
+            db.query(BroadcastView.clip_id, func.max(BroadcastView.shown_at))
+            .filter(
+                BroadcastView.viewer_id == viewer_id,
+                BroadcastView.clip_id.in_([c.id for c in loop_pool]),
+            )
+            .group_by(BroadcastView.clip_id)
+            .all()
+        )
+        replay = min(
+            loop_pool,
+            key=lambda c: last_shown.get(c.id, datetime.min),
+        )
+        course_for_clip = course or db.get(Course, replay.course_id)
+        _record_view(db, viewer_id, replay)
+        return _clip_payload(replay, db, course_for_clip)
+
+    # 4. Genuinely nothing to play (no highlights exist at all) — tell the
+    #    client to render a leaderboard slate for a few seconds and ask
+    #    again. The data shape is intentionally minimal; /watch can fetch
+    #    the full /contests payload separately.
     return {"kind": "slate", "duration_ms": 8000, "course_id": course_id}
 
 

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
+import { fmtDateTime } from "../time.js";
 
 /**
  * Near-live broadcast channel. Polls /api/broadcast/next, autoplays the
@@ -39,9 +40,45 @@ export default function Watch() {
   const [error, setError] = useState(null);
   const [contests, setContests] = useState(null);
   const [channelInfo, setChannelInfo] = useState(null);
+  const [airplayAvailable, setAirplayAvailable] = useState(false);
   const videoRef = useRef(null);
+  const frameRef = useRef(null);
   const advanceTimer = useRef(null);
   const playlistRef = useRef({ clips: [], idx: -1 });
+
+  // AirPlay (Safari/iOS/macOS): the video element announces when a
+  // playback target (Apple TV / AirPlay-capable TV) is reachable.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !window.WebKitPlaybackTargetAvailabilityEvent) return;
+    const onAvail = (e) =>
+      setAirplayAvailable(e.availability === "available");
+    v.addEventListener("webkitplaybacktargetavailabilitychanged", onAvail);
+    return () =>
+      v.removeEventListener(
+        "webkitplaybacktargetavailabilitychanged", onAvail,
+      );
+  }, [item?.kind]);
+
+  function showAirplayPicker() {
+    try {
+      videoRef.current?.webkitShowPlaybackTargetPicker?.();
+    } catch {
+      /* not supported — button only renders when it is */
+    }
+  }
+
+  function toggleFullscreen() {
+    const el = frameRef.current;
+    if (!el) return;
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      (document.exitFullscreen || document.webkitExitFullscreen)?.call(
+        document,
+      );
+      return;
+    }
+    (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+  }
 
   async function next() {
     if (channel) {
@@ -130,7 +167,7 @@ export default function Watch() {
         </div>
       )}
 
-      <div className="watch-frame">
+      <div className="watch-frame" ref={frameRef}>
         {error && (
           <div className="watch-error">
             <p>Couldn't load the channel: <code>{error}</code></p>
@@ -146,6 +183,7 @@ export default function Watch() {
               autoPlay
               playsInline
               muted /* required for autoplay on most browsers */
+              x-webkit-airplay="allow"
               onEnded={onVideoEnded}
               onError={onVideoError}
               className="watch-video"
@@ -153,6 +191,45 @@ export default function Watch() {
             <ClipOverlay item={item} />
           </>
         )}
+
+        {/* Player controls — bottom-left, out of the way of the clip
+            info. AirPlay only appears when a target is reachable
+            (Safari-family browsers). */}
+        <div
+          style={{
+            position: "absolute", left: 10, bottom: 10, zIndex: 5,
+            display: "flex", gap: 8,
+          }}
+        >
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            title="Fill the screen"
+            style={{
+              background: "rgba(0,0,0,0.45)", color: "#fff",
+              border: "1px solid rgba(255,255,255,0.35)",
+              borderRadius: 6, width: 34, height: 30,
+              cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0,
+            }}
+          >
+            ⛶
+          </button>
+          {airplayAvailable && (
+            <button
+              type="button"
+              onClick={showAirplayPicker}
+              title="Play on a TV via AirPlay"
+              style={{
+                background: "rgba(0,0,0,0.45)", color: "#fff",
+                border: "1px solid rgba(255,255,255,0.35)",
+                borderRadius: 6, width: 34, height: 30,
+                cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0,
+              }}
+            >
+              📺
+            </button>
+          )}
+        </div>
 
         {item?.kind === "slate" && (
           <Slate contests={contests} courseId={courseId} />
@@ -165,40 +242,37 @@ export default function Watch() {
 }
 
 function ClipOverlay({ item }) {
+  // Deliberately minimal chrome: no course/hole/HIGHLIGHT box — just
+  // the golfer (when known) and the clip's capture date + time in the
+  // bottom-right corner.
+  const when = item.captured_at
+    ? fmtDateTime(item.captured_at, [], {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : null;
+  if (!when && !item.golfer_name) return null;
   return (
-    <>
-      <div className="watch-overlay tr">
-        <div className="tiny upper muted-on-dark">
-          {item.course_name || "GolfReelz"}
-        </div>
-        <div className="watch-overlay-title">
-          Hole {item.hole_number}
-          {item.yardage ? ` · ${item.yardage}y` : ""}
-        </div>
-        {item.is_highlight && (
-          <span className="pill ok" style={{ marginTop: 6 }}>
-            {item.highlight_tag === "01-ace" ? "ACE" :
-             item.highlight_tag === "02-stiff" ? "STIFF" :
-             "HIGHLIGHT"}
-          </span>
-        )}
-      </div>
+    <div className="watch-overlay br">
       {item.golfer_name && (
-        <div className="watch-overlay br">
-          <div className="watch-overlay-title">{item.golfer_name}</div>
-          {item.ball_in_cup && (
-            <div className="tiny upper" style={{ color: "var(--emerald-300)" }}>
-              ball in cup
-            </div>
-          )}
-          {!item.ball_in_cup && item.distance_from_pin_feet != null && (
-            <div className="tiny upper muted-on-dark">
-              {item.distance_from_pin_feet}ft from pin
-            </div>
-          )}
+        <div className="watch-overlay-title">{item.golfer_name}</div>
+      )}
+      {item.ball_in_cup && (
+        <div className="tiny upper" style={{ color: "var(--emerald-300)" }}>
+          ball in cup
         </div>
       )}
-    </>
+      {!item.ball_in_cup && item.distance_from_pin_feet != null && (
+        <div className="tiny upper muted-on-dark">
+          {item.distance_from_pin_feet}ft from pin
+        </div>
+      )}
+      {when && (
+        <div className="tiny upper muted-on-dark">{when}</div>
+      )}
+    </div>
   );
 }
 
