@@ -28,15 +28,46 @@ function viewerId() {
 export default function Watch() {
   const [params] = useSearchParams();
   const courseId = params.get("course_id") || null;
+  // Channel mode (?channel=course-2 | best): a continuous looping
+  // playlist of Broadcast clips instead of the per-viewer near-live
+  // picker. The playlist refetches on every wrap so freshly promoted
+  // clips join the loop without a reload.
+  const channel = params.get("channel") || null;
   const kiosk = params.get("fullscreen") === "1";
 
   const [item, setItem] = useState(null);
   const [error, setError] = useState(null);
   const [contests, setContests] = useState(null);
+  const [channelInfo, setChannelInfo] = useState(null);
   const videoRef = useRef(null);
   const advanceTimer = useRef(null);
+  const playlistRef = useRef({ clips: [], idx: -1 });
 
   async function next() {
+    if (channel) {
+      try {
+        let pl = playlistRef.current;
+        if (pl.idx + 1 >= pl.clips.length) {
+          const data = await api.broadcastChannelPlaylist(channel);
+          setChannelInfo({ label: data.label, count: (data.clips || []).length });
+          pl = { clips: data.clips || [], idx: -1 };
+          playlistRef.current = pl;
+        }
+        if (!pl.clips.length) {
+          // Empty channel — show a slate and re-check in a bit.
+          setItem({ kind: "slate", duration_ms: 15000 });
+          setError(null);
+          return;
+        }
+        pl.idx += 1;
+        setItem(pl.clips[pl.idx]);
+        setError(null);
+      } catch (e) {
+        setError(e.message);
+        advanceTimer.current = setTimeout(next, 6000);
+      }
+      return;
+    }
     try {
       const data = await api.broadcastNext(viewerId(), courseId);
       setItem(data);
@@ -50,11 +81,12 @@ export default function Watch() {
 
   // Initial pull + grab leaderboard data for slate frames.
   useEffect(() => {
+    playlistRef.current = { clips: [], idx: -1 };
     next();
     api.contests().then(setContests).catch(() => {});
     return () => clearTimeout(advanceTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [courseId]);
+  }, [courseId, channel]);
 
   // Slate frames advance themselves on a timer.
   useEffect(() => {
@@ -81,8 +113,14 @@ export default function Watch() {
           <Brand subtitle="Broadcast" />
           <div className="inline" style={{ justifyContent: "space-between", marginBottom: 8 }}>
             <p className="small muted" style={{ margin: 0 }}>
-              <Icon name="play" size={14} /> Par-3 swings, near-live.
-              {courseId ? " Single-course feed." : " All courses."}
+              <Icon name="play" size={14} />{" "}
+              {channel
+                ? `${channelInfo?.label || "Channel"} — continuous broadcast${
+                    channelInfo ? ` · ${channelInfo.count} clips` : ""
+                  }`
+                : `Par-3 swings, near-live.${
+                    courseId ? " Single-course feed." : " All courses."
+                  }`}
             </p>
             <div className="inline" style={{ gap: 8 }}>
               <Link to="/leaderboards" className="btn ghost small" style={{ width: "auto" }}>Leaderboards</Link>

@@ -13,6 +13,107 @@ const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
  * by /admin/long-upload (tee with AI tracer overlay spliced into the
  * green-side landing) plays back here in a single scroll. Newest first.
  */
+/**
+ * Continuous-stream channels: one per course (that course's Broadcast
+ * clips, newest first, on a loop) plus a cross-course "Best Shots"
+ * channel ordered closest-to-the-pin. Each opens /watch?channel=<key>,
+ * which loops the playlist forever — clubhouse-TV ready via the kiosk
+ * URL (adds &fullscreen=1).
+ */
+function ChannelsSection() {
+  const [channels, setChannels] = useState(null);
+  const [copiedKey, setCopiedKey] = useState(null);
+
+  useEffect(() => {
+    api.broadcastChannels()
+      .then((d) => setChannels(d.channels || []))
+      .catch(() => setChannels([]));
+  }, []);
+
+  async function copyKiosk(key) {
+    const url = `${window.location.origin}/watch?channel=${encodeURIComponent(key)}&fullscreen=1`;
+    try {
+      await navigator.clipboard?.writeText(url);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 1600);
+    } catch {
+      window.prompt("Kiosk URL:", url);
+    }
+  }
+
+  if (channels === null) {
+    return (
+      <div className="card">
+        <div className="shimmer" style={{ height: 60 }} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <h3 style={{ marginBottom: 4 }}>Channels</h3>
+      <p className="small muted" style={{ marginBottom: 10 }}>
+        Continuous streams of the clips below — each plays its playlist on
+        a loop and picks up newly promoted clips automatically. “Kiosk URL”
+        copies a full-screen link for a clubhouse TV.
+      </p>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+          gap: 10,
+        }}
+      >
+        {channels.map((ch) => (
+          <div
+            key={ch.key}
+            className="card tight"
+            style={{ margin: 0, padding: 12 }}
+          >
+            <div className="small" style={{ fontWeight: 600 }}>
+              {ch.key === "best" ? "⭐ " : "⛳ "}
+              {ch.label}
+            </div>
+            <div className="tiny muted" style={{ margin: "4px 0 8px" }}>
+              {ch.count} clip{ch.count === 1 ? "" : "s"} on the loop
+            </div>
+            <div className="inline" style={{ gap: 6 }}>
+              <button
+                type="button"
+                className="small"
+                style={{ width: "auto" }}
+                disabled={!ch.count}
+                onClick={() =>
+                  window.open(
+                    `/watch?channel=${encodeURIComponent(ch.key)}`,
+                    "_blank",
+                  )
+                }
+              >
+                ▶ Watch
+              </button>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto" }}
+                onClick={() => copyKiosk(ch.key)}
+              >
+                {copiedKey === ch.key ? "Copied!" : "Kiosk URL"}
+              </button>
+            </div>
+          </div>
+        ))}
+        {channels.length === 0 && (
+          <div className="tiny muted">
+            No channels yet — promote a clip with Broadcast and they appear
+            here.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AdminBroadcastClips() {
   const adminPassword =
     localStorage.getItem(ADMIN_PW_STORAGE) ||
@@ -248,6 +349,8 @@ export default function AdminBroadcastClips() {
         <Link to="/admin/broadcast-clips" className="active">Broadcast</Link>
         <Link to="/admin/cameras">Cameras</Link>
       </div>
+
+      <ChannelsSection />
 
       <div className="card">
         <h3 style={{ marginBottom: 4 }}>Broadcast clips</h3>

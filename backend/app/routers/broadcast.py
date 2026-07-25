@@ -152,6 +152,119 @@ def broadcast_next(
     return {"kind": "slate", "duration_ms": 8000, "course_id": course_id}
 
 
+# --- Channels ---------------------------------------------------------------
+# A channel is a continuous, looping playlist of Broadcast (is_highlight)
+# clips: one channel per course plus a cross-course "Best Shots" channel
+# ordered closest-to-the-pin first. The /watch page plays a channel's
+# playlist end to end and refetches on wrap, so freshly promoted clips
+# join the loop without a page reload. Public (clubhouse TVs).
+
+BEST_CHANNEL_LABEL = "Best Shots · Closest to the Pin"
+
+
+@router.get("/channels")
+def list_channels(db: Session = Depends(get_db)):
+    """Every available channel + its clip count: one per course that has
+    at least one Broadcast clip, plus the cross-course Best Shots
+    channel (clips with a measured distance-from-pin)."""
+    from sqlalchemy import func
+
+    rows = (
+        db.query(VideoClip.course_id, func.count(VideoClip.id))
+        .filter(VideoClip.is_highlight.is_(True))
+        .group_by(VideoClip.course_id)
+        .all()
+    )
+    course_ids = [r[0] for r in rows]
+    courses = (
+        {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
+        if course_ids
+        else {}
+    )
+    channels = [
+        {
+            "key": f"course-{cid}",
+            "course_id": cid,
+            "label": courses[cid].name if cid in courses else f"Course {cid}",
+            "count": int(n),
+        }
+        for cid, n in sorted(rows, key=lambda r: r[0])
+        if n
+    ]
+    best_n = (
+        db.query(func.count(VideoClip.id))
+        .filter(
+            VideoClip.is_highlight.is_(True),
+            VideoClip.distance_from_pin_feet.isnot(None),
+        )
+        .scalar()
+        or 0
+    )
+    channels.append({
+        "key": "best",
+        "course_id": None,
+        "label": BEST_CHANNEL_LABEL,
+        "count": int(best_n),
+    })
+    return {"channels": channels}
+
+
+@router.get("/channels/{key}/playlist")
+def channel_playlist(
+    key: str,
+    limit: int = Query(default=200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Ordered playlist for one channel. Course channels play newest
+    first; the Best channel plays closest-to-the-pin first (holed-out
+    shots lead, then ascending distance). The player loops the list and
+    refetches when it wraps."""
+    base = db.query(VideoClip).filter(VideoClip.is_highlight.is_(True))
+    if key == "best":
+        label = BEST_CHANNEL_LABEL
+        clips = (
+            base.filter(VideoClip.distance_from_pin_feet.isnot(None))
+            .order_by(
+                desc(VideoClip.ball_in_cup),
+                VideoClip.distance_from_pin_feet.asc(),
+                desc(VideoClip.created_at),
+            )
+            .limit(limit)
+            .all()
+        )
+    elif key.startswith("course-"):
+        try:
+            cid = int(key.split("-", 1)[1])
+        except ValueError:
+            raise HTTPException(404, "unknown channel")
+        course = db.get(Course, cid)
+        if course is None:
+            raise HTTPException(404, "unknown channel")
+        label = course.name
+        clips = (
+            base.filter(VideoClip.course_id == cid)
+            .order_by(desc(VideoClip.created_at))
+            .limit(limit)
+            .all()
+        )
+    else:
+        raise HTTPException(404, "unknown channel")
+
+    course_ids = {c.course_id for c in clips}
+    courses = (
+        {c.id: c for c in db.query(Course).filter(Course.id.in_(course_ids)).all()}
+        if course_ids
+        else {}
+    )
+    return {
+        "key": key,
+        "label": label,
+        "clips": [
+            _clip_payload(c, db, courses.get(c.course_id)) for c in clips
+        ],
+    }
+
+
 def _record_view(db: Session, viewer_id: str, clip: VideoClip) -> None:
     db.add(
         BroadcastView(

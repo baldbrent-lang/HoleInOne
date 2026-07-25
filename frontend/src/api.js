@@ -116,6 +116,11 @@ export const api = {
       auth: false,
     }),
   contests: () => request(`/api/public/contests`, { auth: false }),
+  broadcastChannels: () => request(`/api/broadcast/channels`, { auth: false }),
+  broadcastChannelPlaylist: (key, limit = 200) =>
+    request(`/api/broadcast/channels/${encodeURIComponent(key)}/playlist?limit=${limit}`, {
+      auth: false,
+    }),
   broadcastNext: (viewerId, courseId) => {
     const qs = new URLSearchParams({ viewer_id: viewerId });
     if (courseId) qs.set("course_id", courseId);
