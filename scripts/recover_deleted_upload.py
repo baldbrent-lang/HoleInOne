@@ -46,20 +46,55 @@ sys.path.insert(0, str(_REPO / "backend"))
 # interpreter when we're not already inside it, so plain
 # `python3 scripts/recover_deleted_upload.py` works from the shell.
 _VENV_PY = _REPO / "backend" / ".venv" / "bin" / "python"
-if _VENV_PY.exists() and Path(sys.executable).resolve() != _VENV_PY.resolve():
-    try:
-        import pydantic  # noqa: F401
-    except ModuleNotFoundError:
-        import os
+try:
+    import pydantic  # noqa: F401
+except ModuleNotFoundError:
+    import os
 
+    # NB: can't compare interpreter paths — the venv's bin/python is a
+    # symlink to the same base interpreter, so resolve() looks identical
+    # inside and outside the venv. An env marker guards against loops.
+    if _VENV_PY.exists() and not os.environ.get("GR_RECOVER_REEXEC"):
+        os.environ["GR_RECOVER_REEXEC"] = "1"
         os.execv(str(_VENV_PY), [str(_VENV_PY)] + sys.argv)
+    raise SystemExit(
+        "App packages not importable. Run via the backend venv:\n"
+        "  backend/.venv/bin/python scripts/recover_deleted_upload.py ..."
+    )
 
 from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
-from app.models import AuditLog, LongVideoUpload  # noqa: E402
+from app.models import AuditLog, CameraEvent, LongVideoUpload  # noqa: E402
 from app.services import storage  # noqa: E402
 
 CLIPS_DIR = _REPO / "backend" / settings.upload_dir / "clips"
+
+
+_EVENT_RE = re.compile(r"^event-(\d+)-(tee|green)-[0-9a-f]+\.\w+$")
+
+
+def _orphan_event_files(db) -> list[tuple[int, str, str]]:
+    """Bucket objects named like Pi event clips (event-<id>-<role>-*.mp4)
+    that NO surviving DB row references — i.e. clips whose CameraEvent +
+    LongVideoUpload rows were deleted. These are the recovery candidates
+    for auto-deleted Pi captures. Returns (event_id, role, name) sorted
+    newest-event first."""
+    referenced: set[str] = set()
+    for tee, green in db.query(
+        LongVideoUpload.tee_filename, LongVideoUpload.green_filename
+    ):
+        referenced.update(filter(None, (tee, green)))
+    for tee, green in db.query(
+        CameraEvent.tee_clip_filename, CameraEvent.green_clip_filename
+    ):
+        referenced.update(filter(None, (tee, green)))
+    out = []
+    for name in storage.list_names():
+        m = _EVENT_RE.match(name)
+        if m and name not in referenced:
+            out.append((int(m.group(1)), m.group(2), name))
+    out.sort(key=lambda t: (-t[0], t[1]))
+    return out
 
 
 def _parse_kv(detail: str | None) -> dict:
@@ -84,6 +119,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         )
         if not deletions:
             print("No auto_delete_non_golf audit entries found.")
+        any_unnamed = False
         for d in deletions:
             info = _parse_kv(d.detail)
             upload_id = (d.target or "").split(":")[-1]
@@ -127,11 +163,38 @@ def cmd_list(args: argparse.Namespace) -> int:
                     + (f" {extra}" if extra else "")
                 )
             else:
+                any_unnamed = True
                 print(
-                    "  no filename on record (Pi camera-event upload?) — "
-                    "find it in the bucket with `list --bucket` and match "
-                    "the capture timestamp in the filename."
+                    "  no filename on record (Pi camera-event upload) — "
+                    "see orphaned bucket candidates below."
                 )
+        if any_unnamed:
+            orphans = _orphan_event_files(db)
+            print(
+                f"\n--- orphaned Pi event clips in bucket "
+                f"({len(orphans)} candidate(s)) ---"
+            )
+            print(
+                "These event files exist in object storage but no DB row "
+                "references them —\nthe auto-deleted captures are among "
+                "them (higher event id = more recent)."
+            )
+            by_event: dict[int, dict[str, str]] = {}
+            for eid, role, name in orphans:
+                by_event.setdefault(eid, {})[role] = name
+            for eid in sorted(by_event, reverse=True):
+                files = by_event[eid]
+                print(f"\n  event {eid}:")
+                for role, name in sorted(files.items(), reverse=True):
+                    print(f"    {role}: {name}")
+                if "tee" in files:
+                    cmd = (
+                        "python3 scripts/recover_deleted_upload.py "
+                        f"restore --tee {files['tee']}"
+                    )
+                    if "green" in files:
+                        cmd += f" --green {files['green']}"
+                    print(f"    restore: {cmd}")
         if args.bucket:
             names = sorted(storage.list_names())
             print(f"\n--- bucket contents ({len(names)} objects) ---")
