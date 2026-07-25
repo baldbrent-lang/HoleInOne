@@ -5460,6 +5460,17 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                           {" "}· {s.reason}
                         </span>
                       </div>
+                      {!s.anchor && (real || unknown) && (
+                        <div
+                          className="tiny"
+                          style={{ marginTop: 2, color: "#b7791f" }}
+                        >
+                          \u26a0 \ud83e\udd16 AI anchor walk + launch plot SKIPPED \u2014 the
+                          before/after check never found the resting ball,
+                          so there was no anchor to walk from. The tracer
+                          below is MOG2-only for this swing.
+                        </div>
+                      )}
                       {s.anchor && (
                         <div className="tiny" style={{ marginTop: 2 }}>
                           {"\u2693"}{" "}

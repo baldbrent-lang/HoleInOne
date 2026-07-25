@@ -482,6 +482,33 @@ def _maybe_apply_clahe(frame):
         return frame, False
 
 
+def _enhance_for_vision(img):
+    """Prep a crop for a ball-finding vision call in poor light:
+    CLAHE when the image is low-CONTRAST (overcast/flat, via
+    _maybe_apply_clahe's std gate) plus a gamma lift when it's low-
+    BRIGHTNESS (deep shadow, dusk) so a gray shadowed ball separates
+    from the ground instead of vanishing into it. Well-lit crops pass
+    through untouched. Never raises."""
+    if not HAS_CV or img is None or getattr(img, "size", 0) == 0:
+        return img
+    try:
+        out, _ = _maybe_apply_clahe(img)
+        gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
+        mean = float(gray.mean())
+        if mean < 100.0 and HAS_NP:
+            # Darker crop -> stronger lift. Gamma < 1 brightens
+            # midtones/shadows without clipping highlights the way a
+            # flat brightness add would.
+            gamma = 0.6 if mean < 55.0 else (0.7 if mean < 80.0 else 0.8)
+            lut = np.clip(
+                ((np.arange(256) / 255.0) ** gamma) * 255.0, 0, 255,
+            ).astype("uint8")
+            out = cv2.LUT(out, lut)
+        return out
+    except Exception:  # noqa: BLE001
+        return img
+
+
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
@@ -4372,7 +4399,11 @@ _FIND_RESTING_BALL_PROMPT = (
     "white shoes, socks, shoe trim, tee markers, sprinkler heads, signs or "
     "any other white object — a golf ball is TINY (typically under 2% of "
     "the image width) and perfectly round; if the white thing is attached "
-    "to the golfer or bigger than a few pixels, it is not the ball. When "
+    "to the golfer or bigger than a few pixels, it is not the ball. "
+    "IMPORTANT: in shadow, overcast light, or at dusk the ball may look "
+    "GRAY or dull rather than bright white — judge by its small size, "
+    "round shape, and position on the ground near the golfer's feet, not "
+    "by whiteness alone. When "
     "unsure, answer present=false. Reply with JSON only:\n"
     '{"present": true|false, "x": <int pixel x or null>, '
     '"y": <int pixel y or null>, "confidence": "high"|"medium"|"low"}\n'
@@ -4996,6 +5027,8 @@ def verify_rest_and_impact_ai(
             tx1 = min(crops[f].shape[1], int(rcx + TIGHT))
             ty1 = min(crops[f].shape[0], int(rcy + TIGHT))
             t = crops[f][ty0:ty1, tx0:tx1].copy()
+            # Shadow/low-light lift so a dull gray ball stays visible.
+            t = _enhance_for_vision(t)
             t = cv2.resize(
                 t, (t.shape[1] * 2, t.shape[0] * 2),
                 interpolation=cv2.INTER_CUBIC,
@@ -5361,6 +5394,8 @@ def plot_launch_frames_ai(
                 misses += 1
                 continue
             crop = fulls[f][by0:by1, bx0:bx1].copy()
+            # Shadow/low-light lift so a dull gray ball stays visible.
+            crop = _enhance_for_vision(crop)
             ring = (prev[0] - bx0, prev[1] - by0)
             t = crop.copy()
             if 0 <= ring[0] < t.shape[1] and 0 <= ring[1] < t.shape[0]:
@@ -6040,9 +6075,24 @@ def find_resting_ball(
         raw = raw[crop_y0:crop_y0 + ch, crop_x0:crop_x0 + cw]
         h, w = raw.shape[:2]
         out["crop_box"] = [crop_x0, crop_y0, w, h]
-    scale = frame_w / float(w) if w > frame_w else 1.0
+    # Shadow / low-light lift BEFORE the resize so a gray shadowed ball
+    # keeps its contrast against the ground.
+    raw = _enhance_for_vision(raw)
+    # Downscale big frames — but also UPSCALE small crops (distant/high
+    # camera): the ball goes from a ~5px smudge to a ~12px disc and the
+    # API spends more vision tiles on it. Capped so we never blow a tiny
+    # crop into mush.
+    if w > frame_w:
+        scale = frame_w / float(w)
+    elif w and w < frame_w:
+        scale = min(frame_w / float(w), 2.5)
+    else:
+        scale = 1.0
     if scale != 1.0:
-        raw = cv2.resize(raw, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        raw = cv2.resize(
+            raw, (int(w * scale), int(h * scale)),
+            interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
+        )
     ok, buf = cv2.imencode(".jpg", raw, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
         out["error"] = "jpeg encode failed"
@@ -6229,14 +6279,19 @@ def classify_swing_shot(
     # hint_xy (the golfer's hands from the pose detector) zooms every ball
     # look-up to the golfer instead of scanning the full wide frame — on a
     # course tee shot the ball is otherwise a ~4px dot the model misses.
+    # 0.28 crop (tighter than the old 0.45) + the finder's crop upscale
+    # makes a course-distance ball ~4x its old pixel footprint.
     _hint = tuple(hint_xy) if hint_xy else None
+    _cf = 0.28
     before = None
     probe = None  # last absent look-up, kept so the debug UI can show it
     _errs: list[str] = []  # vision-call FAILURES (rate limit, network) —
     # must never masquerade as "looked and saw no ball"
     for lead in leads:
         t_b = max(0.0, float(peak_time_sec) - lead)
-        r = find_resting_ball(input_path, int(t_b * fps), crop_center=_hint)
+        r = find_resting_ball(
+            input_path, int(t_b * fps), crop_center=_hint, crop_frac=_cf,
+        )
         if r.get("error"):
             _errs.append(str(r["error"]))
         if r.get("present") and r.get("x") is not None:
@@ -6268,7 +6323,15 @@ def classify_swing_shot(
     before_out = before or probe
 
     t_a = float(peak_time_sec) + after_sec
-    ra = find_resting_ball(input_path, int(t_a * fps), crop_center=_hint)
+    # Center the after-look on the FOUND ball when we have it — the
+    # question is "is it still on that spot", so aim the tight crop
+    # there, not at the wrist.
+    _after_center = (
+        (float(before["x"]), float(before["y"])) if before else _hint
+    )
+    ra = find_resting_ball(
+        input_path, int(t_a * fps), crop_center=_after_center, crop_frac=_cf,
+    )
     if ra.get("error"):
         _errs.append(str(ra["error"]))
     after = {
