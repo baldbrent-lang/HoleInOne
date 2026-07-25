@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 import { fmtDateTime } from "../time.js";
@@ -28,12 +28,16 @@ function viewerId() {
 
 export default function Watch() {
   const [params] = useSearchParams();
-  const courseId = params.get("course_id") || null;
+  // Share-link mode (/c/<token>): the token is signed server-side and
+  // resolves to EXACTLY one channel — the only thing this URL can play.
+  // Handed to club pros / GMs; no channel picker, no admin chrome.
+  const { shareToken } = useParams();
+  const courseId = shareToken ? null : params.get("course_id") || null;
   // Channel mode (?channel=course-2 | best): a continuous looping
   // playlist of Broadcast clips instead of the per-viewer near-live
   // picker. The playlist refetches on every wrap so freshly promoted
   // clips join the loop without a reload.
-  const channel = params.get("channel") || null;
+  const channel = shareToken || params.get("channel") || null;
   const kiosk = params.get("fullscreen") === "1";
 
   const [item, setItem] = useState(null);
@@ -85,7 +89,9 @@ export default function Watch() {
       try {
         let pl = playlistRef.current;
         if (pl.idx + 1 >= pl.clips.length) {
-          const data = await api.broadcastChannelPlaylist(channel);
+          const data = shareToken
+            ? await api.sharedChannelPlaylist(shareToken)
+            : await api.broadcastChannelPlaylist(channel);
           setChannelInfo({ label: data.label, count: (data.clips || []).length });
           pl = { clips: data.clips || [], idx: -1 };
           playlistRef.current = pl;
@@ -159,10 +165,12 @@ export default function Watch() {
                     courseId ? " Single-course feed." : " All courses."
                   }`}
             </p>
-            <div className="inline" style={{ gap: 8 }}>
-              <Link to="/leaderboards" className="btn ghost small" style={{ width: "auto" }}>Leaderboards</Link>
-              <Link to="/contests" className="btn ghost small" style={{ width: "auto" }}>Contests</Link>
-            </div>
+            {!shareToken && (
+              <div className="inline" style={{ gap: 8 }}>
+                <Link to="/leaderboards" className="btn ghost small" style={{ width: "auto" }}>Leaderboards</Link>
+                <Link to="/contests" className="btn ghost small" style={{ width: "auto" }}>Contests</Link>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -40,6 +40,7 @@ function ConditionalFooter() {
   if (pathname.startsWith("/operator")) return null;
   if (pathname.startsWith("/r/")) return null;
   if (pathname.startsWith("/watch")) return null;
+  if (pathname.startsWith("/c/")) return null;
   return (
     <div className="wrap" style={{ paddingTop: 0, paddingBottom: 32 }}>
       <Footer />
@@ -63,6 +64,7 @@ export default function App() {
         <Route path="/leaderboards" element={<Leaderboards />} />
         <Route path="/contests" element={<Contests />} />
         <Route path="/watch" element={<Watch />} />
+        <Route path="/c/:shareToken" element={<Watch />} />
         <Route path="/p/:userId" element={<PlayerProfile />} />
         <Route path="/operator/login" element={<OperatorLogin />} />
         <Route path="/operator" element={<OperatorDashboard />} />

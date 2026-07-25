@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..database import get_db
 from ..deps import require_admin
 from ..models import (
@@ -291,6 +292,69 @@ def channel_playlist(
             _clip_payload(c, db, courses.get(c.course_id)) for c in clips
         ],
     }
+
+
+# --- Channel share links ----------------------------------------------------
+# A share token binds a URL to EXACTLY ONE channel: /c/<token> plays that
+# channel and nothing else — no channel list, no admin, no way to swap the
+# key without invalidating the signature. Tokens are HMAC-signed with the
+# server secret, so they can be handed to a club pro / course GM and can't
+# be forged or edited. Rotating jwt_secret revokes all outstanding links.
+
+def _share_sig(key: str) -> str:
+    import hashlib
+    import hmac as _hmac
+
+    return _hmac.new(
+        settings.jwt_secret.encode(), f"channel-share:{key}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:20]
+
+
+def _resolve_share_token(token: str) -> str:
+    """Return the channel key a share token grants, or 404."""
+    import hmac as _hmac
+
+    if "~" not in (token or ""):
+        raise HTTPException(404, "invalid share link")
+    key, sig = token.rsplit("~", 1)
+    if not _hmac.compare_digest(sig, _share_sig(key)):
+        raise HTTPException(404, "invalid share link")
+    return key
+
+
+@router.get(
+    "/admin/channel-share/{key}", dependencies=[Depends(require_admin)],
+)
+def make_channel_share_link(key: str, db: Session = Depends(get_db)):
+    """Mint the share token for one channel (admin only). The token is
+    deterministic per channel+secret, so re-clicking Share always yields
+    the same link."""
+    # Validate the key exists by resolving its playlist metadata.
+    channel_playlist(key, 1, db)
+    token = f"{key}~{_share_sig(key)}"
+    return {"key": key, "token": token, "path": f"/c/{token}"}
+
+
+@router.get("/shared/{token}")
+def shared_channel_meta(token: str, db: Session = Depends(get_db)):
+    """Public: what channel does this share link play? (label + count
+    only — resolving requires a validly signed token.)"""
+    key = _resolve_share_token(token)
+    pl = channel_playlist(key, 1, db)
+    return {"key": key, "label": pl["label"]}
+
+
+@router.get("/shared/{token}/playlist")
+def shared_channel_playlist(
+    token: str,
+    limit: int = Query(default=200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Public: the playlist for the token's channel — the ONLY channel
+    this link can reach."""
+    key = _resolve_share_token(token)
+    return channel_playlist(key, limit, db)
 
 
 def _record_view(db: Session, viewer_id: str, clip: VideoClip) -> None:

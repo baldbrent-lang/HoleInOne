@@ -20,9 +20,26 @@ const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
  * which loops the playlist forever — clubhouse-TV ready via the kiosk
  * URL (adds &fullscreen=1).
  */
-function ChannelsSection() {
+function ChannelsSection({ adminPassword }) {
   const [channels, setChannels] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
+  const [sharedKey, setSharedKey] = useState(null);
+
+  async function copyShare(key) {
+    try {
+      const out = await api.channelShareLink(adminPassword, key);
+      const url = `${window.location.origin}${out.path}`;
+      try {
+        await navigator.clipboard?.writeText(url);
+        setSharedKey(key);
+        setTimeout(() => setSharedKey(null), 1600);
+      } catch {
+        window.prompt("Share link:", url);
+      }
+    } catch (e) {
+      window.alert(`Couldn't create the share link: ${e.message}`);
+    }
+  }
 
   useEffect(() => {
     api.broadcastChannels()
@@ -99,6 +116,15 @@ function ChannelsSection() {
                 onClick={() => copyKiosk(ch.key)}
               >
                 {copiedKey === ch.key ? "Copied!" : "Kiosk URL"}
+              </button>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto" }}
+                onClick={() => copyShare(ch.key)}
+                title="Copy a share link scoped to ONLY this channel — safe to send to a club pro or course GM. They see this channel's stream and nothing else."
+              >
+                {sharedKey === ch.key ? "Copied!" : "🔗 Share"}
               </button>
             </div>
           </div>
@@ -350,7 +376,7 @@ export default function AdminBroadcastClips() {
         <Link to="/admin/cameras">Cameras</Link>
       </div>
 
-      <ChannelsSection />
+      <ChannelsSection adminPassword={adminPassword} />
 
       <div className="card">
         <h3 style={{ marginBottom: 4 }}>Broadcast clips</h3>

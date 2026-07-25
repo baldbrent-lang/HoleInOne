@@ -117,6 +117,20 @@ export const api = {
     }),
   contests: () => request(`/api/public/contests`, { auth: false }),
   broadcastChannels: () => request(`/api/broadcast/channels`, { auth: false }),
+  channelShareLink: (key, channelKey) =>
+    request(
+      `/api/broadcast/admin/channel-share/${encodeURIComponent(channelKey)}`,
+      { adminPassword: key },
+    ),
+  sharedChannel: (token) =>
+    request(`/api/broadcast/shared/${encodeURIComponent(token)}`, {
+      auth: false,
+    }),
+  sharedChannelPlaylist: (token, limit = 200) =>
+    request(
+      `/api/broadcast/shared/${encodeURIComponent(token)}/playlist?limit=${limit}`,
+      { auth: false },
+    ),
   broadcastChannelPlaylist: (key, limit = 200) =>
     request(`/api/broadcast/channels/${encodeURIComponent(key)}/playlist?limit=${limit}`, {
       auth: false,
