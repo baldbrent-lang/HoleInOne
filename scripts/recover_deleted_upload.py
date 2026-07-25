@@ -41,6 +41,19 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "backend"))
 
+# The Replit shell's bare python3 has none of the app's packages — they
+# live in backend/.venv (see start.sh). Re-exec through the venv's
+# interpreter when we're not already inside it, so plain
+# `python3 scripts/recover_deleted_upload.py` works from the shell.
+_VENV_PY = _REPO / "backend" / ".venv" / "bin" / "python"
+if _VENV_PY.exists() and Path(sys.executable).resolve() != _VENV_PY.resolve():
+    try:
+        import pydantic  # noqa: F401
+    except ModuleNotFoundError:
+        import os
+
+        os.execv(str(_VENV_PY), [str(_VENV_PY)] + sys.argv)
+
 from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.models import AuditLog, LongVideoUpload  # noqa: E402
