@@ -6065,13 +6065,18 @@ def find_resting_ball(
     crop_x0 = crop_y0 = 0
     if crop_center is not None and w > 0 and h > 0:
         cw = max(64, int(round(w * crop_frac)))
-        ch = max(64, int(round(h * crop_frac)))
-        # Bias the box slightly downward: the hands sit at waist height and
-        # the ball is on the ground below them.
+        # Taller than wide: the ball can sit well below the hands
+        # (address, backswing frames), so the box needs vertical reach.
+        ch = max(64, int(round(h * min(1.0, crop_frac * 1.7))))
         cx = int(round(float(crop_center[0])))
-        cy = int(round(float(crop_center[1]) + 0.08 * h))
+        cy = int(round(float(crop_center[1])))
         crop_x0 = max(0, min(w - cw, cx - cw // 2))
-        crop_y0 = max(0, min(h - ch, cy - ch // 2))
+        # The hands are ALWAYS above the ball — anchor the box so the
+        # hint sits ~15% from its TOP, leaving ~85% of the height below
+        # for the ground and the ball (covers hands-high backswing
+        # frames). A wrist-CENTERED box spent half its pixels on trees
+        # and clipped the ball at its bottom edge.
+        crop_y0 = max(0, min(h - ch, cy - int(0.15 * ch)))
         raw = raw[crop_y0:crop_y0 + ch, crop_x0:crop_x0 + cw]
         h, w = raw.shape[:2]
         out["crop_box"] = [crop_x0, crop_y0, w, h]
