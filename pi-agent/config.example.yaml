@@ -23,6 +23,17 @@ camera:
   # "auto" tries /dev/video0..3 and picks the first that opens. Or
   # specify a device path like "/dev/video0" or an integer index "0".
   device: "auto"
+  # OPTIONAL capture-mode preset (Pi HQ Cam / IMX477). Overrides
+  # width/height/fps below. Higher fps = ~2x tracer points and less
+  # motion blur on the ball; costs bigger uploads + more RAM for the
+  # pre-roll buffer (5s of 1080p50 ~= 1.6GB, 990p120 ~= 2.4GB — fine
+  # on an 8GB Pi 5). The tee ROI is auto-scaled to the new geometry.
+  #   1080p30  — 1920x1080@30, the long-standing default
+  #   1080p50  — 2028x1080@50, full FOV (binned), best fps upgrade
+  #   990p120  — 1332x990@120, cropped, for high-speed experiments
+  # At 50fps consider raising upload_bitrate_kbps (tee: ~5000) so
+  # per-frame quality doesn't drop.
+  # mode: "1080p50"
   # Capture resolution. GoPro Hero 13 USB-webcam mode is 1080p30.
   # Pi HQ Cam supports up to 4056x3040 but a Pi 5 will struggle at
   # full res; 1080p30 is the sweet spot for either camera.

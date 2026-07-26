@@ -27,6 +27,97 @@ log = logging.getLogger("golfreelz_agent.common")
 # Config
 # ---------------------------------------------------------------------
 
+# Capture-mode presets for the Pi HQ Camera (IMX477). The sensor's
+# native modes: full-width 2x2 binned 2028x1080 sustains ~50fps, and the
+# cropped 1332x990 mode reaches 120fps. Frame rate is pure gold for the
+# ball tracer — at 30fps a driven ball crosses hundreds of pixels
+# between frames; at 50-60 you get ~2x the track points, half the
+# per-frame motion, and less blur smearing the ball into the grass.
+# Cost: bigger uploads (same bitrate, more even quality if you bump
+# upload_bitrate_kbps) and a bigger RAM pre-roll buffer.
+CAPTURE_MODES = {
+    "1080p30": {"width": 1920, "height": 1080, "fps": 30},   # default
+    "1080p50": {"width": 2028, "height": 1080, "fps": 50},   # binned, full FOV
+    "990p120": {"width": 1332, "height": 990, "fps": 120},   # cropped, max fps
+}
+_MODE_ALIASES = {
+    "default": "1080p30", "30": "1080p30", "30fps": "1080p30",
+    "50": "1080p50", "50fps": "1080p50",
+    "120": "990p120", "120fps": "990p120",
+}
+
+
+def _apply_capture_mode(cfg: dict) -> None:
+    """Expand `camera.mode` into width/height/fps (mode wins over any
+    explicit values), scale a 1920x1080-authored tee ROI to the new
+    frame geometry, and log the pre-roll buffer's RAM appetite so a
+    120fps experiment can't silently OOM a Pi."""
+    cam = cfg.setdefault("camera", {})
+    mode_raw = str(cam.get("mode") or "").strip().lower()
+    if mode_raw:
+        mode = _MODE_ALIASES.get(mode_raw, mode_raw)
+        preset = CAPTURE_MODES.get(mode)
+        if preset:
+            cam.update(preset)
+            log.info(
+                "capture mode %r -> %dx%d@%d",
+                mode, preset["width"], preset["height"], preset["fps"],
+            )
+            # The tee ROI was drawn in pixel coords against the old
+            # frame. Scale it to the new geometry (approximate — the
+            # binned/cropped modes shift FOV slightly; re-draw the ROI
+            # if precision matters, this keeps detection working).
+            roi = cfg.get("tee_box_roi")
+            if (
+                isinstance(roi, dict)
+                and all(k in roi for k in ("x", "y", "w", "h"))
+                and (preset["width"], preset["height"]) != (1920, 1080)
+                and roi["x"] + roi["w"] <= 1920
+                and roi["y"] + roi["h"] <= 1080
+            ):
+                sx = preset["width"] / 1920.0
+                sy = preset["height"] / 1080.0
+                scaled = {
+                    "x": int(round(roi["x"] * sx)),
+                    "y": int(round(roi["y"] * sy)),
+                    "w": int(round(roi["w"] * sx)),
+                    "h": int(round(roi["h"] * sy)),
+                }
+                cfg["tee_box_roi"] = scaled
+                log.info(
+                    "capture mode: tee ROI scaled %s -> %s", roi, scaled,
+                )
+        else:
+            log.warning(
+                "unknown camera.mode %r — valid: %s; keeping explicit "
+                "width/height/fps",
+                mode_raw, ", ".join(sorted(CAPTURE_MODES)),
+            )
+    # RAM appetite of the raw-frame pre-roll ring buffer. 5s of
+    # 1080p30 ~= 930MB; 1080p50 ~= 1.6GB; 990p120 ~= 2.4GB. A Pi 5
+    # 8GB survives all three, but log it loudly so nobody 120fps's a
+    # 4GB Pi into the OOM killer.
+    try:
+        _w = int(cam.get("width", 1920))
+        _h = int(cam.get("height", 1080))
+        _f = float(cam.get("fps", 30))
+        _sec = float(cfg.get("buffer_seconds", 5))
+        _mb = _w * _h * 3 * _f * _sec / 1e6
+        msg = (
+            f"pre-roll buffer: ~{_mb:.0f}MB RAM "
+            f"({_w}x{_h}@{_f:.0f} x {_sec:.1f}s)"
+        )
+        if _mb > 2600:
+            log.warning(
+                "%s — heavy! reduce buffer_seconds or fps if the Pi "
+                "runs out of memory", msg,
+            )
+        else:
+            log.info(msg)
+    except (TypeError, ValueError):
+        pass
+
+
 def load_config(path: Path) -> dict:
     """Load YAML config + apply env-variable overrides for sensitive
     fields. `GOLFREELZ_AUTH_TOKEN` and `GOLFREELZ_BACKEND_URL` win
@@ -45,6 +136,7 @@ def load_config(path: Path) -> dict:
         )
     if not cfg.get("backend_url"):
         raise RuntimeError("backend_url missing")
+    _apply_capture_mode(cfg)
     return cfg
 
 
