@@ -110,22 +110,46 @@ def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
-def make_vertical(src: Path, out: Path, width: int = 1080, height: int = 1920) -> bool:
+def make_vertical(
+    src: Path,
+    out: Path,
+    width: int = 1080,
+    height: int = 1920,
+    focus_x_frac: float = 0.5,
+    style: str = "fill",
+) -> bool:
     """Render a 9:16 vertical variant of a landscape clip for social /
-    phone viewing. The full landscape frame is scaled to fit the width
-    and centered over a blurred, zoomed copy of itself filling the
-    portrait canvas — the standard reels/shorts repost look. Nothing is
-    cropped out, so the ball flight and tracer stay fully visible.
-    Audio is passed through. Returns True on success; never raises."""
+    phone viewing.
+
+    style="fill" (default): center-crop a 9:16 window out of the frame
+    and scale it to fill the whole portrait canvas — no bars, only
+    footage. `focus_x_frac` (0..1) aims the crop window horizontally
+    (pass the golfer/ball x-fraction so the action stays centered);
+    it's clamped so the window never leaves the frame.
+
+    style="blur": the full landscape frame over a blurred zoomed
+    backdrop (nothing cropped) — kept as an option.
+
+    Audio passes through. Returns True on success; never raises."""
     if not have_ffmpeg() or not src.exists():
         return False
-    filt = (
-        f"split[bg][fg];"
-        f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},boxblur=22:4,eq=brightness=-0.06[b];"
-        f"[fg]scale={width}:-2[f];"
-        f"[b][f]overlay=(W-w)/2:(H-h)/2"
-    )
+    if style == "blur":
+        filt = (
+            f"split[bg][fg];"
+            f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},boxblur=22:4,eq=brightness=-0.06[b];"
+            f"[fg]scale={width}:-2[f];"
+            f"[b][f]overlay=(W-w)/2:(H-h)/2"
+        )
+    else:
+        fx = max(0.0, min(1.0, float(focus_x_frac)))
+        # Crop window: full height, width = ih*(W/H); x centered on the
+        # focus fraction, clamped inside the frame.
+        filt = (
+            f"crop=w=ih*{width}/{height}:h=ih:"
+            f"x='min(max({fx:.4f}*iw-ow/2,0),iw-ow)':y=0,"
+            f"scale={width}:{height},setsar=1"
+        )
     tmp = out.with_suffix(".tmp.mp4")
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",

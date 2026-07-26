@@ -69,16 +69,18 @@ export default function AdminProducedClips() {
     }
   }
 
-  async function openVertical(clip) {
+  async function openVertical(clip, ev) {
     // Open the 9:16 variant, generating it first if this clip predates
-    // the feature. Generation is a single ffmpeg pass (~clip length).
-    if (clip.vertical_url) {
+    // the feature. Alt/Option-click forces a re-render (picks up crop
+    // style changes). Generation is one ffmpeg pass (~clip length).
+    const force = !!(ev && ev.altKey);
+    if (clip.vertical_url && !force) {
       window.open(clip.vertical_url, "_blank");
       return;
     }
     setBusyId(clip.id);
     try {
-      const out = await api.makeClipVertical(adminPassword, clip.id);
+      const out = await api.makeClipVertical(adminPassword, clip.id, force);
       setClips((cs) => (cs || []).map(
         (c) => (c.id === clip.id ? { ...c, vertical_url: out.vertical_url } : c)
       ));
@@ -221,11 +223,11 @@ export default function AdminProducedClips() {
                   type="button"
                   className="ghost"
                   style={{ width: "auto" }}
-                  onClick={() => openVertical(c)}
+                  onClick={(e) => openVertical(c, e)}
                   disabled={busyId === c.id}
                   title={c.vertical_url
-                    ? "Open the 9:16 vertical version (social / phone)"
-                    : "Generate a 9:16 vertical version of this clip (blur-padded — nothing cropped) for social / phone"}
+                    ? "Open the full-screen 9:16 vertical (social / phone). Alt/Option-click to re-render."
+                    : "Generate a full-screen 9:16 vertical of this clip (cropped to the action) for social / phone"}
                 >
                   {busyId === c.id ? "…" : c.vertical_url ? "📱" : "📱＋"}
                 </button>

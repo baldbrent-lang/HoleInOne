@@ -288,14 +288,15 @@ export default function AdminBroadcastClips() {
    *
    * `appHint` is purely cosmetic, used in the fallback message.
    */
-  async function openVertical(c) {
-    if (c.vertical_url) {
+  async function openVertical(c, ev) {
+    const force = !!(ev && ev.altKey);
+    if (c.vertical_url && !force) {
       window.open(c.vertical_url, "_blank");
       return;
     }
     setFileSharing((s) => ({ ...s, [c.id]: true }));
     try {
-      const out = await api.makeClipVertical(adminPassword, c.id);
+      const out = await api.makeClipVertical(adminPassword, c.id, force);
       setClips((cs) => (cs || []).map(
         (x) => (x.id === c.id ? { ...x, vertical_url: out.vertical_url } : x)
       ));
@@ -593,11 +594,11 @@ export default function AdminBroadcastClips() {
               <button
                 type="button"
                 className="ghost small"
-                onClick={() => openVertical(c)}
+                onClick={(e) => openVertical(c, e)}
                 disabled={!!fileSharing[c.id]}
                 title={c.vertical_url
-                  ? "Open the 9:16 vertical version (social / phone)"
-                  : "Generate a 9:16 vertical version (blur-padded — nothing cropped). Instagram/TikTok shares use it automatically once it exists."}
+                  ? "Open the full-screen 9:16 vertical. Alt/Option-click to re-render. Instagram/TikTok shares use it automatically."
+                  : "Generate a full-screen 9:16 vertical (cropped to the action). Instagram/TikTok shares use it automatically once it exists."}
               >
                 {c.vertical_url ? "📱 Vertical" : "📱 Make vertical"}
               </button>

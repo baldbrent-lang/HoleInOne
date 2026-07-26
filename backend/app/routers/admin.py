@@ -746,14 +746,17 @@ def list_all_clips(
 
 
 @router.post("/clips/{clip_id}/vertical")
-def make_clip_vertical(clip_id: int, db: Session = Depends(get_db)):
+def make_clip_vertical(
+    clip_id: int, force: int = 0, db: Session = Depends(get_db),
+):
     """Generate (or return the existing) 9:16 vertical variant of a
-    produced clip — blur-padded so nothing gets cropped out. Lets
-    clips produced before this feature get a vertical on demand."""
+    produced clip — full-frame crop aimed at the action. `force=1`
+    re-renders even when one exists (e.g. after a style change).
+    Lets clips produced before this feature get a vertical on demand."""
     clip = db.get(VideoClip, clip_id)
     if not clip:
         raise HTTPException(404, "clip not found")
-    if clip.vertical_url:
+    if clip.vertical_url and not force:
         fname = clip.vertical_url.split("?")[0].rsplit("/", 1)[-1]
         if storage.ensure_local(CLIPS_DIR, fname) and (CLIPS_DIR / fname).exists():
             return {"clip_id": clip.id, "vertical_url": clip.vertical_url}
@@ -765,10 +768,27 @@ def make_clip_vertical(clip_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, f"source file {src_name} not found")
     src_path = CLIPS_DIR / src_name
     out_path = CLIPS_DIR / f"{src_path.stem}_vertical.mp4"
-    if not make_vertical(src_path, out_path):
+    # Aim the crop at the golfer when the produce run recorded the
+    # resting-ball position for this clip; center otherwise.
+    _focus = 0.5
+    try:
+        if clip.long_upload_id:
+            _up = db.get(LongVideoUpload, clip.long_upload_id)
+            _em = (_up.edit_metrics or {}) if _up else {}
+            _fw = float(_em.get("frame_width") or 0)
+            for _sw in _em.get("swings") or []:
+                if _sw.get("clip_id") == clip.id and _fw > 0:
+                    _rxy = _sw.get("ball_rest_xy") or _sw.get("rest_xy")
+                    if _rxy and len(_rxy) == 2:
+                        _focus = max(0.15, min(0.85, float(_rxy[0]) / _fw))
+                    break
+    except Exception:  # noqa: BLE001
+        _focus = 0.5
+    if not make_vertical(src_path, out_path, focus_x_frac=_focus):
         raise HTTPException(500, "vertical render failed (see server log)")
     clip.vertical_url = (
         f"{settings.app_base_url}/uploads/clips/{out_path.name}"
+        f"?v={int(out_path.stat().st_mtime)}"
     )
     db.commit()
     log.info("clip %s: vertical variant rendered (%s)", clip.id, out_path.name)
@@ -2802,8 +2822,23 @@ def _process_long_upload_segments(
                 )
             )
             if _vert_src and _vert_src.exists():
+                # Aim the 9:16 crop at the golfer: the resting ball's
+                # x as a fraction of the tee frame width. Falls back to
+                # frame center when unknown.
+                _focus = 0.5
+                try:
+                    _rxy = seg.get("ball_rest_xy")
+                    if _rxy and len(_rxy) == 2:
+                        _sinfo = probe_video_info(seg_path) or {}
+                        _sw = float(_sinfo.get("width") or 0)
+                        if _sw > 0:
+                            _focus = max(
+                                0.15, min(0.85, float(_rxy[0]) / _sw),
+                            )
+                except Exception:  # noqa: BLE001
+                    _focus = 0.5
                 _vert_path = CLIPS_DIR / f"{_vert_src.stem}_vertical.mp4"
-                if make_vertical(_vert_src, _vert_path):
+                if make_vertical(_vert_src, _vert_path, focus_x_frac=_focus):
                     vertical_url = (
                         f"{settings.app_base_url}/uploads/clips/"
                         f"{_vert_path.name}"

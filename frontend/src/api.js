@@ -279,8 +279,8 @@ export const api = {
       `/api/admin/broadcast-clips?limit=${limit}&offset=${offset}`,
       { adminPassword: key },
     ),
-  makeClipVertical: (key, clipId) =>
-    request(`/api/admin/clips/${clipId}/vertical`, {
+  makeClipVertical: (key, clipId, force = false) =>
+    request(`/api/admin/clips/${clipId}/vertical${force ? "?force=1" : ""}`, {
       method: "POST",
       adminPassword: key,
       timeoutMs: 180000,
