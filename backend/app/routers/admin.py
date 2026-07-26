@@ -3223,11 +3223,25 @@ def _vertical_pan_path(track, rest_xy, fps, frame_w, cut_dur=None):
         )
         for r in track
     )
-    x0 = (
-        min(1.0, max(0.0, float(rest_xy[0]) / frame_w))
-        if rest_xy and len(rest_xy) == 2
-        else (pts[0][1] if pts else 0.5)
-    )
+    # OPENING FRAME = THE GOLFER. Rest-ball x is the best anchor (the
+    # golfer stands at the ball); fall back to the median of the first
+    # few track points — the launch happens at the golfer too, and the
+    # median shrugs off a stray first detection.
+    _launch_x = None
+    if pts:
+        _head = sorted(x for _, x in pts[:3])
+        _launch_x = _head[len(_head) // 2]
+    if rest_xy and len(rest_xy) == 2:
+        x0 = min(1.0, max(0.0, float(rest_xy[0]) / frame_w))
+        # A rest anchor that wildly disagrees with where the flight
+        # starts is bad data (wrong scale / phantom) — the opener
+        # would frame empty grass. Trust the launch instead.
+        if _launch_x is not None and abs(x0 - _launch_x) > 0.35:
+            x0 = _launch_x
+    elif _launch_x is not None:
+        x0 = _launch_x
+    else:
+        x0 = 0.5
     path = [(0.0, x0)]
     if pts:
         path.append((max(0.0, pts[0][0] - 0.05), x0))
