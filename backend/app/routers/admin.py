@@ -3347,30 +3347,74 @@ def _probe_golfer_x_frac(clip_path, sample_times=(0.3, 0.9, 1.5)):
         if not cap.isOpened():
             return None
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 30.0
+        frames = []
+        for t in sample_times:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(t * fps)))
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                frames.append(frame)
+        cap.release()
+        if not frames:
+            return None
+
+        def _body_x(res):
+            """(normalized body-center x, visibility) or None. Body
+            center = shoulders + hips averaged — centers the golfer
+            visually (hips alone sat toward the rear of a side-on
+            stance)."""
+            lms = getattr(res, "pose_landmarks", None)
+            if lms is None:
+                return None
+            _pts = [lms.landmark[i] for i in (11, 12, 23, 24)]
+            vis = sum(float(q.visibility) for q in _pts) / len(_pts)
+            hx = sum(float(q.x) for q in _pts) / len(_pts)
+            if not (0.0 <= hx <= 1.0):
+                return None
+            return hx, vis
+
         xs: list[float] = []
         with mp.solutions.pose.Pose(
             static_image_mode=True,
             model_complexity=1,
             min_detection_confidence=0.4,
         ) as pose:
-            for t in sample_times:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(t * fps)))
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    continue
-                res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                lms = getattr(res, "pose_landmarks", None)
-                if lms is None:
-                    continue
-                _lm = lms.landmark
-                # Body center: shoulders + hips averaged — centers the
-                # golfer visually (hips alone sat off toward the rear
-                # of a side-on stance).
-                _pts = [_lm[11], _lm[12], _lm[23], _lm[24]]
-                hx = sum(float(q.x) for q in _pts) / len(_pts)
-                if 0.0 <= hx <= 1.0:
-                    xs.append(hx)
-        cap.release()
+            for frame in frames:
+                r = _body_x(
+                    pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)),
+                )
+                if r is not None and r[1] >= 0.5:
+                    xs.append(r[0])
+            if not xs:
+                # CROP-ZOOM SWEEP: a course-distance golfer is too
+                # small for full-frame pose (same failure the swing
+                # detector had). Slide a zoomed window across the
+                # middle frame — bottom band first, golfers stand on
+                # the ground — and keep the most confident hit.
+                frame = frames[len(frames) // 2]
+                h, w = frame.shape[:2]
+                tw, th = max(64, w // 3), max(64, int(h * 0.6))
+                best = None
+                for ty0 in (h - th, 0):
+                    for k in range(5):
+                        tx0 = min(w - tw, k * tw // 2)
+                        crop = frame[ty0:ty0 + th, tx0:tx0 + tw]
+                        crop = cv2.resize(
+                            crop, (tw * 2, th * 2),
+                            interpolation=cv2.INTER_CUBIC,
+                        )
+                        r = _body_x(
+                            pose.process(
+                                cv2.cvtColor(crop, cv2.COLOR_BGR2RGB),
+                            ),
+                        )
+                        if r is not None and r[1] >= 0.5:
+                            gx = (tx0 + r[0] * tw) / float(w)
+                            if best is None or r[1] > best[1]:
+                                best = (gx, r[1])
+                    if best is not None and best[1] >= 0.75:
+                        break
+                if best is not None:
+                    xs.append(best[0])
         if not xs:
             return None
         xs.sort()
