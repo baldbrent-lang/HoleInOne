@@ -813,12 +813,19 @@ def make_clip_vertical(
                     if r.get("found") and r.get("x") is not None
                     and int(r.get("frame") or 0) >= _off
                 ]
+                _gx = _probe_golfer_x_frac(src_path)
+                if _gx is not None:
+                    _focus = max(0.15, min(0.85, float(_gx)))
                 if len(_trk) >= 3 and _fw > 0:
-                    _ppath = _vertical_pan_path(_trk, _rxy, _fps, _fw)
+                    _ppath = _vertical_pan_path(
+                        _trk, _rxy, _fps, _fw, golfer_x=_gx,
+                    )
                     _made = make_vertical_pan(src_path, out_path, _ppath)
                 log.info(
-                    "clip %s: vertical on-demand — track=%d fw=%s -> %s",
+                    "clip %s: vertical on-demand — track=%d fw=%s "
+                    "golfer_x=%s -> %s",
                     clip.id, len(_trk), _fw,
+                    round(_gx, 3) if _gx is not None else None,
                     "PAN" if _made else "static fallback",
                 )
                 break
@@ -2872,6 +2879,7 @@ def _process_long_upload_segments(
                 _made = False
                 _sw = 0.0
                 _rxy = None
+                _gx = None
                 try:
                     _sinfo = probe_video_info(seg_path) or {}
                     _sw = float(_sinfo.get("width") or 0)
@@ -2889,6 +2897,7 @@ def _process_long_upload_segments(
                         )
                         if r.get("found") and r.get("x") is not None
                     ]
+                    _gx = _probe_golfer_x_frac(_vert_src)
                     if len(_trk) >= 3 and _sw > 0 and _seg_fps:
                         _cut = None
                         if composite_url:
@@ -2898,6 +2907,7 @@ def _process_long_upload_segments(
                                 _cut = None
                         _ppath = _vertical_pan_path(
                             _trk, _rxy, float(_seg_fps), _sw, _cut,
+                            golfer_x=_gx,
                         )
                         _made = make_vertical_pan(
                             _vert_src, _vert_path, _ppath,
@@ -2912,7 +2922,9 @@ def _process_long_upload_segments(
                     # Static crop aimed at the golfer (no usable track).
                     _focus = 0.5
                     try:
-                        if _rxy and len(_rxy) == 2 and _sw > 0:
+                        if _gx is not None:
+                            _focus = max(0.15, min(0.85, float(_gx)))
+                        elif _rxy and len(_rxy) == 2 and _sw > 0:
                             _focus = max(
                                 0.15, min(0.85, float(_rxy[0]) / _sw),
                             )
@@ -3210,7 +3222,52 @@ def _commit_retry(db, apply_fn, what: str, retries: int = 2) -> bool:
     return False
 
 
-def _vertical_pan_path(track, rest_xy, fps, frame_w, cut_dur=None):
+def _probe_golfer_x_frac(clip_path, sample_times=(0.3, 0.9, 1.5)):
+    """Find the golfer's horizontal position (0..1) in the clip's first
+    ~1.5s by running pose on a few frames — ground truth for where the
+    vertical pan should OPEN, instead of inferring it from ball data
+    (which framed empty background when the track started mid-flight).
+    Returns the median hip x, or None (no mediapipe / nobody found)."""
+    try:
+        import cv2
+
+        import mediapipe as mp  # type: ignore
+
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            return None
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 30.0
+        xs: list[float] = []
+        with mp.solutions.pose.Pose(
+            static_image_mode=True,
+            model_complexity=1,
+            min_detection_confidence=0.4,
+        ) as pose:
+            for t in sample_times:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(t * fps)))
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                res = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                lms = getattr(res, "pose_landmarks", None)
+                if lms is None:
+                    continue
+                lh, rh = lms.landmark[23], lms.landmark[24]
+                hx = (float(lh.x) + float(rh.x)) / 2.0
+                if 0.0 <= hx <= 1.0:
+                    xs.append(hx)
+        cap.release()
+        if not xs:
+            return None
+        xs.sort()
+        return xs[len(xs) // 2]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _vertical_pan_path(
+    track, rest_xy, fps, frame_w, cut_dur=None, golfer_x=None,
+):
     """Waypoints (time_sec, x_fraction) for the vertical follow-pan:
     hold on the golfer through address/swing, glide along the tracked
     ball flight, then return to center — at the tee->green cut when we
@@ -3231,7 +3288,11 @@ def _vertical_pan_path(track, rest_xy, fps, frame_w, cut_dur=None):
     if pts:
         _head = sorted(x for _, x in pts[:3])
         _launch_x = _head[len(_head) // 2]
-    if rest_xy and len(rest_xy) == 2:
+    if golfer_x is not None:
+        # Pose found the golfer in the actual opening frames — the
+        # authoritative answer, no cross-checks needed.
+        x0 = min(1.0, max(0.0, float(golfer_x)))
+    elif rest_xy and len(rest_xy) == 2:
         x0 = min(1.0, max(0.0, float(rest_xy[0]) / frame_w))
         # A rest anchor that wildly disagrees with where the flight
         # starts is bad data (wrong scale / phantom) — the opener
