@@ -379,21 +379,16 @@ def _x_expr_left(panel_w: int, video_w: int, anchor_x: int) -> str:
 
 
 def _x_expr_right(panel_w: int, video_w: int, anchor_right_pad: int) -> str:
-    """ffmpeg overlay x= expression for the right panel.
+    """ffmpeg overlay x= expression for the right (brand logo) panel.
 
-    Right panel slides in from x=W → x=W-w-pad, holds, slides back out
-    to x=W.
+    Slides in from x=W → x=W-w-pad and then STAYS for the whole clip —
+    the GolfReelz logo is persistent branding, start to finish, on both
+    the landscape and vertical outputs. (The name plate and target sign
+    keep their slide-out.)
     """
     t_in = SLIDE_IN_SEC
-    t_hold_end = SLIDE_IN_SEC + HOLD_SEC
-    t_out = t_hold_end + SLIDE_OUT_SEC
     anchor = f"(W-w-{anchor_right_pad})"
-    return (
-        f"if(lt(t,{t_in}), W - (W-{anchor})*t/{t_in}, "
-        f"if(lt(t,{t_hold_end}), {anchor}, "
-        f"if(lt(t,{t_out}), {anchor} + (W-{anchor})*(t-{t_hold_end})/{SLIDE_OUT_SEC}, "
-        f"W)))"
-    )
+    return f"if(lt(t,{t_in}), W - (W-{anchor})*t/{t_in}, {anchor})"
 
 
 def _y_expr_target(anchor_y: int) -> str:

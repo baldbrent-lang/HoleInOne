@@ -835,6 +835,31 @@ def make_clip_vertical(
         src_path, out_path, focus_x_frac=_focus,
     ):
         raise HTTPException(500, "vertical render failed (see server log)")
+    # Portrait-geometry name plate + persistent logo on the vertical.
+    try:
+        _course = db.get(Course, clip.course_id)
+        _pname = None
+        if clip.participant_id:
+            _p = db.get(Participant, clip.participant_id)
+            _pname = _p.name if _p else None
+        _yardage = 101
+        if _course and _course.hole_yardages:
+            try:
+                _ry = _course.hole_yardages.get(str(int(clip.hole_number)))
+                if _ry is not None:
+                    _yardage = int(_ry)
+            except (TypeError, ValueError):
+                pass
+        apply_intro_overlay_inplace(
+            out_path,
+            player_name=_pname or "Brent Baldwin",
+            course_name=_course.name if _course else "",
+            hole_number=int(clip.hole_number),
+            par=3,
+            yardage=_yardage,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("clip %s: vertical overlay failed: %s", clip_id, exc)
     clip.vertical_url = (
         f"{settings.app_base_url}/uploads/clips/{out_path.name}"
         f"?v={int(out_path.stat().st_mtime)}"
@@ -2424,6 +2449,50 @@ def _process_long_upload_segments(
         except Exception as exc:  # pragma: no cover
             log.warning("intro overlay failed for clip %s: %s", clip.id, exc)
 
+    def _intro_overlay_for_vertical(
+        clip: VideoClip, participant: Participant | None
+    ) -> None:
+        """Overlay the name plate + persistent logo onto the VERTICAL
+        variant with portrait geometry (the landscape overlay lives in
+        corners the 9:16 crop pans away from). Target sign is skipped —
+        its coords are landscape-frame pixels. Best-effort."""
+        if not clip.vertical_url:
+            return
+        fname = clip.vertical_url.split("?")[0].rsplit("/", 1)[-1]
+        fpath = CLIPS_DIR / fname
+        if not fpath.exists():
+            return
+        course = _course_for_intro
+        course_name = course.name if course and course.name else ""
+        yardage = 101
+        if course and course.hole_yardages:
+            raw_y = course.hole_yardages.get(str(int(clip.hole_number)))
+            try:
+                if raw_y is not None:
+                    yardage = int(raw_y)
+            except (TypeError, ValueError):
+                pass
+        try:
+            if apply_intro_overlay_inplace(
+                fpath,
+                player_name=(
+                    participant.name if participant else "Brent Baldwin"
+                ),
+                course_name=course_name,
+                hole_number=int(clip.hole_number),
+                par=3,
+                yardage=yardage,
+            ):
+                clip.vertical_url = (
+                    f"{settings.app_base_url}/uploads/clips/{fpath.name}"
+                    f"?v={int(fpath.stat().st_mtime)}"
+                )
+        except Exception as exc:  # pragma: no cover
+            log.warning(
+                "vertical intro overlay failed for clip %s: %s",
+                clip.id, exc,
+            )
+
     # Effective clip window. clip_before/clip_after (pose mode) override the
     # defaults; the tee→green cutover (_tee_after) stays put and the green
     # portion is stretched/shrunk so the total post-swing coverage == after.
@@ -2981,6 +3050,7 @@ def _process_long_upload_segments(
                         participant.email,
                     )
                 _intro_overlay_for_clip(_c, participant)
+                _intro_overlay_for_vertical(_c, participant)
                 _clip_holder["clip"] = _c
 
             if not _commit_retry(db, _insert_clip, "publish swing clip"):
