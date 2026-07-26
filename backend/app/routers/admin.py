@@ -789,6 +789,22 @@ def make_clip_vertical(
                     [_ball.get("x"), _ball.get("y")]
                     if _ball.get("x") is not None else None
                 )
+                if _fw <= 0:
+                    # Produce-only uploads never stored frame_width (the
+                    # wizard save writes it) — probe the raw tee cut,
+                    # whose native width the track coords live in.
+                    _probe_src = None
+                    if clip.tee_clip_url:
+                        _tn = clip.tee_clip_url.split("?")[0].rsplit("/", 1)[-1]
+                        if storage.ensure_local(CLIPS_DIR, _tn):
+                            _probe_src = CLIPS_DIR / _tn
+                    elif "_composite" not in src_name:
+                        _probe_src = src_path
+                    if _probe_src is not None and _probe_src.exists():
+                        _fw = float(
+                            (probe_video_info(_probe_src) or {}).get("width")
+                            or 0
+                        )
                 if _rxy and _fw > 0:
                     _focus = max(0.15, min(0.85, float(_rxy[0]) / _fw))
                 _trk = [
@@ -800,6 +816,11 @@ def make_clip_vertical(
                 if len(_trk) >= 3 and _fw > 0:
                     _ppath = _vertical_pan_path(_trk, _rxy, _fps, _fw)
                     _made = make_vertical_pan(src_path, out_path, _ppath)
+                log.info(
+                    "clip %s: vertical on-demand — track=%d fw=%s -> %s",
+                    clip.id, len(_trk), _fw,
+                    "PAN" if _made else "static fallback",
+                )
                 break
     except Exception as exc:  # noqa: BLE001
         log.warning("clip %s: vertical pan failed: %s", clip_id, exc)
@@ -813,7 +834,11 @@ def make_clip_vertical(
     )
     db.commit()
     log.info("clip %s: vertical variant rendered (%s)", clip.id, out_path.name)
-    return {"clip_id": clip.id, "vertical_url": clip.vertical_url}
+    return {
+        "clip_id": clip.id,
+        "vertical_url": clip.vertical_url,
+        "mode": "pan" if _made else "static",
+    }
 
 
 @router.post("/clips/{clip_id}/broadcast")
@@ -2879,6 +2904,10 @@ def _process_long_upload_segments(
                         )
                 except Exception as exc:  # noqa: BLE001
                     log.warning("vertical pan build failed: %s", exc)
+                log.info(
+                    "produce seg %d: vertical -> %s",
+                    idx, "PAN" if _made else "static (no usable track)",
+                )
                 if not _made:
                     # Static crop aimed at the golfer (no usable track).
                     _focus = 0.5
