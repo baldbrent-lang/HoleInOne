@@ -265,10 +265,11 @@ export default function AdminBroadcastClips() {
    * navigator.share — the only way to natively post to Instagram /
    * TikTok / other apps that don't accept URL-share intents.
    */
-  async function fetchClipAsFile(c) {
-    if (!c.source_url) return null;
+  async function fetchClipAsFile(c, url) {
+    const src = url || c.source_url;
+    if (!src) return null;
     try {
-      const res = await fetch(c.source_url);
+      const res = await fetch(src);
       if (!res.ok) return null;
       const blob = await res.blob();
       return new File([blob], suggestedFilename(c), {
@@ -287,11 +288,37 @@ export default function AdminBroadcastClips() {
    *
    * `appHint` is purely cosmetic, used in the fallback message.
    */
-  async function fileShareForApp(c, appHint) {
-    if (!c.source_url) return;
+  async function openVertical(c) {
+    if (c.vertical_url) {
+      window.open(c.vertical_url, "_blank");
+      return;
+    }
     setFileSharing((s) => ({ ...s, [c.id]: true }));
     try {
-      const file = await fetchClipAsFile(c);
+      const out = await api.makeClipVertical(adminPassword, c.id);
+      setClips((cs) => (cs || []).map(
+        (x) => (x.id === c.id ? { ...x, vertical_url: out.vertical_url } : x)
+      ));
+      if (out.vertical_url) window.open(out.vertical_url, "_blank");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setFileSharing((s) => ({ ...s, [c.id]: false }));
+    }
+  }
+
+  async function fileShareForApp(c, appHint) {
+    // Vertical-first platforms get the 9:16 variant when it exists —
+    // it fills the phone screen instead of letterboxing the landscape.
+    const preferVertical = /instagram|tiktok|stories|shorts|reels/i.test(
+      appHint || "",
+    );
+    const shareUrl =
+      preferVertical && c.vertical_url ? c.vertical_url : c.source_url;
+    if (!shareUrl) return;
+    setFileSharing((s) => ({ ...s, [c.id]: true }));
+    try {
+      const file = await fetchClipAsFile(c, shareUrl);
       if (!file) {
         window.alert(
           `Couldn't fetch the clip to share. Try Download, then open ${appHint} and upload manually.`,
@@ -562,6 +589,17 @@ export default function AdminBroadcastClips() {
                 title="On mobile: opens the OS share sheet with the video as a file (TikTok appears as a target). On desktop: downloads the .mp4 and reminds you to upload manually."
               >
                 {fileSharing[c.id] ? "Preparing…" : "TikTok"}
+              </button>
+              <button
+                type="button"
+                className="ghost small"
+                onClick={() => openVertical(c)}
+                disabled={!!fileSharing[c.id]}
+                title={c.vertical_url
+                  ? "Open the 9:16 vertical version (social / phone)"
+                  : "Generate a 9:16 vertical version (blur-padded — nothing cropped). Instagram/TikTok shares use it automatically once it exists."}
+              >
+                {c.vertical_url ? "📱 Vertical" : "📱 Make vertical"}
               </button>
               <button
                 type="button"

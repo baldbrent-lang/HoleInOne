@@ -69,6 +69,27 @@ export default function AdminProducedClips() {
     }
   }
 
+  async function openVertical(clip) {
+    // Open the 9:16 variant, generating it first if this clip predates
+    // the feature. Generation is a single ffmpeg pass (~clip length).
+    if (clip.vertical_url) {
+      window.open(clip.vertical_url, "_blank");
+      return;
+    }
+    setBusyId(clip.id);
+    try {
+      const out = await api.makeClipVertical(adminPassword, clip.id);
+      setClips((cs) => (cs || []).map(
+        (c) => (c.id === clip.id ? { ...c, vertical_url: out.vertical_url } : c)
+      ));
+      if (out.vertical_url) window.open(out.vertical_url, "_blank");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   async function deleteClip(clip) {
     const label = `#${clip.id}${
       clip.hole_number != null ? ` (hole ${clip.hole_number})` : ""
@@ -195,6 +216,18 @@ export default function AdminProducedClips() {
                   {busyId === c.id
                     ? "…"
                     : c.is_highlight ? "On Broadcast" : "Broadcast"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ width: "auto" }}
+                  onClick={() => openVertical(c)}
+                  disabled={busyId === c.id}
+                  title={c.vertical_url
+                    ? "Open the 9:16 vertical version (social / phone)"
+                    : "Generate a 9:16 vertical version of this clip (blur-padded — nothing cropped) for social / phone"}
+                >
+                  {busyId === c.id ? "…" : c.vertical_url ? "📱" : "📱＋"}
                 </button>
                 <button
                   type="button"

@@ -118,6 +118,7 @@ from ..services.video import (
     concat_two_clips,
     cut_segment,
     extract_thumbnail,
+    make_vertical,
     probe_fps,
     probe_source_device,
     probe_video_info,
@@ -730,6 +731,7 @@ def list_all_clips(
                 "source_url": c.source_url,
                 "tracer_url": c.tracer_url,
                 "tee_clip_url": c.tee_clip_url,
+                "vertical_url": c.vertical_url,
                 "thumbnail_url": c.thumbnail_url,
                 "ball_in_cup": bool(c.ball_in_cup),
                 "is_highlight": bool(c.is_highlight),
@@ -741,6 +743,36 @@ def list_all_clips(
             }
         )
     return out
+
+
+@router.post("/clips/{clip_id}/vertical")
+def make_clip_vertical(clip_id: int, db: Session = Depends(get_db)):
+    """Generate (or return the existing) 9:16 vertical variant of a
+    produced clip — blur-padded so nothing gets cropped out. Lets
+    clips produced before this feature get a vertical on demand."""
+    clip = db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+    if clip.vertical_url:
+        fname = clip.vertical_url.split("?")[0].rsplit("/", 1)[-1]
+        if storage.ensure_local(CLIPS_DIR, fname) and (CLIPS_DIR / fname).exists():
+            return {"clip_id": clip.id, "vertical_url": clip.vertical_url}
+    src_url = clip.tracer_url or clip.source_url
+    if not src_url:
+        raise HTTPException(400, "clip has no video to convert")
+    src_name = src_url.split("?")[0].rsplit("/", 1)[-1]
+    if not storage.ensure_local(CLIPS_DIR, src_name):
+        raise HTTPException(404, f"source file {src_name} not found")
+    src_path = CLIPS_DIR / src_name
+    out_path = CLIPS_DIR / f"{src_path.stem}_vertical.mp4"
+    if not make_vertical(src_path, out_path):
+        raise HTTPException(500, "vertical render failed (see server log)")
+    clip.vertical_url = (
+        f"{settings.app_base_url}/uploads/clips/{out_path.name}"
+    )
+    db.commit()
+    log.info("clip %s: vertical variant rendered (%s)", clip.id, out_path.name)
+    return {"clip_id": clip.id, "vertical_url": clip.vertical_url}
 
 
 @router.post("/clips/{clip_id}/broadcast")
@@ -868,6 +900,7 @@ def list_broadcast_clips(
                 "created_at": c.created_at.isoformat() if c.created_at else None,
                 "source_url": c.source_url,
                 "tracer_url": c.tracer_url,
+                "vertical_url": c.vertical_url,
                 "thumbnail_url": c.thumbnail_url,
                 "ball_in_cup": bool(c.ball_in_cup),
                 "is_highlight": bool(c.is_highlight),
@@ -2754,6 +2787,28 @@ def _process_long_upload_segments(
 
             captured_dt = base_dt + timedelta(seconds=tee_cut_start)
 
+            # 9:16 vertical variant of the final video (blur-padded, so
+            # the tracer + ball flight stay fully visible) for social /
+            # phone. Best-effort: a failed render just leaves
+            # vertical_url null and the on-demand endpoint can retry.
+            vertical_url: str | None = None
+            _vert_src = (
+                composite_path
+                if (composite_path and composite_path.exists())
+                else (
+                    tracer_path
+                    if (tracer_path and tracer_path.exists())
+                    else seg_path
+                )
+            )
+            if _vert_src and _vert_src.exists():
+                _vert_path = CLIPS_DIR / f"{_vert_src.stem}_vertical.mp4"
+                if make_vertical(_vert_src, _vert_path):
+                    vertical_url = (
+                        f"{settings.app_base_url}/uploads/clips/"
+                        f"{_vert_path.name}"
+                    )
+
             # The session has idled through minutes of render/composite
             # work — Neon may have killed the connection (idle-in-
             # transaction timeout). Build + insert the clip through the
@@ -2780,6 +2835,7 @@ def _process_long_upload_segments(
                         seg.get("distance_from_pin_feet"),
                     ),
                     ball_in_cup=bool(seg.get("ball_in_cup", False)),
+                    vertical_url=vertical_url,
                     processing_status=ClipProcessingStatus.received.value,
                     tracer_diagnostics=_build_tracer_diagnostics(
                         tracer_info, None,
@@ -2938,7 +2994,10 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
     deleted_files: list[str] = []
     # Collect every URL we know about for this clip so we can resolve
     # them to filenames in CLIPS_DIR.
-    candidate_urls = [clip.source_url, clip.tracer_url, clip.thumbnail_url]
+    candidate_urls = [
+        clip.source_url, clip.tracer_url, clip.thumbnail_url,
+        clip.vertical_url,
+    ]
     candidate_names: set[str] = set()
     for url in candidate_urls:
         if not url:

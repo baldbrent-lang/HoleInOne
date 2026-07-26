@@ -75,6 +75,7 @@ def _clip_payload(clip: VideoClip, db: Session, course: Optional[Course]) -> dic
         "kind": "swing",
         "clip_id": clip.id,
         "video_url": clip.tracer_url or clip.source_url,
+        "vertical_url": clip.vertical_url,
         "tracer": bool(clip.tracer_url),
         "thumbnail_url": clip.thumbnail_url,
         "course_name": course.name if course else "",

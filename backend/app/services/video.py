@@ -110,6 +110,52 @@ def have_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
+def make_vertical(src: Path, out: Path, width: int = 1080, height: int = 1920) -> bool:
+    """Render a 9:16 vertical variant of a landscape clip for social /
+    phone viewing. The full landscape frame is scaled to fit the width
+    and centered over a blurred, zoomed copy of itself filling the
+    portrait canvas — the standard reels/shorts repost look. Nothing is
+    cropped out, so the ball flight and tracer stay fully visible.
+    Audio is passed through. Returns True on success; never raises."""
+    if not have_ffmpeg() or not src.exists():
+        return False
+    filt = (
+        f"split[bg][fg];"
+        f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},boxblur=22:4,eq=brightness=-0.06[b];"
+        f"[fg]scale={width}:-2[f];"
+        f"[b][f]overlay=(W-w)/2:(H-h)/2"
+    )
+    tmp = out.with_suffix(".tmp.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(src),
+        "-filter_complex", filt,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "96k",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(tmp),
+    ]
+    try:
+        subprocess.run(
+            cmd, check=True, timeout=600,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        err = ""
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            err = exc.stderr.decode(errors="replace")[:300]
+        log.warning("make_vertical failed for %s: %s %s", src.name, exc, err)
+        tmp.unlink(missing_ok=True)
+        return False
+    if not tmp.exists() or tmp.stat().st_size == 0:
+        tmp.unlink(missing_ok=True)
+        return False
+    tmp.replace(out)
+    return True
+
+
 def transcode_for_web(path: Path) -> bool:
     """Re-encode an MP4 in-place to H.264 + faststart for browser
     playback. The Pi-agent writes its captures with the mp4v fourcc

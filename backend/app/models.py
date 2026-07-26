@@ -164,6 +164,10 @@ class VideoClip(Base):
     # a single-camera player-visible clip even though source_url points at the
     # composite. Null for single-cam clips (source_url is already the raw cut).
     tee_clip_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 9:16 vertical variant of the produced clip (blur-padded, nothing
+    # cropped) for social / phone. Generated at produce time; older clips
+    # get one on demand via POST /admin/clips/{id}/vertical.
+    vertical_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Marks a clip as eligible to play during dead time on the broadcast
     # channel ("highlights"). Auto-set for aces and CTP winners; operators
     # can toggle via the admin UI.
