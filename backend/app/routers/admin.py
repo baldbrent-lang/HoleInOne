@@ -119,6 +119,7 @@ from ..services.video import (
     cut_segment,
     extract_thumbnail,
     make_vertical,
+    make_vertical_pan,
     probe_fps,
     probe_source_device,
     probe_video_info,
@@ -768,8 +769,10 @@ def make_clip_vertical(
         raise HTTPException(404, f"source file {src_name} not found")
     src_path = CLIPS_DIR / src_name
     out_path = CLIPS_DIR / f"{src_path.stem}_vertical.mp4"
-    # Aim the crop at the golfer when the produce run recorded the
-    # resting-ball position for this clip; center otherwise.
+    # Prefer the follow-the-shot pan when this clip's produce run
+    # persisted a ball track; fall back to a static crop aimed at the
+    # golfer (or frame center) otherwise.
+    _made = False
     _focus = 0.5
     try:
         if clip.long_upload_id:
@@ -777,14 +780,32 @@ def make_clip_vertical(
             _em = (_up.edit_metrics or {}) if _up else {}
             _fw = float(_em.get("frame_width") or 0)
             for _sw in _em.get("swings") or []:
-                if _sw.get("clip_id") == clip.id and _fw > 0:
-                    _rxy = _sw.get("ball_rest_xy") or _sw.get("rest_xy")
-                    if _rxy and len(_rxy) == 2:
-                        _focus = max(0.15, min(0.85, float(_rxy[0]) / _fw))
-                    break
-    except Exception:  # noqa: BLE001
-        _focus = 0.5
-    if not make_vertical(src_path, out_path, focus_x_frac=_focus):
+                if _sw.get("clip_id") != clip.id:
+                    continue
+                _fps = float(_sw.get("fps") or 0) or 30.0
+                _off = int(_sw.get("start_frame") or 0)
+                _ball = _sw.get("ball") or {}
+                _rxy = (
+                    [_ball.get("x"), _ball.get("y")]
+                    if _ball.get("x") is not None else None
+                )
+                if _rxy and _fw > 0:
+                    _focus = max(0.15, min(0.85, float(_rxy[0]) / _fw))
+                _trk = [
+                    {"frame": int(r["frame"]) - _off, "x": r["x"]}
+                    for r in _sw.get("ball_track_frames") or []
+                    if r.get("found") and r.get("x") is not None
+                    and int(r.get("frame") or 0) >= _off
+                ]
+                if len(_trk) >= 3 and _fw > 0:
+                    _ppath = _vertical_pan_path(_trk, _rxy, _fps, _fw)
+                    _made = make_vertical_pan(src_path, out_path, _ppath)
+                break
+    except Exception as exc:  # noqa: BLE001
+        log.warning("clip %s: vertical pan failed: %s", clip_id, exc)
+    if not _made and not make_vertical(
+        src_path, out_path, focus_x_frac=_focus,
+    ):
         raise HTTPException(500, "vertical render failed (see server log)")
     clip.vertical_url = (
         f"{settings.app_base_url}/uploads/clips/{out_path.name}"
@@ -2822,26 +2843,59 @@ def _process_long_upload_segments(
                 )
             )
             if _vert_src and _vert_src.exists():
-                # Aim the 9:16 crop at the golfer: the resting ball's
-                # x as a fraction of the tee frame width. Falls back to
-                # frame center when unknown.
-                _focus = 0.5
+                _vert_path = CLIPS_DIR / f"{_vert_src.stem}_vertical.mp4"
+                _made = False
+                _sw = 0.0
+                _rxy = None
                 try:
-                    _rxy = seg.get("ball_rest_xy")
-                    if _rxy and len(_rxy) == 2:
-                        _sinfo = probe_video_info(seg_path) or {}
-                        _sw = float(_sinfo.get("width") or 0)
-                        if _sw > 0:
+                    _sinfo = probe_video_info(seg_path) or {}
+                    _sw = float(_sinfo.get("width") or 0)
+                    _rxy = (
+                        (tracer_info or {}).get("ball_rest_xy")
+                        or seg.get("ball_rest_xy")
+                    )
+                    # FOLLOW-THE-SHOT PAN: drive the 9:16 crop along
+                    # the tracked ball flight (camera-operator style).
+                    _trk = [
+                        r
+                        for r in (
+                            (tracer_info or {}).get("ball_track_frames")
+                            or []
+                        )
+                        if r.get("found") and r.get("x") is not None
+                    ]
+                    if len(_trk) >= 3 and _sw > 0 and _seg_fps:
+                        _cut = None
+                        if composite_url:
+                            try:
+                                _cut = float(tee_video_dur)
+                            except NameError:
+                                _cut = None
+                        _ppath = _vertical_pan_path(
+                            _trk, _rxy, float(_seg_fps), _sw, _cut,
+                        )
+                        _made = make_vertical_pan(
+                            _vert_src, _vert_path, _ppath,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("vertical pan build failed: %s", exc)
+                if not _made:
+                    # Static crop aimed at the golfer (no usable track).
+                    _focus = 0.5
+                    try:
+                        if _rxy and len(_rxy) == 2 and _sw > 0:
                             _focus = max(
                                 0.15, min(0.85, float(_rxy[0]) / _sw),
                             )
-                except Exception:  # noqa: BLE001
-                    _focus = 0.5
-                _vert_path = CLIPS_DIR / f"{_vert_src.stem}_vertical.mp4"
-                if make_vertical(_vert_src, _vert_path, focus_x_frac=_focus):
+                    except Exception:  # noqa: BLE001
+                        _focus = 0.5
+                    _made = make_vertical(
+                        _vert_src, _vert_path, focus_x_frac=_focus,
+                    )
+                if _made and _vert_path.exists():
                     vertical_url = (
                         f"{settings.app_base_url}/uploads/clips/"
-                        f"{_vert_path.name}"
+                        f"{_vert_path.name}?v={int(_vert_path.stat().st_mtime)}"
                     )
 
             # The session has idled through minutes of render/composite
@@ -3125,6 +3179,37 @@ def _commit_retry(db, apply_fn, what: str, retries: int = 2) -> bool:
             )
             time.sleep(1.0 + attempt)
     return False
+
+
+def _vertical_pan_path(track, rest_xy, fps, frame_w, cut_dur=None):
+    """Waypoints (time_sec, x_fraction) for the vertical follow-pan:
+    hold on the golfer through address/swing, glide along the tracked
+    ball flight, then return to center — at the tee->green cut when we
+    know it (scene change), otherwise ~0.8s after the flight ends.
+    `track` is CLIP-relative {frame, x} records; coords native px."""
+    pts = sorted(
+        (
+            max(0.0, float(r["frame"]) / fps),
+            min(1.0, max(0.0, float(r["x"]) / frame_w)),
+        )
+        for r in track
+    )
+    x0 = (
+        min(1.0, max(0.0, float(rest_xy[0]) / frame_w))
+        if rest_xy and len(rest_xy) == 2
+        else (pts[0][1] if pts else 0.5)
+    )
+    path = [(0.0, x0)]
+    if pts:
+        path.append((max(0.0, pts[0][0] - 0.05), x0))
+        path.extend(pts)
+        t_last, x_last = pts[-1]
+        if cut_dur is not None and cut_dur > t_last:
+            path.append((max(t_last + 0.01, cut_dur - 0.01), x_last))
+            path.append((float(cut_dur), 0.5))
+        else:
+            path.append((t_last + 0.8, 0.5))
+    return path
 
 
 def _auto_delete_upload(upload_id: int, reason: str) -> None:

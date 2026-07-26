@@ -180,6 +180,125 @@ def make_vertical(
     return True
 
 
+def make_vertical_pan(
+    src: Path,
+    out: Path,
+    pan_path: list,
+    width: int = 1080,
+    height: int = 1920,
+) -> bool:
+    """Full-screen 9:16 vertical with a FOLLOW-THE-ACTION pan: the crop
+    window glides horizontally along `pan_path` — a list of
+    (time_sec, x_fraction 0..1) waypoints (golfer at address, then the
+    ball's tracked flight) — like a cameraman panning with the shot.
+    Every frame fills the screen; across the clip the whole shot is
+    seen. The raw path is speed-limited (~45% of frame width per
+    second) and smoothed (~0.25s) so it reads as a camera move, not a
+    twitch. Audio is muxed back in from the source. Returns True on
+    success; never raises."""
+    try:
+        import cv2
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        return False
+    if not src.exists() or not pan_path:
+        return False
+    cap = cv2.VideoCapture(str(src))
+    if not cap.isOpened():
+        return False
+    try:
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 30.0
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cw = int(round(h * width / float(height)))
+        if w <= 0 or h <= 0 or n <= 0 or cw >= w or cw < 16:
+            return False
+
+        pts = sorted(
+            (max(0.0, float(t)), min(1.0, max(0.0, float(x))))
+            for t, x in pan_path
+        )
+        ts = np.arange(n) / fps
+        targets = np.interp(
+            ts, [p[0] for p in pts], [p[1] for p in pts],
+        ) * w
+        # Speed limit: the pan chases the target like a camera operator
+        # — fast enough to catch a drive, never a teleport.
+        max_step = 0.45 * w / fps
+        centers = np.empty(n)
+        cur = float(targets[0])
+        for i in range(n):
+            cur += float(np.clip(targets[i] - cur, -max_step, max_step))
+            centers[i] = cur
+        # Smooth kinks (~0.25s box) then clamp inside the frame.
+        k = max(1, int(round(0.25 * fps)))
+        if k > 1:
+            pad = np.concatenate(
+                [np.full(k, centers[0]), centers, np.full(k, centers[-1])],
+            )
+            centers = np.convolve(pad, np.ones(k) / k, mode="same")[k:-k]
+        centers = np.clip(centers, cw / 2.0, w - cw / 2.0)
+
+        tmp_v = out.with_suffix(".pan.mp4")
+        writer = cv2.VideoWriter(
+            str(tmp_v), cv2.VideoWriter_fourcc(*"mp4v"), fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            return False
+        i = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            c = centers[min(i, n - 1)]
+            x0 = int(round(c - cw / 2.0))
+            x0 = max(0, min(w - cw, x0))
+            crop = frame[:, x0:x0 + cw]
+            writer.write(
+                cv2.resize(crop, (width, height), interpolation=cv2.INTER_LINEAR),
+            )
+            i += 1
+        writer.release()
+        if i == 0 or not tmp_v.exists() or tmp_v.stat().st_size == 0:
+            tmp_v.unlink(missing_ok=True)
+            return False
+    finally:
+        cap.release()
+
+    # H.264 + source audio for browser/social playback.
+    if not have_ffmpeg():
+        tmp_v.replace(out)
+        return True
+    tmp_o = out.with_suffix(".tmp.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(tmp_v), "-i", str(src),
+        "-map", "0:v:0", "-map", "1:a:0?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "aac", "-b:a", "96k",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-shortest",
+        str(tmp_o),
+    ]
+    try:
+        subprocess.run(
+            cmd, check=True, timeout=600,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        tmp_o.replace(out)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        log.warning("make_vertical_pan encode failed for %s: %s", src.name, exc)
+        tmp_o.unlink(missing_ok=True)
+        # Fall back to the raw mp4v render rather than nothing.
+        tmp_v.replace(out)
+        return True
+    finally:
+        tmp_v.unlink(missing_ok=True)
+
+
 def transcode_for_web(path: Path) -> bool:
     """Re-encode an MP4 in-place to H.264 + faststart for browser
     playback. The Pi-agent writes its captures with the mp4v fourcc
