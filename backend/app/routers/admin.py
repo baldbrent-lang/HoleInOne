@@ -769,6 +769,15 @@ def make_clip_vertical(
         raise HTTPException(404, f"source file {src_name} not found")
     src_path = CLIPS_DIR / src_name
     out_path = CLIPS_DIR / f"{src_path.stem}_vertical.mp4"
+    # Render from the CLEAN pre-overlay copy when one exists — the
+    # baked landscape panels would otherwise drift through the pan.
+    render_src = src_path
+    _clean_name = f"{src_path.stem}_clean{src_path.suffix}"
+    if (
+        storage.ensure_local(CLIPS_DIR, _clean_name)
+        and (CLIPS_DIR / _clean_name).exists()
+    ):
+        render_src = CLIPS_DIR / _clean_name
     # Prefer the follow-the-shot pan when this clip's produce run
     # persisted a ball track; fall back to a static crop aimed at the
     # golfer (or frame center) otherwise.
@@ -813,14 +822,14 @@ def make_clip_vertical(
                     if r.get("found") and r.get("x") is not None
                     and int(r.get("frame") or 0) >= _off
                 ]
-                _gx = _probe_golfer_x_frac(src_path)
+                _gx = _probe_golfer_x_frac(render_src)
                 if _gx is not None:
                     _focus = max(0.15, min(0.85, float(_gx)))
                 if len(_trk) >= 3 and _fw > 0:
                     _ppath = _vertical_pan_path(
                         _trk, _rxy, _fps, _fw, golfer_x=_gx,
                     )
-                    _made = make_vertical_pan(src_path, out_path, _ppath)
+                    _made = make_vertical_pan(render_src, out_path, _ppath)
                 log.info(
                     "clip %s: vertical on-demand — track=%d fw=%s "
                     "golfer_x=%s -> %s",
@@ -832,7 +841,7 @@ def make_clip_vertical(
     except Exception as exc:  # noqa: BLE001
         log.warning("clip %s: vertical pan failed: %s", clip_id, exc)
     if not _made and not make_vertical(
-        src_path, out_path, focus_x_frac=_focus,
+        render_src, out_path, focus_x_frac=_focus,
     ):
         raise HTTPException(500, "vertical render failed (see server log)")
     # Portrait-geometry name plate + persistent logo on the vertical.
@@ -2431,6 +2440,17 @@ def _process_long_upload_segments(
                     yardage = int(raw_y)
             except (TypeError, ValueError):
                 pass
+        # Preserve a CLEAN pre-overlay copy first — vertical re-renders
+        # (and any future format) crop/pan the frame, so they must start
+        # from footage without the landscape panels baked in.
+        try:
+            import shutil as _sh
+
+            _clean = fpath.with_name(f"{fpath.stem}_clean{fpath.suffix}")
+            if not _clean.exists():
+                _sh.copy2(fpath, _clean)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("clean-copy failed for %s: %s", fpath.name, exc)
         try:
             apply_intro_overlay_inplace(
                 fpath,
