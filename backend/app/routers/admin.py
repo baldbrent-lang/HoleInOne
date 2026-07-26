@@ -2541,6 +2541,16 @@ def _process_long_upload_segments(
     n_done = 0
     results: list[dict] = []
     for idx, seg in enumerate(seg_list):
+        # Release any open transaction BEFORE this swing's minutes of
+        # ffmpeg/tracer work — a connection idling inside a transaction
+        # is exactly what Neon's idle-in-transaction timeout kills, and
+        # the corpse then breaks the clip INSERT at the end of the
+        # swing. (The insert also retries on a fresh connection; this
+        # just stops the kills from happening at all.)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             hole_number = int(seg["hole_number"])
             start_sec = float(seg["start_sec"])
@@ -2743,35 +2753,56 @@ def _process_long_upload_segments(
                 public_tracer = None
 
             captured_dt = base_dt + timedelta(seconds=tee_cut_start)
-            clip = VideoClip(
-                course_id=course_id,
-                hole_number=hole_number,
-                camera_type=camera_type,
-                captured_at=captured_dt,
-                source_url=public_source,
-                thumbnail_url=thumb_url,
-                tracer_url=public_tracer,
-                tee_clip_url=tee_clip_public_url,
-                long_upload_id=progress_upload_id,
-                carry_yards=_optional_int(seg.get("carry_yards")),
-                apex_feet=_optional_int(seg.get("apex_feet")),
-                ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
-                distance_from_pin_feet=_optional_int(seg.get("distance_from_pin_feet")),
-                ball_in_cup=bool(seg.get("ball_in_cup", False)),
-                processing_status=ClipProcessingStatus.received.value,
-                tracer_diagnostics=_build_tracer_diagnostics(
-                    tracer_info, None, ball_verdict=seg.get("ball_verdict"),
-                ),
-            )
-            db.add(clip)
-            db.flush()
-            participant = match_clip(db, clip)
-            if participant and clip.ball_in_cup:
-                notifications.notify_hio_under_review(
-                    participant.name, participant.mobile, participant.email
+
+            # The session has idled through minutes of render/composite
+            # work — Neon may have killed the connection (idle-in-
+            # transaction timeout). Build + insert the clip through the
+            # dead-connection retry: each attempt constructs a FRESH row
+            # object so a half-flushed casualty of a dead session never
+            # gets re-added.
+            _clip_holder: dict = {}
+
+            def _insert_clip(_db):
+                _c = VideoClip(
+                    course_id=course_id,
+                    hole_number=hole_number,
+                    camera_type=camera_type,
+                    captured_at=captured_dt,
+                    source_url=public_source,
+                    thumbnail_url=thumb_url,
+                    tracer_url=public_tracer,
+                    tee_clip_url=tee_clip_public_url,
+                    long_upload_id=progress_upload_id,
+                    carry_yards=_optional_int(seg.get("carry_yards")),
+                    apex_feet=_optional_int(seg.get("apex_feet")),
+                    ball_speed_mph=_optional_int(seg.get("ball_speed_mph")),
+                    distance_from_pin_feet=_optional_int(
+                        seg.get("distance_from_pin_feet"),
+                    ),
+                    ball_in_cup=bool(seg.get("ball_in_cup", False)),
+                    processing_status=ClipProcessingStatus.received.value,
+                    tracer_diagnostics=_build_tracer_diagnostics(
+                        tracer_info, None,
+                        ball_verdict=seg.get("ball_verdict"),
+                    ),
                 )
-            _intro_overlay_for_clip(clip, participant)
-            db.commit()
+                _db.add(_c)
+                _db.flush()
+                participant = match_clip(_db, _c)
+                if participant and _c.ball_in_cup:
+                    notifications.notify_hio_under_review(
+                        participant.name, participant.mobile,
+                        participant.email,
+                    )
+                _intro_overlay_for_clip(_c, participant)
+                _clip_holder["clip"] = _c
+
+            if not _commit_retry(db, _insert_clip, "publish swing clip"):
+                raise RuntimeError(
+                    "could not save the produced clip row (DB connection "
+                    "kept failing)",
+                )
+            clip = _clip_holder["clip"]
             # Save the swing's detections for the Edit wizard (see helper).
             if seg.get("anchor_rec") and isinstance(tracer_info, dict):
                 tracer_info.setdefault("anchor_check", seg["anchor_rec"])
