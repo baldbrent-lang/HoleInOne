@@ -224,15 +224,16 @@ def make_vertical_pan(
             ts, [p[0] for p in pts], [p[1] for p in pts],
         ) * w
         # Speed limit: the pan chases the target like a camera operator
-        # — fast enough to catch a drive, never a teleport.
-        max_step = 0.45 * w / fps
+        # — fast enough to keep the tracer tip centered on a driven
+        # ball, never a teleport.
+        max_step = 0.75 * w / fps
         centers = np.empty(n)
         cur = float(targets[0])
         for i in range(n):
             cur += float(np.clip(targets[i] - cur, -max_step, max_step))
             centers[i] = cur
-        # Smooth kinks (~0.25s box) then clamp inside the frame.
-        k = max(1, int(round(0.25 * fps)))
+        # Smooth kinks (~0.18s box) then clamp inside the frame.
+        k = max(1, int(round(0.18 * fps)))
         if k > 1:
             pad = np.concatenate(
                 [np.full(k, centers[0]), centers, np.full(k, centers[-1])],

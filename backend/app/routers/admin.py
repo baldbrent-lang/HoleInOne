@@ -3252,8 +3252,12 @@ def _probe_golfer_x_frac(clip_path, sample_times=(0.3, 0.9, 1.5)):
                 lms = getattr(res, "pose_landmarks", None)
                 if lms is None:
                     continue
-                lh, rh = lms.landmark[23], lms.landmark[24]
-                hx = (float(lh.x) + float(rh.x)) / 2.0
+                _lm = lms.landmark
+                # Body center: shoulders + hips averaged — centers the
+                # golfer visually (hips alone sat off toward the rear
+                # of a side-on stance).
+                _pts = [_lm[11], _lm[12], _lm[23], _lm[24]]
+                hx = sum(float(q.x) for q in _pts) / len(_pts)
                 if 0.0 <= hx <= 1.0:
                     xs.append(hx)
         cap.release()
@@ -3309,10 +3313,14 @@ def _vertical_pan_path(
         path.extend(pts)
         t_last, x_last = pts[-1]
         if cut_dur is not None and cut_dur > t_last:
+            # HOLD on the flight's end (the tracer lives there) until
+            # the tee->green scene cut, then snap to center for the
+            # landing view. Drifting home early dragged the tracer out
+            # of frame while it was still on screen.
             path.append((max(t_last + 0.01, cut_dur - 0.01), x_last))
             path.append((float(cut_dur), 0.5))
-        else:
-            path.append((t_last + 0.8, 0.5))
+        # No cut known: hold x_last to the end of the clip (implicit —
+        # interpolation extends the final waypoint).
     return path
 
 
