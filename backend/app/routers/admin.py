@@ -772,12 +772,21 @@ def make_clip_vertical(
     # Render from the CLEAN pre-overlay copy when one exists — the
     # baked landscape panels would otherwise drift through the pan.
     render_src = src_path
-    _clean_name = f"{src_path.stem}_clean{src_path.suffix}"
-    if (
-        storage.ensure_local(CLIPS_DIR, _clean_name)
-        and (CLIPS_DIR / _clean_name).exists()
+    _seg_stem = src_path.stem
+    if _seg_stem.endswith("_composite"):
+        _seg_stem = _seg_stem[: -len("_composite")]
+    for _cand in (
+        f"{src_path.stem}_clean{src_path.suffix}",
+        # Old clips (pre clean-copy): the intermediate tracer render has
+        # the tracer line but NO intro graphics baked in.
+        f"{_seg_stem}_ai_mog2_tracer.mp4",
     ):
-        render_src = CLIPS_DIR / _clean_name
+        if (
+            storage.ensure_local(CLIPS_DIR, _cand)
+            and (CLIPS_DIR / _cand).exists()
+        ):
+            render_src = CLIPS_DIR / _cand
+            break
     # Prefer the follow-the-shot pan when this clip's produce run
     # persisted a ball track; fall back to a static crop aimed at the
     # golfer (or frame center) otherwise.
@@ -822,6 +831,16 @@ def make_clip_vertical(
                     if r.get("found") and r.get("x") is not None
                     and int(r.get("frame") or 0) >= _off
                 ]
+                if render_src is src_path and _sw.get("tracer_url"):
+                    _tn = (
+                        _sw["tracer_url"].split("?")[0].rsplit("/", 1)[-1]
+                    )
+                    if (
+                        _tn
+                        and storage.ensure_local(CLIPS_DIR, _tn)
+                        and (CLIPS_DIR / _tn).exists()
+                    ):
+                        render_src = CLIPS_DIR / _tn
                 _gx = _probe_golfer_x_frac(render_src)
                 if _gx is not None:
                     _focus = max(0.15, min(0.85, float(_gx)))
@@ -832,9 +851,10 @@ def make_clip_vertical(
                     _made = make_vertical_pan(render_src, out_path, _ppath)
                 log.info(
                     "clip %s: vertical on-demand — track=%d fw=%s "
-                    "golfer_x=%s -> %s",
+                    "golfer_x=%s src=%s -> %s",
                     clip.id, len(_trk), _fw,
                     round(_gx, 3) if _gx is not None else None,
+                    render_src.name,
                     "PAN" if _made else "static fallback",
                 )
                 break
