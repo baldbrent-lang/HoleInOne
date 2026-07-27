@@ -352,10 +352,15 @@ class TeeAgent:
             # double-step jump. Genuine captures always differ by at
             # least sensor noise, so byte-identical means a re-read —
             # safe to skip so the clip stays smooth.
+            # Subsampled compare (every 16th pixel): a byte-identical
+            # re-read is identical everywhere, so the sparse grid
+            # catches it — at ~1/256th the cost of a full-frame compare.
+            # The full compare was heavy enough at 1080p50 to make the
+            # capture thread itself fall behind and drop real frames.
             if (
                 prev is not None
                 and fcopy.shape == prev.shape
-                and np.array_equal(fcopy, prev)
+                and np.array_equal(fcopy[::16, ::16], prev[::16, ::16])
             ):
                 continue
             prev = fcopy
@@ -548,6 +553,18 @@ class TeeAgent:
             writer.write(f)
         last_written_ts = snapshot[-1][0]
         n_frames_written = len(snapshot)
+        # Frame-gap instrumentation: count capture gaps > 1.8x the
+        # nominal period so choppiness is measurable in the journal
+        # instead of only visible in playback.
+        _period = 1.0 / max(1.0, fps)
+        _gap_count = 0
+        _worst_gap = 0.0
+        _prev_ts = None
+        for _t, _f in snapshot:
+            if _prev_ts is not None and (_t - _prev_ts) > 1.8 * _period:
+                _gap_count += 1
+                _worst_gap = max(_worst_gap, _t - _prev_ts)
+            _prev_ts = _t
         recording_start = time.time()
         last_person_seen = recording_start
         next_det = recording_start + det_period
@@ -558,6 +575,10 @@ class TeeAgent:
             new_frames = [(ts, f) for ts, f in current if ts > last_written_ts]
             for ts, f in new_frames:
                 writer.write(f)
+                if _prev_ts is not None and (ts - _prev_ts) > 1.8 * _period:
+                    _gap_count += 1
+                    _worst_gap = max(_worst_gap, ts - _prev_ts)
+                _prev_ts = ts
                 last_written_ts = ts
                 n_frames_written += 1
             if now - recording_start > self.max_clip_seconds:
@@ -587,6 +608,27 @@ class TeeAgent:
                     break
             time.sleep(0.02)
         writer.release()
+        # TRUE average rate over the WHOLE recording (the stamped
+        # write_fps was measured from the 5s pre-roll only — if the
+        # capture rate drifted during a minutes-long clip, constant-
+        # rate playback of uneven frames is the 'skipping' judder).
+        # The uploader re-times the encode to this rate, same as the
+        # green agent has always done — which also keeps the tee's
+        # time axis truthful, so the tee->green composite alignment
+        # lands where the clocks say it should.
+        real_span = last_written_ts - first_frame_ts
+        real_fps = None
+        if n_frames_written >= 10 and real_span > 0.5:
+            _measured_all = (n_frames_written - 1) / real_span
+            if 0.5 * fps <= _measured_all <= 1.5 * fps:
+                real_fps = _measured_all
+        log.info(
+            "timing: %d frames over %.2fs (avg %.2f fps, stamped %.2f) — "
+            "%d dropped-frame gap(s), worst %.0f ms",
+            n_frames_written, real_span,
+            ((n_frames_written - 1) / real_span) if real_span > 0.5 else 0.0,
+            write_fps, _gap_count, _worst_gap * 1000.0,
+        )
         # Tell the backend recording is done before starting the
         # (possibly multi-minute) upload, so the paired green Pi —
         # which is polling /event-status — can release its writer at
@@ -624,4 +666,6 @@ class TeeAgent:
         # Hand off to the background uploader (compress + send + cleanup)
         # and return to detection AT ONCE, so a slow cellular upload can't
         # make us miss the next group arriving at the tee.
-        self.uploader.enqueue(session_id, clip_path, first_frame_ts)
+        self.uploader.enqueue(
+            session_id, clip_path, first_frame_ts, real_fps=real_fps,
+        )
