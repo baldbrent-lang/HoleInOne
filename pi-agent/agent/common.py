@@ -784,8 +784,16 @@ def compress_for_upload(
         if force_input_fps and force_input_fps > 0
         else []
     )
+    # nice +15 and a 2-thread cap keep this encode from starving the
+    # CAPTURE thread when a recording overlaps an upload (back-to-back
+    # swings): an unconstrained libx264 grabs all 4 cores, and combined
+    # with thermal throttling that produced multi-second capture stalls
+    # — visible as choppy clips. Slower upload is a fine trade; dropped
+    # frames are not.
     cmd = [
+        "nice", "-n", "15",
         "ffmpeg", "-y", "-loglevel", "error",
+        "-threads", "2",
         *reclock,
         "-i", str(video_path),
         *vf,
@@ -796,6 +804,7 @@ def compress_for_upload(
         "-pix_fmt", "yuv420p",
         "-c:a", "copy",  # preserve audio track if one was muxed in
         "-movflags", "+faststart",
+        "-threads", "2",
         str(tmp_out),
     ]
     try:
