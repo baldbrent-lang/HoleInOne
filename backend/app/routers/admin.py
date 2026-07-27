@@ -845,8 +845,16 @@ def make_clip_vertical(
                 if _gx is not None:
                     _focus = max(0.15, min(0.85, float(_gx)))
                 if len(_trk) >= 3 and _fw > 0:
+                    _imp_t = None
+                    try:
+                        _sif = _sw.get("impact_frame")
+                        if _sif is not None:
+                            _imp_t = max(0.0, (float(_sif) - _off) / _fps)
+                    except (TypeError, ValueError):
+                        _imp_t = None
                     _ppath = _vertical_pan_path(
                         _trk, _rxy, _fps, _fw, golfer_x=_gx,
+                        impact_t=_imp_t,
                     )
                     _made = make_vertical_pan(render_src, out_path, _ppath)
                 log.info(
@@ -3014,9 +3022,16 @@ def _process_long_upload_segments(
                                 _cut = float(tee_video_dur)
                             except NameError:
                                 _cut = None
+                        _imp_t = None
+                        try:
+                            _if = (tracer_info or {}).get("impact_frame")
+                            if _if is not None:
+                                _imp_t = float(_if) / float(_seg_fps)
+                        except (TypeError, ValueError):
+                            _imp_t = None
                         _ppath = _vertical_pan_path(
                             _trk, _rxy, float(_seg_fps), _sw, _cut,
-                            golfer_x=_gx,
+                            golfer_x=_gx, impact_t=_imp_t,
                         )
                         _made = make_vertical_pan(
                             _vert_src, _vert_path, _ppath,
@@ -3425,6 +3440,7 @@ def _probe_golfer_x_frac(clip_path, sample_times=(0.3, 0.9, 1.5)):
 
 def _vertical_pan_path(
     track, rest_xy, fps, frame_w, cut_dur=None, golfer_x=None,
+    impact_t=None,
 ):
     """Waypoints (time_sec, x_fraction) for the vertical follow-pan:
     hold on the golfer through address/swing, glide along the tracked
@@ -3438,6 +3454,13 @@ def _vertical_pan_path(
         )
         for r in track
     )
+    # CONTACT GATE: nothing moves the camera before the ball is
+    # struck. Track entries earlier than impact are pre-swing noise
+    # (waggle/club detections) — they were dragging the pan off the
+    # golfer during the backswing. Drop them, and the hold below
+    # extends to the impact moment.
+    if impact_t is not None:
+        pts = [(t, x) for t, x in pts if t >= float(impact_t) - 0.05]
     # OPENING FRAME = THE GOLFER. Rest-ball x is the best anchor (the
     # golfer stands at the ball); fall back to the median of the first
     # few track points — the launch happens at the golfer too, and the
@@ -3463,7 +3486,15 @@ def _vertical_pan_path(
         x0 = 0.5
     path = [(0.0, x0)]
     if pts:
-        path.append((max(0.0, pts[0][0] - 0.05), x0))
+        # HOLD on the golfer until contact: the pan's first movement
+        # is the ball leaving. From there the interpolated targets ARE
+        # the tracer's leading tip at each moment, so centering on the
+        # targets keeps the tip centered while the ball is in the air;
+        # after the last point the tip's END position stays centered.
+        _hold_until = pts[0][0] - 0.05
+        if impact_t is not None:
+            _hold_until = max(_hold_until, float(impact_t) - 0.05)
+        path.append((max(0.0, _hold_until), x0))
         path.extend(pts)
         t_last, x_last = pts[-1]
         if cut_dur is not None and cut_dur > t_last:
