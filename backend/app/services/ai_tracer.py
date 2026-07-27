@@ -3353,37 +3353,6 @@ def render_tracer_video(
     manual_anchor_idxs: set[int] = set()
     rest_anchor_frame: int | None = None
     rest_added = False
-
-    def _launch_origin() -> tuple[int, int] | None:
-        """Physics-implied launch point: extrapolate the earliest flight
-        detections linearly BACK to the impact frame. When the resting
-        ball was never found (or the anchor is a wrist-position
-        fallback), this is where the tracer should visually begin — on
-        the flight line at the ground, not mid-body on the golfer."""
-        if not HAS_NP:
-            return None
-        pts = sorted(points_by_frame.items())[:6]
-        if len(pts) < 3:
-            return None
-        fs = [float(f) for f, _ in pts]
-        if fs[-1] - fs[0] < 1:
-            return None
-        xs = [float(p[0]) for _, p in pts]
-        ys = [float(p[1]) for _, p in pts]
-        try:
-            cx = np.polyfit(fs, xs, 1)
-            cy = np.polyfit(fs, ys, 1)
-        except Exception:  # noqa: BLE001
-            return None
-        f0 = float(int(impact_frame_idx))
-        ox = float(np.polyval(cx, f0))
-        oy = float(np.polyval(cy, f0))
-        # The origin is on the ground: never ABOVE the first detection.
-        oy = max(oy, ys[0])
-        ox = min(max(ox, 0.0), float(width - 1))
-        oy = min(max(oy, 0.0), float(height - 1))
-        return int(round(ox)), int(round(oy))
-
     if ball_rest_xy_native is not None:
         rest_anchor_frame = max(
             0, int(impact_frame_idx) - REST_ANCHOR_FRAMES_BEFORE_IMPACT,
@@ -3428,51 +3397,7 @@ def render_tracer_video(
         if drop_rest:
             rest_anchor_frame = None  # no longer a valid anchor-0 rest
         else:
-            # LAUNCH-ORIGIN CORRECTION: the anchor may be a WRIST
-            # fallback (rest ball never found) — plausible enough to
-            # survive the wild-offset guard above, but visually wrong:
-            # the tracer starts mid-body instead of at the ball. The
-            # flight itself tells us where it began — if the anchor
-            # sits well ABOVE the extrapolated launch point or far off
-            # the flight line, relocate it to the physics-implied
-            # origin. A genuinely-found rest agrees with the
-            # extrapolation and passes through untouched.
-            _orig = _launch_origin()
-            if _orig is not None:
-                _diag = math.hypot(width, height) or 1.0
-                _above = _orig[1] - ry  # >0 => anchor is above the origin
-                _dist = math.hypot(rx - _orig[0], ry - _orig[1])
-                if _above > 0.05 * height or _dist > 0.12 * _diag:
-                    info["rest_anchor_relocated"] = {
-                        "from": [rx, ry],
-                        "to": [_orig[0], _orig[1]],
-                        "above_px": round(float(_above), 1),
-                        "dist_px": round(float(_dist), 1),
-                    }
-                    log.info(
-                        "ai_tracer: start anchor at (%d,%d) disagrees "
-                        "with the flight's launch origin (%d,%d) — "
-                        "relocating the tracer start to the origin",
-                        rx, ry, _orig[0], _orig[1],
-                    )
-                    rx, ry = _orig
             anchors.append((rest_anchor_frame, rx, ry))
-            rest_added = True
-    else:
-        # No rest anchor at all — synthesize one at the extrapolated
-        # launch origin so the tracer still starts at the ball's
-        # departure point instead of popping in at the first detection.
-        _orig = _launch_origin()
-        if _orig is not None:
-            rest_anchor_frame = max(
-                0, int(impact_frame_idx) - REST_ANCHOR_FRAMES_BEFORE_IMPACT,
-            )
-            info["rest_anchor_synthesized"] = {"xy": [_orig[0], _orig[1]]}
-            log.info(
-                "ai_tracer: no rest anchor — starting the tracer at the "
-                "extrapolated launch origin (%d,%d)", _orig[0], _orig[1],
-            )
-            anchors.append((rest_anchor_frame, _orig[0], _orig[1]))
             rest_added = True
     # Manual points MERGE with the auto-detected ones: the operator's
     # clicks are pinned ground truth (never rejected, 10x weight in the
