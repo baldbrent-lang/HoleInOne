@@ -1448,6 +1448,16 @@ def _render(
         "residual_px": _residual(track),
         "n_points": len(track),
         "n_candidates": len(detections),
+        # The identified resting-ball position (native px) + how it was
+        # found: "address-vote" = directly detected sitting at rest (the
+        # solid cyan 'ball' ring in debug — reliable), "track" = first
+        # track point (may already be mid-flight). Callers use it as the
+        # tracer's start anchor when the AI never found the rest ball.
+        "ball_rest_xy": (
+            [float(ball_pos_native[0]), float(ball_pos_native[1])]
+            if ball_pos_native is not None else None
+        ),
+        "ball_rest_source": ball_pos_source,
         "n_backfilled": n_backfilled,
         "frame_range": [track[0].frame, track[-1].frame],
         "fps": float(fps),

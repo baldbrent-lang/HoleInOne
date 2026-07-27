@@ -7782,6 +7782,33 @@ def _mog2_layer_for_ai_track(
     import numpy as _np
 
     cv_info = cv_info or {}
+
+    # ADOPT THE CLASSICAL REST BALL: when the AI never found the resting
+    # ball (or only has the wrist-position fallback), the classical pass
+    # often DID find it — the solid-cyan 'ball' address-vote in its
+    # debug view. That's a real ground position at the strike; use it as
+    # the rest for everything downstream (rest-lock cone, arc ground
+    # line, and the render's start anchor) so the tracer begins at the
+    # ball instead of mid-body or mid-air.
+    _cv_ball = cv_info.get("ball_rest_xy")
+    if (
+        _cv_ball
+        and cv_info.get("ball_rest_source") == "address-vote"
+        and (
+            _rest is None
+            or len(_rest) != 2
+            or pipe.get("ball_rest_source") == "pose_wrist_fallback"
+        )
+    ):
+        _rest = (float(_cv_ball[0]), float(_cv_ball[1]))
+        log.info(
+            "mog2 layer: adopted CLASSICAL address-vote rest ball at "
+            "(%.0f,%.0f) — AI rest was %s",
+            _rest[0], _rest[1],
+            "missing" if pipe.get("ball_rest_xy_native") is None
+            else "wrist fallback",
+        )
+
     pool = _mog2_dot_pool(cv_info)
     launch_pts = [
         {"frame": int(pt["frame"]), "x": float(pt["x"]), "y": float(pt["y"])}
