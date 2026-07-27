@@ -35,10 +35,15 @@ log = logging.getLogger("golfreelz_agent.common")
 # per-frame motion, and less blur smearing the ball into the grass.
 # Cost: bigger uploads (same bitrate, more even quality if you bump
 # upload_bitrate_kbps) and a bigger RAM pre-roll buffer.
+# NOTE on widths: the V4L2 -> OpenCV path needs 32-aligned row widths.
+# Requesting the sensor-native 2028/1332 widths produced stride-corrupted
+# frames (horizontal smearing) — so every preset asks the ISP for an
+# ALIGNED output size while libcamera picks the fast sensor mode
+# underneath (1920x1080@50 still runs the 2028x1080 binned 50fps mode).
 CAPTURE_MODES = {
     "1080p30": {"width": 1920, "height": 1080, "fps": 30},   # default
-    "1080p50": {"width": 2028, "height": 1080, "fps": 50},   # binned, full FOV
-    "990p120": {"width": 1332, "height": 990, "fps": 120},   # cropped, max fps
+    "1080p50": {"width": 1920, "height": 1080, "fps": 50},   # binned sensor mode, full FOV
+    "990p120": {"width": 1280, "height": 960, "fps": 120},   # cropped high-speed mode
 }
 _MODE_ALIASES = {
     "default": "1080p30", "30": "1080p30", "30fps": "1080p30",
