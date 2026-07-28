@@ -466,11 +466,15 @@ class ClipWriter:
         # absorption without crowding the ring buffer out of RAM.
         _fb = max(1, int(size[0]) * int(size[1]) * 3)
         self._q = queue.Queue(maxsize=max(30, int(queue_bytes / _fb)))
+        # Above this backlog the encoder is losing the race — stop
+        # spending encode cycles on cosmetic gap fills (see _run).
+        self._backlog_limit = max(5, int(self._q.maxsize * 0.25))
         self.n_written = 0
         self.n_filled = 0
         self.n_gaps = 0
         self.worst_gap = 0.0
         self.n_dropped = 0
+        self.n_fills_skipped = 0
         self._prev_ts = None
         self._prev_frame = None
         self._thread = None
@@ -504,6 +508,17 @@ class ClipWriter:
                     n_fill = min(
                         int(round(gap / self._period)) - 1, self._max_fill,
                     )
+                    # BACK-PRESSURE: a gap fill costs a full encode, so
+                    # when the encoder is already behind, filling steals
+                    # the very capacity that would have saved the next
+                    # REAL frame — drops make gaps, gaps make fills,
+                    # fills make drops. When the queue is backing up,
+                    # skip the fill and spend the cycles on real
+                    # footage. Timing drifts slightly for that stretch;
+                    # real frames are worth more than perfect duration.
+                    if self._q.qsize() > self._backlog_limit:
+                        self.n_fills_skipped += max(0, n_fill)
+                        n_fill = 0
                     for _ in range(max(0, n_fill)):
                         self._writer.write(self._prev_frame)
                         self.n_written += 1

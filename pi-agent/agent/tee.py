@@ -648,7 +648,7 @@ class TeeAgent:
             "timing: %d frames over %.2fs (%d captured @ %.1f fps eff, "
             "%d gap-filled, stamped %.2f) — %d gap(s), worst %.0f ms | "
             "camera delivered %d frames (%.1f fps, %d gap(s), worst "
-            "%.0f ms), queue drops %d",
+            "%.0f ms), queue drops %d, fills skipped %d",
             n_frames_written, real_span, _captured,
             (_captured / real_span) if real_span > 0.5 else 0.0,
             clip_writer.n_filled, write_fps, clip_writer.n_gaps,
@@ -657,7 +657,7 @@ class TeeAgent:
             (self._cap_frames - _cap_at_start)
             / max(0.001, time.time() - _cap_t_start),
             self._cap_gaps, self._cap_worst * 1000.0,
-            clip_writer.n_dropped,
+            clip_writer.n_dropped, clip_writer.n_fills_skipped,
         )
         # Reset camera counters for the next recording.
         self._cap_frames = 0

@@ -289,7 +289,7 @@ class GreenAgent:
             "recorded %s: %d frames, %.1f MB (reason=%s) | timing: "
             "%d captured @ %.1f fps eff, %d gap-filled, %d gap(s), "
             "worst %.0f ms | camera delivered %d frames (%.1f fps, "
-            "%d gap(s), worst %.0f ms), queue drops %d",
+            "%d gap(s), worst %.0f ms), queue drops %d, fills skipped %d",
             clip_path.name, frames_written, size / (1024 * 1024),
             stop_reason, _captured,
             (_captured / real_span) if real_span > 0.5 else 0.0,
@@ -299,7 +299,7 @@ class GreenAgent:
             (self._cap_frames - _cap_at_start)
             / max(0.001, time.time() - _cap_t_start),
             self._cap_gaps, self._cap_worst * 1000.0,
-            clip_writer.n_dropped,
+            clip_writer.n_dropped, clip_writer.n_fills_skipped,
         )
         self._cap_frames = 0
         self._cap_gaps = 0
