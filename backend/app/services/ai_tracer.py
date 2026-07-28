@@ -6333,7 +6333,12 @@ def classify_swing_shot(
     input_path: Path,
     peak_time_sec: float,
     fps: float,
-    leads: tuple = (1.5, 1.0, 0.5),
+    # NEAREST-FIRST. The far look isn't the safer one: at 1.5s the golfer
+    # may still be walking in or placing the ball, so whatever gets found
+    # there isn't necessarily the ball that gets struck. Closest to the
+    # swing is the most trustworthy — ball placed, still there, and the
+    # rest position it hands downstream is the freshest.
+    leads: tuple = (0.25, 0.75, 1.25),
     after_sec: float = 1.5,
     move_tol_frac: float = 0.06,
     hint_xy: tuple[float, float] | None = None,
@@ -6342,7 +6347,7 @@ def classify_swing_shot(
 
     A real swing makes a resting ball leave; a practice/air swing / whiff
     does not. Find the resting ball BEFORE the swing (trying each lead in
-    turn — the club can hide it at 1.5s but not nearer the top) and check
+    turn, nearest the swing first — see `leads`) and check
     whether it's gone AFTER (club has followed through, so the spot is
     clear). Verdict:
       * no ball before        -> practice (air swing)
@@ -6388,16 +6393,19 @@ def classify_swing_shot(
     # Every zoomed look missed. The zoom crop is aimed at the pose wrist
     # point — if that point was garbled (pose dropout near the blurred
     # peak), the crop may not even contain the ball. One full-frame retry
-    # at the nearest lead so a bad hint can't guarantee a miss.
+    # at the nearest lead so a bad hint can't guarantee a miss. Nearest
+    # by VALUE, not by position — this read leads[-1], which was only
+    # "nearest" because the tuple used to run far-to-near.
+    _near = min(leads)
     if before is None and _hint is not None:
-        t_b = max(0.0, float(peak_time_sec) - leads[-1])
+        t_b = max(0.0, float(peak_time_sec) - _near)
         r = find_resting_ball(input_path, int(t_b * fps))
         if r.get("error"):
             _errs.append(str(r["error"]))
         if r.get("present") and r.get("x") is not None:
             before = {
                 "present": True, "x": r["x"], "y": r["y"],
-                "t": round(t_b, 2), "lead": leads[-1],
+                "t": round(t_b, 2), "lead": _near,
                 "confidence": r.get("confidence"), "crop_box": None,
             }
     before_out = before or probe
