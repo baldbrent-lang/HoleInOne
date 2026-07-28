@@ -5163,6 +5163,11 @@ def verify_rest_and_impact_ai(
         fs_sorted = sorted(crops)
         f_hi = fs_sorted[-1]
         ring = [cx0 - x0, cy0 - y0]
+        # Where the FINDER put the ball, before this function is allowed
+        # to touch it. Kept so the debug strip can show both positions —
+        # "the ring is below the ball in the strip but on it in the
+        # before thumbnail" is otherwise impossible to attribute.
+        orig_ring = [ring[0], ring[1]]
         client = _anthropic_client()
         use_model = model or ANCHOR_AI_MODEL
 
@@ -5336,6 +5341,20 @@ def verify_rest_and_impact_ai(
             out["rest_blob"] = round(
                 _ball_blob_score(crops[f_lo], int(ring[0]), int(ring[1])), 3,
             )
+            log.info(
+                "anchor walk: finder rest=(%.0f,%.0f) snapped=%s%s "
+                "blob %.3f -> %.3f",
+                cx0, cy0, bool(out.get("snapped")),
+                (
+                    f" ({out.get('snap_px')}px)" if out.get("snapped")
+                    else (
+                        f" REFUSED ({out.get('snap_rejected_px')}px)"
+                        if out.get("snap_rejected") else ""
+                    )
+                ),
+                float(out.get("rest_blob_pre") or -1.0),
+                float(out.get("rest_blob") or -1.0),
+            )
 
             # 2. WALK forward until the ball is confirmed gone.
             stride = 3
@@ -5402,6 +5421,24 @@ def verify_rest_and_impact_ai(
                 tiles = []
                 for f in sel:
                     t = crops[f].copy()
+                    # The finder's original position, whenever the walk
+                    # ended up watching somewhere else. White cross =
+                    # what the before thumbnail shows; cyan ring = what
+                    # the walk actually watched.
+                    if (
+                        abs(orig_ring[0] - ring[0]) > 1.5
+                        or abs(orig_ring[1] - ring[1]) > 1.5
+                    ):
+                        _ox, _oy = int(orig_ring[0]), int(orig_ring[1])
+                        _k = max(4, int(r * 0.6))
+                        cv2.line(
+                            t, (_ox - _k, _oy), (_ox + _k, _oy),
+                            (255, 255, 255), 1, cv2.LINE_AA,
+                        )
+                        cv2.line(
+                            t, (_ox, _oy - _k), (_ox, _oy + _k),
+                            (255, 255, 255), 1, cv2.LINE_AA,
+                        )
                     cv2.circle(
                         t, (int(ring[0]), int(ring[1])), int(r * 0.9),
                         (255, 200, 0), 2, cv2.LINE_AA,
@@ -5433,15 +5470,42 @@ def verify_rest_and_impact_ai(
                         rowt.append(np.zeros_like(tiles[0]))
                     rows.append(cv2.hconcat(rowt))
                 strip = cv2.vconcat(rows)
-                bar = np.zeros((40, strip.shape[1], 3), np.uint8)
+                bar = np.zeros((64, strip.shape[1], 3), np.uint8)
                 cv2.putText(
                     bar,
                     (
                         f"AI anchor walk [{use_model}] - only the "
                         f"frames checked are shown; {out['reason']}"
                     ),
-                    (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (255, 255, 255), 1, cv2.LINE_AA,
+                )
+                # Second line: what happened to the anchor, in numbers.
+                # The ring's position relative to the ball is the thing
+                # that keeps being argued about from screenshots — print
+                # it instead.
+                if out.get("snapped"):
+                    _snap_txt = (
+                        f"SNAP APPLIED {out.get('snap_px')}px -> "
+                        f"({out['rest_xy'][0]:.0f},{out['rest_xy'][1]:.0f}) "
+                        f"[white cross = finder's spot]"
+                    )
+                elif out.get("snap_rejected"):
+                    _snap_txt = (
+                        f"snap REFUSED ({out.get('snap_rejected_px')}px, "
+                        f"blob {out.get('snap_rejected_blob')} < "
+                        f"{out.get('rest_blob_pre')}) - kept finder's spot"
+                    )
+                else:
+                    _snap_txt = "no snap - ring is exactly where the finder put it"
+                cv2.putText(
+                    bar,
+                    (
+                        f"finder rest=({cx0:.0f},{cy0:.0f})  {_snap_txt}  "
+                        f"ball-test blob={out.get('rest_blob')}"
+                    ),
+                    (8, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
+                    (0, 220, 255), 1, cv2.LINE_AA,
                 )
                 name = f"{debug_prefix}.jpg"
                 cv2.imwrite(
