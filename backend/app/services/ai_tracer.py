@@ -5299,6 +5299,18 @@ def verify_rest_and_impact_ai(
                 pass
             ref_tile, _ = _tight_tile(f_lo)
 
+            # 1b. Does the anchor ACTUALLY look like a ball in pixels?
+            # The walk below is spot-the-difference against this frame:
+            # it asks "has tile N changed since the reference", never
+            # "where is the ball". So if the ring sits on bare turf, the
+            # reference is bare turf, every later tile is bare turf too,
+            # and the answer is "present" forever — a bad anchor and a
+            # genuine practice swing produce the IDENTICAL verdict. Score
+            # the anchor here so the two can be told apart.
+            out["rest_blob"] = round(
+                _ball_blob_score(crops[f_lo], int(ring[0]), int(ring[1])), 3,
+            )
+
             # 2. WALK forward until the ball is confirmed gone.
             stride = 3
             last_present = f_lo
@@ -5327,10 +5339,25 @@ def verify_rest_and_impact_ai(
                 break
             if dep is None:
                 out["verified"] = False
-                out["reason"] = (
-                    "AI walk: ball never left the rest spot in the "
-                    "window (practice swing, or impact estimate far off)"
-                )
+                _rb = out.get("rest_blob")
+                if _rb is not None and 0.0 <= _rb < 0.35:
+                    # Bare-turf-looking anchor. Name the real cause
+                    # instead of blaming the swing — "practice swing" here
+                    # sends the operator looking at the golfer when the
+                    # problem is that we were watching the wrong patch of
+                    # ground for the whole window.
+                    out["rest_anchor_suspect"] = True
+                    out["reason"] = (
+                        f"AI walk: nothing ever changed at the rest spot — "
+                        f"but that spot scores {_rb:.2f} on the ball test "
+                        f"(bare ground), so the ANCHOR is probably off the "
+                        f"ball, not the swing off the ball"
+                    )
+                else:
+                    out["reason"] = (
+                        "AI walk: ball never left the rest spot in the "
+                        "window (practice swing, or impact estimate far off)"
+                    )
             else:
                 out["verified"] = True
                 out["impact_frame"] = int(dep)

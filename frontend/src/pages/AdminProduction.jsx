@@ -5490,6 +5490,21 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                               departure pin failed — {s.anchor.reason}
                             </span>
                           )}
+                          {s.anchor.rest_anchor_suspect && (
+                            <div
+                              className="tiny"
+                              style={{ marginTop: 2, color: "#c0392b" }}
+                            >
+                              🎯 the watched spot scores{" "}
+                              {s.anchor.rest_blob} on the ball test (bare
+                              ground reads ~0.18, a lit ball ~1.0) — the
+                              walk was almost certainly watching the wrong
+                              patch of ground, so "never left" says nothing
+                              about the swing. Check the before/after
+                              thumbnails below: if the ring isn't on the
+                              ball, THAT is the bug, not the tracer.
+                            </div>
+                          )}
                           {s.anchor.ai_fallback_reason != null && (
                             <div className="tiny" style={{ color: "#b7791f" }}>
                               ⚠ AI anchor check bailed (
