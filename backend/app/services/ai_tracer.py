@@ -54,6 +54,22 @@ except Exception:  # pragma: no cover
 # vision task.
 MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 
+# The resting-ball look-up is routed SEPARATELY from the rest of the
+# pipeline. Finding a ~6px ball on grass is the hardest vision task we
+# ask for, and it's the one that still misses: the same crops that our
+# calls came back empty on were identified instantly by a current-
+# generation model in chat. Opus 5 is the same price as the 4.7 the
+# rest of the pipeline runs on, so this costs nothing but a newer
+# model. Set TRACER_BALL_MODEL to A/B it (claude-fable-5 is the most
+# capable option; claude-opus-4-7 restores the old behaviour).
+#
+# NB: on Opus 5 / Fable 5, extended thinking is ON by default when the
+# request omits `thinking` — which is exactly what we want here (look
+# hard, then answer) but means max_tokens has to leave room for the
+# thinking BEFORE the JSON, or the reply truncates to nothing. See
+# BALL_MAX_TOKENS at the call site.
+BALL_MODEL = os.environ.get("TRACER_BALL_MODEL", "claude-opus-5")
+
 # Number of frames sampled across the clip and sent to Claude in one
 # multi-image API call. 12 gives Claude a clear timeline view of the
 # whole swing while keeping per-request token usage bounded; with
@@ -410,7 +426,14 @@ ANTHROPIC_MAX_RETRIES = 6
 # operator A/B Opus vs Haiku on the same clip without restarting the
 # backend; anything outside this set falls back to the env-driven
 # MODEL default.
-SUPPORTED_MODELS = {"claude-opus-4-7", "claude-haiku-4-5"}
+SUPPORTED_MODELS = {
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+}
 
 
 def _anthropic_client():
@@ -444,6 +467,18 @@ def _resolve_frame_picker_model(model_override: str | None = None) -> str:
     Kept the helper in place in case we want per-task model routing
     later (e.g. send handedness to Haiku but keep address on Opus)."""
     return _resolve_model(model_override)
+
+
+def _resolve_ball_model(model_override: str | None = None) -> str:
+    """Model for the resting-ball look-up. An explicit per-run override
+    still wins (so the debug UI's model picker works), but with no
+    override this does NOT follow the pipeline default — it uses
+    BALL_MODEL. This one call is where the pipeline still fails, and it
+    is worth running on a current-generation model even when the rest of
+    the run is pinned to something older/cheaper."""
+    if model_override and model_override in SUPPORTED_MODELS:
+        return model_override
+    return BALL_MODEL
 
 
 def _maybe_apply_clahe(frame):
@@ -6146,6 +6181,8 @@ def find_resting_ball(
     crop_center: tuple[float, float] | None = None,
     crop_frac: float = 0.45,
     expect_present: bool = True,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "",
 ) -> dict:
     """Single-frame Claude vision call: is there a golf ball AT REST, and
     where? Returns {present, x, y, confidence, error} with x/y in NATIVE
@@ -6223,12 +6260,31 @@ def find_resting_ball(
         return out
     client = _anthropic_client()
     b64 = base64.standard_b64encode(bytes(buf)).decode("ascii")
+    ball_model = _resolve_ball_model(model)
+    out["model"] = ball_model
+    # The EXACT bytes the model was shown. When a miss gets reported we
+    # want to look at this, not at a re-derived crop — every previous
+    # round of guesswork here was about what the model could actually
+    # see (crop aim, upscale, shadow lift), and this settles it.
+    if debug_dir is not None:
+        try:
+            Path(debug_dir).mkdir(parents=True, exist_ok=True)
+            _sent = Path(debug_dir) / f"{debug_prefix}ball_sent_f{frame_idx}.jpg"
+            _sent.write_bytes(bytes(buf))
+        except Exception:  # noqa: BLE001 — debug artefacts never break a run
+            pass
+    replies: list[str] = []
 
     def _ask(nudge: str) -> list:
         """One vision call -> list of candidate dicts (may be empty)."""
         resp = client.messages.create(
-            model=_resolve_frame_picker_model(model),
-            max_tokens=400,
+            model=ball_model,
+            # Room for extended thinking AHEAD of the JSON. Thinking is
+            # on by default on Opus 5 / Fable 5 and this is precisely the
+            # "look carefully before answering" task it helps; at the old
+            # max_tokens=400 the thinking would eat the whole budget and
+            # the reply would come back with no JSON at all.
+            max_tokens=2000,
             system=[{
                 "type": "text",
                 "text": _FIND_RESTING_BALL_PROMPT,
@@ -6242,9 +6298,17 @@ def find_resting_ball(
                 }},
             ]}],
         )
+        # Only the text blocks — a thinking block has no .text we want,
+        # and on models where thinking is on it comes back first.
         text = "".join(
             c.text for c in resp.content if getattr(c, "type", None) == "text"
         )
+        if getattr(resp, "stop_reason", None) == "max_tokens":
+            # Thinking ran long and the JSON never got written. Worth
+            # seeing explicitly — it looks identical to "found nothing"
+            # from the outside, but the fix is a bigger budget.
+            text += "  [TRUNCATED: stop_reason=max_tokens]"
+        replies.append(text)
         data = _extract_json(text) or {}
         cands = data.get("candidates")
         if isinstance(cands, list):
@@ -6277,6 +6341,22 @@ def find_resting_ball(
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"api_failed: {exc}"
         return out
+    finally:
+        # What the model actually SAID, kept next to the image it saw.
+        # An empty reply and a wrong-point reply are different failures
+        # and we could not previously tell them apart from the outside.
+        out["raw"] = (" | ".join(replies))[:600]
+        if debug_dir is not None and replies:
+            try:
+                (
+                    Path(debug_dir) / f"{debug_prefix}ball_reply_f{frame_idx}.txt"
+                ).write_text(
+                    f"model={ball_model}\nframe={frame_idx}\n"
+                    f"crop_box={out.get('crop_box')}\n\n"
+                    + "\n\n---\n\n".join(replies)
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     # Score every candidate: what the model believes, checked against
     # what the pixels actually look like. The pixel score is what stops a
@@ -6311,6 +6391,13 @@ def find_resting_ball(
         out["blob_score"] = round(blob, 3) if blob >= 0 else None
         out["x"] = int(round(cx / scale)) + crop_x0
         out["y"] = int(round(cy / scale)) + crop_y0
+    else:
+        log.info(
+            "ai_tracer: resting ball NOT found (model=%s frame=%s crop=%s "
+            "cands=%d expect_present=%s) reply=%r",
+            ball_model, frame_idx, out.get("crop_box"), len(cands),
+            expect_present, out.get("raw", "")[:200],
+        )
     return out
 
 
@@ -6438,6 +6525,8 @@ def classify_swing_shot(
     after_sec: float = 1.5,
     move_tol_frac: float = 0.06,
     hint_xy: tuple[float, float] | None = None,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "",
 ) -> dict:
     """Real shot vs practice swing, by ball departure.
 
@@ -6472,6 +6561,7 @@ def classify_swing_shot(
         t_b = max(0.0, float(peak_time_sec) - lead)
         r = find_resting_ball(
             input_path, int(t_b * fps), crop_center=_hint, crop_frac=_cf,
+            debug_dir=debug_dir, debug_prefix=f"{debug_prefix}before-",
         )
         if r.get("error"):
             _errs.append(str(r["error"]))
@@ -6492,7 +6582,10 @@ def classify_swing_shot(
     # at the nearest lead so a bad hint can't guarantee a miss.
     if before is None and _hint is not None:
         t_b = max(0.0, float(peak_time_sec) - leads[-1])
-        r = find_resting_ball(input_path, int(t_b * fps))
+        r = find_resting_ball(
+            input_path, int(t_b * fps),
+            debug_dir=debug_dir, debug_prefix=f"{debug_prefix}beforefull-",
+        )
         if r.get("error"):
             _errs.append(str(r["error"]))
         if r.get("present") and r.get("x") is not None:
@@ -6514,6 +6607,7 @@ def classify_swing_shot(
         input_path, int(t_a * fps), crop_center=_after_center, crop_frac=_cf,
         # The whole point of this look is that the ball may be GONE.
         expect_present=False,
+        debug_dir=debug_dir, debug_prefix=f"{debug_prefix}after-",
     )
     if ra.get("error"):
         _errs.append(str(ra["error"]))

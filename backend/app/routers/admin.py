@@ -1859,6 +1859,14 @@ def _run_long_upload_job(
                         v = classify_swing_shot(
                             src_path, float(d.get("peak_time_sec") or 0.0), tee_fps,
                             hint_xy=d.get("impact_wrist_xy"),
+                            # Saves the EXACT jpeg sent to the model plus
+                            # its raw reply — the only way to tell "the
+                            # crop missed the ball" apart from "the model
+                            # was shown the ball and said nothing".
+                            debug_dir=_dbg_dir,
+                            debug_prefix=(
+                                f"ball-{upload_id}-{secrets.token_hex(3)}-"
+                            ),
                         )
                         _e = _dec_for(d)
                         _e["practice"] = v.get("verdict")
