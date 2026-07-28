@@ -3107,6 +3107,12 @@ def _process_long_upload_segments(
                 _intro_overlay_for_clip(_c, participant)
                 _intro_overlay_for_vertical(_c, participant)
                 _clip_holder["clip"] = _c
+                # The matched participant is needed by the results
+                # payload below; it lives in THIS closure now, so hand
+                # it back out explicitly (reading it from the enclosing
+                # scope raised UnboundLocalError after the clip insert
+                # moved in here).
+                _clip_holder["participant"] = participant
 
             if not _commit_retry(db, _insert_clip, "publish swing clip"):
                 raise RuntimeError(
@@ -3114,6 +3120,7 @@ def _process_long_upload_segments(
                     "kept failing)",
                 )
             clip = _clip_holder["clip"]
+            participant = _clip_holder.get("participant")
             # Save the swing's detections for the Edit wizard (see helper).
             if seg.get("anchor_rec") and isinstance(tracer_info, dict):
                 tracer_info.setdefault("anchor_check", seg["anchor_rec"])
