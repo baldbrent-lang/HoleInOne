@@ -8489,6 +8489,18 @@ def _mog2_layer_for_ai_track(
             impact_frame_idx=int(_imp) if _imp is not None else 0,
             track_frames=merged,
         )
+        # The renderer is allowed to MOVE the line's start away from the
+        # rest anchor we handed it (wild-offset drop, or the launch-origin
+        # relocation). This is the deliverable's own render, and until now
+        # those decisions went only to the server log — from the outside a
+        # relocated start is indistinguishable from a bad anchor. Carry
+        # them out with the stats so the panel can say which happened.
+        for _k in (
+            "rest_anchor_relocated", "rest_anchor_dropped",
+            "rest_anchor_synthesized",
+        ):
+            if rr.get(_k):
+                stats[_k] = rr[_k]
         if rr.get("ok") and ext_path.exists():
             compress_for_email(ext_path)
             if ext_path.exists() and ext_path.stat().st_size > 0:
@@ -9527,6 +9539,10 @@ def _run_produce_debug_job(
                                 "tracer_raw_motion_url",
                             ),
                             "timed_points": _sw.get("timed_points"),
+                            # Carries rest_anchor_relocated/_dropped —
+                            # whether the renderer kept the start where
+                            # the anchor said.
+                            "mog2_stats": _sw.get("mog2_stats"),
                             # Full mapped track (all sources) so the
                             # flight map can draw the whole arc line.
                             "track_points": [

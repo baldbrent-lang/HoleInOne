@@ -5949,6 +5949,48 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                     )}
                   </div>
                 )}
+                {(s.ai?.mog2_stats?.rest_anchor_relocated ||
+                  s.ai?.mog2_stats?.rest_anchor_dropped ||
+                  s.ai?.mog2_stats?.rest_anchor_synthesized) && (
+                  <div
+                    className="tiny"
+                    style={{ marginTop: 4, color: "#b7791f" }}
+                  >
+                    {s.ai.mog2_stats.rest_anchor_relocated && (
+                      <>
+                        📍 the RENDER moved the line&apos;s start off the
+                        rest anchor: (
+                        {s.ai.mog2_stats.rest_anchor_relocated.from?.join(
+                          ", ",
+                        )}
+                        ) → (
+                        {s.ai.mog2_stats.rest_anchor_relocated.to?.join(", ")}
+                        ), {s.ai.mog2_stats.rest_anchor_relocated.dist_px}px.
+                        The anchor disagreed with the flight&apos;s
+                        extrapolated launch origin, so the origin won. This
+                        is why the tracer can start somewhere other than the
+                        cyan dot below.
+                      </>
+                    )}
+                    {s.ai.mog2_stats.rest_anchor_dropped && (
+                      <>
+                        📍 the RENDER DROPPED the rest anchor (
+                        {s.ai.mog2_stats.rest_anchor_dropped.nearest_detection_px}
+                        px from the nearest detection, limit{" "}
+                        {s.ai.mog2_stats.rest_anchor_dropped.threshold_px}px) —
+                        the line starts at the first tracked point instead.
+                      </>
+                    )}
+                    {s.ai.mog2_stats.rest_anchor_synthesized && (
+                      <>
+                        📍 no rest anchor reached the render — the start was
+                        synthesized at the extrapolated launch origin (
+                        {s.ai.mog2_stats.rest_anchor_synthesized.xy?.join(", ")}
+                        ).
+                      </>
+                    )}
+                  </div>
+                )}
                 {s.ai?.raw_motion_url &&
                   ((s.ai.timed_points || []).length > 0 ||
                     (s.ai.anchor_check?.ai_launch_points || []).length >
