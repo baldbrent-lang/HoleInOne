@@ -352,15 +352,20 @@ class TeeAgent:
             # double-step jump. Genuine captures always differ by at
             # least sensor noise, so byte-identical means a re-read —
             # safe to skip so the clip stays smooth.
-            # Subsampled compare (every 16th pixel): a byte-identical
-            # re-read is identical everywhere, so the sparse grid
-            # catches it — at ~1/256th the cost of a full-frame compare.
-            # The full compare was heavy enough at 1080p50 to make the
-            # capture thread itself fall behind and drop real frames.
+            # TWO-STAGE duplicate check. Stage 1: sparse grid (every
+            # 16th pixel, ~1/256th the cost) — different frames almost
+            # always differ here, so the fast path stays fast. Stage 2:
+            # only when the sparse grid matches, confirm with the FULL
+            # compare — a static scene can look identical on the grid
+            # while genuinely differing by sensor noise, and dropping
+            # those real frames showed up as ~11% frame loss + ~1s
+            # gaps even on a cool, unthrottled Pi. Only true re-reads
+            # (byte-identical everywhere) are skipped.
             if (
                 prev is not None
                 and fcopy.shape == prev.shape
                 and np.array_equal(fcopy[::16, ::16], prev[::16, ::16])
+                and np.array_equal(fcopy, prev)
             ):
                 continue
             prev = fcopy
