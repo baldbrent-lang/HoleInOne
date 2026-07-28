@@ -399,14 +399,10 @@ class TeeAgent:
         self._cap_gaps = 0
         self._cap_worst = 0.0
         self._cap_last = None
-        # Cap OpenCV's internal thread pool. YOLO inference (and the
-        # mp4v encode) otherwise fan out across every core, starving
-        # the capture thread — on a thermally throttled Pi that's how a
-        # 5s ring buffer overflows and frames are lost for good.
-        try:
-            cv2.setNumThreads(2)
-        except Exception:  # noqa: BLE001
-            pass
+        # NB: do NOT cap cv2.setNumThreads here. Capping it to 2
+        # starved the mp4v ENCODER — measured 9.9 fps of throughput
+        # versus 31 fps with the full pool — and the encoder, not the
+        # camera, is the pipeline's bottleneck.
 
         det_width = int(self.det_cfg.get("detect_width", 320))
         det_fps = float(self.det_cfg.get("fps", 5))
@@ -590,6 +586,8 @@ class TeeAgent:
         # loop never waits on encoding, so the ring buffer can't wrap
         # and lose frames while a hitch works itself out. The writer
         # thread owns gap filling (see _ClipWriter).
+        _cap_at_start = self._cap_frames
+        _cap_t_start = time.time()
         for _ts, f in snapshot:
             clip_writer.submit(_ts, f)
         last_written_ts = snapshot[-1][0]
@@ -646,7 +644,6 @@ class TeeAgent:
         # Camera low  -> the camera/driver stalled (thermal, hardware).
         # Camera fine but written low -> our pipeline lost frames
         # (queue overflow) — a software problem. Never guess again.
-        _cam_span = max(0.001, real_span)
         log.info(
             "timing: %d frames over %.2fs (%d captured @ %.1f fps eff, "
             "%d gap-filled, stamped %.2f) — %d gap(s), worst %.0f ms | "
@@ -656,7 +653,9 @@ class TeeAgent:
             (_captured / real_span) if real_span > 0.5 else 0.0,
             clip_writer.n_filled, write_fps, clip_writer.n_gaps,
             clip_writer.worst_gap * 1000.0,
-            self._cap_frames, self._cap_frames / _cam_span,
+            self._cap_frames - _cap_at_start,
+            (self._cap_frames - _cap_at_start)
+            / max(0.001, time.time() - _cap_t_start),
             self._cap_gaps, self._cap_worst * 1000.0,
             clip_writer.n_dropped,
         )

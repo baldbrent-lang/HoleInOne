@@ -29,7 +29,10 @@ camera:
   # pre-roll buffer (5s of 1080p50 ~= 1.6GB, 990p120 ~= 2.4GB — fine
   # on an 8GB Pi 5). The tee ROI is auto-scaled to the new geometry.
   #   1080p30  — 1920x1080@30, the long-standing default
-  #   1080p50  — 1920x1080@50, full FOV (binned sensor mode), best upgrade
+  #   720p50   — 1280x720@50, the 50fps mode the encoder can sustain
+  #   1080p50  — 1920x1080@50, only on a COOL (unthrottled) Pi: the
+  #              software encoder tops out near 31 fps at 1080p when
+  #              throttled, and frames past that are lost
   #   990p120  — 1280x960@120, cropped, for high-speed experiments
   # At 50fps consider raising upload_bitrate_kbps (tee: ~5000) so
   # per-frame quality doesn't drop.

@@ -41,14 +41,21 @@ log = logging.getLogger("golfreelz_agent.common")
 # frames (horizontal smearing) — so every preset asks the ISP for an
 # ALIGNED output size while libcamera picks the fast sensor mode
 # underneath (1920x1080@50 still runs the 2028x1080 binned 50fps mode).
+# ENCODER BUDGET (measured on a Pi 5, mp4v via OpenCV, thermally
+# throttled at ~85C): ~31 fps of 1080p. The camera itself delivers a
+# rock-steady 50 fps even while throttled — the SOFTWARE ENCODER is
+# the pipeline's ceiling, so a mode is only usable if the encoder can
+# keep up with it. 720p is ~2.25x cheaper per frame, which is what
+# makes 50 fps viable without new hardware.
 CAPTURE_MODES = {
-    "1080p30": {"width": 1920, "height": 1080, "fps": 30},   # default
-    "1080p50": {"width": 1920, "height": 1080, "fps": 50},   # binned sensor mode, full FOV
-    "990p120": {"width": 1280, "height": 960, "fps": 120},   # cropped high-speed mode
+    "1080p30": {"width": 1920, "height": 1080, "fps": 30},   # default; fits the budget
+    "720p50": {"width": 1280, "height": 720, "fps": 50},     # 50fps that the encoder can actually sustain
+    "1080p50": {"width": 1920, "height": 1080, "fps": 50},   # needs a COOL, unthrottled Pi
+    "990p120": {"width": 1280, "height": 960, "fps": 120},   # cropped high-speed experiment
 }
 _MODE_ALIASES = {
     "default": "1080p30", "30": "1080p30", "30fps": "1080p30",
-    "50": "1080p50", "50fps": "1080p50",
+    "50": "720p50", "50fps": "720p50",
     "120": "990p120", "120fps": "990p120",
 }
 

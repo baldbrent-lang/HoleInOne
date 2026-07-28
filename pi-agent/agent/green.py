@@ -82,12 +82,10 @@ class GreenAgent:
         self._cap_gaps = 0
         self._cap_worst = 0.0
         self._cap_last = None
-        # Keep OpenCV's thread pool from monopolising the cores and
-        # starving the capture thread.
-        try:
-            cv2.setNumThreads(2)
-        except Exception:  # noqa: BLE001
-            pass
+        # NB: do NOT cap cv2.setNumThreads here. Capping it to 2
+        # starved the mp4v ENCODER — measured 9.9 fps of throughput
+        # versus 31 fps with the full pool — and the encoder, not the
+        # camera, is the pipeline's bottleneck.
 
         # Start the livestream helper before the capture thread so the
         # very first frame can be forwarded if an admin happens to be
@@ -216,6 +214,8 @@ class GreenAgent:
         # this loop (see ClipWriter) so a hitch can't stall the drain
         # and wrap the ring buffer — that overflow is how frames get
         # destroyed and clips come out choppy.
+        _cap_at_start = self._cap_frames
+        _cap_t_start = time.time()
         for _ts, f in snapshot:
             clip_writer.submit(_ts, f)
         last_written_ts = snapshot[-1][0]
@@ -285,7 +285,6 @@ class GreenAgent:
         real_span = last_written_ts - first_frame_ts
         frames_written = clip_writer.n_written
         _captured = frames_written - clip_writer.n_filled
-        _cam_span = max(0.001, real_span)
         log.info(
             "recorded %s: %d frames, %.1f MB (reason=%s) | timing: "
             "%d captured @ %.1f fps eff, %d gap-filled, %d gap(s), "
@@ -296,7 +295,9 @@ class GreenAgent:
             (_captured / real_span) if real_span > 0.5 else 0.0,
             clip_writer.n_filled, clip_writer.n_gaps,
             clip_writer.worst_gap * 1000.0,
-            self._cap_frames, self._cap_frames / _cam_span,
+            self._cap_frames - _cap_at_start,
+            (self._cap_frames - _cap_at_start)
+            / max(0.001, time.time() - _cap_t_start),
             self._cap_gaps, self._cap_worst * 1000.0,
             clip_writer.n_dropped,
         )
