@@ -5677,6 +5677,12 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                                 </a>
                                 <div className="small muted">
                                   {tag}: {sh.present ? "ball" : "no ball"} @ {sh.t}s
+                                  {sh.dist_px != null
+                                    ? ` · ${sh.dist_px}px from the rest spot`
+                                    : ""}
+                                  {sh.rest_spot_blob != null
+                                    ? ` · rest patch ${sh.rest_spot_blob}`
+                                    : ""}
                                 </div>
                               </div>
                             ) : null,

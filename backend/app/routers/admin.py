@@ -9230,6 +9230,11 @@ def _run_produce_debug_job(
                     return None
                 return {
                     "t": round(t, 2), "present": present,
+                    # The numbers the verdict actually turned on — a
+                    # "practice" call that eliminates a swing should be
+                    # auditable without re-reading the code.
+                    "dist_px": ball.get("dist_px"),
+                    "rest_spot_blob": ball.get("rest_spot_blob"),
                     "image_url": (
                         f"{settings.app_base_url}/uploads/clips/{iname}"
                         f"?v={int(_sp.stat().st_mtime)}"

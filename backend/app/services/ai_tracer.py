@@ -6518,6 +6518,30 @@ def find_resting_ball(
     return out
 
 
+def _blob_score_at(
+    input_path: Path, frame_idx: int, x: float, y: float,
+) -> float:
+    """_ball_blob_score at a point on one frame of a video. Returns 0..1
+    (higher = more ball-like) or -1 when the frame can't be read.
+
+    Used to ask the question the vision calls can't: not "is there a ball
+    somewhere near here", but "is there still a ball on THIS EXACT
+    SPOT" — a resting ball doesn't move, so the rest spot going bare IS
+    the departure."""
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0, frame_idx)))
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if not ok or frame is None:
+            return -1.0
+        return _ball_blob_score(frame, int(round(x)), int(round(y)))
+    except Exception:  # noqa: BLE001
+        return -1.0
+
+
 def _white_blob_at(input_path: Path, frame_idx: int, x: int, y: int) -> bool | None:
     """Cheap pixel check: does the marked point actually look like a golf
     ball — a small cluster of notably-bright pixels near (x, y)? Guards the
@@ -6792,7 +6816,17 @@ def classify_swing_shot(
         }
     if before is None and after["present"]:
         a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
-        if a_ok is False:
+        # No before position to compare against, so this verdict rests
+        # entirely on the after mark being a real ball. It eliminates the
+        # swing, so hold it to the pixel test too — a shoe here costs us
+        # a shot.
+        _a_blob = _blob_score_at(
+            input_path, int(after["t"] * fps), after["x"], after["y"],
+        )
+        after["rest_spot_blob"] = (
+            round(_a_blob, 3) if _a_blob >= 0 else None
+        )
+        if a_ok is False or (0.0 <= _a_blob < 0.35):
             return {
                 "verdict": "unknown",
                 "reason": "marked point doesn't look like a ball — not trusting it",
@@ -6830,23 +6864,64 @@ def classify_swing_shot(
         w, h = 1920.0, 1080.0
     diag = (w * w + h * h) ** 0.5
     dist = ((before["x"] - after["x"]) ** 2 + (before["y"] - after["y"]) ** 2) ** 0.5
-    if dist <= move_tol_frac * diag:
-        b_ok = _white_blob_at(input_path, int(before["t"] * fps), before["x"], before["y"])
-        a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
-        if b_ok is False or a_ok is False:
+    # A RESTING BALL DOES NOT MOVE. "Same spot" therefore has to mean
+    # ball-sized, not frame-sized: move_tol_frac alone allowed 6% of the
+    # frame diagonal — 132px at 1080p — so the after look-up could latch
+    # onto the golfer's white SHOE a hundred pixels away and still be
+    # counted as the same unmoved ball. That verdict eliminates the swing,
+    # so the loose tolerance was silently throwing away real shots.
+    _r_ball = max(6.0, 0.015 * h)
+    tol = min(move_tol_frac * diag, max(12.0, 2.5 * _r_ball))
+    # And the decisive test, which needs no vision call at all: does the
+    # rest spot ITSELF still look like a ball on the after frame? If that
+    # exact patch has gone bare, the ball left — whatever else the model
+    # found elsewhere in the crop is not it.
+    _rest_after = _blob_score_at(
+        input_path, int(after["t"] * fps), before["x"], before["y"],
+    )
+    after["dist_px"] = round(float(dist), 1)
+    after["rest_spot_blob"] = round(_rest_after, 3) if _rest_after >= 0 else None
+    _spot_bare = 0.0 <= _rest_after < 0.35
+    if dist > tol:
+        if _spot_bare:
             return {
-                "verdict": "unknown",
-                "reason": "marked point doesn't look like a ball — not trusting 'unmoved' verdict",
+                "verdict": "real",
+                "reason": (
+                    f"ball gone from its rest spot (patch scores "
+                    f"{_rest_after:.2f}); the after look-up latched onto "
+                    f"something {dist:.0f}px away — a resting ball doesn't "
+                    f"move, so that isn't it"
+                ),
                 "before": before_out, "after": after,
             }
-        return {"verdict": "practice", "reason": "ball still at rest (not struck)",
-                "before": before_out, "after": after}
-    return {
-        "verdict": "unknown",
-        "reason": "resting ball visible after the swing at a different spot "
-                  "(re-teed vs spare ball — ambiguous), keeping",
-        "before": before_out, "after": after,
-    }
+        return {
+            "verdict": "unknown",
+            "reason": (
+                f"resting ball visible after the swing {dist:.0f}px away "
+                f"(re-teed vs spare ball — ambiguous), keeping"
+            ),
+            "before": before_out, "after": after,
+        }
+    # Within tolerance: the after look-up is pointing at the rest spot.
+    if _spot_bare:
+        return {
+            "verdict": "real",
+            "reason": (
+                f"rest spot is bare after the swing (scores "
+                f"{_rest_after:.2f}) — ball departed"
+            ),
+            "before": before_out, "after": after,
+        }
+    b_ok = _white_blob_at(input_path, int(before["t"] * fps), before["x"], before["y"])
+    a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
+    if b_ok is False or a_ok is False:
+        return {
+            "verdict": "unknown",
+            "reason": "marked point doesn't look like a ball — not trusting 'unmoved' verdict",
+            "before": before_out, "after": after,
+        }
+    return {"verdict": "practice", "reason": "ball still at rest (not struck)",
+            "before": before_out, "after": after}
 
 
 def detect_swings_from_ai_ball(
