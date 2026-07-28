@@ -11,6 +11,7 @@ without the full ML stack."""
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import time
 import uuid
@@ -164,6 +165,93 @@ class YoloPersonDetector:
 
     def close(self):
         pass
+
+
+class _ClipWriter:
+    """MP4 encoder running on its OWN thread behind a deep queue.
+
+    Why this exists: the record loop used to encode every frame inline
+    while ALSO running the person detector. When it couldn't drain the
+    ring buffer at capture rate — thermally throttled Pi, upload
+    contention, a 1080p50 stream — the buffer (only `buffer_seconds`
+    deep) wrapped and frames were DESTROYED before they were ever
+    written. That is what a multi-second "stall" in a clip actually
+    was: not the camera failing to deliver, but our pipeline failing
+    to keep up. With the encode behind a queue, a hitch costs RAM for
+    a moment instead of costing footage permanently.
+
+    Also owns gap filling: any real capture gap is filled by holding
+    the previous frame, so playback time tracks wall-clock time.
+    """
+
+    def __init__(self, path, fps, size, max_fill_sec=20.0,
+                 queue_bytes=900_000_000):
+        self.fps = max(1.0, float(fps))
+        self._period = 1.0 / self.fps
+        self._max_fill = int(max_fill_sec * self.fps)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self._writer = cv2.VideoWriter(str(path), fourcc, self.fps, size)
+        self.ok = self._writer.isOpened()
+        # Queue depth from a MEMORY budget, not a frame count: 1080p
+        # BGR is ~6 MB/frame, so a naive "N seconds" queue would try to
+        # hold tens of GB. ~900 MB ≈ 3 s at 1080p50 — ample shock
+        # absorption without crowding the ring buffer out of RAM.
+        _fb = max(1, int(size[0]) * int(size[1]) * 3)
+        self._q = queue.Queue(maxsize=max(30, int(queue_bytes / _fb)))
+        self.n_written = 0
+        self.n_filled = 0
+        self.n_gaps = 0
+        self.worst_gap = 0.0
+        self.n_dropped = 0
+        self._prev_ts = None
+        self._prev_frame = None
+        self._thread = None
+        if self.ok:
+            self._thread = threading.Thread(
+                target=self._run, daemon=True, name="clip-writer",
+            )
+            self._thread.start()
+
+    def submit(self, ts, frame) -> None:
+        """Hand a frame to the encoder. Never blocks the caller."""
+        try:
+            self._q.put_nowait((ts, frame))
+        except queue.Full:
+            # Encoder is hopelessly behind (should not happen now that
+            # it has its own thread). Skip rather than stall the drain
+            # loop; gap filling covers the hole and the count is logged.
+            self.n_dropped += 1
+
+    def _run(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            ts, frame = item
+            if self._prev_frame is not None and self._prev_ts is not None:
+                gap = ts - self._prev_ts
+                if gap > 1.8 * self._period:
+                    self.n_gaps += 1
+                    self.worst_gap = max(self.worst_gap, gap)
+                    n_fill = min(
+                        int(round(gap / self._period)) - 1, self._max_fill,
+                    )
+                    for _ in range(max(0, n_fill)):
+                        self._writer.write(self._prev_frame)
+                        self.n_written += 1
+                        self.n_filled += 1
+            self._writer.write(frame)
+            self.n_written += 1
+            self._prev_ts, self._prev_frame = ts, frame
+
+    def close(self, timeout: float = 180.0) -> None:
+        """Flush the queue, stop the thread, release the file."""
+        if self._thread is not None:
+            self._q.put(None)
+            self._thread.join(timeout=timeout)
+            self._thread = None
+        if self.ok:
+            self._writer.release()
 
 
 class MotionFallbackDetector:
@@ -344,6 +432,18 @@ class TeeAgent:
             if not ok or frame is None:
                 time.sleep(0.02)
                 continue
+            # Camera-side delivery stats. Recorded independently of the
+            # writer so the timing log can say whether a stall was the
+            # CAMERA not delivering frames (thermal/driver) or OUR
+            # pipeline failing to keep up — two different fixes.
+            _cnow = time.time()
+            if self._cap_last is not None:
+                _cgap = _cnow - self._cap_last
+                if _cgap > 1.8 / max(1.0, self.fps):
+                    self._cap_gaps += 1
+                    self._cap_worst = max(self._cap_worst, _cgap)
+            self._cap_last = _cnow
+            self._cap_frames += 1
             fcopy = frame.copy()
             # Drop exact-duplicate reads. The GoPro in USB-webcam mode
             # hands cv2 the same frame again ~once/second (the read loop
@@ -380,6 +480,19 @@ class TeeAgent:
         fps = float(self.cam_cfg.get("fps", 30))
         self.fps = fps
         self.buffer = FrameBuffer(self.buffer_seconds, fps)
+        # Camera-side delivery counters (see _capture_loop).
+        self._cap_frames = 0
+        self._cap_gaps = 0
+        self._cap_worst = 0.0
+        self._cap_last = None
+        # Cap OpenCV's internal thread pool. YOLO inference (and the
+        # mp4v encode) otherwise fan out across every core, starving
+        # the capture thread — on a thermally throttled Pi that's how a
+        # 5s ring buffer overflows and frames are lost for good.
+        try:
+            cv2.setNumThreads(2)
+        except Exception:  # noqa: BLE001
+            pass
 
         det_width = int(self.det_cfg.get("detect_width", 320))
         det_fps = float(self.det_cfg.get("fps", 5))
@@ -545,9 +658,8 @@ class TeeAgent:
         )
 
         clip_path = self.work_dir / f"{session_id}.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(clip_path), fourcc, write_fps, (width, height))
-        if not writer.isOpened():
+        clip_writer = _ClipWriter(clip_path, write_fps, (width, height))
+        if not clip_writer.ok:
             log.error("VideoWriter failed to open for %s", clip_path)
             return
 
@@ -559,54 +671,17 @@ class TeeAgent:
         audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
         audio_recorder.start(session_id)
 
-        # GAP-FILLED constant-rate write. The file is stamped at
-        # write_fps, so every written frame occupies exactly 1/write_fps
-        # of playback time. When the camera stalls (thermal throttling,
-        # CPU contention), the missing slots are filled by HOLDING the
-        # previous frame — so wall-clock time and playback time stay
-        # locked together.
-        #
-        # Why not just re-time the clip to the average rate (the
-        # previous approach)? Because drops are BURSTY: one 10s stall
-        # drags the average to ~17fps, and re-timing then plays the
-        # healthy ~50fps swing frames at 17fps — the swing itself
-        # renders in slow motion. Filling gaps keeps real motion at
-        # real speed; a stall shows as a brief freeze, which is honest
-        # (we genuinely captured nothing then) and keeps the tee's time
-        # axis truthful for the tee->green composite alignment.
-        _period = 1.0 / max(1.0, write_fps)
-        _gap_count = 0
-        _worst_gap = 0.0
-        _n_filled = 0
-        _MAX_FILL = int(20.0 * write_fps)  # cap a pathological stall at 20s
-        _prev_ts = None
-        n_frames_written = 0
-
-        def _write_with_fill(ts, frame, prev_frame):
-            """Write `frame`, first holding `prev_frame` across any
-            capture gap so playback time tracks wall-clock time.
-            Returns the number of frames written."""
-            nonlocal _gap_count, _worst_gap, _n_filled
-            written = 0
-            if prev_frame is not None and _prev_ts is not None:
-                gap = ts - _prev_ts
-                if gap > 1.8 * _period:
-                    _gap_count += 1
-                    _worst_gap = max(_worst_gap, gap)
-                    n_fill = min(int(round(gap / _period)) - 1, _MAX_FILL)
-                    for _ in range(max(0, n_fill)):
-                        writer.write(prev_frame)
-                        written += 1
-                        _n_filled += 1
-            writer.write(frame)
-            return written + 1
-
-        _prev_frame = None
+        # Hand the pre-roll to the encoder thread, then keep feeding it
+        # newly-captured frames. Submitting is a queue put — the drain
+        # loop never waits on encoding, so the ring buffer can't wrap
+        # and lose frames while a hitch works itself out. The writer
+        # thread owns gap filling (see _ClipWriter).
         for _ts, f in snapshot:
-            n_frames_written += _write_with_fill(_ts, f, _prev_frame)
-            _prev_ts, _prev_frame = _ts, f
+            clip_writer.submit(_ts, f)
         last_written_ts = snapshot[-1][0]
-        n_preroll_written = n_frames_written
+        # Playback length of the pre-roll == its wall-clock span, since
+        # gap filling keeps playback time locked to real time.
+        preroll_span = snapshot[-1][0] - snapshot[0][0]
         recording_start = time.time()
         last_person_seen = recording_start
         next_det = recording_start + det_period
@@ -616,8 +691,7 @@ class TeeAgent:
             current = self.buffer.snapshot()
             new_frames = [(ts, f) for ts, f in current if ts > last_written_ts]
             for ts, f in new_frames:
-                n_frames_written += _write_with_fill(ts, f, _prev_frame)
-                _prev_ts, _prev_frame = ts, f
+                clip_writer.submit(ts, f)
                 last_written_ts = ts
             if now - recording_start > self.max_clip_seconds:
                 log.warning("max_clip_seconds hit; stopping")
@@ -645,19 +719,37 @@ class TeeAgent:
                     )
                     break
             time.sleep(0.02)
-        writer.release()
-        # No re-timing on upload: gap-filling already made the file a
+        clip_writer.close()
+        # No re-timing on upload: gap filling already made the file a
         # correct constant-rate clip whose duration equals wall-clock.
         real_fps = None
         real_span = last_written_ts - first_frame_ts
-        _captured = n_frames_written - _n_filled
+        n_frames_written = clip_writer.n_written
+        _captured = n_frames_written - clip_writer.n_filled
+        # Two rates, deliberately separate:
+        #   camera  = what the SENSOR delivered to the capture thread
+        #   written = what survived into the clip
+        # Camera low  -> the camera/driver stalled (thermal, hardware).
+        # Camera fine but written low -> our pipeline lost frames
+        # (queue overflow) — a software problem. Never guess again.
+        _cam_span = max(0.001, real_span)
         log.info(
             "timing: %d frames over %.2fs (%d captured @ %.1f fps eff, "
-            "%d gap-filled, stamped %.2f) — %d gap(s), worst %.0f ms",
+            "%d gap-filled, stamped %.2f) — %d gap(s), worst %.0f ms | "
+            "camera delivered %d frames (%.1f fps, %d gap(s), worst "
+            "%.0f ms), queue drops %d",
             n_frames_written, real_span, _captured,
             (_captured / real_span) if real_span > 0.5 else 0.0,
-            _n_filled, write_fps, _gap_count, _worst_gap * 1000.0,
+            clip_writer.n_filled, write_fps, clip_writer.n_gaps,
+            clip_writer.worst_gap * 1000.0,
+            self._cap_frames, self._cap_frames / _cam_span,
+            self._cap_gaps, self._cap_worst * 1000.0,
+            clip_writer.n_dropped,
         )
+        # Reset camera counters for the next recording.
+        self._cap_frames = 0
+        self._cap_gaps = 0
+        self._cap_worst = 0.0
         # Tell the backend recording is done before starting the
         # (possibly multi-minute) upload, so the paired green Pi —
         # which is polling /event-status — can release its writer at
@@ -676,7 +768,7 @@ class TeeAgent:
             # The clip opens with a silent pre-roll (buffered before
             # arecord started), so delay the audio by the pre-roll's
             # playback length to line it up with the trigger moment.
-            preroll_seconds = n_preroll_written / write_fps if write_fps else 0.0
+            preroll_seconds = preroll_span
             muxed = mux_audio_into_video(
                 clip_path, wav_done, audio_delay_seconds=preroll_seconds,
             )
