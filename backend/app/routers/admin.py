@@ -1859,14 +1859,6 @@ def _run_long_upload_job(
                         v = classify_swing_shot(
                             src_path, float(d.get("peak_time_sec") or 0.0), tee_fps,
                             hint_xy=d.get("impact_wrist_xy"),
-                            # Saves the EXACT jpeg sent to the model plus
-                            # its raw reply — the only way to tell "the
-                            # crop missed the ball" apart from "the model
-                            # was shown the ball and said nothing".
-                            debug_dir=_dbg_dir,
-                            debug_prefix=(
-                                f"ball-{upload_id}-{secrets.token_hex(3)}-"
-                            ),
                         )
                         _e = _dec_for(d)
                         _e["practice"] = v.get("verdict")
@@ -2095,11 +2087,6 @@ def _run_long_upload_job(
                                             "impact_delta", "reason",
                                             "image", "image_mog2",
                                             "ai_fallback_reason",
-                                            "rest_blob",
-                                            "rest_blob_pre",
-                                            "rest_anchor_suspect",
-                                            "snap_rejected",
-                                            "snap_rejected_px",
                                             "launch_n",
                                             "launch_reason", "launch_image",
                                             "launch_image_heat",
@@ -2148,11 +2135,6 @@ def _run_long_upload_job(
                                         "impact_frame", "impact_delta",
                                         "reason", "image", "image_mog2",
                                         "ai_fallback_reason",
-                                        "rest_blob",
-                                        "rest_blob_pre",
-                                        "rest_anchor_suspect",
-                                        "snap_rejected",
-                                        "snap_rejected_px",
                                         "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
@@ -9230,11 +9212,6 @@ def _run_produce_debug_job(
                     return None
                 return {
                     "t": round(t, 2), "present": present,
-                    # The numbers the verdict actually turned on — a
-                    # "practice" call that eliminates a swing should be
-                    # auditable without re-reading the code.
-                    "dist_px": ball.get("dist_px"),
-                    "rest_spot_blob": ball.get("rest_spot_blob"),
                     "image_url": (
                         f"{settings.app_base_url}/uploads/clips/{iname}"
                         f"?v={int(_sp.stat().st_mtime)}"

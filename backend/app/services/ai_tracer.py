@@ -54,22 +54,6 @@ except Exception:  # pragma: no cover
 # vision task.
 MODEL = os.environ.get("TRACER_AI_MODEL", "claude-opus-4-7")
 
-# The resting-ball look-up is routed SEPARATELY from the rest of the
-# pipeline. Finding a ~6px ball on grass is the hardest vision task we
-# ask for, and it's the one that still misses: the same crops that our
-# calls came back empty on were identified instantly by a current-
-# generation model in chat. Opus 5 is the same price as the 4.7 the
-# rest of the pipeline runs on, so this costs nothing but a newer
-# model. Set TRACER_BALL_MODEL to A/B it (claude-fable-5 is the most
-# capable option; claude-opus-4-7 restores the old behaviour).
-#
-# NB: on Opus 5 / Fable 5, extended thinking is ON by default when the
-# request omits `thinking` — which is exactly what we want here (look
-# hard, then answer) but means max_tokens has to leave room for the
-# thinking BEFORE the JSON, or the reply truncates to nothing. See
-# BALL_MAX_TOKENS at the call site.
-BALL_MODEL = os.environ.get("TRACER_BALL_MODEL", "claude-opus-5")
-
 # Number of frames sampled across the clip and sent to Claude in one
 # multi-image API call. 12 gives Claude a clear timeline view of the
 # whole swing while keeping per-request token usage bounded; with
@@ -426,14 +410,7 @@ ANTHROPIC_MAX_RETRIES = 6
 # operator A/B Opus vs Haiku on the same clip without restarting the
 # backend; anything outside this set falls back to the env-driven
 # MODEL default.
-SUPPORTED_MODELS = {
-    "claude-fable-5",
-    "claude-opus-5",
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-sonnet-5",
-    "claude-haiku-4-5",
-}
+SUPPORTED_MODELS = {"claude-opus-4-7", "claude-haiku-4-5"}
 
 
 def _anthropic_client():
@@ -467,18 +444,6 @@ def _resolve_frame_picker_model(model_override: str | None = None) -> str:
     Kept the helper in place in case we want per-task model routing
     later (e.g. send handedness to Haiku but keep address on Opus)."""
     return _resolve_model(model_override)
-
-
-def _resolve_ball_model(model_override: str | None = None) -> str:
-    """Model for the resting-ball look-up. An explicit per-run override
-    still wins (so the debug UI's model picker works), but with no
-    override this does NOT follow the pipeline default — it uses
-    BALL_MODEL. This one call is where the pipeline still fails, and it
-    is worth running on a current-generation model even when the rest of
-    the run is pinned to something older/cheaper."""
-    if model_override and model_override in SUPPORTED_MODELS:
-        return model_override
-    return BALL_MODEL
 
 
 def _maybe_apply_clahe(frame):
@@ -4500,68 +4465,25 @@ def detect_swings_from_motion(
 
 
 _FIND_RESTING_BALL_PROMPT = (
-    "This is ONE frame from a golf camera, taken while a golfer is "
-    "ADDRESSING THE BALL — so a ball is almost certainly present on the "
-    "ground in this image. Your job is to LOCATE it, not to decide "
-    "whether golf exists. Find the ball and report where it is.\n\n"
-    "Where to look: on the ground near the golfer's feet, typically just "
-    "in front of / between the feet in the direction the club is "
-    "pointing, often right where the club head is resting. It is small "
-    "(a few pixels to ~2% of image width), round, and sits ON the turf "
-    "with a small shadow under it. In shade, overcast or dusk it can "
-    "look GRAY or dull, not bright white — judge by SIZE, ROUND SHAPE "
-    "and POSITION ON THE GROUND, never by brightness alone.\n\n"
-    "Rank up to 3 candidates, best first. Prefer a small round object on "
-    "the turf near the feet. Rank lower (but still include) anything "
-    "attached to the golfer (shoes, socks), tee markers, sprinkler "
-    "heads, signs, or objects clearly too large. If you truly cannot see "
-    "any candidate, return an empty list — but look carefully first; "
-    "returning nothing when the ball is visible is the WORST outcome.\n"
-    "Reply with JSON only:\n"
-    '{"candidates": [{"x": <int>, "y": <int>, '
-    '"confidence": "high"|"medium"|"low", "what": "<short reason>"}]}\n'
+    "You are looking at ONE frame from a golf tee camera positioned behind "
+    "the golfer. Decide whether a golf ball is sitting AT REST on the "
+    "ground / mat / tee — a small, roughly round, usually white ball that is "
+    "stationary and ready to be hit. It may be partially hidden by the club "
+    "head resting behind it. Do NOT count a ball in flight, balls in a "
+    "bucket, distant range balls, or the hole. CRITICALLY: do NOT count "
+    "white shoes, socks, shoe trim, tee markers, sprinkler heads, signs or "
+    "any other white object — a golf ball is TINY (typically under 2% of "
+    "the image width) and perfectly round; if the white thing is attached "
+    "to the golfer or bigger than a few pixels, it is not the ball. "
+    "IMPORTANT: in shadow, overcast light, or at dusk the ball may look "
+    "GRAY or dull rather than bright white — judge by its small size, "
+    "round shape, and position on the ground near the golfer's feet, not "
+    "by whiteness alone. When "
+    "unsure, answer present=false. Reply with JSON only:\n"
+    '{"present": true|false, "x": <int pixel x or null>, '
+    '"y": <int pixel y or null>, "confidence": "high"|"medium"|"low"}\n'
     "Coordinates are pixels in THIS image (top-left = 0,0)."
 )
-
-
-def _ball_blob_score(img, x: int, y: int) -> float:
-    """Cheap pixel sanity check for a claimed ball position: how much
-    does (x, y) look like a SMALL bright-ish round cluster against its
-    local surroundings? Returns 0..1 (higher = more ball-like), or -1
-    when it can't be evaluated. Used to rank the vision model's
-    candidates so a confident-but-wrong pick (a shoe, a sign) loses to
-    a real ball, and to catch a hallucinated coordinate."""
-    if not (HAS_CV and HAS_NP) or img is None:
-        return -1.0
-    try:
-        h, w = img.shape[:2]
-        # Ball radius scales with the image: our crops are framed so the
-        # ball is a handful of pixels across.
-        r = max(3, int(round(0.012 * max(w, h))))
-        x0, x1 = max(0, x - 4 * r), min(w, x + 4 * r + 1)
-        y0, y1 = max(0, y - 4 * r), min(h, y + 4 * r + 1)
-        if x1 - x0 < 6 or y1 - y0 < 6:
-            return -1.0
-        patch = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
-        cx, cy = x - x0, y - y0
-        cx0, cx1 = max(0, cx - r), min(patch.shape[1], cx + r + 1)
-        cy0, cy1 = max(0, cy - r), min(patch.shape[0], cy + r + 1)
-        if cx1 - cx0 < 2 or cy1 - cy0 < 2:
-            return -1.0
-        core = patch[cy0:cy1, cx0:cx1]
-        core_mean = float(core.mean())
-        surround = float(np.median(patch))
-        # Contrast of the claimed ball against its immediate surroundings.
-        contrast = (core_mean - surround) / 255.0
-        # Small-object test: the bright cluster must NOT fill the patch
-        # (that's a shoe / sign / sky), it should be a compact blob.
-        thr = max(core_mean - 12.0, surround + 6.0)
-        bright_frac = float((patch >= thr).mean())
-        compact = 1.0 - min(1.0, bright_frac / 0.30)
-        return max(0.0, min(1.0, 0.65 * max(0.0, contrast * 3.0)
-                            + 0.35 * compact))
-    except Exception:  # noqa: BLE001
-        return -1.0
 
 
 def verify_rest_and_impact(
@@ -5163,11 +5085,6 @@ def verify_rest_and_impact_ai(
         fs_sorted = sorted(crops)
         f_hi = fs_sorted[-1]
         ring = [cx0 - x0, cy0 - y0]
-        # Where the FINDER put the ball, before this function is allowed
-        # to touch it. Kept so the debug strip can show both positions —
-        # "the ring is below the ball in the strip but on it in the
-        # before thumbnail" is otherwise impossible to attribute.
-        orig_ring = [ring[0], ring[1]]
         client = _anthropic_client()
         use_model = model or ANCHOR_AI_MODEL
 
@@ -5289,21 +5206,6 @@ def verify_rest_and_impact_ai(
                 "before frame - rest position likely wrong"
             )
         else:
-            # The snap is a SECOND, independent vision call, and it can
-            # only move the ring — it has no way to leave a good anchor
-            # alone. A correct rest position arrives here and leaves
-            # dragged up to 6r (~60-90px) onto whatever this call points
-            # at. That is exactly the failure we see: the ball is ringed
-            # correctly in the before thumbnail, then the walk strip
-            # shows the ring sitting below the ball.
-            #
-            # So make the snap EARN the move: it has to make the pixels
-            # look MORE like a ball, not less. Anything else is left
-            # where the finder put it.
-            _blob_orig = _ball_blob_score(
-                crops[f_lo], int(ring[0]), int(ring[1]),
-            )
-            out["rest_blob_pre"] = round(_blob_orig, 3)
             try:
                 px, py = float(first.get("x_pct")), float(first.get("y_pct"))
                 if 0.0 <= px <= 100.0 and 0.0 <= py <= 100.0:
@@ -5311,50 +5213,13 @@ def verify_rest_and_impact_ai(
                     by = y0 + _snap_box[1] + py / 100.0 * _snap_box[3]
                     d = ((bx - cx0) ** 2 + (by - cy0) ** 2) ** 0.5
                     if 2.0 < d <= 6.0 * r:
-                        _blob_snap = _ball_blob_score(
-                            crops[f_lo], int(bx - x0), int(by - y0),
-                        )
-                        if _blob_orig >= 0.0 and _blob_snap < _blob_orig:
-                            # Refused: the ring already sat on something
-                            # more ball-like than where this call wants
-                            # to drag it.
-                            out["snap_rejected"] = True
-                            out["snap_rejected_px"] = float(round(d, 1))
-                            out["snap_rejected_blob"] = round(_blob_snap, 3)
-                        else:
-                            out["rest_xy"] = [round(bx, 1), round(by, 1)]
-                            out["snapped"] = True
-                            out["snap_px"] = float(round(d, 1))
-                            ring[0], ring[1] = bx - x0, by - y0
+                        out["rest_xy"] = [round(bx, 1), round(by, 1)]
+                        out["snapped"] = True
+                        out["snap_px"] = float(round(d, 1))
+                        ring[0], ring[1] = bx - x0, by - y0
             except (TypeError, ValueError):
                 pass
             ref_tile, _ = _tight_tile(f_lo)
-
-            # 1b. Does the anchor ACTUALLY look like a ball in pixels?
-            # The walk below is spot-the-difference against this frame:
-            # it asks "has tile N changed since the reference", never
-            # "where is the ball". So if the ring sits on bare turf, the
-            # reference is bare turf, every later tile is bare turf too,
-            # and the answer is "present" forever — a bad anchor and a
-            # genuine practice swing produce the IDENTICAL verdict. Score
-            # the anchor here so the two can be told apart.
-            out["rest_blob"] = round(
-                _ball_blob_score(crops[f_lo], int(ring[0]), int(ring[1])), 3,
-            )
-            log.info(
-                "anchor walk: finder rest=(%.0f,%.0f) snapped=%s%s "
-                "blob %.3f -> %.3f",
-                cx0, cy0, bool(out.get("snapped")),
-                (
-                    f" ({out.get('snap_px')}px)" if out.get("snapped")
-                    else (
-                        f" REFUSED ({out.get('snap_rejected_px')}px)"
-                        if out.get("snap_rejected") else ""
-                    )
-                ),
-                float(out.get("rest_blob_pre") or -1.0),
-                float(out.get("rest_blob") or -1.0),
-            )
 
             # 2. WALK forward until the ball is confirmed gone.
             stride = 3
@@ -5384,25 +5249,10 @@ def verify_rest_and_impact_ai(
                 break
             if dep is None:
                 out["verified"] = False
-                _rb = out.get("rest_blob")
-                if _rb is not None and 0.0 <= _rb < 0.35:
-                    # Bare-turf-looking anchor. Name the real cause
-                    # instead of blaming the swing — "practice swing" here
-                    # sends the operator looking at the golfer when the
-                    # problem is that we were watching the wrong patch of
-                    # ground for the whole window.
-                    out["rest_anchor_suspect"] = True
-                    out["reason"] = (
-                        f"AI walk: nothing ever changed at the rest spot — "
-                        f"but that spot scores {_rb:.2f} on the ball test "
-                        f"(bare ground), so the ANCHOR is probably off the "
-                        f"ball, not the swing off the ball"
-                    )
-                else:
-                    out["reason"] = (
-                        "AI walk: ball never left the rest spot in the "
-                        "window (practice swing, or impact estimate far off)"
-                    )
+                out["reason"] = (
+                    "AI walk: ball never left the rest spot in the "
+                    "window (practice swing, or impact estimate far off)"
+                )
             else:
                 out["verified"] = True
                 out["impact_frame"] = int(dep)
@@ -5421,24 +5271,6 @@ def verify_rest_and_impact_ai(
                 tiles = []
                 for f in sel:
                     t = crops[f].copy()
-                    # The finder's original position, whenever the walk
-                    # ended up watching somewhere else. White cross =
-                    # what the before thumbnail shows; cyan ring = what
-                    # the walk actually watched.
-                    if (
-                        abs(orig_ring[0] - ring[0]) > 1.5
-                        or abs(orig_ring[1] - ring[1]) > 1.5
-                    ):
-                        _ox, _oy = int(orig_ring[0]), int(orig_ring[1])
-                        _k = max(4, int(r * 0.6))
-                        cv2.line(
-                            t, (_ox - _k, _oy), (_ox + _k, _oy),
-                            (255, 255, 255), 1, cv2.LINE_AA,
-                        )
-                        cv2.line(
-                            t, (_ox, _oy - _k), (_ox, _oy + _k),
-                            (255, 255, 255), 1, cv2.LINE_AA,
-                        )
                     cv2.circle(
                         t, (int(ring[0]), int(ring[1])), int(r * 0.9),
                         (255, 200, 0), 2, cv2.LINE_AA,
@@ -5470,42 +5302,15 @@ def verify_rest_and_impact_ai(
                         rowt.append(np.zeros_like(tiles[0]))
                     rows.append(cv2.hconcat(rowt))
                 strip = cv2.vconcat(rows)
-                bar = np.zeros((64, strip.shape[1], 3), np.uint8)
+                bar = np.zeros((40, strip.shape[1], 3), np.uint8)
                 cv2.putText(
                     bar,
                     (
                         f"AI anchor walk [{use_model}] - only the "
                         f"frames checked are shown; {out['reason']}"
                     ),
-                    (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    (8, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (255, 255, 255), 1, cv2.LINE_AA,
-                )
-                # Second line: what happened to the anchor, in numbers.
-                # The ring's position relative to the ball is the thing
-                # that keeps being argued about from screenshots — print
-                # it instead.
-                if out.get("snapped"):
-                    _snap_txt = (
-                        f"SNAP APPLIED {out.get('snap_px')}px -> "
-                        f"({out['rest_xy'][0]:.0f},{out['rest_xy'][1]:.0f}) "
-                        f"[white cross = finder's spot]"
-                    )
-                elif out.get("snap_rejected"):
-                    _snap_txt = (
-                        f"snap REFUSED ({out.get('snap_rejected_px')}px, "
-                        f"blob {out.get('snap_rejected_blob')} < "
-                        f"{out.get('rest_blob_pre')}) - kept finder's spot"
-                    )
-                else:
-                    _snap_txt = "no snap - ring is exactly where the finder put it"
-                cv2.putText(
-                    bar,
-                    (
-                        f"finder rest=({cx0:.0f},{cy0:.0f})  {_snap_txt}  "
-                        f"ball-test blob={out.get('rest_blob')}"
-                    ),
-                    (8, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.46,
-                    (0, 220, 255), 1, cv2.LINE_AA,
                 )
                 name = f"{debug_prefix}.jpg"
                 cv2.imwrite(
@@ -6297,9 +6102,6 @@ def find_resting_ball(
     model: str | None = None,
     crop_center: tuple[float, float] | None = None,
     crop_frac: float = 0.45,
-    expect_present: bool = True,
-    debug_dir: Path | None = None,
-    debug_prefix: str = "",
 ) -> dict:
     """Single-frame Claude vision call: is there a golf ball AT REST, and
     where? Returns {present, x, y, confidence, error} with x/y in NATIVE
@@ -6376,170 +6178,39 @@ def find_resting_ball(
         out["error"] = "jpeg encode failed"
         return out
     client = _anthropic_client()
-    b64 = base64.standard_b64encode(bytes(buf)).decode("ascii")
-    ball_model = _resolve_ball_model(model)
-    out["model"] = ball_model
-    # The EXACT bytes the model was shown. When a miss gets reported we
-    # want to look at this, not at a re-derived crop — every previous
-    # round of guesswork here was about what the model could actually
-    # see (crop aim, upscale, shadow lift), and this settles it.
-    if debug_dir is not None:
-        try:
-            Path(debug_dir).mkdir(parents=True, exist_ok=True)
-            _sent = Path(debug_dir) / f"{debug_prefix}ball_sent_f{frame_idx}.jpg"
-            _sent.write_bytes(bytes(buf))
-        except Exception:  # noqa: BLE001 — debug artefacts never break a run
-            pass
-    replies: list[str] = []
-
-    def _ask(nudge: str) -> list:
-        """One vision call -> list of candidate dicts (may be empty)."""
+    try:
         resp = client.messages.create(
-            model=ball_model,
-            # Room for extended thinking AHEAD of the JSON. Thinking is
-            # on by default on Opus 5 / Fable 5 and this is precisely the
-            # "look carefully before answering" task it helps; at the old
-            # max_tokens=400 the thinking would eat the whole budget and
-            # the reply would come back with no JSON at all.
-            max_tokens=2000,
+            model=_resolve_frame_picker_model(model),
+            max_tokens=150,
             system=[{
                 "type": "text",
                 "text": _FIND_RESTING_BALL_PROMPT,
                 "cache_control": {"type": "ephemeral"},
             }],
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": f"Frame {frame_idx}. {nudge} JSON only."},
+                {"type": "text", "text": f"Frame {frame_idx}. JSON only."},
                 {"type": "image", "source": {
                     "type": "base64", "media_type": "image/jpeg",
-                    "data": b64,
+                    "data": base64.standard_b64encode(bytes(buf)).decode("ascii"),
                 }},
             ]}],
         )
-        # Only the text blocks — a thinking block has no .text we want,
-        # and on models where thinking is on it comes back first.
-        text = "".join(
-            c.text for c in resp.content if getattr(c, "type", None) == "text"
-        )
-        if getattr(resp, "stop_reason", None) == "max_tokens":
-            # Thinking ran long and the JSON never got written. Worth
-            # seeing explicitly — it looks identical to "found nothing"
-            # from the outside, but the fix is a bigger budget.
-            text += "  [TRUNCATED: stop_reason=max_tokens]"
-        replies.append(text)
-        data = _extract_json(text) or {}
-        cands = data.get("candidates")
-        if isinstance(cands, list):
-            return [c for c in cands if isinstance(c, dict)]
-        # Tolerate the old single-answer shape.
-        if data.get("x") is not None and data.get("y") is not None:
-            return [{
-                "x": data["x"], "y": data["y"],
-                "confidence": data.get("confidence"),
-            }]
-        return []
-
-    # ATTEMPT 1, then a SECOND look if it came back empty. Two different
-    # vision models spotted the ball instantly in these very crops, so an
-    # empty answer means the model gave up, not that the ball is absent —
-    # the retry nudges it to commit to its best guess.
-    _CONF_RANK = {"high": 1.0, "medium": 0.6, "low": 0.3}
-    try:
-        cands = _ask("Locate the ball.")
-        if not cands and expect_present:
-            # Only push when the ball SHOULD be there (address frame).
-            # The after-impact check calls with expect_present=False:
-            # there the ball is legitimately gone, and nudging the model
-            # to "find one anyway" would manufacture a still-there
-            # verdict and get a real swing thrown out as a practice cut.
-            cands = _ask(
-                "A ball IS in this image, on the ground near the golfer. "
-                "Give your single best guess even if you are unsure."
-            )
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"api_failed: {exc}"
         return out
-    finally:
-        # What the model actually SAID, kept next to the image it saw.
-        # An empty reply and a wrong-point reply are different failures
-        # and we could not previously tell them apart from the outside.
-        out["raw"] = (" | ".join(replies))[:600]
-        if debug_dir is not None and replies:
-            try:
-                (
-                    Path(debug_dir) / f"{debug_prefix}ball_reply_f{frame_idx}.txt"
-                ).write_text(
-                    f"model={ball_model}\nframe={frame_idx}\n"
-                    f"crop_box={out.get('crop_box')}\n\n"
-                    + "\n\n---\n\n".join(replies)
-                )
-            except Exception:  # noqa: BLE001
-                pass
-
-    # Score every candidate: what the model believes, checked against
-    # what the pixels actually look like. The pixel score is what stops a
-    # confident-but-wrong pick (shoe, sign, sprinkler) from winning.
-    best = None
-    for rank, c in enumerate(cands[:3]):
+    text = "".join(
+        c.text for c in resp.content if getattr(c, "type", None) == "text"
+    )
+    data = _extract_json(text) or {}
+    out["present"] = bool(data.get("present"))
+    out["confidence"] = data.get("confidence")
+    if out["present"] and data.get("x") is not None and data.get("y") is not None:
         try:
-            cx, cy = int(round(float(c["x"]))), int(round(float(c["y"])))
-        except (TypeError, ValueError, KeyError):
-            continue
-        if not (0 <= cx < raw.shape[1] and 0 <= cy < raw.shape[0]):
-            continue
-        blob = _ball_blob_score(raw, cx, cy)
-        conf = _CONF_RANK.get(str(c.get("confidence") or "").lower(), 0.5)
-        # Model order carries real signal, so keep a mild rank bonus.
-        score = (0.45 * conf) + (0.40 * max(0.0, blob)) + (0.15 / (rank + 1))
-        if best is None or score > best[0]:
-            best = (score, cx, cy, c.get("confidence"), blob)
-
-    if best is not None and not expect_present:
-        # Strict mode: a claim that the ball is STILL on the tee has to
-        # be backed by the pixels, not by the model's willingness to
-        # answer. Weak-looking blobs are treated as "gone".
-        _s, _cx, _cy, _cf, _blob = best
-        if _blob >= 0.0 and _blob < 0.35 and str(_cf or "").lower() != "high":
-            best = None
-            out["rejected_weak_blob"] = round(_blob, 3)
-    if best is not None:
-        _score, cx, cy, conf, blob = best
-        out["present"] = True
-        out["confidence"] = conf
-        out["blob_score"] = round(blob, 3) if blob >= 0 else None
-        out["x"] = int(round(cx / scale)) + crop_x0
-        out["y"] = int(round(cy / scale)) + crop_y0
-    else:
-        log.info(
-            "ai_tracer: resting ball NOT found (model=%s frame=%s crop=%s "
-            "cands=%d expect_present=%s) reply=%r",
-            ball_model, frame_idx, out.get("crop_box"), len(cands),
-            expect_present, out.get("raw", "")[:200],
-        )
+            out["x"] = int(round(float(data["x"]) / scale)) + crop_x0
+            out["y"] = int(round(float(data["y"]) / scale)) + crop_y0
+        except (TypeError, ValueError):
+            pass
     return out
-
-
-def _blob_score_at(
-    input_path: Path, frame_idx: int, x: float, y: float,
-) -> float:
-    """_ball_blob_score at a point on one frame of a video. Returns 0..1
-    (higher = more ball-like) or -1 when the frame can't be read.
-
-    Used to ask the question the vision calls can't: not "is there a ball
-    somewhere near here", but "is there still a ball on THIS EXACT
-    SPOT" — a resting ball doesn't move, so the rest spot going bare IS
-    the departure."""
-    try:
-        cap = cv2.VideoCapture(str(input_path))
-        try:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0, frame_idx)))
-            ok, frame = cap.read()
-        finally:
-            cap.release()
-        if not ok or frame is None:
-            return -1.0
-        return _ball_blob_score(frame, int(round(x)), int(round(y)))
-    except Exception:  # noqa: BLE001
-        return -1.0
 
 
 def _white_blob_at(input_path: Path, frame_idx: int, x: int, y: int) -> bool | None:
@@ -6662,26 +6333,16 @@ def classify_swing_shot(
     input_path: Path,
     peak_time_sec: float,
     fps: float,
-    # NEAREST-FIRST. Ordered 1.5 -> 0.5 originally, on the theory that
-    # the club is furthest from the ball early. In practice the far lead
-    # is the WORSE look: at 1.5s the golfer may still be walking in or
-    # placing the ball, and whatever the model finds there isn't
-    # necessarily the ball that gets struck. 0.5s before the wrist-speed
-    # peak is around the top of the backswing — ball definitely placed,
-    # definitely still there, club nowhere near it — and it also gives
-    # the after-look a rest point that's only 2s old instead of 3s.
-    leads: tuple = (0.5, 1.0, 1.5),
+    leads: tuple = (1.5, 1.0, 0.5),
     after_sec: float = 1.5,
     move_tol_frac: float = 0.06,
     hint_xy: tuple[float, float] | None = None,
-    debug_dir: Path | None = None,
-    debug_prefix: str = "",
 ) -> dict:
     """Real shot vs practice swing, by ball departure.
 
     A real swing makes a resting ball leave; a practice/air swing / whiff
     does not. Find the resting ball BEFORE the swing (trying each lead in
-    turn, nearest the swing first — see `leads`) and check
+    turn — the club can hide it at 1.5s but not nearer the top) and check
     whether it's gone AFTER (club has followed through, so the spot is
     clear). Verdict:
       * no ball before        -> practice (air swing)
@@ -6710,7 +6371,6 @@ def classify_swing_shot(
         t_b = max(0.0, float(peak_time_sec) - lead)
         r = find_resting_ball(
             input_path, int(t_b * fps), crop_center=_hint, crop_frac=_cf,
-            debug_dir=debug_dir, debug_prefix=f"{debug_prefix}before-",
         )
         if r.get("error"):
             _errs.append(str(r["error"]))
@@ -6728,23 +6388,16 @@ def classify_swing_shot(
     # Every zoomed look missed. The zoom crop is aimed at the pose wrist
     # point — if that point was garbled (pose dropout near the blurred
     # peak), the crop may not even contain the ball. One full-frame retry
-    # at the nearest lead so a bad hint can't guarantee a miss. Take the
-    # nearest lead by VALUE, not by position — this used to read
-    # leads[-1], which silently became the FARTHEST look the moment the
-    # tuple was reordered nearest-first.
-    _near = min(leads)
+    # at the nearest lead so a bad hint can't guarantee a miss.
     if before is None and _hint is not None:
-        t_b = max(0.0, float(peak_time_sec) - _near)
-        r = find_resting_ball(
-            input_path, int(t_b * fps),
-            debug_dir=debug_dir, debug_prefix=f"{debug_prefix}beforefull-",
-        )
+        t_b = max(0.0, float(peak_time_sec) - leads[-1])
+        r = find_resting_ball(input_path, int(t_b * fps))
         if r.get("error"):
             _errs.append(str(r["error"]))
         if r.get("present") and r.get("x") is not None:
             before = {
                 "present": True, "x": r["x"], "y": r["y"],
-                "t": round(t_b, 2), "lead": _near,
+                "t": round(t_b, 2), "lead": leads[-1],
                 "confidence": r.get("confidence"), "crop_box": None,
             }
     before_out = before or probe
@@ -6758,9 +6411,6 @@ def classify_swing_shot(
     )
     ra = find_resting_ball(
         input_path, int(t_a * fps), crop_center=_after_center, crop_frac=_cf,
-        # The whole point of this look is that the ball may be GONE.
-        expect_present=False,
-        debug_dir=debug_dir, debug_prefix=f"{debug_prefix}after-",
     )
     if ra.get("error"):
         _errs.append(str(ra["error"]))
@@ -6816,17 +6466,7 @@ def classify_swing_shot(
         }
     if before is None and after["present"]:
         a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
-        # No before position to compare against, so this verdict rests
-        # entirely on the after mark being a real ball. It eliminates the
-        # swing, so hold it to the pixel test too — a shoe here costs us
-        # a shot.
-        _a_blob = _blob_score_at(
-            input_path, int(after["t"] * fps), after["x"], after["y"],
-        )
-        after["rest_spot_blob"] = (
-            round(_a_blob, 3) if _a_blob >= 0 else None
-        )
-        if a_ok is False or (0.0 <= _a_blob < 0.35):
+        if a_ok is False:
             return {
                 "verdict": "unknown",
                 "reason": "marked point doesn't look like a ball — not trusting it",
@@ -6864,64 +6504,23 @@ def classify_swing_shot(
         w, h = 1920.0, 1080.0
     diag = (w * w + h * h) ** 0.5
     dist = ((before["x"] - after["x"]) ** 2 + (before["y"] - after["y"]) ** 2) ** 0.5
-    # A RESTING BALL DOES NOT MOVE. "Same spot" therefore has to mean
-    # ball-sized, not frame-sized: move_tol_frac alone allowed 6% of the
-    # frame diagonal — 132px at 1080p — so the after look-up could latch
-    # onto the golfer's white SHOE a hundred pixels away and still be
-    # counted as the same unmoved ball. That verdict eliminates the swing,
-    # so the loose tolerance was silently throwing away real shots.
-    _r_ball = max(6.0, 0.015 * h)
-    tol = min(move_tol_frac * diag, max(12.0, 2.5 * _r_ball))
-    # And the decisive test, which needs no vision call at all: does the
-    # rest spot ITSELF still look like a ball on the after frame? If that
-    # exact patch has gone bare, the ball left — whatever else the model
-    # found elsewhere in the crop is not it.
-    _rest_after = _blob_score_at(
-        input_path, int(after["t"] * fps), before["x"], before["y"],
-    )
-    after["dist_px"] = round(float(dist), 1)
-    after["rest_spot_blob"] = round(_rest_after, 3) if _rest_after >= 0 else None
-    _spot_bare = 0.0 <= _rest_after < 0.35
-    if dist > tol:
-        if _spot_bare:
+    if dist <= move_tol_frac * diag:
+        b_ok = _white_blob_at(input_path, int(before["t"] * fps), before["x"], before["y"])
+        a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
+        if b_ok is False or a_ok is False:
             return {
-                "verdict": "real",
-                "reason": (
-                    f"ball gone from its rest spot (patch scores "
-                    f"{_rest_after:.2f}); the after look-up latched onto "
-                    f"something {dist:.0f}px away — a resting ball doesn't "
-                    f"move, so that isn't it"
-                ),
+                "verdict": "unknown",
+                "reason": "marked point doesn't look like a ball — not trusting 'unmoved' verdict",
                 "before": before_out, "after": after,
             }
-        return {
-            "verdict": "unknown",
-            "reason": (
-                f"resting ball visible after the swing {dist:.0f}px away "
-                f"(re-teed vs spare ball — ambiguous), keeping"
-            ),
-            "before": before_out, "after": after,
-        }
-    # Within tolerance: the after look-up is pointing at the rest spot.
-    if _spot_bare:
-        return {
-            "verdict": "real",
-            "reason": (
-                f"rest spot is bare after the swing (scores "
-                f"{_rest_after:.2f}) — ball departed"
-            ),
-            "before": before_out, "after": after,
-        }
-    b_ok = _white_blob_at(input_path, int(before["t"] * fps), before["x"], before["y"])
-    a_ok = _white_blob_at(input_path, int(after["t"] * fps), after["x"], after["y"])
-    if b_ok is False or a_ok is False:
-        return {
-            "verdict": "unknown",
-            "reason": "marked point doesn't look like a ball — not trusting 'unmoved' verdict",
-            "before": before_out, "after": after,
-        }
-    return {"verdict": "practice", "reason": "ball still at rest (not struck)",
-            "before": before_out, "after": after}
+        return {"verdict": "practice", "reason": "ball still at rest (not struck)",
+                "before": before_out, "after": after}
+    return {
+        "verdict": "unknown",
+        "reason": "resting ball visible after the swing at a different spot "
+                  "(re-teed vs spare ball — ambiguous), keeping",
+        "before": before_out, "after": after,
+    }
 
 
 def detect_swings_from_ai_ball(

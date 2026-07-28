@@ -979,9 +979,7 @@ export default function AdminLongUpload() {
                     disabled={uploading}
                     style={{ fontSize: 13 }}
                   >
-                    <option value="claude-opus-4-7">Opus 4.7 (default)</option>
-                    <option value="claude-opus-5">Opus 5 (newer, same price)</option>
-                    <option value="claude-fable-5">Fable 5 (most capable)</option>
+                    <option value="claude-opus-4-7">Opus 4.7 (best)</option>
                     <option value="claude-haiku-4-5">Haiku 4.5 (5× cheaper, faster)</option>
                   </select>
                 </label>

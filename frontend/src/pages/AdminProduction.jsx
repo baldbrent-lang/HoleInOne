@@ -5490,30 +5490,6 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                               departure pin failed — {s.anchor.reason}
                             </span>
                           )}
-                          {s.anchor.snap_rejected && (
-                            <div className="tiny" style={{ marginTop: 2 }}>
-                              📌 snap REFUSED ({s.anchor.snap_rejected_px}px)
-                              — the walk's own ball look-up wanted to move
-                              the ring, but the spot it pointed at scored
-                              worse on the pixel ball test than where the
-                              finder put it. Kept the finder's position.
-                            </div>
-                          )}
-                          {s.anchor.rest_anchor_suspect && (
-                            <div
-                              className="tiny"
-                              style={{ marginTop: 2, color: "#c0392b" }}
-                            >
-                              🎯 the watched spot scores{" "}
-                              {s.anchor.rest_blob} on the ball test (bare
-                              ground reads ~0.18, a lit ball ~1.0) — the
-                              walk was almost certainly watching the wrong
-                              patch of ground, so "never left" says nothing
-                              about the swing. Check the before/after
-                              thumbnails below: if the ring isn't on the
-                              ball, THAT is the bug, not the tracer.
-                            </div>
-                          )}
                           {s.anchor.ai_fallback_reason != null && (
                             <div className="tiny" style={{ color: "#b7791f" }}>
                               ⚠ AI anchor check bailed (
@@ -5677,12 +5653,6 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                                 </a>
                                 <div className="small muted">
                                   {tag}: {sh.present ? "ball" : "no ball"} @ {sh.t}s
-                                  {sh.dist_px != null
-                                    ? ` · ${sh.dist_px}px from the rest spot`
-                                    : ""}
-                                  {sh.rest_spot_blob != null
-                                    ? ` · rest patch ${sh.rest_spot_blob}`
-                                    : ""}
                                 </div>
                               </div>
                             ) : null,
