@@ -5490,6 +5490,15 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                               departure pin failed — {s.anchor.reason}
                             </span>
                           )}
+                          {s.anchor.snap_rejected && (
+                            <div className="tiny" style={{ marginTop: 2 }}>
+                              📌 snap REFUSED ({s.anchor.snap_rejected_px}px)
+                              — the walk's own ball look-up wanted to move
+                              the ring, but the spot it pointed at scored
+                              worse on the pixel ball test than where the
+                              finder put it. Kept the finder's position.
+                            </div>
+                          )}
                           {s.anchor.rest_anchor_suspect && (
                             <div
                               className="tiny"

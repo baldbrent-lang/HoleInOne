@@ -5284,6 +5284,21 @@ def verify_rest_and_impact_ai(
                 "before frame - rest position likely wrong"
             )
         else:
+            # The snap is a SECOND, independent vision call, and it can
+            # only move the ring — it has no way to leave a good anchor
+            # alone. A correct rest position arrives here and leaves
+            # dragged up to 6r (~60-90px) onto whatever this call points
+            # at. That is exactly the failure we see: the ball is ringed
+            # correctly in the before thumbnail, then the walk strip
+            # shows the ring sitting below the ball.
+            #
+            # So make the snap EARN the move: it has to make the pixels
+            # look MORE like a ball, not less. Anything else is left
+            # where the finder put it.
+            _blob_orig = _ball_blob_score(
+                crops[f_lo], int(ring[0]), int(ring[1]),
+            )
+            out["rest_blob_pre"] = round(_blob_orig, 3)
             try:
                 px, py = float(first.get("x_pct")), float(first.get("y_pct"))
                 if 0.0 <= px <= 100.0 and 0.0 <= py <= 100.0:
@@ -5291,10 +5306,21 @@ def verify_rest_and_impact_ai(
                     by = y0 + _snap_box[1] + py / 100.0 * _snap_box[3]
                     d = ((bx - cx0) ** 2 + (by - cy0) ** 2) ** 0.5
                     if 2.0 < d <= 6.0 * r:
-                        out["rest_xy"] = [round(bx, 1), round(by, 1)]
-                        out["snapped"] = True
-                        out["snap_px"] = float(round(d, 1))
-                        ring[0], ring[1] = bx - x0, by - y0
+                        _blob_snap = _ball_blob_score(
+                            crops[f_lo], int(bx - x0), int(by - y0),
+                        )
+                        if _blob_orig >= 0.0 and _blob_snap < _blob_orig:
+                            # Refused: the ring already sat on something
+                            # more ball-like than where this call wants
+                            # to drag it.
+                            out["snap_rejected"] = True
+                            out["snap_rejected_px"] = float(round(d, 1))
+                            out["snap_rejected_blob"] = round(_blob_snap, 3)
+                        else:
+                            out["rest_xy"] = [round(bx, 1), round(by, 1)]
+                            out["snapped"] = True
+                            out["snap_px"] = float(round(d, 1))
+                            ring[0], ring[1] = bx - x0, by - y0
             except (TypeError, ValueError):
                 pass
             ref_tile, _ = _tight_tile(f_lo)
