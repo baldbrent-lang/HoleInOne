@@ -24,6 +24,7 @@ import numpy as np
 from .common import (
     BackendClient,
     BackgroundUploader,
+    ClipWriter,
     FrameBuffer,
     HeartbeatThread,
     build_audio_recorder,
@@ -165,93 +166,6 @@ class YoloPersonDetector:
 
     def close(self):
         pass
-
-
-class _ClipWriter:
-    """MP4 encoder running on its OWN thread behind a deep queue.
-
-    Why this exists: the record loop used to encode every frame inline
-    while ALSO running the person detector. When it couldn't drain the
-    ring buffer at capture rate — thermally throttled Pi, upload
-    contention, a 1080p50 stream — the buffer (only `buffer_seconds`
-    deep) wrapped and frames were DESTROYED before they were ever
-    written. That is what a multi-second "stall" in a clip actually
-    was: not the camera failing to deliver, but our pipeline failing
-    to keep up. With the encode behind a queue, a hitch costs RAM for
-    a moment instead of costing footage permanently.
-
-    Also owns gap filling: any real capture gap is filled by holding
-    the previous frame, so playback time tracks wall-clock time.
-    """
-
-    def __init__(self, path, fps, size, max_fill_sec=20.0,
-                 queue_bytes=900_000_000):
-        self.fps = max(1.0, float(fps))
-        self._period = 1.0 / self.fps
-        self._max_fill = int(max_fill_sec * self.fps)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self._writer = cv2.VideoWriter(str(path), fourcc, self.fps, size)
-        self.ok = self._writer.isOpened()
-        # Queue depth from a MEMORY budget, not a frame count: 1080p
-        # BGR is ~6 MB/frame, so a naive "N seconds" queue would try to
-        # hold tens of GB. ~900 MB ≈ 3 s at 1080p50 — ample shock
-        # absorption without crowding the ring buffer out of RAM.
-        _fb = max(1, int(size[0]) * int(size[1]) * 3)
-        self._q = queue.Queue(maxsize=max(30, int(queue_bytes / _fb)))
-        self.n_written = 0
-        self.n_filled = 0
-        self.n_gaps = 0
-        self.worst_gap = 0.0
-        self.n_dropped = 0
-        self._prev_ts = None
-        self._prev_frame = None
-        self._thread = None
-        if self.ok:
-            self._thread = threading.Thread(
-                target=self._run, daemon=True, name="clip-writer",
-            )
-            self._thread.start()
-
-    def submit(self, ts, frame) -> None:
-        """Hand a frame to the encoder. Never blocks the caller."""
-        try:
-            self._q.put_nowait((ts, frame))
-        except queue.Full:
-            # Encoder is hopelessly behind (should not happen now that
-            # it has its own thread). Skip rather than stall the drain
-            # loop; gap filling covers the hole and the count is logged.
-            self.n_dropped += 1
-
-    def _run(self) -> None:
-        while True:
-            item = self._q.get()
-            if item is None:
-                return
-            ts, frame = item
-            if self._prev_frame is not None and self._prev_ts is not None:
-                gap = ts - self._prev_ts
-                if gap > 1.8 * self._period:
-                    self.n_gaps += 1
-                    self.worst_gap = max(self.worst_gap, gap)
-                    n_fill = min(
-                        int(round(gap / self._period)) - 1, self._max_fill,
-                    )
-                    for _ in range(max(0, n_fill)):
-                        self._writer.write(self._prev_frame)
-                        self.n_written += 1
-                        self.n_filled += 1
-            self._writer.write(frame)
-            self.n_written += 1
-            self._prev_ts, self._prev_frame = ts, frame
-
-    def close(self, timeout: float = 180.0) -> None:
-        """Flush the queue, stop the thread, release the file."""
-        if self._thread is not None:
-            self._q.put(None)
-            self._thread.join(timeout=timeout)
-            self._thread = None
-        if self.ok:
-            self._writer.release()
 
 
 class MotionFallbackDetector:
@@ -658,7 +572,7 @@ class TeeAgent:
         )
 
         clip_path = self.work_dir / f"{session_id}.mp4"
-        clip_writer = _ClipWriter(clip_path, write_fps, (width, height))
+        clip_writer = ClipWriter(clip_path, write_fps, (width, height))
         if not clip_writer.ok:
             log.error("VideoWriter failed to open for %s", clip_path)
             return

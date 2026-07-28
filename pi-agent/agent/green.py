@@ -24,6 +24,7 @@ from typing import Optional
 import cv2
 
 from .common import (
+    ClipWriter,
     BackendClient,
     BackgroundUploader,
     FrameBuffer,
@@ -77,6 +78,16 @@ class GreenAgent:
     def run(self) -> None:
         cap = open_camera(self.cam_cfg)
         self.buffer = FrameBuffer(self.buffer_seconds, self.fps)
+        self._cap_frames = 0
+        self._cap_gaps = 0
+        self._cap_worst = 0.0
+        self._cap_last = None
+        # Keep OpenCV's thread pool from monopolising the cores and
+        # starving the capture thread.
+        try:
+            cv2.setNumThreads(2)
+        except Exception:  # noqa: BLE001
+            pass
 
         # Start the livestream helper before the capture thread so the
         # very first frame can be forwarded if an admin happens to be
@@ -162,6 +173,16 @@ class GreenAgent:
             if not ok or frame is None:
                 time.sleep(0.02)
                 continue
+            # Camera-side delivery stats — see tee.py. Separates "the
+            # camera stalled" from "we lost frames" in the log.
+            _cnow = time.time()
+            if self._cap_last is not None:
+                _cgap = _cnow - self._cap_last
+                if _cgap > 1.8 / max(1.0, self.fps):
+                    self._cap_gaps += 1
+                    self._cap_worst = max(self._cap_worst, _cgap)
+            self._cap_last = _cnow
+            self._cap_frames += 1
             if self.frame_shape is None:
                 self.frame_shape = (frame.shape[0], frame.shape[1])
             self.buffer.push(time.time(), frame.copy())
@@ -181,9 +202,8 @@ class GreenAgent:
         # Reported on upload for dual-camera cut alignment.
         first_frame_ts = snapshot[0][0]
         clip_path = self.work_dir / f"{session_id}.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(clip_path), fourcc, self.fps, (width, height))
-        if not writer.isOpened():
+        clip_writer = ClipWriter(clip_path, self.fps, (width, height))
+        if not clip_writer.ok:
             log.error("VideoWriter failed for %s", clip_path)
             return
 
@@ -192,11 +212,14 @@ class GreenAgent:
         audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
         audio_recorder.start(session_id)
 
-        # Write the pre-roll first.
+        # Hand the pre-roll to the encoder thread. Encoding runs off
+        # this loop (see ClipWriter) so a hitch can't stall the drain
+        # and wrap the ring buffer — that overflow is how frames get
+        # destroyed and clips come out choppy.
         for _ts, f in snapshot:
-            writer.write(f)
+            clip_writer.submit(_ts, f)
         last_written_ts = snapshot[-1][0]
-        frames_written = len(snapshot)
+        preroll_span = snapshot[-1][0] - snapshot[0][0]
         start = time.time()
         deadline = start + self.max_clip_seconds
         next_stop_check = start + self.stop_poll_interval
@@ -206,9 +229,8 @@ class GreenAgent:
             current = self.buffer.snapshot()
             new_frames = [(ts, f) for ts, f in current if ts > last_written_ts]
             for ts, f in new_frames:
-                writer.write(f)
+                clip_writer.submit(ts, f)
                 last_written_ts = ts
-                frames_written += 1
             now = time.time()
             if now > deadline:
                 stop_reason = "max_clip_seconds"
@@ -235,7 +257,7 @@ class GreenAgent:
                         )
                         break
             time.sleep(0.05)
-        writer.release()
+        clip_writer.close()
 
         # Stop the parallel audio capture and fold the WAV into the MP4.
         wav_done = audio_recorder.stop()
@@ -243,7 +265,7 @@ class GreenAgent:
             # Delay audio by the silent pre-roll's playback length so it
             # lines up with the trigger moment, not the start of the
             # pre-roll (arecord only starts once recording begins).
-            preroll_seconds = len(snapshot) / self.fps if self.fps else 0.0
+            preroll_seconds = preroll_span
             muxed = mux_audio_into_video(
                 clip_path, wav_done, audio_delay_seconds=preroll_seconds,
             )
@@ -254,29 +276,33 @@ class GreenAgent:
                 )
 
         size = clip_path.stat().st_size if clip_path.exists() else 0
-        # Actual delivered rate over the whole recording, measured from
-        # FRAME timestamps (first buffered frame → last written frame).
-        # Green drops frames under load (livestream + cellular upload), so
-        # stamping the nominal fps made clips play too fast; re-clock to the
-        # measured rate on compress so it plays in real time.
-        #
-        # Measure against frame timestamps, NOT a wall-clock `start`: an
-        # earlier version used `start`, which under-counted the span and
-        # inflated the rate (e.g. 42 fps for a 30 fps camera → clips played
-        # ~1.4x fast). Cap at nominal — the camera can't deliver faster than
-        # its configured fps, so any higher reading is measurement error;
-        # floor at 40% so a rare startup glitch can't stamp an absurdly slow
-        # clip.
-        real_span = last_written_ts - first_frame_ts
+        # NO average re-timing. Frame loss is BURSTY: one stall drags
+        # the average down, and re-clocking the whole clip to it plays
+        # the healthy frames slow — the "slow motion" artifact. The
+        # ClipWriter instead fills gaps by holding the previous frame,
+        # so playback time already equals wall-clock time.
         real_fps = None
-        if real_span > 1.0 and frames_written >= 5:
-            measured = (frames_written - 1) / real_span
-            real_fps = min(float(self.fps), max(0.4 * float(self.fps), measured))
+        real_span = last_written_ts - first_frame_ts
+        frames_written = clip_writer.n_written
+        _captured = frames_written - clip_writer.n_filled
+        _cam_span = max(0.001, real_span)
         log.info(
-            "recorded %s: %d frames, %.1f MB (reason=%s, real_fps=%s)",
-            clip_path.name, frames_written, size / (1024 * 1024), stop_reason,
-            f"{real_fps:.1f}" if real_fps else "n/a",
+            "recorded %s: %d frames, %.1f MB (reason=%s) | timing: "
+            "%d captured @ %.1f fps eff, %d gap-filled, %d gap(s), "
+            "worst %.0f ms | camera delivered %d frames (%.1f fps, "
+            "%d gap(s), worst %.0f ms), queue drops %d",
+            clip_path.name, frames_written, size / (1024 * 1024),
+            stop_reason, _captured,
+            (_captured / real_span) if real_span > 0.5 else 0.0,
+            clip_writer.n_filled, clip_writer.n_gaps,
+            clip_writer.worst_gap * 1000.0,
+            self._cap_frames, self._cap_frames / _cam_span,
+            self._cap_gaps, self._cap_worst * 1000.0,
+            clip_writer.n_dropped,
         )
+        self._cap_frames = 0
+        self._cap_gaps = 0
+        self._cap_worst = 0.0
 
         # Hand the clip to the background uploader and return AT ONCE, so
         # we're back listening for the next trigger immediately. The
