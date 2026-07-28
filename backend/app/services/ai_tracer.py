@@ -3874,6 +3874,17 @@ def render_tracer_video(
     info["n_points"] = len(smoothed_points)
     if smoothed_points:
         info["frame_range"] = [int(smoothed_points[0][0]), int(smoothed_points[-1][0])]
+        # THE LINE THAT ACTUALLY GETS DRAWN. The debug flight map plots the
+        # tracked POINTS, but the render samples a fitted curve — so "the
+        # points are right and the tracer isn't" has been impossible to see
+        # in one place. Export a downsampled copy of the drawn curve so the
+        # map can show both and the difference is visible instead of
+        # inferred by comparing a map against a video.
+        _step = max(1, len(smoothed_points) // 200)
+        info["rendered_line"] = [
+            [int(f), int(x), int(y)]
+            for (f, x, y) in smoothed_points[::_step]
+        ]
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))

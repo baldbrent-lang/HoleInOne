@@ -5165,7 +5165,7 @@ function PoseChart({ pose }) {
  */
 function FlightMapStatic({
   bgUrl, dots, restBall, aiPoints, trackPoints, frameW, frameH,
-  impactFrame, region,
+  impactFrame, region, renderedLine,
 }) {
   // Native dims: prop when the backend knows them, else measured off
   // the heat image itself (it's rendered at native resolution).
@@ -5272,6 +5272,23 @@ function FlightMapStatic({
               strokeLinejoin="round"
               strokeLinecap="round"
               opacity={0.85}
+            />
+          )}
+          {/* What the RENDERER actually drew — the fitted curve sampled
+              per frame, not the points it was fitted to. Where this
+              parts from the blue line is the tracer being wrong. */}
+          {(renderedLine || []).length >= 2 && (
+            <polyline
+              points={(renderedLine || [])
+                .map((p) => `${p[1]},${p[2]}`)
+                .join(" ")}
+              fill="none"
+              stroke="#ffffff"
+              strokeWidth={Math.max(2, fw / 420)}
+              strokeDasharray={`${fw / 90} ${fw / 180}`}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              opacity={0.95}
             />
           )}
           {track.map((p, i) => (
@@ -6002,7 +6019,11 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       added by arc completion, dashed red = the
                       arc-completion search region, magenta = rest →
                       AI launch (cyan dot = rest), amber = unused pool
-                      dots with frame labels
+                      dots with frame labels,{" "}
+                      <b>dashed white = the curve the renderer actually
+                      drew</b> (the fitted parabola, sampled per frame —
+                      where it parts from the blue line is the tracer
+                      disagreeing with its own points)
                     </div>
                     <FlightMapStatic
                       bgUrl={s.ai.raw_motion_url}
@@ -6014,6 +6035,7 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       frameH={s.ai.frame_h}
                       impactFrame={s.ai.impact_frame}
                       region={s.ai.arc_region}
+                      renderedLine={s.ai.mog2_stats?.rendered_line}
                     />
                   </div>
                 )}

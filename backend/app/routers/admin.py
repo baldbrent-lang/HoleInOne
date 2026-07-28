@@ -8497,7 +8497,7 @@ def _mog2_layer_for_ai_track(
         # them out with the stats so the panel can say which happened.
         for _k in (
             "rest_anchor_relocated", "rest_anchor_dropped",
-            "rest_anchor_synthesized",
+            "rest_anchor_synthesized", "rendered_line",
         ):
             if rr.get(_k):
                 stats[_k] = rr[_k]
