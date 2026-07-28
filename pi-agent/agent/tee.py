@@ -520,11 +520,18 @@ class TeeAgent:
         # real ~30 fps action in slow motion (and reports an 8-minute
         # duration). Only trust the measured rate when it's within a sane
         # band of nominal (±40%); otherwise keep nominal.
+        # Use the MEDIAN inter-frame interval, not the mean: a single
+        # stall inside the pre-roll drags the mean down and would stamp
+        # the whole clip slow. The median is the camera's true cadence.
         write_fps = fps
         if len(snapshot) >= 5:
-            span = snapshot[-1][0] - snapshot[0][0]
-            if span > 0.5:
-                measured = (len(snapshot) - 1) / span
+            _iv = sorted(
+                snapshot[i][0] - snapshot[i - 1][0]
+                for i in range(1, len(snapshot))
+            )
+            _med = _iv[len(_iv) // 2]
+            if _med > 1e-4:
+                measured = 1.0 / _med
                 if 0.6 * fps <= measured <= 1.4 * fps:
                     write_fps = max(1.0, min(120.0, measured))
                 else:
@@ -552,24 +559,54 @@ class TeeAgent:
         audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
         audio_recorder.start(session_id)
 
-        # Write the pre-roll, then keep draining newly-captured frames
-        # from the buffer (the same pattern the green agent uses).
-        for _ts, f in snapshot:
-            writer.write(f)
-        last_written_ts = snapshot[-1][0]
-        n_frames_written = len(snapshot)
-        # Frame-gap instrumentation: count capture gaps > 1.8x the
-        # nominal period so choppiness is measurable in the journal
-        # instead of only visible in playback.
-        _period = 1.0 / max(1.0, fps)
+        # GAP-FILLED constant-rate write. The file is stamped at
+        # write_fps, so every written frame occupies exactly 1/write_fps
+        # of playback time. When the camera stalls (thermal throttling,
+        # CPU contention), the missing slots are filled by HOLDING the
+        # previous frame — so wall-clock time and playback time stay
+        # locked together.
+        #
+        # Why not just re-time the clip to the average rate (the
+        # previous approach)? Because drops are BURSTY: one 10s stall
+        # drags the average to ~17fps, and re-timing then plays the
+        # healthy ~50fps swing frames at 17fps — the swing itself
+        # renders in slow motion. Filling gaps keeps real motion at
+        # real speed; a stall shows as a brief freeze, which is honest
+        # (we genuinely captured nothing then) and keeps the tee's time
+        # axis truthful for the tee->green composite alignment.
+        _period = 1.0 / max(1.0, write_fps)
         _gap_count = 0
         _worst_gap = 0.0
+        _n_filled = 0
+        _MAX_FILL = int(20.0 * write_fps)  # cap a pathological stall at 20s
         _prev_ts = None
-        for _t, _f in snapshot:
-            if _prev_ts is not None and (_t - _prev_ts) > 1.8 * _period:
-                _gap_count += 1
-                _worst_gap = max(_worst_gap, _t - _prev_ts)
-            _prev_ts = _t
+        n_frames_written = 0
+
+        def _write_with_fill(ts, frame, prev_frame):
+            """Write `frame`, first holding `prev_frame` across any
+            capture gap so playback time tracks wall-clock time.
+            Returns the number of frames written."""
+            nonlocal _gap_count, _worst_gap, _n_filled
+            written = 0
+            if prev_frame is not None and _prev_ts is not None:
+                gap = ts - _prev_ts
+                if gap > 1.8 * _period:
+                    _gap_count += 1
+                    _worst_gap = max(_worst_gap, gap)
+                    n_fill = min(int(round(gap / _period)) - 1, _MAX_FILL)
+                    for _ in range(max(0, n_fill)):
+                        writer.write(prev_frame)
+                        written += 1
+                        _n_filled += 1
+            writer.write(frame)
+            return written + 1
+
+        _prev_frame = None
+        for _ts, f in snapshot:
+            n_frames_written += _write_with_fill(_ts, f, _prev_frame)
+            _prev_ts, _prev_frame = _ts, f
+        last_written_ts = snapshot[-1][0]
+        n_preroll_written = n_frames_written
         recording_start = time.time()
         last_person_seen = recording_start
         next_det = recording_start + det_period
@@ -579,13 +616,9 @@ class TeeAgent:
             current = self.buffer.snapshot()
             new_frames = [(ts, f) for ts, f in current if ts > last_written_ts]
             for ts, f in new_frames:
-                writer.write(f)
-                if _prev_ts is not None and (ts - _prev_ts) > 1.8 * _period:
-                    _gap_count += 1
-                    _worst_gap = max(_worst_gap, ts - _prev_ts)
-                _prev_ts = ts
+                n_frames_written += _write_with_fill(ts, f, _prev_frame)
+                _prev_ts, _prev_frame = ts, f
                 last_written_ts = ts
-                n_frames_written += 1
             if now - recording_start > self.max_clip_seconds:
                 log.warning("max_clip_seconds hit; stopping")
                 break
@@ -613,26 +646,17 @@ class TeeAgent:
                     break
             time.sleep(0.02)
         writer.release()
-        # TRUE average rate over the WHOLE recording (the stamped
-        # write_fps was measured from the 5s pre-roll only — if the
-        # capture rate drifted during a minutes-long clip, constant-
-        # rate playback of uneven frames is the 'skipping' judder).
-        # The uploader re-times the encode to this rate, same as the
-        # green agent has always done — which also keeps the tee's
-        # time axis truthful, so the tee->green composite alignment
-        # lands where the clocks say it should.
-        real_span = last_written_ts - first_frame_ts
+        # No re-timing on upload: gap-filling already made the file a
+        # correct constant-rate clip whose duration equals wall-clock.
         real_fps = None
-        if n_frames_written >= 10 and real_span > 0.5:
-            _measured_all = (n_frames_written - 1) / real_span
-            if 0.5 * fps <= _measured_all <= 1.5 * fps:
-                real_fps = _measured_all
+        real_span = last_written_ts - first_frame_ts
+        _captured = n_frames_written - _n_filled
         log.info(
-            "timing: %d frames over %.2fs (avg %.2f fps, stamped %.2f) — "
-            "%d dropped-frame gap(s), worst %.0f ms",
-            n_frames_written, real_span,
-            ((n_frames_written - 1) / real_span) if real_span > 0.5 else 0.0,
-            write_fps, _gap_count, _worst_gap * 1000.0,
+            "timing: %d frames over %.2fs (%d captured @ %.1f fps eff, "
+            "%d gap-filled, stamped %.2f) — %d gap(s), worst %.0f ms",
+            n_frames_written, real_span, _captured,
+            (_captured / real_span) if real_span > 0.5 else 0.0,
+            _n_filled, write_fps, _gap_count, _worst_gap * 1000.0,
         )
         # Tell the backend recording is done before starting the
         # (possibly multi-minute) upload, so the paired green Pi —
@@ -652,7 +676,7 @@ class TeeAgent:
             # The clip opens with a silent pre-roll (buffered before
             # arecord started), so delay the audio by the pre-roll's
             # playback length to line it up with the trigger moment.
-            preroll_seconds = len(snapshot) / write_fps if write_fps else 0.0
+            preroll_seconds = n_preroll_written / write_fps if write_fps else 0.0
             muxed = mux_audio_into_video(
                 clip_path, wav_done, audio_delay_seconds=preroll_seconds,
             )
