@@ -4465,25 +4465,68 @@ def detect_swings_from_motion(
 
 
 _FIND_RESTING_BALL_PROMPT = (
-    "You are looking at ONE frame from a golf tee camera positioned behind "
-    "the golfer. Decide whether a golf ball is sitting AT REST on the "
-    "ground / mat / tee — a small, roughly round, usually white ball that is "
-    "stationary and ready to be hit. It may be partially hidden by the club "
-    "head resting behind it. Do NOT count a ball in flight, balls in a "
-    "bucket, distant range balls, or the hole. CRITICALLY: do NOT count "
-    "white shoes, socks, shoe trim, tee markers, sprinkler heads, signs or "
-    "any other white object — a golf ball is TINY (typically under 2% of "
-    "the image width) and perfectly round; if the white thing is attached "
-    "to the golfer or bigger than a few pixels, it is not the ball. "
-    "IMPORTANT: in shadow, overcast light, or at dusk the ball may look "
-    "GRAY or dull rather than bright white — judge by its small size, "
-    "round shape, and position on the ground near the golfer's feet, not "
-    "by whiteness alone. When "
-    "unsure, answer present=false. Reply with JSON only:\n"
-    '{"present": true|false, "x": <int pixel x or null>, '
-    '"y": <int pixel y or null>, "confidence": "high"|"medium"|"low"}\n'
+    "This is ONE frame from a golf camera, taken while a golfer is "
+    "ADDRESSING THE BALL — so a ball is almost certainly present on the "
+    "ground in this image. Your job is to LOCATE it, not to decide "
+    "whether golf exists. Find the ball and report where it is.\n\n"
+    "Where to look: on the ground near the golfer's feet, typically just "
+    "in front of / between the feet in the direction the club is "
+    "pointing, often right where the club head is resting. It is small "
+    "(a few pixels to ~2% of image width), round, and sits ON the turf "
+    "with a small shadow under it. In shade, overcast or dusk it can "
+    "look GRAY or dull, not bright white — judge by SIZE, ROUND SHAPE "
+    "and POSITION ON THE GROUND, never by brightness alone.\n\n"
+    "Rank up to 3 candidates, best first. Prefer a small round object on "
+    "the turf near the feet. Rank lower (but still include) anything "
+    "attached to the golfer (shoes, socks), tee markers, sprinkler "
+    "heads, signs, or objects clearly too large. If you truly cannot see "
+    "any candidate, return an empty list — but look carefully first; "
+    "returning nothing when the ball is visible is the WORST outcome.\n"
+    "Reply with JSON only:\n"
+    '{"candidates": [{"x": <int>, "y": <int>, '
+    '"confidence": "high"|"medium"|"low", "what": "<short reason>"}]}\n'
     "Coordinates are pixels in THIS image (top-left = 0,0)."
 )
+
+
+def _ball_blob_score(img, x: int, y: int) -> float:
+    """Cheap pixel sanity check for a claimed ball position: how much
+    does (x, y) look like a SMALL bright-ish round cluster against its
+    local surroundings? Returns 0..1 (higher = more ball-like), or -1
+    when it can't be evaluated. Used to rank the vision model's
+    candidates so a confident-but-wrong pick (a shoe, a sign) loses to
+    a real ball, and to catch a hallucinated coordinate."""
+    if not (HAS_CV and HAS_NP) or img is None:
+        return -1.0
+    try:
+        h, w = img.shape[:2]
+        # Ball radius scales with the image: our crops are framed so the
+        # ball is a handful of pixels across.
+        r = max(3, int(round(0.012 * max(w, h))))
+        x0, x1 = max(0, x - 4 * r), min(w, x + 4 * r + 1)
+        y0, y1 = max(0, y - 4 * r), min(h, y + 4 * r + 1)
+        if x1 - x0 < 6 or y1 - y0 < 6:
+            return -1.0
+        patch = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        cx, cy = x - x0, y - y0
+        cx0, cx1 = max(0, cx - r), min(patch.shape[1], cx + r + 1)
+        cy0, cy1 = max(0, cy - r), min(patch.shape[0], cy + r + 1)
+        if cx1 - cx0 < 2 or cy1 - cy0 < 2:
+            return -1.0
+        core = patch[cy0:cy1, cx0:cx1]
+        core_mean = float(core.mean())
+        surround = float(np.median(patch))
+        # Contrast of the claimed ball against its immediate surroundings.
+        contrast = (core_mean - surround) / 255.0
+        # Small-object test: the bright cluster must NOT fill the patch
+        # (that's a shoe / sign / sky), it should be a compact blob.
+        thr = max(core_mean - 12.0, surround + 6.0)
+        bright_frac = float((patch >= thr).mean())
+        compact = 1.0 - min(1.0, bright_frac / 0.30)
+        return max(0.0, min(1.0, 0.65 * max(0.0, contrast * 3.0)
+                            + 0.35 * compact))
+    except Exception:  # noqa: BLE001
+        return -1.0
 
 
 def verify_rest_and_impact(
@@ -6102,6 +6145,7 @@ def find_resting_ball(
     model: str | None = None,
     crop_center: tuple[float, float] | None = None,
     crop_frac: float = 0.45,
+    expect_present: bool = True,
 ) -> dict:
     """Single-frame Claude vision call: is there a golf ball AT REST, and
     where? Returns {present, x, y, confidence, error} with x/y in NATIVE
@@ -6178,38 +6222,95 @@ def find_resting_ball(
         out["error"] = "jpeg encode failed"
         return out
     client = _anthropic_client()
-    try:
+    b64 = base64.standard_b64encode(bytes(buf)).decode("ascii")
+
+    def _ask(nudge: str) -> list:
+        """One vision call -> list of candidate dicts (may be empty)."""
         resp = client.messages.create(
             model=_resolve_frame_picker_model(model),
-            max_tokens=150,
+            max_tokens=400,
             system=[{
                 "type": "text",
                 "text": _FIND_RESTING_BALL_PROMPT,
                 "cache_control": {"type": "ephemeral"},
             }],
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": f"Frame {frame_idx}. JSON only."},
+                {"type": "text", "text": f"Frame {frame_idx}. {nudge} JSON only."},
                 {"type": "image", "source": {
                     "type": "base64", "media_type": "image/jpeg",
-                    "data": base64.standard_b64encode(bytes(buf)).decode("ascii"),
+                    "data": b64,
                 }},
             ]}],
         )
+        text = "".join(
+            c.text for c in resp.content if getattr(c, "type", None) == "text"
+        )
+        data = _extract_json(text) or {}
+        cands = data.get("candidates")
+        if isinstance(cands, list):
+            return [c for c in cands if isinstance(c, dict)]
+        # Tolerate the old single-answer shape.
+        if data.get("x") is not None and data.get("y") is not None:
+            return [{
+                "x": data["x"], "y": data["y"],
+                "confidence": data.get("confidence"),
+            }]
+        return []
+
+    # ATTEMPT 1, then a SECOND look if it came back empty. Two different
+    # vision models spotted the ball instantly in these very crops, so an
+    # empty answer means the model gave up, not that the ball is absent —
+    # the retry nudges it to commit to its best guess.
+    _CONF_RANK = {"high": 1.0, "medium": 0.6, "low": 0.3}
+    try:
+        cands = _ask("Locate the ball.")
+        if not cands and expect_present:
+            # Only push when the ball SHOULD be there (address frame).
+            # The after-impact check calls with expect_present=False:
+            # there the ball is legitimately gone, and nudging the model
+            # to "find one anyway" would manufacture a still-there
+            # verdict and get a real swing thrown out as a practice cut.
+            cands = _ask(
+                "A ball IS in this image, on the ground near the golfer. "
+                "Give your single best guess even if you are unsure."
+            )
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"api_failed: {exc}"
         return out
-    text = "".join(
-        c.text for c in resp.content if getattr(c, "type", None) == "text"
-    )
-    data = _extract_json(text) or {}
-    out["present"] = bool(data.get("present"))
-    out["confidence"] = data.get("confidence")
-    if out["present"] and data.get("x") is not None and data.get("y") is not None:
+
+    # Score every candidate: what the model believes, checked against
+    # what the pixels actually look like. The pixel score is what stops a
+    # confident-but-wrong pick (shoe, sign, sprinkler) from winning.
+    best = None
+    for rank, c in enumerate(cands[:3]):
         try:
-            out["x"] = int(round(float(data["x"]) / scale)) + crop_x0
-            out["y"] = int(round(float(data["y"]) / scale)) + crop_y0
-        except (TypeError, ValueError):
-            pass
+            cx, cy = int(round(float(c["x"]))), int(round(float(c["y"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+        if not (0 <= cx < raw.shape[1] and 0 <= cy < raw.shape[0]):
+            continue
+        blob = _ball_blob_score(raw, cx, cy)
+        conf = _CONF_RANK.get(str(c.get("confidence") or "").lower(), 0.5)
+        # Model order carries real signal, so keep a mild rank bonus.
+        score = (0.45 * conf) + (0.40 * max(0.0, blob)) + (0.15 / (rank + 1))
+        if best is None or score > best[0]:
+            best = (score, cx, cy, c.get("confidence"), blob)
+
+    if best is not None and not expect_present:
+        # Strict mode: a claim that the ball is STILL on the tee has to
+        # be backed by the pixels, not by the model's willingness to
+        # answer. Weak-looking blobs are treated as "gone".
+        _s, _cx, _cy, _cf, _blob = best
+        if _blob >= 0.0 and _blob < 0.35 and str(_cf or "").lower() != "high":
+            best = None
+            out["rejected_weak_blob"] = round(_blob, 3)
+    if best is not None:
+        _score, cx, cy, conf, blob = best
+        out["present"] = True
+        out["confidence"] = conf
+        out["blob_score"] = round(blob, 3) if blob >= 0 else None
+        out["x"] = int(round(cx / scale)) + crop_x0
+        out["y"] = int(round(cy / scale)) + crop_y0
     return out
 
 
@@ -6411,6 +6512,8 @@ def classify_swing_shot(
     )
     ra = find_resting_ball(
         input_path, int(t_a * fps), crop_center=_after_center, crop_frac=_cf,
+        # The whole point of this look is that the ball may be GONE.
+        expect_present=False,
     )
     if ra.get("error"):
         _errs.append(str(ra["error"]))
