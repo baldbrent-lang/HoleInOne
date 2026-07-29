@@ -43,6 +43,12 @@ warnings.filterwarnings(
 # MediaPipe pose landmark indices.
 _LEFT_WRIST = 15
 _RIGHT_WRIST = 16
+# Feet — the bottom of the golfer. The ball sits on the ground near this
+# line, so it bounds the search box for a resting ball.
+_LEFT_ANKLE = 27
+_RIGHT_ANKLE = 28
+_LEFT_FOOT = 31
+_RIGHT_FOOT = 32
 _LEFT_SHOULDER = 11
 _RIGHT_SHOULDER = 12
 _LEFT_HIP = 23
@@ -200,6 +206,9 @@ def detect_swings_from_pose(
     vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 0
 
     wrist: list[tuple[float, float] | None] = []  # per sample: (x,y) normalized or None
+    # Lowest visible foot/ankle per sample — the ground line under
+    # the golfer, which bounds where a resting ball can be.
+    feet: list[tuple[float, float] | None] = []
     bend: list[float | None] = []  # per sample: spine angle from vertical (deg)
     times: list[float] = []
     n_pose = 0
@@ -342,10 +351,20 @@ def detect_swings_from_pose(
                         crop = None
             if pts is None:
                 wrist.append(None)
+                feet.append(None)
                 bend.append(None)
                 continue
             crop = _crop_from(pts)
             bend.append(_spine_deg(pts))
+            # Lowest visible foot/ankle — the ground line under the golfer.
+            _fc = [
+                (p.x, p.y) for p in (
+                    pts[_LEFT_ANKLE], pts[_RIGHT_ANKLE],
+                    pts[_LEFT_FOOT], pts[_RIGHT_FOOT],
+                )
+                if getattr(p, "visibility", 0.0) >= 0.3
+            ]
+            feet.append(max(_fc, key=lambda q: q[1]) if _fc else None)
             cands = []
             for wi in (_LEFT_WRIST, _RIGHT_WRIST):
                 p = pts[wi]
@@ -544,6 +563,20 @@ def detect_swings_from_pose(
                     return [int(round(wx * vid_w)), int(round(wy * vid_h))]
         return None
 
+    def _feet_native(p_i):
+        """Lowest visible foot/ankle (native pixels) at/near the peak — the
+        ground line under the golfer. Same outward search as the wrist,
+        since pose drops out at the blurred peak. Returns [x, y] or None."""
+        if not (vid_w and vid_h):
+            return None
+        span = int(round(0.5 * eff_hz)) + 1
+        for off in range(span):
+            for j in (p_i - off, p_i + off):
+                if 0 <= j < len(feet) and feet[j] is not None:
+                    fx, fy = feet[j]
+                    return [int(round(fx * vid_w)), int(round(fy * vid_h))]
+        return None
+
     segments = []
     for s_i, e_i, p_i, p_v, b, ratio in keep:
         burst_status[p_i] = "swing"
@@ -558,6 +591,8 @@ def detect_swings_from_pose(
             "back_bend_deg": (round(float(b), 1) if b is not None else None),
             # Hands position at the strike — the tracer's start anchor.
             "impact_wrist_xy": _wrist_native(p_i),
+            # Ground line under the golfer — bounds the ball search box.
+            "impact_feet_xy": _feet_native(p_i),
         })
 
     # Decimate the wrist-speed waveform for plotting (peak-preserving).

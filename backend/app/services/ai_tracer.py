@@ -6141,6 +6141,7 @@ def find_resting_ball(
     model: str | None = None,
     crop_center: tuple[float, float] | None = None,
     crop_frac: float = 0.45,
+    crop_rect: tuple[int, int, int, int] | None = None,
 ) -> dict:
     """Single-frame Claude vision call: is there a golf ball AT REST, and
     where? Returns {present, x, y, confidence, error} with x/y in NATIVE
@@ -6177,7 +6178,22 @@ def find_resting_ball(
         return out
     h, w = raw.shape[:2]
     crop_x0 = crop_y0 = 0
-    if crop_center is not None and w > 0 and h > 0:
+    if crop_rect is not None and w > 0 and h > 0:
+        # Caller-supplied search box (x, y, w, h) in native pixels — used
+        # when the caller knows the geometry better than a centred crop
+        # can express it. The assumed-impact path builds this from the
+        # pose: left edge at the hands, top just above them, bottom below
+        # the feet, squared off. The hands are only a REFERENCE for where
+        # to look; the ball is whatever we find inside the box.
+        _rx = max(0, min(w - 8, int(crop_rect[0])))
+        _ry = max(0, min(h - 8, int(crop_rect[1])))
+        _rw = max(16, min(w - _rx, int(crop_rect[2])))
+        _rh = max(16, min(h - _ry, int(crop_rect[3])))
+        crop_x0, crop_y0 = _rx, _ry
+        raw = raw[_ry:_ry + _rh, _rx:_rx + _rw]
+        h, w = raw.shape[:2]
+        out["crop_box"] = [crop_x0, crop_y0, w, h]
+    elif crop_center is not None and w > 0 and h > 0:
         cw = max(64, int(round(w * crop_frac)))
         # Taller than wide: the ball can sit well below the hands
         # (address, backswing frames), so the box needs vertical reach.

@@ -105,6 +105,7 @@ from ..services.ai_tracer import (
     detect_swings_from_ball,
     detect_swings_from_ai_ball,
     classify_swing_shot,
+    find_resting_ball,
     compute_motion_trace,
     detect_swings_combined,
     filter_swings_by_ball_departure,
@@ -1441,8 +1442,59 @@ def ai_trace(
     }
 
 
+def _ball_search_box(src_path, wrist_xy, feet_xy):
+    """The square to look for a resting ball in, from the pose.
+
+    Geometry per the operator's sketch: the hands are a REFERENCE POINT,
+    not the ball. Take the top of the hands marker as the box's upper-left
+    corner, run down to below the golfer's feet, and square it off from
+    there. On a camera behind the golfer that region covers the ground in
+    front of the stance, which is exactly where a ball at address sits —
+    and it excludes the golfer's body, which is what kept dragging the
+    search onto shoes and shorts.
+
+    Returns (x, y, w, h) in native pixels, or None when there isn't enough
+    pose to build it."""
+    if not (wrist_xy and len(wrist_xy) == 2):
+        return None
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(src_path))
+        try:
+            fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        finally:
+            cap.release()
+        if not (fw and fh):
+            return None
+        wx, wy = int(wrist_xy[0]), int(wrist_xy[1])
+        # Top edge: just above the hands marker (the ring drawn on the
+        # debug frame), so the box starts level with the top of it.
+        _r = max(10, int(fh * 0.02))
+        top = max(0, wy - _r)
+        # Bottom edge: below the feet. Falls back to a stance-height
+        # estimate when pose lost the ankles at the blurred peak.
+        if feet_xy and len(feet_xy) == 2:
+            bottom = int(feet_xy[1]) + int(0.03 * fh)
+        else:
+            bottom = wy + int(0.22 * fh)
+        bottom = min(fh, max(top + 32, bottom))
+        size = bottom - top
+        # Square, running from the hands toward the target side.
+        left = max(0, min(fw - 16, wx))
+        size = min(size, fw - left, fh - top)
+        if size < 32:
+            return None
+        return (int(left), int(top), int(size), int(size))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ball search box failed: %s", exc)
+        return None
+
+
 def _save_assumed_impact_frame(
     src_path, frame_idx: int, fps: float, seed_xy, ai_points, name_stem: str,
+    search_box=None, box_ball_xy=None,
 ) -> str | None:
     """Write the frame we ASSUMED impact on, annotated. Returns the
     filename, or None.
@@ -1468,6 +1520,18 @@ def _save_assumed_impact_frame(
                 max(10, int(fr.shape[0] * 0.02)),
                 (255, 200, 0), 2, cv2.LINE_AA,
             )
+        if search_box and len(search_box) == 4:
+            _bx, _by, _bw, _bh = (int(v) for v in search_box)
+            cv2.rectangle(
+                fr, (_bx, _by), (_bx + _bw, _by + _bh),
+                (0, 0, 255), 2, cv2.LINE_AA,
+            )
+        if box_ball_xy and len(box_ball_xy) == 2:
+            cv2.circle(
+                fr, (int(box_ball_xy[0]), int(box_ball_xy[1])),
+                max(8, int(fr.shape[0] * 0.015)),
+                (0, 255, 0), 3, cv2.LINE_AA,
+            )
         for q in (ai_points or []):
             cv2.circle(
                 fr, (int(q["x"]), int(q["y"])),
@@ -1477,7 +1541,8 @@ def _save_assumed_impact_frame(
         _txt = (
             f"ASSUMED impact f{int(frame_idx)} "
             f"({frame_idx / max(1.0, fps):.2f}s) - pose peak, no ball "
-            f"departure; cyan=pose hands (launch seed), magenta=AI picks"
+            f"departure; cyan=pose hands (REFERENCE only), red=search box, "
+            f"green=ball found in box, magenta=AI launch picks"
         )
         for _c, _w in (((0, 0, 0), 4), ((255, 255, 255), 1)):
             cv2.putText(
@@ -2232,15 +2297,41 @@ def _run_long_upload_job(
                                     float(d.get("peak_time_sec") or 0.0)
                                     * tee_fps,
                                 ))
-                                # Seed the plot at the golfer's hands at
-                                # impact: the ball sits just below them,
-                                # and it is the only position we have.
+                                # The hands are a REFERENCE, never the
+                                # ball. Build the search box from them:
+                                # upper-left just above the hands, running
+                                # down past the golfer's feet and squared
+                                # off — that region is where a ball on the
+                                # ground in front of the golfer has to be.
+                                # Then LOOK IN IT, and whatever is found
+                                # there is the rest position.
                                 _seed = d.get("impact_wrist_xy")
+                                _feet = d.get("impact_feet_xy")
+                                _box = _ball_search_box(
+                                    src_path, _seed, _feet,
+                                )
                                 if _seed and len(_seed) == 2:
                                     _tok = secrets.token_hex(3)
+                                    _rb = find_resting_ball(
+                                        src_path, _pk_f, crop_rect=_box,
+                                    ) if _box else {}
+                                    _found_rest = (
+                                        [float(_rb["x"]), float(_rb["y"])]
+                                        if _rb.get("present")
+                                        and _rb.get("x") is not None
+                                        else None
+                                    )
+                                    log.info(
+                                        "long-upload worker: assumed-impact "
+                                        "ball search box=%s -> %s",
+                                        _box,
+                                        _found_rest or f"no ball ({_rb.get('error')})",
+                                    )
+                                    _plot_from = _found_rest or _seed
                                     _alp = plot_launch_frames_ai(
                                         src_path,
-                                        (float(_seed[0]), float(_seed[1])),
+                                        (float(_plot_from[0]),
+                                         float(_plot_from[1])),
                                         _pk_f, tee_fps,
                                         debug_dir=_dbg_dir,
                                         debug_prefix=(
@@ -2283,7 +2374,18 @@ def _run_long_upload_job(
                                         "ai_launch_reason": _alp.get("reason"),
                                         "ai_launch_image": _alp.get("image"),
                                         "ai_launch_points": _ai_pts,
+                                        "search_box": _box,
+                                        "box_ball_xy": _found_rest,
                                     }
+                                    if _found_rest:
+                                        # A ball located inside the box
+                                        # beats an inferred launch point.
+                                        d["ball_rest_xy"] = list(_found_rest)
+                                        d["impact_pinned"] = True
+                                        _anchor_rec["rest_xy"] = list(
+                                            _found_rest,
+                                        )
+                                        _e["impact_pinned_f"] = _pk_f
                                     if _ai_pts:
                                         # The earliest AI pick IS where the
                                         # flight starts — the rest anchor,
@@ -2293,24 +2395,29 @@ def _run_long_upload_job(
                                             _ai_pts,
                                             key=lambda q: int(q["frame"]),
                                         )
-                                        d["ball_rest_xy"] = [
-                                            float(_first["x"]),
-                                            float(_first["y"]),
-                                        ]
-                                        d["impact_pinned"] = True
-                                        _anchor_rec["rest_xy"] = [
-                                            float(_first["x"]),
-                                            float(_first["y"]),
-                                        ]
-                                        _e["impact_pinned_f"] = _pk_f
+                                        if not _found_rest:
+                                            d["ball_rest_xy"] = [
+                                                float(_first["x"]),
+                                                float(_first["y"]),
+                                            ]
+                                            d["impact_pinned"] = True
+                                            _anchor_rec["rest_xy"] = [
+                                                float(_first["x"]),
+                                                float(_first["y"]),
+                                            ]
+                                            _e["impact_pinned_f"] = _pk_f
                                         # Same hand-off as the departure
                                         # path: pixel tracker seeded from
                                         # the AI's points, then MOG2.
                                         try:
+                                            _tr_from = (
+                                                _found_rest
+                                                or [_first["x"], _first["y"]]
+                                            )
                                             _lt = track_launch_from_rest(
                                                 src_path,
-                                                (float(_first["x"]),
-                                                 float(_first["y"])),
+                                                (float(_tr_from[0]),
+                                                 float(_tr_from[1])),
                                                 _pk_f, tee_fps,
                                                 debug_dir=_dbg_dir,
                                                 debug_prefix=(
@@ -2367,6 +2474,8 @@ def _run_long_upload_job(
                                             src_path, _pk_f, tee_fps,
                                             _seed, _ai_pts,
                                             f"assumedimp-{upload_id}-{_tok}",
+                                            search_box=_box,
+                                            box_ball_xy=_found_rest,
                                         )
                                     d["anchor_rec"] = {
                                         k: _anchor_rec.get(k)
@@ -2383,6 +2492,7 @@ def _run_long_upload_job(
                                             "ai_launch_reason",
                                             "ai_launch_image",
                                             "ai_launch_points",
+                                            "search_box", "box_ball_xy",
                                         )
                                     }
                             except Exception as exc:  # noqa: BLE001
@@ -2410,6 +2520,7 @@ def _run_long_upload_job(
                                         # assumed-impact path (no departure)
                                         "assumed_impact",
                                         "assumed_impact_image", "rest_xy",
+                                        "search_box", "box_ball_xy",
                                         "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
