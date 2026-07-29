@@ -39,6 +39,7 @@ overlay, share buttons, matching to players — see
 | `agent/common.py` | Config loader, HTTP client, ring buffer, heartbeat thread |
 | `agent/tee.py` | Tee-side detect-and-record loop |
 | `agent/green.py` | Green-side long-poll-and-record loop |
+| `focus.py` | Live focus meter — turn the lens ring until the score peaks |
 | `config.example.yaml` | Template config; copy to `config.yaml` and fill in |
 | `requirements.txt` | Python deps (OpenCV, MediaPipe, requests, PyYAML) |
 | `install.sh` | One-shot installer for a fresh Raspberry Pi OS install |
@@ -98,6 +99,57 @@ sudo -u golfreelz ./venv/bin/python3 -c "import cv2; \
 # draw a rectangle around the tee markers, note the pixel coords.
 # Plug them into config.yaml as tee_box_roi.x/y/w/h.
 ```
+
+## Checking focus
+
+The HQ camera (IMX477) has **no autofocus** — focus and aperture are
+physical rings on the C/CS lens. `focus.py` gives you a number to tune
+against instead of squinting at a preview on a laptop in sunlight.
+
+```bash
+sudo systemctl stop golfreelz-agent        # the service holds the camera
+cd /opt/golfreelz-agent
+sudo -u golfreelz ./venv/bin/python3 focus.py --roi tee --save /tmp/focus.jpg
+# ... turn the focus ring slowly, stop where `score` peaks, Ctrl-C ...
+sudo systemctl start golfreelz-agent
+```
+
+Output looks like:
+
+```
+score    1284  (best    1301)  [###################  ]  bright 118  zones L 940 C 1284 R 1102
+```
+
+- **score** — sharpness right now. The absolute value means nothing across
+  scenes; only its **peak as you turn the ring** matters.
+- **best** — highest seen this run, so you can tell you have gone past it.
+- **zones** — left/centre/right thirds. A large spread means the camera
+  isn't square to the scene, or the lens is soft off-axis (stopping the
+  aperture down usually fixes the latter).
+- **bright** — mean luma. Below ~40 or above ~220 the score is unreliable;
+  fix exposure first.
+
+Three things look identical in a finished clip, and this separates them:
+
+| What you see | Cause | Fix |
+|---|---|---|
+| A *static* object at the golfer's distance scores low here | focus | the lens ring |
+| Scores fine here, but *moving* things smear in the video | motion blur | shutter speed / more light |
+| Scores fine and the saved 100% crop is sharp, but the uploaded clip is soft | compression | bitrate (green uploads 720p @ 1500 kbps) |
+
+**If the saved `_crop100.jpg` is sharp, focus is not the problem.**
+
+Two things worth doing while you are out there:
+
+- **Stop the aperture down.** Wide open (f/1.2 on the 6mm CS lens) the
+  depth of field is very shallow and the corners are soft. Around f/4–5.6
+  sharpens the frame and buys enough depth that the ball at address and
+  the ball a few yards downrange are both acceptable. In daylight you have
+  light to spare.
+- **Focus through the enclosure**, at the real mounting distance — acrylic
+  shifts the focal plane slightly and shows up any haze or condensation.
+
+Lock both rings with their grub screws when done; transport walks them.
 
 ## Updating the agent code
 
