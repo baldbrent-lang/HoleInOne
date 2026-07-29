@@ -11276,10 +11276,25 @@ def _debug2_run(row, src_path, db):
         ]
         entry["n_dots"] = len(pool)
 
-        # 5. CHAIN upward from the ball.
-        ch = d2.chain_from_ball(
-            pool, club.get("xy"), imp_f, _fh,
+        # 5. CHAIN. Lock on ABOVE THE HEAD, where the map is clean and
+        # the ball's dots bunch as it slows, then walk back down toward
+        # impact. Walking up from the ball starts in the worst place on
+        # the map — body heat and motion blur — and one bad first link
+        # poisons the rest. Falls back to the upward walk when there is no
+        # head position or nothing above it to lock onto.
+        _head = c.get("impact_head_xy")
+        _head_y = float(_head[1]) if _head and len(_head) == 2 else None
+        entry["head_y"] = _head_y
+        ch = d2.chain_above_head(
+            pool, club.get("xy"), imp_f, _fh, _head_y,
         )
+        entry["chain_method"] = "above-head lock-on, walked back"
+        if not ch.get("points"):
+            _why_above = ch.get("reason")
+            ch = d2.chain_from_ball(pool, club.get("xy"), imp_f, _fh)
+            entry["chain_method"] = f"fell back to up-from-ball ({_why_above})"
+        entry["aim_px"] = ch.get("aim_px")
+        entry["seed_frames"] = ch.get("seed")
         entry["chain"] = ch["points"]
         entry["chain_reason"] = ch["reason"]
         entry["n_rejected"] = len(ch["rejected"])
@@ -11297,9 +11312,12 @@ def _debug2_run(row, src_path, db):
             name = f"d2chain-{upload_id}-{tok}-{i}.jpg"
             if d2.draw_chain(
                 CLIPS_DIR / _heat, club.get("xy"), ch["points"],
-                ch["rejected"], CLIPS_DIR / name,
+                ch.get("rejected") or [], CLIPS_DIR / name,
                 f"chain f{f_lo}-{f_hi}: {ch['reason']}  "
-                f"(green=ascending, orange=descending, red x=rejected)",
+                f"(green=chain, magenta x=where it aims back to, "
+                f"red x=rejected)",
+                head_y=_head_y,
+                aim_xy=ch.get("aim_xy"),
             ):
                 entry["chain_image_url"] = _clip_url(name)
         rep["swings"].append(entry)

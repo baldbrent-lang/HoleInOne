@@ -268,6 +268,12 @@ def chain_from_ball(
 
 # ── drawing ────────────────────────────────────────────────────────────
 
+def _label2(img, text: str, y: int) -> None:
+    for colour, weight in (((0, 0, 0), 3), ((255, 255, 255), 1)):
+        cv2.putText(img, text, (10, max(12, y)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, colour, weight, cv2.LINE_AA)
+
+
 def _label(img, text: str) -> None:
     for colour, weight in (((0, 0, 0), 4), ((255, 255, 255), 1)):
         cv2.putText(
@@ -283,6 +289,8 @@ def draw_chain(
     rejected: list,
     out_path: Path,
     header: str,
+    head_y: float | None = None,
+    aim_xy=None,
 ) -> bool:
     """The chain over the windowed heat: the ball, the links, and the
     dots that were considered and thrown out. The rejects are drawn
@@ -294,6 +302,23 @@ def draw_chain(
         img = cv2.imread(str(heat_path))
         if img is None:
             return False
+        if head_y is not None:
+            # The line the lock-on happens above. Everything over it is
+            # sky and trees, which is why the dots up there are clean.
+            cv2.line(img, (0, int(head_y)), (img.shape[1], int(head_y)),
+                     (0, 200, 255), 1, cv2.LINE_AA)
+            _label2(img, "head line — lock on above here", int(head_y) - 6)
+        if aim_xy and len(aim_xy) == 2:
+            # Where the chain, run BACK to the impact frame, says the ball
+            # was. Its distance from the green ball marker is the check on
+            # both the chain and the ball position.
+            ax, ay = int(aim_xy[0]), int(aim_xy[1])
+            cv2.drawMarker(img, (ax, ay), (255, 0, 255),
+                           cv2.MARKER_CROSS, 22, 2, cv2.LINE_AA)
+            if ball_xy and len(ball_xy) == 2:
+                cv2.line(img, (ax, ay),
+                         (int(ball_xy[0]), int(ball_xy[1])),
+                         (255, 0, 255), 1, cv2.LINE_AA)
         for rj in (rejected or []):
             cv2.drawMarker(
                 img, (int(rj["x"]), int(rj["y"])), (60, 60, 220),
@@ -318,3 +343,181 @@ def draw_chain(
     except Exception as exc:  # noqa: BLE001
         log.warning("debug2 draw_chain failed: %s", exc)
         return False
+
+
+# ── stage 5b: lock on above the head, then walk back down to the ball ──
+
+def chain_above_head(
+    dots: list,
+    ball_xy,
+    impact_frame: int,
+    frame_h: int,
+    head_y: float | None,
+    max_frames: int = WIN_POST,
+) -> dict:
+    """Find the flight where it is EASY, then walk back to where it is hard.
+
+    Walking up from the ball starts in the worst place on the map: the
+    first frames after impact sit inside the golfer's body heat, the ball
+    is a motion-blurred smear, and one bad first link poisons everything
+    after it. Above head height the opposite holds — no body heat, and the
+    ball is slowing down so its dots bunch closer together and read as an
+    obvious line.
+
+    So: lock a chain onto the clean dots above the head, then extend it
+    BACKWARD, frame by frame, down toward impact. A correct chain points
+    at the ball when you run it back, which also gives a free check on the
+    ball position itself — reported as aim_px.
+
+    Returns {points, seed, aim_px, reason, rejected}."""
+    out = {
+        "points": [], "seed": None, "aim_px": None,
+        "reason": None, "rejected": [],
+    }
+    r = max(6.0, 0.012 * float(frame_h))
+    f0, f1 = int(impact_frame), int(impact_frame) + int(max_frames)
+    inwin = [
+        {"frame": int(d["frame"]), "x": float(d["x"]), "y": float(d["y"])}
+        for d in (dots or [])
+        if d.get("frame") is not None and f0 < int(d["frame"]) <= f1
+        and d.get("x") is not None and d.get("y") is not None
+    ]
+    if head_y is None:
+        out["reason"] = "no head position — cannot pick the clean region"
+        return out
+    above = sorted(
+        [d for d in inwin if d["y"] <= float(head_y)],
+        key=lambda d: d["frame"],
+    )
+    if len(above) < 3:
+        out["reason"] = (
+            f"only {len(above)} dot(s) above head level (y<={int(head_y)}) "
+            f"— nothing to lock onto"
+        )
+        return out
+
+    # Seed on the straightest 3-dot run: constant-velocity triples, scored
+    # by how little the second step turns from the first. A ball in flight
+    # barely turns between adjacent frames; foliage flicker does nothing
+    # else BUT turn.
+    best = None
+    for i in range(len(above)):
+        a = above[i]
+        for j in range(i + 1, len(above)):
+            b = above[j]
+            df1 = b["frame"] - a["frame"]
+            if df1 <= 0 or df1 > 8:
+                break
+            v1 = ((b["x"] - a["x"]) / df1, (b["y"] - a["y"]) / df1)
+            if math.hypot(*v1) < 0.35 * r:
+                continue                      # stationary: not a ball
+            for k in range(j + 1, len(above)):
+                c = above[k]
+                df2 = c["frame"] - b["frame"]
+                if df2 <= 0 or df2 > 8:
+                    break
+                v2 = ((c["x"] - b["x"]) / df2, (c["y"] - b["y"]) / df2)
+                turn = math.hypot(v2[0] - v1[0], v2[1] - v1[1])
+                spd = math.hypot(*v1)
+                if turn > 0.55 * spd + 0.5 * r:
+                    continue                  # turns too hard to be flight
+                # Prefer TIGHT, STRAIGHT triples. As the ball climbs it
+                # slows, so its dots bunch up — consecutive frames are the
+                # signal. Rewarding a long span instead picks three
+                # widely-spaced dots that line up by coincidence, which is
+                # exactly what foliage flicker offers.
+                score = -(turn / max(spd, 1e-3)) - 0.10 * (df1 + df2)
+                if best is None or score > best[0]:
+                    best = (score, a, b, c, v2)
+    if best is None:
+        out["reason"] = (
+            f"{len(above)} dot(s) above head level but no straight "
+            f"3-dot run among them"
+        )
+        return out
+    _s, a, b, c, vel = best
+    chain = [a, b, c]
+    out["seed"] = [a["frame"], b["frame"], c["frame"]]
+
+    # Forward along the flight, then backward down toward the ball. The
+    # backward walk is the point of the exercise.
+    def _walk(anchor, v, direction):
+        got, px, py, pf = [], anchor["x"], anchor["y"], anchor["frame"]
+        vx, vy = v
+        while True:
+            nxt = None
+            for d in inwin:
+                df = (d["frame"] - pf) * direction
+                if df <= 0 or df > 10:
+                    continue
+                ex, ey = px + vx * df * direction, py + vy * df * direction
+                dist = math.hypot(d["x"] - ex, d["y"] - ey)
+                tol = (2.5 + 0.9 * df) * r
+                if dist <= tol and (nxt is None or dist < nxt[0]):
+                    nxt = (dist, d, df)
+            if nxt is None:
+                break
+            _dist, d, df = nxt
+            got.append(d)
+            # Blend the measured step into the velocity so a gently
+            # curving flight is followed rather than fought.
+            nvx = (d["x"] - px) / (df * direction)
+            nvy = (d["y"] - py) / (df * direction)
+            vx, vy = 0.5 * vx + 0.5 * nvx, 0.5 * vy + 0.5 * nvy
+            px, py, pf = d["x"], d["y"], d["frame"]
+        return got, (vx, vy), (px, py, pf)
+
+    fwd, _v_f, _end = _walk(c, vel, +1)
+    back, v_b, (bx, by, bf) = _walk(a, vel, -1)
+
+    allpts = sorted(
+        {int(d["frame"]): d for d in (back + chain + fwd)}.values(),
+        key=lambda d: d["frame"],
+    )
+    out["points"] = [
+        {"frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"]),
+         "phase": "up"}
+        for d in allpts
+    ]
+
+    # Does the chain, run back to the impact frame, arrive at the ball?
+    # This is the check that makes the whole approach worth it: it tests
+    # the chain AND the ball position against each other.
+    if ball_xy and len(ball_xy) == 2:
+        # BALLISTIC back-extrapolation, not linear. The ball is fastest at
+        # launch and slows as it climbs, so running the chain's LATE
+        # velocity straight back overshoots badly — measured 186px on a
+        # synthetic flight whose quadratic fit lands within a few. Fit
+        # x and y against frame and evaluate at impact, which is the same
+        # model the renderer uses.
+        ex = ey = None
+        pts = out["points"]
+        if HAS_CV and len(pts) >= 4:
+            try:
+                fs = np.array([p["frame"] for p in pts], float)
+                xs = np.array([p["x"] for p in pts], float)
+                ys = np.array([p["y"] for p in pts], float)
+                deg = 2 if len(pts) >= 6 else 1
+                ex = float(np.polyval(np.polyfit(fs, xs, deg), impact_frame))
+                ey = float(np.polyval(np.polyfit(fs, ys, 2), impact_frame))
+            except Exception:  # noqa: BLE001
+                ex = ey = None
+        if ex is None:
+            df = bf - int(impact_frame)
+            ex, ey = bx - v_b[0] * df, by - v_b[1] * df
+        out["aim_px"] = round(
+            math.hypot(ex - float(ball_xy[0]), ey - float(ball_xy[1])), 1,
+        )
+        out["aim_xy"] = [int(ex), int(ey)]
+
+    out["reason"] = (
+        f"{len(out['points'])} linked f{out['points'][0]['frame']}-"
+        f"{out['points'][-1]['frame']} — locked on {len(above)} clean dots "
+        f"above the head (seed f{a['frame']}/{b['frame']}/{c['frame']}), "
+        f"walked back {len(back)} and forward {len(fwd)}"
+        + (
+            f"; back-extension lands {out['aim_px']:.0f}px from the ball"
+            if out.get("aim_px") is not None else ""
+        )
+    )
+    return out

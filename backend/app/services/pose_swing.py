@@ -45,6 +45,7 @@ _LEFT_WRIST = 15
 _RIGHT_WRIST = 16
 # Feet — the bottom of the golfer. The ball sits on the ground near this
 # line, so it bounds the search box for a resting ball.
+_NOSE = 0
 _LEFT_ANKLE = 27
 _RIGHT_ANKLE = 28
 _LEFT_FOOT = 31
@@ -209,6 +210,10 @@ def detect_swings_from_pose(
     # Lowest visible foot/ankle per sample — the ground line under
     # the golfer, which bounds where a resting ball can be.
     feet: list[tuple[float, float] | None] = []
+    # Head (nose) per sample. Everything above this line in the frame is
+    # sky/trees — the clean part of the map, where the ball's trail has no
+    # body heat to compete with.
+    head: list[tuple[float, float] | None] = []
     bend: list[float | None] = []  # per sample: spine angle from vertical (deg)
     times: list[float] = []
     n_pose = 0
@@ -352,6 +357,7 @@ def detect_swings_from_pose(
             if pts is None:
                 wrist.append(None)
                 feet.append(None)
+                head.append(None)
                 bend.append(None)
                 continue
             crop = _crop_from(pts)
@@ -365,6 +371,11 @@ def detect_swings_from_pose(
                 if getattr(p, "visibility", 0.0) >= 0.3
             ]
             feet.append(max(_fc, key=lambda q: q[1]) if _fc else None)
+            _nose = pts[_NOSE]
+            head.append(
+                (_nose.x, _nose.y)
+                if getattr(_nose, "visibility", 0.0) >= 0.3 else None
+            )
             cands = []
             for wi in (_LEFT_WRIST, _RIGHT_WRIST):
                 p = pts[wi]
@@ -563,6 +574,19 @@ def detect_swings_from_pose(
                     return [int(round(wx * vid_w)), int(round(wy * vid_h))]
         return None
 
+    def _head_native(p_i):
+        """Nose position (native px) at/near the peak — the top of the
+        golfer. Same outward search as the wrist."""
+        if not (vid_w and vid_h):
+            return None
+        span = int(round(0.5 * eff_hz)) + 1
+        for off in range(span):
+            for j in (p_i - off, p_i + off):
+                if 0 <= j < len(head) and head[j] is not None:
+                    hx, hy = head[j]
+                    return [int(round(hx * vid_w)), int(round(hy * vid_h))]
+        return None
+
     def _feet_native(p_i):
         """Lowest visible foot/ankle (native pixels) at/near the peak — the
         ground line under the golfer. Same outward search as the wrist,
@@ -593,6 +617,8 @@ def detect_swings_from_pose(
             "impact_wrist_xy": _wrist_native(p_i),
             # Ground line under the golfer — bounds the ball search box.
             "impact_feet_xy": _feet_native(p_i),
+            # Head line — above it the map is sky and trees.
+            "impact_head_xy": _head_native(p_i),
         })
 
     # Decimate the wrist-speed waveform for plotting (peak-preserving).

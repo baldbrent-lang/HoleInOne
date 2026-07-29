@@ -3094,6 +3094,22 @@ function Debug2Modal({ state, onClose }) {
                 <div className="tiny" style={{ marginTop: 4 }}>
                   <b>chain:</b> {sw.chain_reason || "—"}
                   {sw.n_dots != null && ` · ${sw.n_dots} dots in window`}
+                  {sw.chain_method && (
+                    <div className="muted">method: {sw.chain_method}</div>
+                  )}
+                  {sw.aim_px != null && (
+                    <div
+                      style={{
+                        color: sw.aim_px <= 60 ? "#1a9d55" : "#b7791f",
+                      }}
+                    >
+                      run back to impact, the chain lands{" "}
+                      <b>{sw.aim_px}px</b> from the ball
+                      {sw.aim_px <= 60
+                        ? " — chain and ball agree"
+                        : " — chain and ball DISAGREE; one of them is wrong"}
+                    </div>
+                  )}
                   {sw.rejected_why?.length > 0 && (
                     <div className="muted" style={{ marginTop: 2 }}>
                       rejects:{" "}
