@@ -1486,8 +1486,12 @@ def _ball_search_box(src_path, wrist_xy, feet_xy):
         # golfer-side edge stay put — the extra reach goes where the ball
         # can actually be (further from the stance, and higher up the
         # slope), not back across the body.
-        left = max(0, min(fw - 16, wx))
+        # Nudged right, off the hands. The hands mark the golfer-side
+        # edge of where the ball can be, so a box starting exactly on them
+        # spends its left column on the club and the golfer's near leg.
+        # A tenth of the box's width clears that without giving up reach.
         size = int(round(size * 1.15))
+        left = max(0, min(fw - 16, wx + int(round(0.10 * size))))
         top = max(0, bottom - size)
         size = min(size, fw - left, fh - top)
         if size < 32:
