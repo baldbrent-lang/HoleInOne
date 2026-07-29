@@ -3642,7 +3642,11 @@ def render_tracer_video(
     # fitted curve is forced to keep (and hug) them instead of tossing
     # them as "outliers" relative to a fit the AI points had skewed.
     rest_is_anchor_zero = rest_added
-    pinned_set: set[int] = set(manual_anchor_idxs) | priority_anchor_idxs
+    # NB: priority anchors are NOT pinned. Pinning made them immune to
+    # outlier rejection, so a single mis-plotted launch point (plotted
+    # from a wrist fallback rather than a ball) could not be thrown out
+    # and dragged the fitted curve well off the tracked points.
+    pinned_set: set[int] = set(manual_anchor_idxs)
     if rest_is_anchor_zero:
         pinned_set.add(0)
     if not pinned_set:
@@ -3657,10 +3661,11 @@ def render_tracer_video(
             if (rest_is_anchor_zero and i == 0) or i in manual_anchor_idxs:
                 weight_list.append(10.0)
             elif i in priority_anchor_idxs:
-                # AI-plotted launch points — below the operator and the
-                # verified rest, well above a MOG2 dot that might be a
-                # leaf.
-                weight_list.append(6.0)
+                # AI-plotted launch points. A mild preference only: they
+                # ARE better evidence than a raw motion dot, but they are
+                # only as good as the position they were plotted from, so
+                # they must still be outlier-rejectable.
+                weight_list.append(2.0)
             else:
                 weight_list.append(1.0)
     else:

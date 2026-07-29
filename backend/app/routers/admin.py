@@ -7870,49 +7870,13 @@ def _mog2_layer_for_ai_track(
         except Exception as exc:  # noqa: BLE001
             log.warning("mog2 layer: anchor check failed: %s", exc)
 
-    # AI LAUNCH PLOT, here, when nobody handed us one. It was only ever
-    # computed in the produce worker behind the practice filter finding
-    # the resting ball — so on every swing where that filter misses (and
-    # it does), the early flight was never plotted at all, the render's
-    # nearest known ball position was hundreds of px up the arc, and the
-    # rest anchor got thrown out for disagreeing with it. This layer has
-    # its own departure-verified rest and impact, which is all the plot
-    # needs. Clip-relative frames throughout, same as the rest of the
-    # layer.
+    # NB: an "own AI launch plot" ran here briefly and was removed. It
+    # chased the ball starting from `_rest`, which on these swings is the
+    # POSE-WRIST fallback — so it plotted from the golfer's hands, found
+    # one point, and that single bad point then got pinned in the fit and
+    # dragged the whole curve. Plotting the launch is only worth doing
+    # from a real ball position; fix the anchor first.
     _own_launch: list[dict] = []
-    if (
-        not (pipe.get("launch_points") or [])
-        and _rest and len(_rest) == 2 and _imp is not None
-        and os.environ.get("ANTHROPIC_API_KEY")
-    ):
-        try:
-            from ..services.ai_tracer import plot_launch_frames_ai
-
-            _alp = plot_launch_frames_ai(
-                clip_path, (float(_rest[0]), float(_rest[1])),
-                int(_imp), _fps,
-                debug_dir=CLIPS_DIR,
-                debug_prefix=f"ailaunch-{clip_path.stem}",
-            )
-            _own_launch = [
-                {"frame": int(p["frame"]), "x": float(p["x"]),
-                 "y": float(p["y"])}
-                for p in (_alp.get("points") or [])
-                if p.get("frame") is not None
-            ]
-            log.info(
-                "mog2 layer: own AI launch plot -> %d point(s) (%s)",
-                len(_own_launch), _alp.get("reason"),
-            )
-            if anchor_check is None:
-                anchor_check = {"verified": True, "reason": "anchors preverified"}
-            anchor_check["ai_launch_points"] = _own_launch
-            anchor_check["ai_launch_n"] = _alp.get("n_found")
-            anchor_check["ai_launch_reason"] = _alp.get("reason")
-            if _alp.get("image"):
-                anchor_check["ai_launch_image"] = _alp["image"]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("mog2 layer: own AI launch plot failed: %s", exc)
 
     _pfx = f"mog2layer-{clip_path.stem}"
     _cv_url, cv_info, _cv_traced, _cv_dbg = _run_tracer(
