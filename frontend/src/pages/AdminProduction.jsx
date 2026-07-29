@@ -2975,9 +2975,29 @@ function Debug2Modal({ state, onClose }) {
         </div>
 
         {state.running && (
-          <div className="small muted" style={{ marginTop: 8 }}>
-            Running the pipeline — pose pass, club-arc ball, AI judge,
-            windowed heat and the chain. Minutes, not seconds.
+          <div style={{ marginTop: 10 }}>
+            <div className="small">
+              <span
+                className="shimmer"
+                style={{
+                  display: "inline-block", width: 12, height: 12,
+                  borderRadius: "50%", marginRight: 8,
+                  verticalAlign: "middle",
+                }}
+              />
+              Running — this is one synchronous pass, so the stages below
+              fill in only when it finishes. Minutes, not seconds.
+            </div>
+            {/* The stage list up front, so the wait is legible: you can
+                see what it is doing even though the result arrives in one
+                piece. */}
+            <ol className="tiny muted" style={{ marginTop: 8, paddingLeft: 18 }}>
+              <li>Pose candidates — wrist speed + spine bend</li>
+              <li>Impact frame, and the ball from the bottom of the club arc</li>
+              <li>AI judge on the motion-heat composite</li>
+              <li>MOG2 heat over impact−5 … impact+100</li>
+              <li>Chain walked upward from the ball</li>
+            </ol>
           </div>
         )}
         {state.error && (
@@ -6794,15 +6814,23 @@ export default function AdminProduction() {
   }
 
   async function handleDebug2(row) {
-    setBusy(true);
+    // Open the window FIRST. Anything that throws after this still leaves
+    // the operator with a visible panel carrying the error, instead of a
+    // button that appears to do nothing.
     setD2({ running: true, uploadId: row.id, report: null, error: null });
+    setBusyId(row.id);
     try {
       const rep = await api.debug2(adminPassword, row.id);
-      setD2({ running: false, uploadId: row.id, report: rep, error: rep.error });
+      setD2({
+        running: false, uploadId: row.id, report: rep,
+        error: rep?.ok === false ? rep.error : null,
+      });
     } catch (e) {
-      setD2({ running: false, uploadId: row.id, report: null, error: e.message });
+      setD2({
+        running: false, uploadId: row.id, report: null, error: e.message,
+      });
     } finally {
-      setBusy(false);
+      setBusyId((cur) => (cur === row.id ? null : cur));
     }
   }
 
