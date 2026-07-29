@@ -404,6 +404,13 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   // wizard meant leaving this screen and losing the plot in progress.
   const [impactFrame, setImpactFrame] = useState(swing.impact_frame ?? null);
   const impactF = impactFrame;
+  // BALL AT IMPACT = the tracer's starting point. The renderer anchors
+  // the fitted curve on it, so when it is wrong the line begins in the
+  // wrong place no matter how good the flight points are. Editable here
+  // because this is the screen where you can actually SEE where the ball
+  // was, against the motion heat.
+  const [ballAtRest, setBallAtRest] = useState(swing.ball ?? null);
+  const [placingBall, setPlacingBall] = useState(false);
   const winLo = impactF == null ? null : impactF - PLOT_WINDOW_PRE;
   const winHi = impactF == null ? null : impactF + PLOT_WINDOW_POST;
   const inWindow = (arr) =>
@@ -477,6 +484,8 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   function resetMarks() {
     setMarks({ ...baked });
     setImpactFrame(swing.impact_frame ?? null);
+    setBallAtRest(swing.ball ?? null);
+    setPlacingBall(false);
   }
 
   // Diff vs the baked state: new/moved picks become manual points,
@@ -498,7 +507,14 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
     const { overrides, cleared } = pendingChanges();
     const movedImpact =
       impactFrame != null && impactFrame !== (swing.impact_frame ?? null);
-    if (overrides.length === 0 && cleared.length === 0 && !movedImpact) {
+    const movedBall =
+      !!ballAtRest &&
+      (ballAtRest.x !== (swing.ball?.x ?? null) ||
+        ballAtRest.y !== (swing.ball?.y ?? null));
+    if (
+      overrides.length === 0 && cleared.length === 0
+      && !movedImpact && !movedBall
+    ) {
       onClose();
       return;
     }
@@ -514,7 +530,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
         cleared_frames: cleared,
         base_track_frames: swing.ball_track_frames || [],
         impact_frame: impactFrame ?? null,
-        ball_at_rest: swing.ball || null,
+        ball_at_rest: ballAtRest || null,
         target: swing.target || null,
         render_window: hasWindow
           ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
@@ -525,6 +541,12 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           ? {
               ...s,
               impact_frame: impactFrame ?? s.impact_frame,
+              ...(ballAtRest
+                // ball_manual marks it operator-placed; the produce
+                // worker checks that flag before writing a detected rest
+                // position, so a re-produce cannot move it back.
+                ? { ball: ballAtRest, ball_manual: true }
+                : {}),
               tracer_url: fast.tracer_url,
               ball_track_frames: fast.ball_track_frames || [],
             }
@@ -590,7 +612,12 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   const { overrides: pendAdd, cleared: pendClear } = pendingChanges();
   const impactMoved =
     impactFrame != null && impactFrame !== (swing.impact_frame ?? null);
-  const nChanged = pendAdd.length + pendClear.length + (impactMoved ? 1 : 0);
+  const ballMoved =
+    !!ballAtRest &&
+    (ballAtRest.x !== (swing.ball?.x ?? null) ||
+      ballAtRest.y !== (swing.ball?.y ?? null));
+  const nChanged =
+    pendAdd.length + pendClear.length + (impactMoved ? 1 : 0) + (ballMoved ? 1 : 0);
   // The earliest point actually in the saved track — with a wrong impact
   // frame this is the honest answer to "when does the ball leave", so it
   // is offered as a one-click fix.
@@ -719,6 +746,25 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
             </span>
             <button
               type="button"
+              className={placingBall ? "small" : "ghost small"}
+              style={{ width: "auto" }}
+              disabled={busy}
+              onClick={() => setPlacingBall((v) => !v)}
+              title="Click the map to set where the tracer line STARTS - the ball at impact. This anchors the whole line, so it matters more than any single flight point."
+            >
+              {placingBall
+                ? "click the map…"
+                : ballAtRest
+                  ? `⦿ start ${ballAtRest.x},${ballAtRest.y}`
+                  : "⦿ set tracer start"}
+            </button>
+            {ballMoved && (
+              <span className="small" style={{ color: "var(--emerald-700)" }}>
+                start moved
+              </span>
+            )}
+            <button
+              type="button"
               className="ghost small"
               onClick={resetMarks}
               style={{ width: "auto" }}
@@ -776,6 +822,12 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                 (r) => r.found && r.x != null && r.y != null,
               )}
               onToggleDot={toggleDot}
+              ballXY={ballAtRest}
+              placingBall={placingBall}
+              onPlaceBall={(pt) => {
+                setBallAtRest(pt);
+                setPlacingBall(false);
+              }}
               scanRegion={async (region) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
@@ -806,6 +858,9 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           in the saved ball track; amber are unused detections. Click a
           dot to add the ball at exactly that spot for that frame; a
           different dot on the same frame replaces the pick. The green
+          ringed green marker is where the tracer line STARTS (the ball at
+          impact) — hit <b>set tracer start</b> and click the map to move
+          it. The green
           dots ARE the produced tracer&apos;s points — <b>click one to
           remove it</b> (it turns into a red dashed ring; click again to
           put it back). Alt-click or right-click removes without needing
@@ -2996,7 +3051,7 @@ const DENSE_DOT_ZOOM = 2.5;
 
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
-  scanRegion, track,
+  scanRegion, track, ballXY, placingBall, onPlaceBall,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -3095,11 +3150,33 @@ function PlotHeatCanvas({
         }}
       >
       <div
+        onPointerDown={
+          placingBall && hasDims
+            ? (e) => {
+                // Measure against THIS element: it is the scaled one, so
+                // its bounding rect already accounts for zoom and the
+                // transform origin. Deriving frame coords from the outer
+                // box instead would be wrong at any zoom but 1x.
+                const r = e.currentTarget.getBoundingClientRect();
+                const fx = Math.round(
+                  ((e.clientX - r.left) / r.width) * frameW,
+                );
+                const fy = Math.round(
+                  ((e.clientY - r.top) / r.height) * frameH,
+                );
+                onPlaceBall?.({
+                  x: Math.max(0, Math.min(frameW - 1, fx)),
+                  y: Math.max(0, Math.min(frameH - 1, fy)),
+                });
+              }
+            : undefined
+        }
         style={{
           position: "absolute", inset: 0,
           transform: `scale(${zoom})`,
           transformOrigin: `${focus.x}% ${focus.y}%`,
           transition: "transform 120ms ease",
+          cursor: placingBall ? "crosshair" : undefined,
         }}
       >
         <img
@@ -3170,6 +3247,31 @@ function PlotHeatCanvas({
               </text>
             )}
           </svg>
+        )}
+        {/* BALL AT IMPACT — where the tracer line STARTS. Not a track
+            point: the renderer anchors the fitted curve here, so it is
+            the one marker that decides where the line begins rather than
+            where it passes through. Drawn as a ringed crosshair so it
+            cannot be mistaken for a plotted flight point. */}
+        {hasDims && ballXY && (
+          <div
+            style={{
+              position: "absolute",
+              left: `${(ballXY.x / frameW) * 100}%`,
+              top: `${(ballXY.y / frameH) * 100}%`,
+              width: Math.max(22, 22 / zoom),
+              height: Math.max(22, 22 / zoom),
+              marginLeft: -Math.max(11, 11 / zoom),
+              marginTop: -Math.max(11, 11 / zoom),
+              borderRadius: "50%",
+              border: "2px solid #f0fdf4",
+              boxShadow: "0 0 0 2px #16a34a, 0 0 6px rgba(0,0,0,0.8)",
+              background: "rgba(22,163,74,0.25)",
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+            title={`Tracer start — ball at impact (${ballXY.x}, ${ballXY.y})`}
+          />
         )}
         {/* PRODUCTION TRACK POINTS, clickable. The green line is drawn
             in an SVG layer with pointerEvents:none, so the points
