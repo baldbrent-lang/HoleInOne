@@ -3020,6 +3020,26 @@ function Debug2Modal({ state, onClose }) {
           </div>
         )}
 
+        {rep?.bursts?.length > 0 && (
+          <div className="tiny" style={{ marginTop: 8 }}>
+            <span className="muted">
+              every burst the pose detector saw (stage 1 working):
+            </span>{" "}
+            {rep.bursts.map((b, i) => (
+              <span
+                key={i}
+                style={{
+                  display: "inline-block", marginRight: 6,
+                  color: b.status === "swing" ? "#1a9d55" : "#b7791f",
+                }}
+              >
+                {b.t}s ×{b.ratio}
+                {b.bend != null && ` ${b.bend}°`} [{b.status}]
+              </span>
+            ))}
+          </div>
+        )}
+
         {(rep?.swings || []).map((sw) => {
           const dropped = sw.verdict === "not_swing";
           return (

@@ -11105,6 +11105,18 @@ def debug2(upload_id: int, db: Session = Depends(get_db)):
     if not src_path or not src_path.exists():
         raise HTTPException(400, "tee video missing on disk")
 
+    try:
+        return _debug2_run(row, src_path, db)
+    except Exception as exc:  # noqa: BLE001
+        # A debug tool that 500s tells the operator nothing. Hand the
+        # failure back as data so the panel can show which stage died.
+        log.warning("debug2 failed for upload=%s: %s", upload_id, exc,
+                    exc_info=True)
+        return {"ok": False, "upload_id": upload_id, "error": f"{exc}"}
+
+
+def _debug2_run(row, src_path, db):
+    upload_id = row.id
     from ..services import debug2 as d2
     from ..services import pose_swing
     from ..services.tracer import swing_heat_check
@@ -11151,13 +11163,30 @@ def debug2(upload_id: int, db: Session = Depends(get_db)):
         db.rollback()          # the passes below are slow; don't hold a txn
     except Exception:  # noqa: BLE001
         pass
-    pose = pose_swing.detect_swings_from_pose(src_path, fps=fps)
-    cands = list(pose.get("segments") or [])
+    # detect_swings_from_pose returns the SEGMENT LIST directly; the
+    # per-burst diagnostics come back through the `debug` dict it fills in.
+    pose_dbg: dict = {}
+    cands = list(
+        pose_swing.detect_swings_from_pose(src_path, fps=fps, debug=pose_dbg)
+        or []
+    )
+    rep["pose_debug"] = {
+        k: pose_dbg.get(k)
+        for k in ("n_pose_frames", "n_samples", "coverage",
+                  "n_bend_rejected", "back_bend_min_deg")
+    }
+    # Every burst the detector saw and what happened to it — the stage-1
+    # working, including the ones that never became candidates.
+    rep["bursts"] = list(pose_dbg.get("bursts_detail") or [])
     rep["stages"].append({
         "n": 1, "name": "Pose candidates",
         "detail": (
             f"{len(cands)} burst(s) passed the wrist-speed and spine-bend "
             f"gates"
+            + (
+                f" · {pose_dbg['n_bend_rejected']} rejected as upright"
+                if pose_dbg.get("n_bend_rejected") else ""
+            )
         ),
         "count": len(cands),
     })
