@@ -397,7 +397,13 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   // dots that can only ever be wrong picks. Show impact-5 (a few frames of
   // lead-in, in case impact is estimated a touch late) through impact+100,
   // which at 50fps is two seconds of flight.
-  const impactF = swing.impact_frame ?? null;
+  // IMPACT FRAME, editable here. It drives the flight window below AND
+  // where the rendered tracer line starts, so when it is wrong (pinned to
+  // a waggle rather than the strike) the map hides the real flight and the
+  // line is drawn across frames nothing was detected in. Fixing it in the
+  // wizard meant leaving this screen and losing the plot in progress.
+  const [impactFrame, setImpactFrame] = useState(swing.impact_frame ?? null);
+  const impactF = impactFrame;
   const winLo = impactF == null ? null : impactF - PLOT_WINDOW_PRE;
   const winHi = impactF == null ? null : impactF + PLOT_WINDOW_POST;
   const inWindow = (arr) =>
@@ -470,6 +476,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   // Put it back to whatever was saved before this modal was opened.
   function resetMarks() {
     setMarks({ ...baked });
+    setImpactFrame(swing.impact_frame ?? null);
   }
 
   // Diff vs the baked state: new/moved picks become manual points,
@@ -489,7 +496,9 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
 
   async function saveAndClose() {
     const { overrides, cleared } = pendingChanges();
-    if (overrides.length === 0 && cleared.length === 0) {
+    const movedImpact =
+      impactFrame != null && impactFrame !== (swing.impact_frame ?? null);
+    if (overrides.length === 0 && cleared.length === 0 && !movedImpact) {
       onClose();
       return;
     }
@@ -504,7 +513,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
         manual_positions: overrides,
         cleared_frames: cleared,
         base_track_frames: swing.ball_track_frames || [],
-        impact_frame: swing.impact_frame ?? null,
+        impact_frame: impactFrame ?? null,
         ball_at_rest: swing.ball || null,
         target: swing.target || null,
         render_window: hasWindow
@@ -515,6 +524,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
         i === swingPos
           ? {
               ...s,
+              impact_frame: impactFrame ?? s.impact_frame,
               tracer_url: fast.tracer_url,
               ball_track_frames: fast.ball_track_frames || [],
             }
@@ -578,7 +588,15 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   }
 
   const { overrides: pendAdd, cleared: pendClear } = pendingChanges();
-  const nChanged = pendAdd.length + pendClear.length;
+  const impactMoved =
+    impactFrame != null && impactFrame !== (swing.impact_frame ?? null);
+  const nChanged = pendAdd.length + pendClear.length + (impactMoved ? 1 : 0);
+  // The earliest point actually in the saved track — with a wrong impact
+  // frame this is the honest answer to "when does the ball leave", so it
+  // is offered as a one-click fix.
+  const firstTrackF = (swing.ball_track_frames || [])
+    .filter((r) => r.found && r.x != null && r.y != null)
+    .reduce((m, r) => (m == null || r.frame < m ? r.frame : m), null);
   return (
     <div
       role="dialog"
@@ -629,6 +647,76 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                 {pendClear.length > 0 && `${pendClear.length} removed`}
               </span>
             )}
+            <span
+              className="small"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+              title="The frame the ball is struck. Drives the flight window shown here and where the rendered tracer line starts."
+            >
+              <span className="muted">impact</span>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto", padding: "0 6px" }}
+                disabled={busy || impactFrame == null}
+                onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) - 10))}
+              >
+                −10
+              </button>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto", padding: "0 6px" }}
+                disabled={busy || impactFrame == null}
+                onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) - 1))}
+              >
+                −1
+              </button>
+              <input
+                type="number"
+                value={impactFrame ?? ""}
+                disabled={busy}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  setImpactFrame(Number.isFinite(n) ? Math.max(0, n) : null);
+                }}
+                style={{ width: 80, textAlign: "center", padding: "1px 4px" }}
+              />
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto", padding: "0 6px" }}
+                disabled={busy || impactFrame == null}
+                onClick={() => setImpactFrame((f) => (f ?? 0) + 1)}
+              >
+                +1
+              </button>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto", padding: "0 6px" }}
+                disabled={busy || impactFrame == null}
+                onClick={() => setImpactFrame((f) => (f ?? 0) + 10)}
+              >
+                +10
+              </button>
+              {firstTrackF != null && firstTrackF !== impactFrame && (
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ width: "auto", padding: "0 6px" }}
+                  disabled={busy}
+                  onClick={() => setImpactFrame(firstTrackF)}
+                  title={`The earliest point in the saved track is f${firstTrackF}. If the ball is already moving there, that is closer to the real strike than f${impactFrame}.`}
+                >
+                  ← f{firstTrackF}
+                </button>
+              )}
+              {impactMoved && (
+                <span style={{ color: "var(--emerald-700)" }}>
+                  (was f{swing.impact_frame})
+                </span>
+              )}
+            </span>
             <button
               type="button"
               className="ghost small"
