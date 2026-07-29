@@ -1514,18 +1514,7 @@ def _save_assumed_impact_frame(
             cap.release()
         if not ok or fr is None:
             return None
-        if seed_xy and len(seed_xy) == 2:
-            cv2.circle(
-                fr, (int(seed_xy[0]), int(seed_xy[1])),
-                max(10, int(fr.shape[0] * 0.02)),
-                (255, 200, 0), 2, cv2.LINE_AA,
-            )
-        if search_box and len(search_box) == 4:
-            _bx, _by, _bw, _bh = (int(v) for v in search_box)
-            cv2.rectangle(
-                fr, (_bx, _by), (_bx + _bw, _by + _bh),
-                (0, 0, 255), 2, cv2.LINE_AA,
-            )
+
         if box_ball_xy and len(box_ball_xy) == 2:
             cv2.circle(
                 fr, (int(box_ball_xy[0]), int(box_ball_xy[1])),
@@ -1541,8 +1530,8 @@ def _save_assumed_impact_frame(
         _txt = (
             f"ASSUMED impact f{int(frame_idx)} "
             f"({frame_idx / max(1.0, fps):.2f}s) - pose peak, no ball "
-            f"departure; cyan=pose hands (REFERENCE only), red=search box, "
-            f"green=ball found in box, magenta=AI launch picks"
+            f"departure; green=ball found in the zoom square, "
+            f"magenta=AI launch picks"
         )
         for _c, _w in (((0, 0, 0), 4), ((255, 255, 255), 1)):
             cv2.putText(
@@ -2310,29 +2299,27 @@ def _run_long_upload_job(
                                 _box = _ball_search_box(
                                     src_path, _seed, _feet,
                                 )
-                                if _seed and len(_seed) == 2:
+                                if _box:
                                     _tok = secrets.token_hex(3)
-                                    _rb = find_resting_ball(
-                                        src_path, _pk_f, crop_rect=_box,
-                                    ) if _box else {}
-                                    _found_rest = (
-                                        [float(_rb["x"]), float(_rb["y"])]
-                                        if _rb.get("present")
-                                        and _rb.get("x") is not None
-                                        else None
+                                    # The launch plot's FIRST tile is the
+                                    # zoom square: look for the ball at
+                                    # rest in there. Every frame after it
+                                    # tracks from what was found, and the
+                                    # square is never referred to again.
+                                    # rest_xy is the box centre only so
+                                    # the miss-widening has an origin —
+                                    # the wrist is not used past building
+                                    # the box's corner.
+                                    _plot_from = (
+                                        _box[0] + _box[2] / 2.0,
+                                        _box[1] + _box[3] / 2.0,
                                     )
-                                    log.info(
-                                        "long-upload worker: assumed-impact "
-                                        "ball search box=%s -> %s",
-                                        _box,
-                                        _found_rest or f"no ball ({_rb.get('error')})",
-                                    )
-                                    _plot_from = _found_rest or _seed
                                     _alp = plot_launch_frames_ai(
                                         src_path,
                                         (float(_plot_from[0]),
                                          float(_plot_from[1])),
                                         _pk_f, tee_fps,
+                                        first_rect=_box,
                                         debug_dir=_dbg_dir,
                                         debug_prefix=(
                                             f"ailaunch-assumed-{upload_id}-"
@@ -2354,6 +2341,17 @@ def _run_long_upload_job(
                                         upload_id, _pk_f,
                                         float(d.get("peak_time_sec") or 0.0),
                                         len(_ai_pts), _alp.get("reason"),
+                                    )
+                                    _found_rest = (
+                                        [float(min(
+                                            _ai_pts,
+                                            key=lambda q: int(q["frame"]),
+                                        )["x"]),
+                                         float(min(
+                                            _ai_pts,
+                                            key=lambda q: int(q["frame"]),
+                                        )["y"])]
+                                        if _ai_pts else None
                                     )
                                     _anchor_rec = {
                                         "verified": bool(_ai_pts),

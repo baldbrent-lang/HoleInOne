@@ -5409,6 +5409,32 @@ _LAUNCH_PLOT_PROMPT = (
 )
 
 
+_LAUNCH_REST_SQUARE_PROMPT = (
+    "You are looking at a ZOOMED crop of the ground in front of a golfer, "
+    "taken from a camera behind them, at the moment of impact. Somewhere "
+    "in this crop is a golf ball sitting AT REST on the ground — small, "
+    "roughly round, usually white. FIND IT.\n"
+    "Guidance:\n"
+    "- The ball is TINY. Look for a small round spot with its own shadow, "
+    "not for a large white shape.\n"
+    "- In shadow or overcast light it reads GRAY or dull, not bright "
+    "white. Judge by size, roundness and its shadow, not by whiteness.\n"
+    "- The club head or shaft may be next to or partly over it. The ball "
+    "is the round object, not the club.\n"
+    "- Ignore white shoes, socks, shoe trim, tee markers, sprinkler heads "
+    "and signs. Anything attached to the golfer is not the ball.\n"
+    "- This crop was chosen to contain the ball, so a ball is almost "
+    "certainly present. Give your best single location rather than "
+    "declining; found=false only if you genuinely cannot see one.\n"
+    "Respond with JSON only:\n"
+    "{\"found\": true|false, \"x_pct\": number|null,"
+    " \"y_pct\": number|null, \"note\": string}\n"
+    "x_pct/y_pct = the ball centre as percentages (0-100) of THIS "
+    "image's width/height. Your ENTIRE reply must be that single JSON "
+    "object — no text before or after it."
+)
+
+
 def plot_launch_frames_ai(
     input_path: Path,
     rest_xy: tuple[float, float],
@@ -5418,6 +5444,7 @@ def plot_launch_frames_ai(
     debug_dir: Path | None = None,
     debug_prefix: str = "ailaunch",
     model: str | None = None,
+    first_rect: tuple[int, int, int, int] | None = None,
 ) -> dict:
     """AI tracks the ball frame by frame for the first few frames after
     impact - the motion-blur zone where the pixel launch tracker
@@ -5479,7 +5506,20 @@ def plot_launch_frames_ai(
         api_fails = 0
         for i, f in enumerate(frames):
             fr = fulls[f]
-            if vel is None:
+            if i == 0 and first_rect is not None:
+                # ZOOM SQUARE. On the impact frame we are not chasing a
+                # ball in flight — we are finding the one sitting on the
+                # ground — so look in the caller's box and nowhere else.
+                # No ring is drawn: nothing is known yet, and a ring at a
+                # guessed position (the pose hands) is exactly what made
+                # the model answer "at the ring" or give up. The box is
+                # used for this one frame; every frame after it tracks
+                # from what was found here.
+                bx0 = max(0, int(first_rect[0]))
+                by0 = max(0, int(first_rect[1]))
+                bx1 = min(w, bx0 + int(first_rect[2]))
+                by1 = min(h, by0 + int(first_rect[3]))
+            elif vel is None:
                 # No lock yet (first frame, or every frame so far
                 # missed): the ball is SOMEWHERE up the launch path and
                 # only gets HIGHER each frame — keep the region
@@ -5512,7 +5552,8 @@ def plot_launch_frames_ai(
             crop = _enhance_for_vision(crop)
             ring = (prev[0] - bx0, prev[1] - by0)
             t = crop.copy()
-            if 0 <= ring[0] < t.shape[1] and 0 <= ring[1] < t.shape[0]:
+            _draw_ring = not (i == 0 and first_rect is not None)
+            if _draw_ring and 0 <= ring[0] < t.shape[1] and 0 <= ring[1] < t.shape[0]:
                 cv2.circle(
                     t, (int(ring[0]), int(ring[1])), int(r * 0.9),
                     (255, 200, 0), 2, cv2.LINE_AA,
@@ -5545,7 +5586,15 @@ def plot_launch_frames_ai(
                         max_tokens=300,
                         system=[{
                             "type": "text",
-                            "text": _LAUNCH_PLOT_PROMPT,
+                            # The zoom-square frame is a different
+                            # question — a ball sitting still on grass,
+                            # not a blur in flight near a ring. Same JSON
+                            # shape so the parsing below is unchanged.
+                            "text": (
+                                _LAUNCH_REST_SQUARE_PROMPT
+                                if (i == 0 and first_rect is not None)
+                                else _LAUNCH_PLOT_PROMPT
+                            ),
                             "cache_control": {"type": "ephemeral"},
                         }],
                         messages=[
@@ -5553,6 +5602,17 @@ def plot_launch_frames_ai(
                                 {
                                     "type": "text",
                                     "text": (
+                                        (
+                                            f"Frame {f}. This crop is the "
+                                            f"ground in front of the "
+                                            f"golfer. Find the golf ball "
+                                            f"at rest on it. Crop origin "
+                                            f"({bx0},{by0}) size "
+                                            f"{bx1 - bx0}x{by1 - by0}. "
+                                            "JSON only."
+                                        )
+                                        if (i == 0 and first_rect is not None)
+                                        else
                                         f"Frame {f}. Crop origin "
                                         f"({bx0},{by0}) size "
                                         f"{bx1 - bx0}x{by1 - by0}. "
