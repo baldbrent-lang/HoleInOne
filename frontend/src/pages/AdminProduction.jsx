@@ -3031,6 +3031,59 @@ function PlotHeatCanvas({
             )}
           </svg>
         )}
+        {/* PRODUCTION TRACK POINTS, clickable. The green line is drawn
+            in an SVG layer with pointerEvents:none, so the points
+            production put in the track could be SEEN but not touched —
+            and most of them (AI launch picks, launch-tracker points, arc
+            completion) have no detection dot underneath to click
+            instead. These targets sit on top so a wrong point can just
+            be clicked off. zIndex keeps them above the amber dots where
+            the two overlap, and the hit area has a floor so it stays
+            clickable when zoomed in. */}
+        {hasDims && track.map((t, i) => {
+          const still = marks[t.frame];
+          const kept =
+            !!still &&
+            Math.abs(still.x - t.x) <= 2 &&
+            Math.abs(still.y - t.y) <= 2;
+          const hit = Math.max(15, 15 / zoom);
+          return (
+            <div
+              key={`tp-${t.frame}-${i}`}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onToggleDot({ frame: t.frame, x: t.x, y: t.y }, kept);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onToggleDot({ frame: t.frame, x: t.x, y: t.y }, true);
+              }}
+              title={
+                kept
+                  ? `Frame ${t.frame} — in the produced tracer. Click to REMOVE it.`
+                  : `Frame ${t.frame} — removed. Click to put it back.`
+              }
+              style={{
+                position: "absolute",
+                left: `${(t.x / frameW) * 100}%`,
+                top: `${(t.y / frameH) * 100}%`,
+                width: hit, height: hit,
+                borderRadius: "50%",
+                border: kept
+                  ? "2px solid #22c55e"
+                  : "2px dashed rgba(239,68,68,0.95)",
+                background: kept
+                  ? "rgba(34,197,94,0.30)"
+                  : "rgba(239,68,68,0.10)",
+                transform: "translate(-50%, -50%)",
+                cursor: "pointer",
+                zIndex: 4,
+                boxShadow: "0 0 4px rgba(0,0,0,0.6)",
+              }}
+            />
+          );
+        })}
         {/* Dense candidate layer — smaller, dimmer targets that only
             appear once zoomed in, so the fit view stays readable. */}
         {hasDims && showDense &&
