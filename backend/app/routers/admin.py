@@ -11280,6 +11280,38 @@ def _debug2_run(row, src_path, db):
         ]
         entry["n_dots"] = len(pool)
 
+        # 4c. RE-SCAN THE CLEAN BAND WITH LOOSE GATES. The tracer's pool is
+        # heavily filtered — per-frame candidate gates, a ghost-trail
+        # filter, a hot-mask — all tuned to keep the ball out of the
+        # golfer's body heat. Above the club fan none of that is needed:
+        # the region is sky and treetops. Observed on a real swing: a run
+        # of four ball dots plainly visible on the heat map was absent
+        # from the pool entirely, so no chaining rule could have found it.
+        # Scan that band directly and merge what it finds.
+        _fan_pre = d2.fan_line_y(
+            c.get("impact_head_xy"), c.get("impact_feet_xy"), _fh,
+        )
+        if _fan_pre is not None:
+            _band = d2.scan_band(
+                src_path, 0, 0, _fw, int(_fan_pre), f_lo, f_hi,
+            )
+            _have = {(int(p["frame"]), int(p["x"]) // 6, int(p["y"]) // 6)
+                     for p in pool}
+            _added = [
+                b for b in _band
+                if (int(b["frame"]), int(b["x"]) // 6, int(b["y"]) // 6)
+                not in _have
+            ]
+            pool = pool + _added
+            entry["n_band_scan"] = len(_band)
+            entry["n_band_new"] = len(_added)
+            log.info(
+                "debug2: band scan above y=%d gave %d dot(s), %d new "
+                "(pool %d -> %d)",
+                int(_fan_pre), len(_band), len(_added),
+                entry["n_dots"], len(pool),
+            )
+
         # 4b. TRACE THE TRAIL — on the WINDOWED heat, not the swing-check
         # composite. The composite spans the whole swing, so the club fan
         # and the golfer's body dominate it and the ball's dots are a

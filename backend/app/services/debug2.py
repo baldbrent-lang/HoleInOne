@@ -881,13 +881,21 @@ def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
                     ex - float(ball_xy[0]), ey - float(ball_xy[1]),
                 )
                 aim_xy = [int(ex), int(ey)]
-            # AIM IS A GATE, not a tiebreak. "Points back at the ball" is
-            # the thing that separates a ball from a bird, so a run that
-            # misses by more than a fifth of the frame is not a ball at
-            # all — no amount of length or straightness redeems it. Among
-            # what survives, longer and straighter wins.
-            if aim_px is not None and aim_px > aim_gate:
-                continue
+            # AIM IS A GATE, and it scales with DISTANCE. "Points back at
+            # the ball" only means something relative to how far away the
+            # run is: missing by 300px from 400px away is not aiming at
+            # anything, while the same miss from 2000px away is a good
+            # line. A fixed fraction-of-frame limit let a short run
+            # hugging the golfer pass with an aim that pointed nowhere
+            # near the ball, purely because the frame was wide.
+            if aim_px is not None:
+                d0 = math.hypot(
+                    run[0]["x"] - float(ball_xy[0]),
+                    run[0]["y"] - float(ball_xy[1]),
+                ) if ball_xy and len(ball_xy) == 2 else 0.0
+                limit = min(aim_gate, max(60.0, 0.30 * d0))
+                if aim_px > limit:
+                    continue
             score = 2.0 * len(run) - straight / 10.0
             if best is None or score > best[0]:
                 best = (score, {
@@ -901,3 +909,83 @@ def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
                     "aim_xy": aim_xy,
                 })
     return best[1] if best else None
+
+
+# ── stage 4b: re-scan the clean band with loose gates ──────────────────
+
+def scan_band(
+    input_path: Path,
+    x: int, y: int, w: int, h: int,
+    f0: int, f1: int,
+    max_per_frame: int = 6,
+    cap_dots: int = 1500,
+) -> list:
+    """Frame-diff every frame in a region and return the movers, with
+    frames.
+
+    The tracer's dot pool is a heavily gated subset — per-frame candidate
+    gates, a ghost-trail filter, a hot-mask — all tuned to keep the ball
+    out of the golfer's body. Above the club fan none of that is needed:
+    the region is sky and treetops, and the gates only cost detections.
+    Observed on a real swing: a run of four ball dots plainly visible on
+    the heat map was absent from the pool entirely, so no amount of
+    chaining could have found it.
+
+    Same detector as the operator's deep scan (scan-region), pointed at
+    the clean band."""
+    out: list = []
+    if not HAS_CV:
+        return out
+    cap = cv2.VideoCapture(str(input_path))
+    try:
+        if not cap.isOpened():
+            return out
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        nb = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        x = max(0, min(max(0, fw - 2), int(x)))
+        y = max(0, min(max(0, fh - 2), int(y)))
+        w = max(8, min(fw - x, int(w)))
+        h = max(8, min(fh - y, int(h)))
+        f0 = max(0, int(f0))
+        f1 = int(f1)
+        if nb > 0:
+            f1 = min(f1, nb - 1)
+        if f1 <= f0:
+            return out
+        cap.set(cv2.CAP_PROP_POS_FRAMES, float(f0))
+        prev = None
+        for f in range(f0, f1 + 1):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            crop = frame[y:y + h, x:x + w]
+            gray = cv2.GaussianBlur(
+                cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0,
+            )
+            if prev is not None:
+                diff = cv2.absdiff(gray, prev)
+                _, th = cv2.threshold(diff, 12, 255, cv2.THRESH_BINARY)
+                th = cv2.dilate(th, None, iterations=1)
+                n, _l, stats, cents = cv2.connectedComponentsWithStats(th)
+                hits = []
+                for i in range(1, n):
+                    area = int(stats[i, cv2.CC_STAT_AREA])
+                    if 2 <= area <= 600:
+                        hits.append((area, float(cents[i][0]), float(cents[i][1])))
+                hits.sort(reverse=True)
+                for _a, cx, cy in hits[:max_per_frame]:
+                    out.append({
+                        "frame": int(f),
+                        "x": int(round(x + cx)),
+                        "y": int(round(y + cy)),
+                        "source": "bandscan",
+                    })
+            prev = gray
+            if len(out) >= cap_dots:
+                break
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug2 scan_band failed: %s", exc)
+    finally:
+        cap.release()
+    return out

@@ -3113,6 +3113,14 @@ function Debug2Modal({ state, onClose }) {
                 <div className="tiny" style={{ marginTop: 4 }}>
                   <b>chain:</b> {sw.chain_reason || "—"}
                   {sw.n_dots != null && ` · ${sw.n_dots} dots in window`}
+                  {sw.n_band_new != null && (
+                    <div className="muted">
+                      band re-scan above the club fan: {sw.n_band_scan} dot(s)
+                      found, <b>{sw.n_band_new} the tracer pool did not
+                      have</b> — the pool's gates are tuned for the golfer's
+                      body, not for open sky
+                    </div>
+                  )}
                   {sw.chain_method && (
                     <div className="muted">
                       method: {sw.chain_method}
