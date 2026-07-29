@@ -564,6 +564,16 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
         start_frame: swing.start_frame ?? null,
         end_frame: swing.end_frame ?? null,
         cut_frame: swing.cut_frame ?? null,
+        // WITHOUT THIS THE CLIP STOPS CUTTING TO THE GREEN. finalize
+        // decides the cutover from cut_frame, falling back to
+        // impact_frame + 2.5s when there is no explicit cut. Produce
+        // never persists a per-swing cut_frame, so that fallback is the
+        // only thing that puts the green in — and it needs an impact
+        // frame. Omitting it meant _pick_frame fell through to the
+        // TOP-LEVEL edit_metrics, which on a multi-swing upload has no
+        // impact_frame at all, so cut_src_sec came out None and the
+        // finalize silently produced a tee-only clip.
+        impact_frame: impactFrame ?? swing.impact_frame ?? null,
         swing: swing.idx ?? swingPos,
       });
       nextSwings = nextSwings.map((s, i) =>
