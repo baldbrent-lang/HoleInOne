@@ -2647,22 +2647,6 @@ def _process_long_upload_segments(
                     slot = i
                     break
             nsw = dict(swings[slot]) if slot is not None else {"idx": swing_idx}
-            # CLEAR this run's derived evidence before merging. Every
-            # field below is written only "if we have one", so a stage
-            # that didn't run this time left the PREVIOUS run's value in
-            # place — and the debug panel showed it as if it were fresh.
-            # That is how a walk strip rendered by since-reverted code,
-            # and its launch points, kept reappearing next to genuinely
-            # fresh numbers from the same run: half the panel was a ghost.
-            # Operator-owned fields (manual ball, finalized_*, clip_id)
-            # are NOT touched — only what a produce run regenerates.
-            for _stale in (
-                "anchor_check", "mog2_stats", "mog2_overlay_url",
-                "timed_points", "cand_points", "ball_track_frames",
-                "tracer_raw_motion_url", "tracer_debug_url",
-                "tracer_raw_motion_arc_url", "tracer_raw_motion_frames_url",
-            ):
-                nsw.pop(_stale, None)
             # The window of the clip this run actually cut — source of
             # truth for the wizard's start/impact/end frames.
             nsw["start_frame"] = offset
@@ -2724,20 +2708,8 @@ def _process_long_upload_segments(
                         "verified", "snapped", "snap_px", "impact_delta",
                         "present_ratio_pre", "reason",
                         "ai_fallback_reason", "ai_launch_points",
-                        # Without these the launch-plot film-strip has no
-                        # URL to render, so the sequence silently vanished
-                        # from the AI-tracer panel even though the plot ran.
-                        "ai_launch_n", "ai_launch_reason",
                     )
                 }
-                if _ac.get("ai_launch_image") and (
-                    CLIPS_DIR / _ac["ai_launch_image"]
-                ).exists():
-                    _alp_p = CLIPS_DIR / _ac["ai_launch_image"]
-                    _ac_entry["ai_launch_image_url"] = (
-                        f"{settings.app_base_url}/uploads/clips/"
-                        f"{_alp_p.name}?v={int(_alp_p.stat().st_mtime)}"
-                    )
                 if _ac.get("image") and (CLIPS_DIR / _ac["image"]).exists():
                     _acp = CLIPS_DIR / _ac["image"]
                     _ac_entry["image_url"] = (
@@ -7870,14 +7842,6 @@ def _mog2_layer_for_ai_track(
         except Exception as exc:  # noqa: BLE001
             log.warning("mog2 layer: anchor check failed: %s", exc)
 
-    # NB: an "own AI launch plot" ran here briefly and was removed. It
-    # chased the ball starting from `_rest`, which on these swings is the
-    # POSE-WRIST fallback — so it plotted from the golfer's hands, found
-    # one point, and that single bad point then got pinned in the fit and
-    # dragged the whole curve. Plotting the launch is only worth doing
-    # from a real ball position; fix the anchor first.
-    _own_launch: list[dict] = []
-
     _pfx = f"mog2layer-{clip_path.stem}"
     _cv_url, cv_info, _cv_traced, _cv_dbg = _run_tracer(
         clip_path,
@@ -7904,14 +7868,9 @@ def _mog2_layer_for_ai_track(
     pool = _mog2_dot_pool(cv_info)
     launch_pts = [
         {"frame": int(pt["frame"]), "x": float(pt["x"]), "y": float(pt["y"])}
-        for pt in (list(pipe.get("launch_points") or []) + _own_launch)
+        for pt in (pipe.get("launch_points") or [])
         if pt.get("frame") is not None and int(pt["frame"]) >= 0
     ]
-    # De-dupe by frame — handed-in points win over our own plot.
-    _lp_seen: dict[int, dict] = {}
-    for _pt in launch_pts:
-        _lp_seen.setdefault(int(_pt["frame"]), _pt)
-    launch_pts = [_lp_seen[k] for k in sorted(_lp_seen)]
     if launch_pts:
         # Adaptive-square tracker points: per-frame, pixel-exact,
         # already ball-verified — they join the dot pool AND go into

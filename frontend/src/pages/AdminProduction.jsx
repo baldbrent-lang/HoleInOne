@@ -5966,36 +5966,6 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                     )}
                   </div>
                 )}
-                {s.ai?.anchor_check?.ai_launch_image_url && (
-                  <div style={{ marginTop: 4 }}>
-                    <div className="tiny">
-                      🤖 AI launch plot —{" "}
-                      <span
-                        style={{
-                          color: s.ai.anchor_check.ai_launch_n
-                            ? "#1a9d55"
-                            : "#b7791f",
-                        }}
-                      >
-                        {s.ai.anchor_check.ai_launch_reason ||
-                          `${s.ai.anchor_check.ai_launch_n ?? 0} frame(s)`}
-                      </span>
-                    </div>
-                    <a
-                      href={s.ai.anchor_check.ai_launch_image_url}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ display: "block" }}
-                      title="The first post-impact frames sent to the vision model. Magenta ring = its ball pick, cyan ring = the previous position, green border = found, red = not found. These points are pinned in the tracer fit."
-                    >
-                      <img
-                        src={s.ai.anchor_check.ai_launch_image_url}
-                        alt="AI launch plot film-strip"
-                        style={{ maxWidth: "100%", borderRadius: 6 }}
-                      />
-                    </a>
-                  </div>
-                )}
                 {s.ai?.mog2_stats && (
                   <div className="tiny muted" style={{ marginTop: 3 }}>
                     launch points handed to the render:{" "}
