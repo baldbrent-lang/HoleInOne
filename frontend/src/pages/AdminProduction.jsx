@@ -3013,8 +3013,9 @@ function Debug2Modal({ state, onClose }) {
                 <b>{st.n}. {st.name}</b>{" "}
                 <span className="muted">— {st.detail}</span>{" "}
                 <b style={{ color: st.count ? "var(--emerald-700)" : "#b7791f" }}>
-                  [{st.count}]
+                  {st.count}
                 </b>
+                {st.counts && <span className="muted"> {st.counts}</span>}
               </div>
             ))}
           </div>
@@ -3093,6 +3094,14 @@ function Debug2Modal({ state, onClose }) {
                 <div className="tiny" style={{ marginTop: 4 }}>
                   <b>chain:</b> {sw.chain_reason || "—"}
                   {sw.n_dots != null && ` · ${sw.n_dots} dots in window`}
+                  {sw.rejected_why?.length > 0 && (
+                    <div className="muted" style={{ marginTop: 2 }}>
+                      rejects:{" "}
+                      {sw.rejected_why
+                        .map((r) => `${r.n}× ${r.why}`)
+                        .join(" · ")}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

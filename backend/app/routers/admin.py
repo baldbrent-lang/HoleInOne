@@ -11189,7 +11189,7 @@ def _debug2_run(row, src_path, db):
                 if pose_dbg.get("n_bend_rejected") else ""
             )
         ),
-        "count": len(cands),
+        "count": len(cands), "counts": "candidates",
     })
 
     n_judged_out = 0
@@ -11251,7 +11251,12 @@ def _debug2_run(row, src_path, db):
             pass
         _trc_url, cv_info, _trc_path, _trc_dbg = _run_tracer(
             src_path,
-            frame_debug_dir=None,
+            # The raw-motion heat is only WRITTEN when a debug dir is set
+            # (tracer.py:690). Passing None meant stage 4 produced its dot
+            # pool but no image — so the windowed heat was missing and the
+            # chain had no background to draw on.
+            frame_debug_dir=CLIPS_DIR,
+            frame_debug_prefix=f"d2win-{upload_id}-{tok}-{i}",
             impact_frame_hint_override=imp_f,
             ball_rest_hint=(
                 (float(club["xy"][0]), float(club["xy"][1]))
@@ -11278,6 +11283,15 @@ def _debug2_run(row, src_path, db):
         entry["chain"] = ch["points"]
         entry["chain_reason"] = ch["reason"]
         entry["n_rejected"] = len(ch["rejected"])
+        # A count of rejects is not a diagnosis. Group them by reason so a
+        # short chain says WHY it stopped growing.
+        _why: dict = {}
+        for rj in ch["rejected"]:
+            _why[rj["why"]] = _why.get(rj["why"], 0) + 1
+        entry["rejected_why"] = sorted(
+            ({"why": k, "n": v} for k, v in _why.items()),
+            key=lambda r: -r["n"],
+        )
         _heat = cv_info.get("raw_motion_image")
         if _heat and (CLIPS_DIR / _heat).exists():
             name = f"d2chain-{upload_id}-{tok}-{i}.jpg"
@@ -11295,16 +11309,19 @@ def _debug2_run(row, src_path, db):
         {"n": 2, "name": "Impact + ball from the club arc",
          "detail": "impact = peak wrist speed; ball = the bottom of the "
                    "club's heat arc through impact",
-         "count": sum(1 for s in rep["swings"] if s.get("ball"))},
+         "count": sum(1 for s in rep["swings"] if s.get("ball")),
+         "counts": "balls located"},
         {"n": 3, "name": "AI judge on the heat composite",
          "detail": f"{n_real} kept, {n_judged_out} rejected as not a swing",
-         "count": n_real},
+         "count": n_real, "counts": "real swings kept"},
         {"n": 4, "name": "Windowed MOG2 heat",
          "detail": f"impact−{d2.WIN_PRE} .. impact+{d2.WIN_POST} only",
-         "count": sum(1 for s in rep["swings"] if s.get("heat_window_image_url"))},
+         "count": sum(s.get("n_dots") or 0 for s in rep["swings"]),
+         "counts": "motion dots in the window"},
         {"n": 5, "name": "Chain walked up from the ball",
          "detail": "each step advances in frame, rises while ascending, "
                    "and drifts sideways far less than it rises",
-         "count": sum(len(s.get("chain") or []) for s in rep["swings"])},
+         "count": sum(len(s.get("chain") or []) for s in rep["swings"]),
+         "counts": "tracer points linked"},
     ])
     return rep
