@@ -509,6 +509,16 @@ export const api = {
       adminPassword: key,
       timeoutMs: 10 * 60_000,
     }),
+  emailStatus: (key) =>
+    request("/api/admin/email-status", { adminPassword: key }),
+  emailSendTemplates: (key, to) =>
+    // Sends one of each template. Real clip attachments make this slow.
+    request("/api/admin/email-send-templates", {
+      method: "POST",
+      body: { to },
+      adminPassword: key,
+      timeoutMs: 3 * 60_000,
+    }),
   produceDebugStatus: (key, uploadId) =>
     request(`/api/admin/long-uploads/${uploadId}/produce-debug/status`, {
       adminPassword: key,

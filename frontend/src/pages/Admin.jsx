@@ -234,6 +234,34 @@ function TestEmailCard({ adminPassword, onToast }) {
   const [to, setTo] = useState("");
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null);
+  const [tpl, setTpl] = useState(null);
+  const [mail, setMail] = useState(null);
+
+  // Transport status on mount, so "not configured" is visible before
+  // anyone wonders why their inbox is empty.
+  useEffect(() => {
+    if (!adminPassword) return;
+    api.emailStatus(adminPassword).then(setMail).catch(() => setMail(null));
+  }, [adminPassword]);
+
+  async function sendTemplates() {
+    setSending(true);
+    setTpl(null);
+    setResult(null);
+    try {
+      const r = await api.emailSendTemplates(adminPassword, to);
+      setTpl(r);
+      onToast?.(
+        r.transport === "mock"
+          ? "Mock mode — nothing delivered"
+          : `Sent ${(r.results || []).filter((x) => x.ok).length} template(s)`,
+      );
+    } catch (e) {
+      setTpl({ results: [], note: e.message });
+    } finally {
+      setSending(false);
+    }
+  }
 
   async function send() {
     setSending(true);
@@ -251,11 +279,45 @@ function TestEmailCard({ adminPassword, onToast }) {
 
   return (
     <div className="card">
-      <h3 style={{ marginBottom: 6 }}>Test email delivery</h3>
+      <h3 style={{ marginBottom: 6 }}>Email delivery</h3>
+      {/* The transport, stated up front. The failure mode here is silent —
+          with no credentials every send "succeeds" and only writes a log
+          line — so it should not take a log dive to notice. */}
+      {mail && (
+        <div
+          className="small"
+          style={{
+            marginBottom: 10, padding: "8px 10px", borderRadius: 6,
+            background: mail.transport === "mock"
+              ? "rgba(192,57,43,0.08)" : "var(--primary-soft)",
+            border: `1px solid ${mail.transport === "mock"
+              ? "rgba(192,57,43,0.35)" : "var(--emerald-200)"}`,
+          }}
+        >
+          <b style={{
+            color: mail.transport === "mock" ? "#c0392b" : "var(--emerald-800)",
+          }}>
+            {mail.transport === "mock"
+              ? "Not configured — nothing is being sent"
+              : `Sending via ${mail.transport}`}
+          </b>
+          <div className="muted">{mail.detail}</div>
+          {mail.from && <div className="muted">from: {mail.from}</div>}
+          {mail.logo_kb != null && (
+            <div className="muted">footer logo: {mail.logo_kb} KB inline</div>
+          )}
+          {mail.missing?.length > 0 && (
+            <div style={{ marginTop: 4 }}>
+              set in Secrets: <b>{mail.missing.join(", ")}</b>
+            </div>
+          )}
+        </div>
+      )}
       <p className="small muted" style={{ marginBottom: 10 }}>
-        Drops a single message at the address below. Uses SMTP if
-        <code> SMTP_HOST / SMTP_USER / SMTP_PASSWORD</code> are set in Secrets,
-        else SendGrid, else mock-log.
+        <b>Send test</b> drops one generic message to check the wiring.{" "}
+        <b>Send all templates</b> fires the five real emails a golfer gets —
+        registration, gallery ready, ace under review, ace confirmed, and the
+        per-clip delivery with a genuine clip attached.
       </p>
       <div className="row">
         <div className="field" style={{ flex: 2 }}>
@@ -267,9 +329,15 @@ function TestEmailCard({ adminPassword, onToast }) {
             placeholder="you@example.com"
           />
         </div>
-        <div style={{ alignSelf: "end" }}>
-          <button type="button" disabled={sending || !to} onClick={send}>
+        <div style={{ alignSelf: "end", display: "flex", gap: 8 }}>
+          <button type="button" className="secondary"
+            disabled={sending || !to} onClick={send}
+            style={{ width: "auto" }}>
             {sending ? "Sending…" : "Send test"}
+          </button>
+          <button type="button" disabled={sending || !to}
+            onClick={sendTemplates} style={{ width: "auto" }}>
+            {sending ? "Sending…" : "Send all templates"}
           </button>
         </div>
       </div>
@@ -280,6 +348,20 @@ function TestEmailCard({ adminPassword, onToast }) {
         </p>
       )}
       {result && !result.ok && <p className="err-text small">{result.error}</p>}
+      {tpl && (
+        <div className="small" style={{ marginTop: 8 }}>
+          {tpl.note && (
+            <div style={{ color: "#c0392b", marginBottom: 4 }}>{tpl.note}</div>
+          )}
+          {(tpl.results || []).map((r) => (
+            <div key={r.template}
+              style={{ color: r.ok ? "var(--emerald-700)" : "#c0392b" }}>
+              {r.ok ? "✓" : "✕"} {r.template}
+              {r.error ? ` — ${r.error}` : ""}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

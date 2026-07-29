@@ -11473,3 +11473,138 @@ def _debug2_run(row, src_path, db):
          "counts": "tracer points linked"},
     ])
     return rep
+
+
+# ── Email setup + test send ────────────────────────────────────────────
+
+@router.get("/email-status")
+def email_status():
+    """Which transport email will actually use, without leaking secrets.
+
+    Worth having as its own call because the failure mode is silent: with
+    neither SMTP nor SendGrid configured, every send "succeeds" and only
+    writes an EMAIL (mock) log line. This says so plainly."""
+    from ..services import notifications as N
+
+    smtp_ok = bool(
+        settings.smtp_host and settings.smtp_user and settings.smtp_password
+    )
+    if smtp_ok:
+        transport = "smtp"
+        detail = (
+            f"{settings.smtp_host}:{settings.smtp_port} as "
+            f"{settings.smtp_user}"
+            f"{' (SSL)' if settings.smtp_use_ssl or settings.smtp_port == 465 else ' (STARTTLS)'}"
+        )
+        sender = settings.smtp_from or settings.smtp_user
+    elif settings.sendgrid_api_key:
+        transport = "sendgrid"
+        detail = f"API key set ({len(settings.sendgrid_api_key)} chars)"
+        sender = settings.sendgrid_from_email
+    else:
+        transport = "mock"
+        detail = (
+            "NOTHING IS SENT — set SMTP_HOST / SMTP_USER / SMTP_PASSWORD, "
+            "or SENDGRID_API_KEY"
+        )
+        sender = None
+    _logo = N._logo_png()
+    return {
+        "transport": transport,
+        "detail": detail,
+        "from": sender,
+        "logo_kb": round(len(_logo) / 1024.0, 1) if _logo else None,
+        "missing": [
+            k for k, v in (
+                ("SMTP_HOST", settings.smtp_host),
+                ("SMTP_USER", settings.smtp_user),
+                ("SMTP_PASSWORD", settings.smtp_password),
+            ) if not v
+        ] if transport == "mock" else [],
+    }
+
+
+@router.post("/email-send-templates")
+def email_send_templates(
+    payload: dict = Body(default={}), db: Session = Depends(get_db),
+):
+    """Send one of each REAL email to an address so the templates can be seen.
+
+    Distinct from /test-email, which sends a single generic "your wiring
+    works" message. This one fires the actual notify_* functions.
+
+    Uses the REAL notify_* functions, not copies — a preview that renders
+    its own approximation of the template is a preview of the wrong thing.
+    The clip email attaches a genuine produced clip when one is on disk,
+    so the attachment path gets exercised too rather than only the body.
+    """
+    to = (payload.get("to") or "").strip()
+    if "@" not in to:
+        raise HTTPException(400, "a destination email address is required")
+    which = payload.get("templates") or "all"
+    from types import SimpleNamespace
+
+    from ..models import VideoClip
+    from ..services import notifications as N
+
+    gallery = f"{settings.app_base_url}/g/sample-token"
+    results: list[dict] = []
+
+    def _try(name: str, fn):
+        if which != "all" and name not in which:
+            return
+        try:
+            fn()
+            results.append({"template": name, "ok": True})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("email-test %s failed: %s", name, exc)
+            results.append({"template": name, "ok": False, "error": str(exc)})
+
+    _try("registration", lambda: N.notify_registration_confirmed(
+        "Ben", None, to, gallery))
+    _try("gallery_ready", lambda: N.notify_gallery_ready(
+        "Ben", None, to, gallery))
+    _try("hio_review", lambda: N.notify_hio_under_review("Ben", None, to))
+    _try("hio_confirmed", lambda: N.notify_hio_confirmed(
+        "Ben", None, to, gallery))
+
+    # The clip email, with a real clip when we can find one — this is the
+    # message golfers actually receive, and the one worth seeing.
+    def _clip():
+        clip_row = (
+            db.query(VideoClip)
+            .filter(VideoClip.source_url.isnot(None))
+            .order_by(VideoClip.id.desc())
+            .first()
+        )
+        fake_participant = SimpleNamespace(
+            id=0, name="Ben", email=to, gallery_token="sample-token",
+        )
+        fake_course = SimpleNamespace(
+            name=(clip_row.course.name if clip_row and clip_row.course
+                  else "Baldwin Links"),
+            hole_yardages={"3": 173},
+        )
+        fake_clip = SimpleNamespace(
+            id=0,
+            delivered_at=None,          # so the idempotency guard lets it send
+            hole_number=(clip_row.hole_number if clip_row else 3),
+            carry_yards=168, ball_speed_mph=112,
+            source_url=(clip_row.source_url if clip_row else None),
+        )
+        N.notify_clip_ready(fake_participant, fake_clip, fake_course)
+
+    _try("clip_ready", _clip)
+
+    st = email_status()
+    return {
+        "ok": all(r["ok"] for r in results),
+        "to": to,
+        "transport": st["transport"],
+        "note": (
+            "transport is 'mock' — nothing was actually delivered, check the "
+            "server log for EMAIL (mock) lines"
+            if st["transport"] == "mock" else None
+        ),
+        "results": results,
+    }
