@@ -11329,12 +11329,32 @@ def _debug2_run(row, src_path, db):
         # both correctly shaped and correctly timed. Measured on a
         # synthetic flight buried in 120 noise dots: 100% of the flight
         # kept, none of the noise.
+        _aim_gate = max(120.0, 0.20 * float(_fw))
         if entry.get("ai_path"):
             _c1 = d2.chain_along_ai_path(
                 pool, entry["ai_path"], club.get("xy"), imp_f, _fh,
             )
+            # The AI's trail gets NO free pass. It once traced a roughly
+            # horizontal line across the treetops; the corridor collected
+            # 43 dots along it and the real rising flight was discarded as
+            # "off the trail". So its result must clear the same two tests
+            # as everything else — it has to RISE, and it has to point back
+            # at the ball — or we fall through to the thirds search, which
+            # would have found the real chain.
+            _rise = _c1.get("rise_px")
+            _aim = _c1.get("aim_px")
+            _ok = len(_c1.get("points") or []) >= 3
+            if _ok and (_rise is None or _rise < 30):
+                _ok = False
+                _c1["reason"] += " — REJECTED: does not rise"
+            if _ok and _aim is not None and _aim > _aim_gate:
+                _ok = False
+                _c1["reason"] += (
+                    f" — REJECTED: aims {_aim:.0f}px from the ball "
+                    f"(limit {_aim_gate:.0f})"
+                )
             _tries.append(f"AI trail: {_c1['reason']}")
-            if len(_c1.get("points") or []) >= 3:
+            if _ok:
                 ch, method = _c1, "dots on the AI-traced trail"
         if ch is None:
             # THIRDS. Above the club fan the map is nearly empty, so split

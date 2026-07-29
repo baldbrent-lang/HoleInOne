@@ -275,11 +275,35 @@ def _label2(img, text: str, y: int) -> None:
 
 
 def _label(img, text: str) -> None:
-    for colour, weight in (((0, 0, 0), 4), ((255, 255, 255), 1)):
-        cv2.putText(
-            img, text, (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.58,
-            colour, weight, cv2.LINE_AA,
+    """Header text, WRAPPED. OpenCV does not wrap, so a long reason string
+    ran off the edge and the outline pass overprinted itself into an
+    unreadable smear — which is what a caption is for, so it has to fit."""
+    scale, thick = 0.58, 1
+    max_w = img.shape[1] - 20
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        (tw, _th), _ = cv2.getTextSize(
+            trial, cv2.FONT_HERSHEY_SIMPLEX, scale, thick,
         )
+        if tw > max_w and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    lines = lines[:4]
+    # A dark band behind the text so it stays readable over sky or heat.
+    band_h = 8 + 22 * len(lines)
+    img[0:min(band_h, img.shape[0]), :] = (
+        0.45 * img[0:min(band_h, img.shape[0]), :]
+    ).astype(img.dtype)
+    for i, ln in enumerate(lines):
+        y = 24 + 22 * i
+        for colour, weight in (((0, 0, 0), 3), ((255, 255, 255), 1)):
+            cv2.putText(img, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                        scale, colour, weight, cv2.LINE_AA)
 
 
 def draw_chain(
@@ -620,12 +644,51 @@ def chain_along_ai_path(
         if cur is None or k["path_px"] < cur["path_px"]:
             byf[k["frame"]] = k
     out["points"] = [byf[f] for f in sorted(byf)]
+
+    # THE AI CAN TRACE THE WRONG THING. Observed: it drew a roughly
+    # horizontal line across the treetops, the corridor dutifully
+    # collected 43 dots along it, and the real rising flight was thrown
+    # out as "off the trail". So the corridor's own result faces the same
+    # two tests every other candidate does — does it RISE, and does it
+    # point back at the ball — and the caller can reject it on those.
+    pts = out["points"]
+    if len(pts) >= 2:
+        out["rise_px"] = round(pts[0]["y"] - pts[-1]["y"], 1)
+        if ball_xy and len(ball_xy) == 2:
+            ex = ey = None
+            if HAS_CV and len(pts) >= 4:
+                try:
+                    _f = np.array([p["frame"] for p in pts], float)
+                    _x = np.array([p["x"] for p in pts], float)
+                    _y = np.array([p["y"] for p in pts], float)
+                    ex = float(np.polyval(np.polyfit(_f, _x, 1), impact_frame))
+                    ey = float(np.polyval(np.polyfit(_f, _y, 2), impact_frame))
+                except Exception:  # noqa: BLE001
+                    ex = ey = None
+            if ex is None:
+                df = max(1, pts[-1]["frame"] - pts[0]["frame"])
+                vx = (pts[-1]["x"] - pts[0]["x"]) / df
+                vy = (pts[-1]["y"] - pts[0]["y"]) / df
+                d0 = pts[0]["frame"] - int(impact_frame)
+                ex, ey = pts[0]["x"] - vx * d0, pts[0]["y"] - vy * d0
+            out["aim_px"] = round(
+                math.hypot(ex - float(ball_xy[0]), ey - float(ball_xy[1])), 1,
+            )
+            out["aim_xy"] = [int(ex), int(ey)]
     out["reason"] = (
         f"{len(out['points'])} dot(s) on the AI trail "
         f"(corridor {corr:.0f}px), {len(out['rejected'])} off it"
         + (
             f", f{out['points'][0]['frame']}-{out['points'][-1]['frame']}"
             if out["points"] else ""
+        )
+        + (
+            f", rises {out['rise_px']:.0f}px"
+            if out.get("rise_px") is not None else ""
+        )
+        + (
+            f", aims {out['aim_px']:.0f}px from the ball"
+            if out.get("aim_px") is not None else ""
         )
     )
     return out
