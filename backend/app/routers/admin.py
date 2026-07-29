@@ -1441,39 +1441,6 @@ def ai_trace(
     }
 
 
-def _seg_launch_points(seg: dict) -> list[dict]:
-    """Every AI/tracker launch point we have for this swing, in SOURCE
-    frame numbers.
-
-    These points are the plotted early flight — the magenta line on the
-    debug flight map — and they are the difference between the renderer
-    seeing the ball leave the tee and its nearest known position being
-    hundreds of pixels up the arc.
-
-    They were reaching the map but not the render, because the map reads
-    anchor_rec["ai_launch_points"] while the render reads
-    seg["launch_points"], and only the latter is behind the chain of
-    gates in the produce worker (practice filter found the ball AND the
-    anchor verified AND the merged list came back non-empty). Measured on
-    a real swing: map showed 3, render was handed 0. Take the union so a
-    plotted point can't be displayed and ignored at the same time."""
-    out: dict[int, dict] = {}
-    for src in (
-        seg.get("launch_points") or [],
-        (seg.get("anchor_rec") or {}).get("ai_launch_points") or [],
-    ):
-        for pt in src:
-            if not isinstance(pt, dict):
-                continue
-            f, x, y = pt.get("frame"), pt.get("x"), pt.get("y")
-            if f is None or x is None or y is None:
-                continue
-            out.setdefault(int(f), {
-                "frame": int(f), "x": float(x), "y": float(y),
-            })
-    return [out[k] for k in sorted(out)]
-
-
 def _utcnow_naive() -> datetime:
     """Naive UTC datetime, matching how the model stores timestamps."""
     return datetime.utcnow()
@@ -2911,18 +2878,12 @@ def _process_long_upload_segments(
             # not the tracer, so the engine choice doesn't affect the cut.
             _seg_fps = probe_fps(seg_path) or 30.0
             _cut_off = int(round(tee_cut_start * _src_fps))
-            _lp_all = _seg_launch_points(seg)
             _lp_cut = [
                 {**pt, "frame": int(pt["frame"]) - _cut_off}
-                for pt in _lp_all
-                if int(pt["frame"]) >= _cut_off
+                for pt in (seg.get("launch_points") or [])
+                if pt.get("frame") is not None
+                and int(pt["frame"]) >= _cut_off
             ]
-            log.info(
-                "produce: swing %s launch points -> render: %d of %d "
-                "(cut_off=f%d)",
-                seg.get("hole_number"), len(_lp_cut), len(_lp_all),
-                _cut_off,
-            )
             _tracer_url, tracer_info, traced_path, _debug_url = _trace_segment(
                 seg_path,
                 ball_at_rest_override=seg.get("impact_wrist_xy"),
@@ -3201,17 +3162,11 @@ def _process_long_upload_segments(
         )
         _seg_fps = probe_fps(seg_path) or 30.0
         _cut_off = int(round(tee_cut_start * _src_fps))
-        _lp_all = _seg_launch_points(seg)
         _lp_cut = [
             {**pt, "frame": int(pt["frame"]) - _cut_off}
-            for pt in _lp_all
-            if int(pt["frame"]) >= _cut_off
+            for pt in (seg.get("launch_points") or [])
+            if pt.get("frame") is not None and int(pt["frame"]) >= _cut_off
         ]
-        log.info(
-            "produce: swing %s launch points -> render: %d of %d "
-            "(cut_off=f%d)",
-            seg.get("hole_number"), len(_lp_cut), len(_lp_all), _cut_off,
-        )
         tracer_url, tracer_info, _, _ = _trace_segment(
             seg_path,
             ball_at_rest_override=seg.get("impact_wrist_xy"),
