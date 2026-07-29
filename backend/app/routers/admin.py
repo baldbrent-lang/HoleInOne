@@ -11124,10 +11124,11 @@ def _debug2_run(row, src_path, db):
     tok = secrets.token_hex(3)
     fps = float(probe_fps(src_path) or 30.0)
 
-    def _u(name):
+    def _clip_url(name):
         """Filename under uploads/clips -> public URL. `_public_url` is a
         nested helper elsewhere and takes a Path, so this endpoint has its
-        own."""
+        own. Named unambiguously: a short name here was shadowed by a
+        tuple unpack further down and the helper became None mid-run."""
         if not name:
             return None
         p = CLIPS_DIR / name
@@ -11212,7 +11213,7 @@ def _debug2_run(row, src_path, db):
         )
         entry["ball"] = club.get("xy")
         entry["ball_reason"] = club.get("reason")
-        entry["ball_image_url"] = _u(club.get("image"))
+        entry["ball_image_url"] = _clip_url(club.get("image"))
 
         # 3. AI JUDGE on the motion-heat composite.
         chk = swing_heat_check(
@@ -11221,7 +11222,7 @@ def _debug2_run(row, src_path, db):
             debug_dir=CLIPS_DIR,
             debug_prefix=f"d2heat-{upload_id}-{tok}-{i}",
         )
-        entry["heat_image_url"] = _u(
+        entry["heat_image_url"] = _clip_url(
             chk.get("image") or chk.get("image_clean"),
         )
         verdict, reason = chk.get("verdict"), "club-fan heuristic (no API key)"
@@ -11248,7 +11249,7 @@ def _debug2_run(row, src_path, db):
             db.rollback()
         except Exception:  # noqa: BLE001
             pass
-        _u, cv_info, _t, _d = _run_tracer(
+        _trc_url, cv_info, _trc_path, _trc_dbg = _run_tracer(
             src_path,
             frame_debug_dir=None,
             impact_frame_hint_override=imp_f,
@@ -11261,7 +11262,7 @@ def _debug2_run(row, src_path, db):
             render_video=False,
         )
         cv_info = cv_info or {}
-        entry["heat_window_image_url"] = _u(
+        entry["heat_window_image_url"] = _clip_url(
             cv_info.get("raw_motion_image"),
         )
         pool = [
@@ -11286,7 +11287,7 @@ def _debug2_run(row, src_path, db):
                 f"chain f{f_lo}-{f_hi}: {ch['reason']}  "
                 f"(green=ascending, orange=descending, red x=rejected)",
             ):
-                entry["chain_image_url"] = _u(name)
+                entry["chain_image_url"] = _clip_url(name)
         rep["swings"].append(entry)
 
     n_real = sum(1 for s in rep["swings"] if s.get("verdict") != "not_swing")
