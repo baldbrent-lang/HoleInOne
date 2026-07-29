@@ -8298,6 +8298,14 @@ def _mog2_layer_for_ai_track(
         "n_cv": len(pool),
         "n_matched": n_matched,
         "n_added": len(added),
+        # How many launch points the caller actually HANDED us. The
+        # magenta launch points on the flight map come from a
+        # display-only field (anchor_check.ai_launch_points); the render
+        # only ever sees pipe["launch_points"]. When the map shows early
+        # points near the ball and this reads 0, they never reached the
+        # renderer — which is how the nearest tracked point ended up
+        # 592px up the flight with the ball plainly plotted at the tee.
+        "n_launch_in": len(launch_pts),
         "n_added_track": len(added_track),
         "n_added_launch": len(added_launch),
         "n_added_mid": len(added_mid),

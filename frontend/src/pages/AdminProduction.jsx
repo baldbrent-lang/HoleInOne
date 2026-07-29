@@ -5966,6 +5966,34 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                     )}
                   </div>
                 )}
+                {s.ai?.mog2_stats && (
+                  <div className="tiny muted" style={{ marginTop: 3 }}>
+                    launch points handed to the render:{" "}
+                    <b
+                      style={{
+                        color: s.ai.mog2_stats.n_launch_in
+                          ? "inherit"
+                          : "#c0392b",
+                      }}
+                    >
+                      {s.ai.mog2_stats.n_launch_in ?? "?"}
+                    </b>
+                    {" · "}added to arc from them:{" "}
+                    {s.ai.mog2_stats.n_added_track ?? 0}
+                    {!s.ai.mog2_stats.n_launch_in &&
+                      (s.ai.anchor_check?.ai_launch_points || []).length >
+                        0 && (
+                        <>
+                          {" "}
+                          — the map shows{" "}
+                          {s.ai.anchor_check.ai_launch_points.length} AI
+                          launch point(s) near the ball, but{" "}
+                          <b>none reached the renderer</b>, so its nearest
+                          tracked point is far up the flight
+                        </>
+                      )}
+                  </div>
+                )}
                 {(s.ai?.mog2_stats?.rest_anchor_relocated ||
                   s.ai?.mog2_stats?.rest_anchor_dropped ||
                   s.ai?.mog2_stats?.rest_anchor_synthesized) && (
