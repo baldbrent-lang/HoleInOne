@@ -3264,7 +3264,6 @@ def render_tracer_video(
     target_xy: tuple[float, float] | None = None,
     write_start: int | None = None,
     write_end: int | None = None,
-    rest_verified: bool = False,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
@@ -3406,16 +3405,7 @@ def render_tracer_video(
             (x, y) for (x, y, _m) in points_by_frame.values()
         ]
         drop_rest = False
-        # `rest_verified` = the departure walk WATCHED the ball sit on this
-        # exact spot frame by frame and saw it leave. That is stronger
-        # evidence than anything below, which only reasons about distance
-        # to the tracked points — and the tracked points are the weak part
-        # when the launch is blurred and tracking only locks on later, far
-        # up the flight. Measured on a real clip: anchor pixel-verified,
-        # nearest detection 592px away, guard limit 485px → the correct
-        # anchor was thrown out and the line started 592px up the arc.
-        # A verified rest is never overruled by the track's geometry.
-        if len(ref_pts) >= 2 and not rest_verified:
+        if len(ref_pts) >= 2:
             diag = math.hypot(width, height) or 1.0
             # Generous threshold: a real ball can rise a long way before the
             # tracker first locks on, so only reject a rest that's WILDLY off
@@ -3447,10 +3437,7 @@ def render_tracer_video(
             # the flight line, relocate it to the physics-implied
             # origin. A genuinely-found rest agrees with the
             # extrapolation and passes through untouched.
-            # Same reasoning as the drop guard: this exists to rescue a
-            # WRIST fallback that never saw a ball. A departure-verified
-            # rest is the ball, so the extrapolation doesn't get to move it.
-            _orig = None if rest_verified else _launch_origin()
+            _orig = _launch_origin()
             if _orig is not None:
                 _diag = math.hypot(width, height) or 1.0
                 _above = _orig[1] - ry  # >0 => anchor is above the origin
@@ -3887,17 +3874,6 @@ def render_tracer_video(
     info["n_points"] = len(smoothed_points)
     if smoothed_points:
         info["frame_range"] = [int(smoothed_points[0][0]), int(smoothed_points[-1][0])]
-        # THE LINE THAT ACTUALLY GETS DRAWN. The debug flight map plots the
-        # tracked POINTS, but the render samples a fitted curve — so "the
-        # points are right and the tracer isn't" has been impossible to see
-        # in one place. Export a downsampled copy of the drawn curve so the
-        # map can show both and the difference is visible instead of
-        # inferred by comparing a map against a video.
-        _step = max(1, len(smoothed_points) // 200)
-        info["rendered_line"] = [
-            [int(f), int(x), int(y)]
-            for (f, x, y) in smoothed_points[::_step]
-        ]
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
@@ -6357,12 +6333,7 @@ def classify_swing_shot(
     input_path: Path,
     peak_time_sec: float,
     fps: float,
-    # NEAREST-FIRST. The far look isn't the safer one: at 1.5s the golfer
-    # may still be walking in or placing the ball, so whatever gets found
-    # there isn't necessarily the ball that gets struck. Closest to the
-    # swing is the most trustworthy — ball placed, still there, and the
-    # rest position it hands downstream is the freshest.
-    leads: tuple = (0.25, 0.75, 1.25),
+    leads: tuple = (1.5, 1.0, 0.5),
     after_sec: float = 1.5,
     move_tol_frac: float = 0.06,
     hint_xy: tuple[float, float] | None = None,
@@ -6371,7 +6342,7 @@ def classify_swing_shot(
 
     A real swing makes a resting ball leave; a practice/air swing / whiff
     does not. Find the resting ball BEFORE the swing (trying each lead in
-    turn, nearest the swing first — see `leads`) and check
+    turn — the club can hide it at 1.5s but not nearer the top) and check
     whether it's gone AFTER (club has followed through, so the spot is
     clear). Verdict:
       * no ball before        -> practice (air swing)
@@ -6417,19 +6388,16 @@ def classify_swing_shot(
     # Every zoomed look missed. The zoom crop is aimed at the pose wrist
     # point — if that point was garbled (pose dropout near the blurred
     # peak), the crop may not even contain the ball. One full-frame retry
-    # at the nearest lead so a bad hint can't guarantee a miss. Nearest
-    # by VALUE, not by position — this read leads[-1], which was only
-    # "nearest" because the tuple used to run far-to-near.
-    _near = min(leads)
+    # at the nearest lead so a bad hint can't guarantee a miss.
     if before is None and _hint is not None:
-        t_b = max(0.0, float(peak_time_sec) - _near)
+        t_b = max(0.0, float(peak_time_sec) - leads[-1])
         r = find_resting_ball(input_path, int(t_b * fps))
         if r.get("error"):
             _errs.append(str(r["error"]))
         if r.get("present") and r.get("x") is not None:
             before = {
                 "present": True, "x": r["x"], "y": r["y"],
-                "t": round(t_b, 2), "lead": _near,
+                "t": round(t_b, 2), "lead": leads[-1],
                 "confidence": r.get("confidence"), "crop_box": None,
             }
     before_out = before or probe

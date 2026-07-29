@@ -5165,7 +5165,7 @@ function PoseChart({ pose }) {
  */
 function FlightMapStatic({
   bgUrl, dots, restBall, aiPoints, trackPoints, frameW, frameH,
-  impactFrame, region, renderedLine,
+  impactFrame, region,
 }) {
   // Native dims: prop when the backend knows them, else measured off
   // the heat image itself (it's rendered at native resolution).
@@ -5272,23 +5272,6 @@ function FlightMapStatic({
               strokeLinejoin="round"
               strokeLinecap="round"
               opacity={0.85}
-            />
-          )}
-          {/* What the RENDERER actually drew — the fitted curve sampled
-              per frame, not the points it was fitted to. Where this
-              parts from the blue line is the tracer being wrong. */}
-          {(renderedLine || []).length >= 2 && (
-            <polyline
-              points={(renderedLine || [])
-                .map((p) => `${p[1]},${p[2]}`)
-                .join(" ")}
-              fill="none"
-              stroke="#ffffff"
-              strokeWidth={Math.max(2, fw / 420)}
-              strokeDasharray={`${fw / 90} ${fw / 180}`}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              opacity={0.95}
             />
           )}
           {track.map((p, i) => (
@@ -5966,85 +5949,6 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                     )}
                   </div>
                 )}
-                {s.ai?.mog2_stats && (
-                  <div className="tiny muted" style={{ marginTop: 3 }}>
-                    launch points handed to the render:{" "}
-                    <b
-                      style={{
-                        color: s.ai.mog2_stats.n_launch_in
-                          ? "inherit"
-                          : "#c0392b",
-                      }}
-                    >
-                      {s.ai.mog2_stats.n_launch_in ?? "?"}
-                    </b>
-                    {" · "}added to arc from them:{" "}
-                    {s.ai.mog2_stats.n_added_track ?? 0}
-                    {!s.ai.mog2_stats.n_launch_in &&
-                      (s.ai.anchor_check?.ai_launch_points || []).length >
-                        0 && (
-                        <>
-                          {" "}
-                          — the map shows{" "}
-                          {s.ai.anchor_check.ai_launch_points.length} AI
-                          launch point(s) near the ball, but{" "}
-                          <b>none reached the renderer</b>, so its nearest
-                          tracked point is far up the flight
-                        </>
-                      )}
-                  </div>
-                )}
-                {(() => {
-                  const ri = s.ai?.render_info || s.ai?.mog2_stats || null;
-                  if (!ri) return null;
-                  const moved =
-                    ri.rest_anchor_relocated ||
-                    ri.rest_anchor_dropped ||
-                    ri.rest_anchor_synthesized;
-                  if (!moved) {
-                    return (
-                      <div className="tiny muted" style={{ marginTop: 4 }}>
-                        📍 the render kept the line&apos;s start on the
-                        rest anchor (no drop, no relocation)
-                      </div>
-                    );
-                  }
-                  return (
-                    <div
-                      className="tiny"
-                      style={{ marginTop: 4, color: "#b7791f" }}
-                    >
-                      {ri.rest_anchor_relocated && (
-                        <>
-                          📍 the RENDER moved the line&apos;s start off
-                          the rest anchor: (
-                          {ri.rest_anchor_relocated.from?.join(", ")}) → (
-                          {ri.rest_anchor_relocated.to?.join(", ")}),{" "}
-                          {ri.rest_anchor_relocated.dist_px}px. The anchor
-                          disagreed with the flight&apos;s extrapolated launch
-                          origin, so the origin won. This is why the tracer can
-                          start somewhere other than the cyan dot below.
-                        </>
-                      )}
-                      {ri.rest_anchor_dropped && (
-                        <>
-                          📍 the RENDER DROPPED the rest anchor (
-                          {ri.rest_anchor_dropped.nearest_detection_px}px from
-                          the nearest detection, limit{" "}
-                          {ri.rest_anchor_dropped.threshold_px}px) — the
-                          line starts at the first tracked point instead.
-                        </>
-                      )}
-                      {ri.rest_anchor_synthesized && (
-                        <>
-                          📍 no rest anchor reached the render — the
-                          start was synthesized at the extrapolated launch
-                          origin ({ri.rest_anchor_synthesized.xy?.join(", ")}).
-                        </>
-                      )}
-                    </div>
-                  );
-                })()}
                 {s.ai?.raw_motion_url &&
                   ((s.ai.timed_points || []).length > 0 ||
                     (s.ai.anchor_check?.ai_launch_points || []).length >
@@ -6056,11 +5960,7 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       added by arc completion, dashed red = the
                       arc-completion search region, magenta = rest →
                       AI launch (cyan dot = rest), amber = unused pool
-                      dots with frame labels,{" "}
-                      <b>dashed white = the curve the renderer actually
-                      drew</b> (the fitted parabola, sampled per frame —
-                      where it parts from the blue line is the tracer
-                      disagreeing with its own points)
+                      dots with frame labels
                     </div>
                     <FlightMapStatic
                       bgUrl={s.ai.raw_motion_url}
@@ -6072,10 +5972,6 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                       frameH={s.ai.frame_h}
                       impactFrame={s.ai.impact_frame}
                       region={s.ai.arc_region}
-                      renderedLine={
-                        s.ai.render_info?.rendered_line ||
-                        s.ai.mog2_stats?.rendered_line
-                      }
                     />
                   </div>
                 )}

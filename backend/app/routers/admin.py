@@ -2703,11 +2703,6 @@ def _process_long_upload_segments(
                 )
             if tracer_info.get("mog2"):
                 nsw["mog2_stats"] = tracer_info["mog2"]
-            # What the render decided about the line's start — recorded
-            # whichever render produced the clip, so the panel can always
-            # show it (the layer's stats only exist when it extended).
-            if tracer_info.get("render_info") is not None:
-                nsw["render_info"] = tracer_info["render_info"]
             # Timed transient dots (mapped to source frames) + the raw
             # motion heat image — the wizard's click-to-plot view opens
             # straight from these, no in-session re-render needed.
@@ -8303,14 +8298,6 @@ def _mog2_layer_for_ai_track(
         "n_cv": len(pool),
         "n_matched": n_matched,
         "n_added": len(added),
-        # How many launch points the caller actually HANDED us. The
-        # magenta launch points on the flight map come from a
-        # display-only field (anchor_check.ai_launch_points); the render
-        # only ever sees pipe["launch_points"]. When the map shows early
-        # points near the ball and this reads 0, they never reached the
-        # renderer — which is how the nearest tracked point ended up
-        # 592px up the flight with the ball plainly plotted at the tee.
-        "n_launch_in": len(launch_pts),
         "n_added_track": len(added_track),
         "n_added_launch": len(added_launch),
         "n_added_mid": len(added_mid),
@@ -8501,27 +8488,7 @@ def _mog2_layer_for_ai_track(
             ),
             impact_frame_idx=int(_imp) if _imp is not None else 0,
             track_frames=merged,
-            # The departure walk watched the ball sit on this spot and
-            # leave it. Tell the renderer, so its "this anchor looks too
-            # far from the track" guard can't overrule a rest position
-            # that was verified frame by frame.
-            rest_verified=bool(
-                (anchor_check and anchor_check.get("verified"))
-                or pipe.get("anchors_preverified")
-            ),
         )
-        # The renderer is allowed to MOVE the line's start away from the
-        # rest anchor we handed it (wild-offset drop, or the launch-origin
-        # relocation). This is the deliverable's own render, and until now
-        # those decisions went only to the server log — from the outside a
-        # relocated start is indistinguishable from a bad anchor. Carry
-        # them out with the stats so the panel can say which happened.
-        for _k in (
-            "rest_anchor_relocated", "rest_anchor_dropped",
-            "rest_anchor_synthesized", "rendered_line",
-        ):
-            if rr.get(_k):
-                stats[_k] = rr[_k]
         if rr.get("ok") and ext_path.exists():
             compress_for_email(ext_path)
             if ext_path.exists() and ext_path.stat().st_size > 0:
@@ -8621,23 +8588,6 @@ def _trace_segment(
                 # Adaptive-square tracker points (CUT-relative frames)
                 # join the layer's dot pool — per-frame, pixel-exact.
                 r["launch_points"] = launch_points
-            # RENDER DECISIONS from the PIPELINE's own render. These were
-            # only ever captured from the MOG2 layer's extended render —
-            # but the layer returns early when it adds no points, and then
-            # the pipeline's render IS the deliverable. On those runs the
-            # debug panel simply had nothing to show, which reads as "the
-            # diagnostics stopped working" when it actually means "the
-            # layer didn't extend this time". Capture them here so the
-            # panel always shows what the render decided, whichever render
-            # produced the clip.
-            _render_info = {
-                _k: (r.get("tracer_video_info") or {}).get(_k)
-                for _k in (
-                    "rest_anchor_relocated", "rest_anchor_dropped",
-                    "rest_anchor_synthesized", "rendered_line",
-                )
-                if (r.get("tracer_video_info") or {}).get(_k)
-            }
             tvp = r.get("tracer_video_path")
             if r.get("ok"):
                 # The pipeline's own render is optional now: with the AI
@@ -8695,15 +8645,6 @@ def _trace_segment(
                         _layer = None
                     if _layer:
                         info["mog2"] = _layer.get("stats")
-                        # The layer rendered too — its render is the
-                        # deliverable, so ITS decisions win over the
-                        # pipeline's.
-                        for _k in (
-                            "rest_anchor_relocated", "rest_anchor_dropped",
-                            "rest_anchor_synthesized", "rendered_line",
-                        ):
-                            if (_layer.get("stats") or {}).get(_k):
-                                _render_info[_k] = _layer["stats"][_k]
                         if _layer.get("overlay_name"):
                             info["mog2_overlay_image"] = _layer["overlay_name"]
                         # Timed heat dots + candidate pool + raw-motion
@@ -8737,15 +8678,8 @@ def _trace_segment(
                         info["n_points"] = len(
                             info.get("ball_track_frames") or [],
                         )
-                        # Always present, even when empty — the panel then
-                        # says "no start correction" instead of rendering
-                        # nothing and looking broken.
-                        info["render_info"] = _render_info
                         log.info(
-                            "produce: AI tracer ok for %s — render decisions: "
-                            "%s", clip_path.name,
-                            {k: True for k in _render_info if k != "rendered_line"}
-                            or "none",
+                            "produce: AI tracer ok for %s", clip_path.name,
                         )
                         return url, info, p, None
                     log.warning(
@@ -8813,11 +8747,6 @@ def _trace_segment(
                 ball_rest_xy_native=_rest_m,
                 impact_frame_idx=_imp_m,
                 track_frames=_rt,
-                # _rest_m here IS the departure-verified rest (or the
-                # operator's own marked ball) — not a guess to second-guess.
-                rest_verified=bool(
-                    verified_rest_xy or ball_at_rest_override,
-                ),
             )
             if (
                 _ri.get("ok")
@@ -9598,11 +9527,6 @@ def _run_produce_debug_job(
                                 "tracer_raw_motion_url",
                             ),
                             "timed_points": _sw.get("timed_points"),
-                            # Carries rest_anchor_relocated/_dropped —
-                            # whether the renderer kept the start where
-                            # the anchor said.
-                            "mog2_stats": _sw.get("mog2_stats"),
-                            "render_info": _sw.get("render_info"),
                             # Full mapped track (all sources) so the
                             # flight map can draw the whole arc line.
                             "track_points": [
