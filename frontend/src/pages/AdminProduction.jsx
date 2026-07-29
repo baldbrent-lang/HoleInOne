@@ -5325,6 +5325,7 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
   // Per-swing 🔥 toggle for the launch-tracker film-strip (plain vs
   // motion-mask tint).
   const [launchHeat, setLaunchHeat] = useState({});
+  const [earlyHeat, setEarlyHeat] = useState({});
   // Per-swing toggle for the anchor-check strip: photo tiles (what the
   // AI judged) vs the MOG2 frame-diff twin of the same tiles.
   const [anchorHeat, setAnchorHeat] = useState({});
@@ -5488,14 +5489,45 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                             filling the frames the AI missed. AI picks win
                             per frame; these fill the gaps.
                           </div>
+                          {s.anchor.early_image_heat_url && (
+                            <button
+                              type="button"
+                              className={
+                                earlyHeat[s.swing] ? "small" : "ghost small"
+                              }
+                              style={{
+                                width: "auto", padding: "1px 8px",
+                                marginBottom: 3,
+                              }}
+                              onClick={() =>
+                                setEarlyHeat((m) => ({
+                                  ...m,
+                                  [s.swing]: !m[s.swing],
+                                }))
+                              }
+                              title="Toggle the motion mask on these tiles — what MOG2 actually saw in the launch window."
+                            >
+                              🔥 heat {earlyHeat[s.swing] ? "on" : "off"}
+                            </button>
+                          )}
                           <a
-                            href={s.anchor.early_image_url}
+                            href={
+                              earlyHeat[s.swing] &&
+                              s.anchor.early_image_heat_url
+                                ? s.anchor.early_image_heat_url
+                                : s.anchor.early_image_url
+                            }
                             target="_blank"
                             rel="noreferrer"
                             style={{ display: "block" }}
                           >
                             <img
-                              src={s.anchor.early_image_url}
+                              src={
+                                earlyHeat[s.swing] &&
+                                s.anchor.early_image_heat_url
+                                  ? s.anchor.early_image_heat_url
+                                  : s.anchor.early_image_url
+                              }
                               alt="MOG2 launch-window strip"
                               style={{ maxWidth: "100%", borderRadius: 6 }}
                             />

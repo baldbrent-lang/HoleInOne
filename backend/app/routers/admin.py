@@ -2461,6 +2461,9 @@ def _run_long_upload_job(
                                             _anchor_rec["early_image"] = (
                                                 _lt_early.get("image")
                                             )
+                                            _anchor_rec["early_image_heat"] = (
+                                                _lt_early.get("image_heat")
+                                            )
                                             log.info(
                                                 "long-upload worker: launch "
                                                 "window — AI %d pt(s), MOG2 "
@@ -2549,10 +2552,9 @@ def _run_long_upload_job(
                                             "ai_launch_image",
                                             "ai_launch_points",
                                             "search_box", "box_ball_xy",
-                                        "early_n", "early_reason",
-                                        "early_image",
                                             "early_n", "early_reason",
                                             "early_image",
+                                            "early_image_heat",
                                         )
                                     }
                             except Exception as exc:  # noqa: BLE001
@@ -2582,7 +2584,7 @@ def _run_long_upload_job(
                                         "assumed_impact_image", "rest_xy",
                                         "search_box", "box_ball_xy",
                                         "early_n", "early_reason",
-                                        "early_image",
+                                        "early_image", "early_image_heat",
                                         "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
@@ -9749,6 +9751,7 @@ def _run_produce_debug_job(
                         ("ai_launch_image", "ai_launch_image_url"),
                         ("assumed_impact_image", "assumed_impact_image_url"),
                         ("early_image", "early_image_url"),
+                        ("early_image_heat", "early_image_heat_url"),
                     ):
                         if _anc.get(_ik) and (
                             CLIPS_DIR / _anc[_ik]
