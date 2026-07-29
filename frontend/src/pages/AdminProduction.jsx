@@ -2141,7 +2141,8 @@ function WizardBody({
         </div>
         <div className="tiny muted" style={{ marginTop: 6 }}>
           Green dot = ball at rest · Green box = ball-tracer detection
-          area · Red flag = target. Click a field on the right to edit.
+          area · Red flag = target. Click a field on the right to edit —
+          then drag the marker, or click anywhere on the frame to place it.
         </div>
       </div>
 
@@ -2250,6 +2251,39 @@ function WizardBody({
               setEditing(null);
             }}
           />
+        </EditableRow>
+
+        <EditableRow
+          label="Ball at rest"
+          value={
+            draft.ball
+              ? `${draft.ball.x}, ${draft.ball.y} px${draft.ballManual ? " (placed by hand)" : ""}`
+              : "Not set"
+          }
+          active={editing === "ball"}
+          onActivate={() => setEditing(editing === "ball" ? null : "ball")}
+        >
+          <div className="tiny muted">
+            Drag the green dot on the left, or click anywhere on the frame
+            to drop it there. This is where the tracer line STARTS, so it
+            wants to be on the ball itself, not near it.
+          </div>
+          <button
+            type="button"
+            style={{ width: "auto", marginTop: 6 }}
+            onClick={() => {
+              if (draft.ball) {
+                // ball_manual marks it operator-placed. Production checks
+                // that flag before writing a detected rest position, so a
+                // re-produce can't quietly move it back.
+                setDraft((d) => ({ ...d, ballManual: true }));
+                persistPatch({ ball: draft.ball, ball_manual: true });
+              }
+              setEditing(null);
+            }}
+          >
+            Done
+          </button>
         </EditableRow>
 
         <EditableRow
