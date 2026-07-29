@@ -2396,133 +2396,104 @@ def _run_long_upload_job(
                                             _found_rest,
                                         )
                                         _e["impact_pinned_f"] = _pk_f
-                                    if _ai_pts:
-                                        # The earliest AI pick IS where the
-                                        # flight starts — the rest anchor,
-                                        # exactly as the departure walk's
-                                        # rest_xy would have been.
-                                        _first = min(
-                                            _ai_pts,
-                                            key=lambda q: int(q["frame"]),
+                                    # MOG2 ACROSS THE LAUNCH WINDOW - unconditionally.
+                                    # This used to sit inside `if _ai_pts:`, so on the
+                                    # swings that need it most - the AI seeing nothing
+                                    # at all - the pixel tracker never ran either, and
+                                    # the swing fell through to MOG2-only with no
+                                    # anchor. Both detectors get the same six frames.
+                                    _lt_early = None
+                                    _tr_from = _found_rest or [
+                                        _box[0] + _box[2] / 2.0,
+                                        _box[1] + _box[3] * 0.75,
+                                    ]
+                                    try:
+                                        _lt_early = track_launch_from_rest(
+                                            src_path,
+                                            (float(_tr_from[0]), float(_tr_from[1])),
+                                            _pk_f, tee_fps,
+                                            debug_dir=_dbg_dir,
+                                            debug_prefix=(
+                                                f"launchearly-{upload_id}-{_tok}"
+                                            ),
+                                            max_seconds=6.5 / max(1.0, tee_fps),
                                         )
-                                        if not _found_rest:
-                                            d["ball_rest_xy"] = [
-                                                float(_first["x"]),
-                                                float(_first["y"]),
-                                            ]
-                                            d["impact_pinned"] = True
-                                            _anchor_rec["rest_xy"] = [
-                                                float(_first["x"]),
-                                                float(_first["y"]),
-                                            ]
-                                            _e["impact_pinned_f"] = _pk_f
-                                        # Same hand-off as the departure
-                                        # path: pixel tracker seeded from
-                                        # the AI's points, then MOG2.
+                                        _anchor_rec["early_n"] = _lt_early.get("n_found")
+                                        _anchor_rec["early_reason"] = _lt_early.get("reason")
+                                        _anchor_rec["early_image"] = _lt_early.get("image")
+                                        _anchor_rec["early_image_heat"] = (
+                                            _lt_early.get("image_heat")
+                                        )
+                                        log.info(
+                                            "long-upload worker: launch window - AI %d "
+                                            "pt(s), MOG2 %s pt(s) over the same frames",
+                                            len(_ai_pts), _lt_early.get("n_found"),
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        log.warning("early MOG2 pass failed: %s", exc)
+                                    _early_pts = list((_lt_early or {}).get("points") or [])
+                                    # Whichever detector saw the ball first IS the rest
+                                    # anchor. The AI wins ties; MOG2 alone is still a
+                                    # real anchor, and far better than none.
+                                    _ai_frames = {int(a["frame"]) for a in _ai_pts}
+                                    _all_early = sorted(
+                                        _ai_pts + [
+                                            q for q in _early_pts
+                                            if int(q["frame"]) not in _ai_frames
+                                        ],
+                                        key=lambda q: int(q["frame"]),
+                                    )
+                                    if not _found_rest and _all_early:
+                                        _found_rest = [
+                                            float(_all_early[0]["x"]),
+                                            float(_all_early[0]["y"]),
+                                        ]
+                                        d["ball_rest_xy"] = list(_found_rest)
+                                        d["impact_pinned"] = True
+                                        _anchor_rec["rest_xy"] = list(_found_rest)
+                                        _anchor_rec["verified"] = True
+                                        _e["impact_pinned_f"] = _pk_f
+                                    if _all_early:
+                                        # Continuation: the tracker picks up after the
+                                        # last point either detector found.
                                         try:
-                                            _tr_from = (
-                                                _found_rest
-                                                or [_first["x"], _first["y"]]
-                                            )
-                                            # MOG2 OVER THE SAME FIRST
-                                            # FRAMES. The seeded call
-                                            # below deliberately starts
-                                            # AFTER the last AI point so
-                                            # the two strips read as one
-                                            # chain — which means the
-                                            # frames the AI MISSED inside
-                                            # the launch window were never
-                                            # covered by anything. These
-                                            # are the frames that set the
-                                            # tracer's direction, so run
-                                            # the pixel tracker across
-                                            # them too and let it fill the
-                                            # AI's gaps.
-                                            _lt_early = track_launch_from_rest(
-                                                src_path,
-                                                (float(_tr_from[0]),
-                                                 float(_tr_from[1])),
-                                                _pk_f, tee_fps,
-                                                debug_dir=_dbg_dir,
-                                                debug_prefix=(
-                                                    f"launchearly-"
-                                                    f"{upload_id}-{_tok}"
-                                                ),
-                                                max_seconds=(
-                                                    6.5 / max(1.0, tee_fps)
-                                                ),
-                                            )
-                                            _anchor_rec["early_n"] = (
-                                                _lt_early.get("n_found")
-                                            )
-                                            _anchor_rec["early_reason"] = (
-                                                _lt_early.get("reason")
-                                            )
-                                            _anchor_rec["early_image"] = (
-                                                _lt_early.get("image")
-                                            )
-                                            _anchor_rec["early_image_heat"] = (
-                                                _lt_early.get("image_heat")
-                                            )
-                                            log.info(
-                                                "long-upload worker: launch "
-                                                "window — AI %d pt(s), MOG2 "
-                                                "%s pt(s) over the same "
-                                                "frames",
-                                                len(_ai_pts),
-                                                _lt_early.get("n_found"),
-                                            )
                                             _lt = track_launch_from_rest(
                                                 src_path,
-                                                (float(_tr_from[0]),
-                                                 float(_tr_from[1])),
+                                                (float(_found_rest[0]),
+                                                 float(_found_rest[1])),
                                                 _pk_f, tee_fps,
                                                 debug_dir=_dbg_dir,
                                                 debug_prefix=(
                                                     f"launchtrk-assumed-"
                                                     f"{upload_id}-{_tok}"
                                                 ),
-                                                seed_points=_ai_pts,
+                                                seed_points=_all_early,
                                             )
                                             _merged_lp = {
-                                                int(q["frame"]): q
-                                                for q in _ai_pts
+                                                int(q["frame"]): q for q in _ai_pts
                                             }
                                             for q in (
-                                                (_lt_early.get("points") or [])
-                                                + (_lt.get("points") or [])
+                                                _early_pts + (_lt.get("points") or [])
                                             ):
-                                                _merged_lp.setdefault(
-                                                    int(q["frame"]), {
-                                                        "frame": int(
-                                                            q["frame"],
-                                                        ),
-                                                        "x": q["x"],
-                                                        "y": q["y"],
-                                                    },
-                                                )
+                                                _merged_lp.setdefault(int(q["frame"]), {
+                                                    "frame": int(q["frame"]),
+                                                    "x": q["x"], "y": q["y"],
+                                                })
                                             d["launch_points"] = [
-                                                _merged_lp[k]
-                                                for k in sorted(_merged_lp)
+                                                _merged_lp[k] for k in sorted(_merged_lp)
                                             ]
-                                            _anchor_rec["launch_n"] = (
-                                                _lt.get("n_found")
+                                            _anchor_rec["launch_n"] = _lt.get("n_found")
+                                            _anchor_rec["launch_reason"] = _lt.get("reason")
+                                            _anchor_rec["launch_image"] = _lt.get("image")
+                                            _anchor_rec["launch_image_heat"] = (
+                                                _lt.get("image_heat")
                                             )
-                                            _anchor_rec["launch_reason"] = (
-                                                _lt.get("reason")
-                                            )
-                                            _anchor_rec["launch_image"] = (
-                                                _lt.get("image")
-                                            )
-                                            _anchor_rec[
-                                                "launch_image_heat"
-                                            ] = _lt.get("image_heat")
                                         except Exception as exc:  # noqa: BLE001
                                             log.warning(
-                                                "assumed-impact launch "
-                                                "tracker failed: %s", exc,
+                                                "assumed-impact launch tracker failed: %s",
+                                                exc,
                                             )
-                                            d["launch_points"] = _ai_pts
+                                            d["launch_points"] = _all_early
                                     # The frame we ASSUMED impact on, saved
                                     # so the panel can show exactly which
                                     # one it is.
