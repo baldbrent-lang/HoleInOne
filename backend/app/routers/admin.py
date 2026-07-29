@@ -2724,8 +2724,20 @@ def _process_long_upload_segments(
                         "verified", "snapped", "snap_px", "impact_delta",
                         "present_ratio_pre", "reason",
                         "ai_fallback_reason", "ai_launch_points",
+                        # Without these the launch-plot film-strip has no
+                        # URL to render, so the sequence silently vanished
+                        # from the AI-tracer panel even though the plot ran.
+                        "ai_launch_n", "ai_launch_reason",
                     )
                 }
+                if _ac.get("ai_launch_image") and (
+                    CLIPS_DIR / _ac["ai_launch_image"]
+                ).exists():
+                    _alp_p = CLIPS_DIR / _ac["ai_launch_image"]
+                    _ac_entry["ai_launch_image_url"] = (
+                        f"{settings.app_base_url}/uploads/clips/"
+                        f"{_alp_p.name}?v={int(_alp_p.stat().st_mtime)}"
+                    )
                 if _ac.get("image") and (CLIPS_DIR / _ac["image"]).exists():
                     _acp = CLIPS_DIR / _ac["image"]
                     _ac_entry["image_url"] = (

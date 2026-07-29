@@ -3333,6 +3333,14 @@ def render_tracer_video(
     # ball. Manual entries are operator-confirmed: the fit treats them
     # as pinned ground truth (never rejected, heavily weighted).
     points_by_frame: dict[int, tuple[int, int, bool]] = {}
+    # AI-plotted launch points: the vision model looked at the ball,
+    # frame by frame, in the motion-blur zone right after impact — the
+    # part of the flight the pixel tracker is worst at and where MOG2 has
+    # nothing but body motion. They are the best evidence we have for
+    # where the flight BEGINS, so they outrank ordinary detections in the
+    # fit instead of being averaged in with them. (Not marked `manual`:
+    # that flag also switches the renderer into operator-plot mode.)
+    priority_frames: set[int] = set()
     for rec in track_frames or []:
         if not rec.get("found"):
             continue
@@ -3343,6 +3351,8 @@ def render_tracer_video(
             continue
         try:
             points_by_frame[int(f)] = (int(x), int(y), bool(rec.get("manual", False)))
+            if rec.get("source") in ("launch", "ai") or rec.get("priority"):
+                priority_frames.add(int(f))
         except (TypeError, ValueError):
             continue
 
@@ -3497,10 +3507,13 @@ def render_tracer_video(
     # detected flight vanished from the tracer.
     has_manual = any(m for (_x, _y, m) in points_by_frame.values())
     n_auto_pts = sum(1 for (_x, _y, m) in points_by_frame.values() if not m)
+    priority_anchor_idxs: set[int] = set()
     for f in sorted(points_by_frame):
         x, y, is_manual = points_by_frame[f]
         if is_manual:
             manual_anchor_idxs.add(len(anchors))
+        elif f in priority_frames:
+            priority_anchor_idxs.add(len(anchors))
         anchors.append((f, x, y))
 
     # Fit a smooth parabola through the anchors with iterative outlier
@@ -3629,7 +3642,7 @@ def render_tracer_video(
     # fitted curve is forced to keep (and hug) them instead of tossing
     # them as "outliers" relative to a fit the AI points had skewed.
     rest_is_anchor_zero = rest_added
-    pinned_set: set[int] = set(manual_anchor_idxs)
+    pinned_set: set[int] = set(manual_anchor_idxs) | priority_anchor_idxs
     if rest_is_anchor_zero:
         pinned_set.add(0)
     if not pinned_set:
@@ -3643,6 +3656,11 @@ def render_tracer_video(
         for i in range(len(anchors)):
             if (rest_is_anchor_zero and i == 0) or i in manual_anchor_idxs:
                 weight_list.append(10.0)
+            elif i in priority_anchor_idxs:
+                # AI-plotted launch points — below the operator and the
+                # verified rest, well above a MOG2 dot that might be a
+                # leaf.
+                weight_list.append(6.0)
             else:
                 weight_list.append(1.0)
     else:
