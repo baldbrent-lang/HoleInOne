@@ -2703,6 +2703,11 @@ def _process_long_upload_segments(
                 )
             if tracer_info.get("mog2"):
                 nsw["mog2_stats"] = tracer_info["mog2"]
+            # What the render decided about the line's start — recorded
+            # whichever render produced the clip, so the panel can always
+            # show it (the layer's stats only exist when it extended).
+            if tracer_info.get("render_info") is not None:
+                nsw["render_info"] = tracer_info["render_info"]
             # Timed transient dots (mapped to source frames) + the raw
             # motion heat image — the wizard's click-to-plot view opens
             # straight from these, no in-session re-render needed.
@@ -8616,6 +8621,23 @@ def _trace_segment(
                 # Adaptive-square tracker points (CUT-relative frames)
                 # join the layer's dot pool — per-frame, pixel-exact.
                 r["launch_points"] = launch_points
+            # RENDER DECISIONS from the PIPELINE's own render. These were
+            # only ever captured from the MOG2 layer's extended render —
+            # but the layer returns early when it adds no points, and then
+            # the pipeline's render IS the deliverable. On those runs the
+            # debug panel simply had nothing to show, which reads as "the
+            # diagnostics stopped working" when it actually means "the
+            # layer didn't extend this time". Capture them here so the
+            # panel always shows what the render decided, whichever render
+            # produced the clip.
+            _render_info = {
+                _k: (r.get("tracer_video_info") or {}).get(_k)
+                for _k in (
+                    "rest_anchor_relocated", "rest_anchor_dropped",
+                    "rest_anchor_synthesized", "rendered_line",
+                )
+                if (r.get("tracer_video_info") or {}).get(_k)
+            }
             tvp = r.get("tracer_video_path")
             if r.get("ok"):
                 # The pipeline's own render is optional now: with the AI
@@ -8673,6 +8695,15 @@ def _trace_segment(
                         _layer = None
                     if _layer:
                         info["mog2"] = _layer.get("stats")
+                        # The layer rendered too — its render is the
+                        # deliverable, so ITS decisions win over the
+                        # pipeline's.
+                        for _k in (
+                            "rest_anchor_relocated", "rest_anchor_dropped",
+                            "rest_anchor_synthesized", "rendered_line",
+                        ):
+                            if (_layer.get("stats") or {}).get(_k):
+                                _render_info[_k] = _layer["stats"][_k]
                         if _layer.get("overlay_name"):
                             info["mog2_overlay_image"] = _layer["overlay_name"]
                         # Timed heat dots + candidate pool + raw-motion
@@ -8706,8 +8737,15 @@ def _trace_segment(
                         info["n_points"] = len(
                             info.get("ball_track_frames") or [],
                         )
+                        # Always present, even when empty — the panel then
+                        # says "no start correction" instead of rendering
+                        # nothing and looking broken.
+                        info["render_info"] = _render_info
                         log.info(
-                            "produce: AI tracer ok for %s", clip_path.name,
+                            "produce: AI tracer ok for %s — render decisions: "
+                            "%s", clip_path.name,
+                            {k: True for k in _render_info if k != "rendered_line"}
+                            or "none",
                         )
                         return url, info, p, None
                     log.warning(
@@ -9564,6 +9602,7 @@ def _run_produce_debug_job(
                             # whether the renderer kept the start where
                             # the anchor said.
                             "mog2_stats": _sw.get("mog2_stats"),
+                            "render_info": _sw.get("render_info"),
                             # Full mapped track (all sources) so the
                             # flight map can draw the whole arc line.
                             "track_points": [
