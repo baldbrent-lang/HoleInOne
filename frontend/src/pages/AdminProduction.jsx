@@ -3063,6 +3063,24 @@ function Debug2Modal({ state, onClose }) {
               </div>
               <div className="tiny muted">{sw.verdict_reason}</div>
 
+              {sw.ai_path != null && (
+                <div className="tiny" style={{ marginTop: 4 }}>
+                  <b>AI traced the ball trail:</b>{" "}
+                  {sw.ai_path.length > 0 ? (
+                    <span style={{ color: "#1a9d55" }}>
+                      {sw.ai_path.length} point(s)
+                      {sw.ai_path_confidence && ` · ${sw.ai_path_confidence}`}
+                      {sw.ai_path_start_px != null &&
+                        ` · starts ${sw.ai_path_start_px}px from the club-arc ball`}
+                    </span>
+                  ) : (
+                    <span style={{ color: "#b7791f" }}>no trail found</span>
+                  )}
+                  {sw.ai_path_note && (
+                    <div className="muted">{sw.ai_path_note}</div>
+                  )}
+                </div>
+              )}
               <div className="tiny" style={{ marginTop: 6 }}>
                 <b>ball at impact:</b>{" "}
                 {sw.ball ? `${sw.ball[0]}, ${sw.ball[1]}` : "not found"}
@@ -3096,6 +3114,11 @@ function Debug2Modal({ state, onClose }) {
                   {sw.n_dots != null && ` · ${sw.n_dots} dots in window`}
                   {sw.chain_method && (
                     <div className="muted">method: {sw.chain_method}</div>
+                  )}
+                  {sw.chain_tries?.length > 1 && (
+                    <div className="muted">
+                      tried: {sw.chain_tries.join("  |  ")}
+                    </div>
                   )}
                   {sw.aim_px != null && (
                     <div

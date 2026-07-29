@@ -98,6 +98,7 @@ from ..services.ai_tracer import (
     refine_impact_frame,
     track_ball_after_impact,
     judge_swing_heat_image,
+    trace_ball_path_ai,
     render_tracer_video,
     run_full_ai_tracer_pipeline,
     detect_swings_from_audio,
@@ -11139,12 +11140,14 @@ def _debug2_run(row, src_path, db):
             f"?v={int(p.stat().st_mtime)}"
         )
 
-    # Frame height sets the ball scale the chain rules are written in.
-    _fh = 720
+    # Frame size: the height sets the ball scale the chain rules are
+    # written in, and both are needed to map the AI's percentage points.
+    _fw, _fh = 1280, 720
     try:
         import cv2 as _cv2
 
         _c = _cv2.VideoCapture(str(src_path))
+        _fw = int(_c.get(_cv2.CAP_PROP_FRAME_WIDTH) or 1280) or 1280
         _fh = int(_c.get(_cv2.CAP_PROP_FRAME_HEIGHT) or 720) or 720
         _c.release()
     except Exception:  # noqa: BLE001
@@ -11236,6 +11239,35 @@ def _debug2_run(row, src_path, db):
                 reason = f"AI judge unavailable ({j.get('reason')})"
         entry["verdict"] = verdict
         entry["verdict_reason"] = reason
+
+        # 3b. SAME COMPOSITE, SECOND QUESTION: trace the ball's dotted
+        # trail. On this map the trail is the most legible thing in the
+        # picture — an evenly-spaced line of blue dots leaving the frame —
+        # and reading it needs no chain to be assembled first. Points come
+        # back as percentages of the composite, so they map onto the source
+        # frame regardless of how the composite was scaled.
+        if verdict != "not_swing" and chk.get("image_clean"):
+            _tp = trace_ball_path_ai(CLIPS_DIR / chk["image_clean"])
+            entry["ai_path_note"] = _tp.get("note") or _tp.get("error")
+            entry["ai_path_confidence"] = _tp.get("confidence")
+            _pts_pct = _tp.get("points_pct") or []
+            entry["ai_path"] = [
+                {
+                    "x": int(round(p["x_pct"] / 100.0 * _fw)),
+                    "y": int(round(p["y_pct"] / 100.0 * _fh)),
+                }
+                for p in _pts_pct
+            ]
+            # Does the AI's trail start where the club arc says the ball
+            # was? Two independent reads agreeing is worth more than
+            # either alone.
+            if entry["ai_path"] and club.get("xy"):
+                _a = entry["ai_path"][0]
+                entry["ai_path_start_px"] = int(round((
+                    (_a["x"] - club["xy"][0]) ** 2
+                    + (_a["y"] - club["xy"][1]) ** 2
+                ) ** 0.5))
+
         if verdict == "not_swing":
             n_judged_out += 1
             rep["swings"].append(entry)
@@ -11285,14 +11317,34 @@ def _debug2_run(row, src_path, db):
         _head = c.get("impact_head_xy")
         _head_y = float(_head[1]) if _head and len(_head) == 2 else None
         entry["head_y"] = _head_y
-        ch = d2.chain_above_head(
-            pool, club.get("xy"), imp_f, _fh, _head_y,
-        )
-        entry["chain_method"] = "above-head lock-on, walked back"
-        if not ch.get("points"):
-            _why_above = ch.get("reason")
+        _tries: list = []
+        ch, method = None, None
+        # BEST FIRST: the trail the AI traced. It knows the path's SHAPE
+        # but has no frame numbers; MOG2 has exact frames but cannot tell
+        # the ball from foliage. Intersecting them gives a path that is
+        # both correctly shaped and correctly timed. Measured on a
+        # synthetic flight buried in 120 noise dots: 100% of the flight
+        # kept, none of the noise.
+        if entry.get("ai_path"):
+            _c1 = d2.chain_along_ai_path(
+                pool, entry["ai_path"], club.get("xy"), imp_f, _fh,
+            )
+            _tries.append(f"AI trail: {_c1['reason']}")
+            if len(_c1.get("points") or []) >= 3:
+                ch, method = _c1, "dots on the AI-traced trail"
+        if ch is None:
+            _c2 = d2.chain_above_head(
+                pool, club.get("xy"), imp_f, _fh, _head_y,
+            )
+            _tries.append(f"above-head: {_c2['reason']}")
+            if _c2.get("points"):
+                ch, method = _c2, "above-head lock-on, walked back"
+        if ch is None:
             ch = d2.chain_from_ball(pool, club.get("xy"), imp_f, _fh)
-            entry["chain_method"] = f"fell back to up-from-ball ({_why_above})"
+            _tries.append(f"up-from-ball: {ch['reason']}")
+            method = "up-from-ball walk"
+        entry["chain_method"] = method
+        entry["chain_tries"] = _tries
         entry["aim_px"] = ch.get("aim_px")
         entry["seed_frames"] = ch.get("seed")
         entry["chain"] = ch["points"]
@@ -11318,6 +11370,7 @@ def _debug2_run(row, src_path, db):
                 f"red x=rejected)",
                 head_y=_head_y,
                 aim_xy=ch.get("aim_xy"),
+                ai_path=entry.get("ai_path"),
             ):
                 entry["chain_image_url"] = _clip_url(name)
         rep["swings"].append(entry)

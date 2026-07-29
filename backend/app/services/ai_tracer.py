@@ -6395,6 +6395,102 @@ _JUDGE_SWING_HEAT_PROMPT = (
 )
 
 
+_TRACE_BALL_PATH_PROMPT = (
+    "You are looking at a MOTION-HEAT visualization from a fixed golf tee "
+    "camera: one video frame with accumulated motion overlaid in color "
+    "(blue = pixels that moved only BRIEFLY, green/yellow/orange/red = "
+    "progressively more constant motion).\n"
+    "A struck golf ball leaves a very distinctive mark on this map: a "
+    "line of small BLUE dots or dashes, evenly spaced, running away from "
+    "the golfer and off the edge of the frame. It is blue because the "
+    "ball touches each pixel for only one or two frames. The dots are "
+    "spaced widest near the golfer and get CLOSER TOGETHER further along "
+    "the path as the ball slows and the perspective compresses.\n"
+    "TRACE THAT TRAIL. Give an ordered list of points along it, starting "
+    "nearest the golfer and ending where it leaves the frame or fades "
+    "out. 5-12 points is plenty.\n"
+    "Do NOT trace: the fan of thin streaks sweeping around the golfer "
+    "(that is the club shaft), the warm blob of the golfer's body, "
+    "foliage shimmer at the tops of trees (scattered, not a line), or "
+    "anything that does not read as an evenly-spaced line of dots.\n"
+    "If there is no such trail, say found=false rather than guessing.\n"
+    "Reply with JSON only:\n"
+    '{"found": true|false, "points": [{"x_pct": number, "y_pct": number}], '
+    '"confidence": "high"|"medium"|"low", "note": "<one short sentence>"}\n'
+    "x_pct/y_pct are percentages (0-100) of THIS image's width/height."
+)
+
+
+def trace_ball_path_ai(image_path, model: str | None = None) -> dict:
+    """Ask the vision model to TRACE the ball's dotted trail on a motion-
+    heat composite.
+
+    The same judge that recognises a swing can also point at the ball's
+    path, and on this map the trail is the most legible thing in the
+    picture — an evenly-spaced line of blue dots leaving the frame, which
+    no pixel chain has to be assembled to see. It gives an independent
+    read on where the flight went, useful both as a corridor for the dot
+    chain and as a check on it.
+
+    Returns {available, found, points_pct, confidence, note, error} with
+    points as percentages; the caller maps them onto its own frame.
+    Never raises."""
+    out = {
+        "available": False, "found": None, "points_pct": [],
+        "confidence": None, "note": None, "error": None,
+    }
+    if not HAS_ANTHROPIC or not os.environ.get("ANTHROPIC_API_KEY"):
+        out["error"] = "ANTHROPIC_API_KEY not set"
+        return out
+    try:
+        data = Path(image_path).read_bytes()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"could not read image: {exc}"
+        return out
+    try:
+        client = _anthropic_client()
+        resp = client.messages.create(
+            model=_resolve_frame_picker_model(model),
+            max_tokens=700,
+            system=[{
+                "type": "text",
+                "text": _TRACE_BALL_PATH_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": "JSON only."},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg",
+                    "data": base64.standard_b64encode(data).decode("ascii"),
+                }},
+            ]}],
+        )
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"api_failed: {exc}"
+        return out
+    text = "".join(
+        c.text for c in resp.content if getattr(c, "type", None) == "text"
+    )
+    parsed = _extract_json(text) or {}
+    out["available"] = True
+    out["found"] = bool(parsed.get("found"))
+    out["confidence"] = parsed.get("confidence")
+    out["note"] = parsed.get("note")
+    pts = []
+    for p in (parsed.get("points") or []):
+        try:
+            xp, yp = float(p["x_pct"]), float(p["y_pct"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if 0.0 <= xp <= 100.0 and 0.0 <= yp <= 100.0:
+            pts.append({"x_pct": xp, "y_pct": yp})
+    out["points_pct"] = pts
+    if out["found"] and not pts:
+        out["found"] = False
+        out["note"] = (out["note"] or "") + " (claimed a trail but gave no usable points)"
+    return out
+
+
 def judge_swing_heat_image(image_path, model: str | None = None) -> dict:
     """One Claude vision call: does this motion-heat composite look like a
     golfer swinging a club? The operator A/B-tested this against the

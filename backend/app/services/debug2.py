@@ -291,6 +291,7 @@ def draw_chain(
     header: str,
     head_y: float | None = None,
     aim_xy=None,
+    ai_path=None,
 ) -> bool:
     """The chain over the windowed heat: the ball, the links, and the
     dots that were considered and thrown out. The rejects are drawn
@@ -302,6 +303,16 @@ def draw_chain(
         img = cv2.imread(str(heat_path))
         if img is None:
             return False
+        if ai_path and len(ai_path) >= 2:
+            # The trail the AI traced off the heat map — the corridor the
+            # dots were matched against.
+            for a, b in zip(ai_path, ai_path[1:]):
+                cv2.line(img, (int(a["x"]), int(a["y"])),
+                         (int(b["x"]), int(b["y"])),
+                         (255, 255, 255), 1, cv2.LINE_AA)
+            for a in ai_path:
+                cv2.circle(img, (int(a["x"]), int(a["y"])), 3,
+                           (255, 255, 255), -1, cv2.LINE_AA)
         if head_y is not None:
             # The line the lock-on happens above. Everything over it is
             # sky and trees, which is why the dots up there are clean.
@@ -518,6 +529,89 @@ def chain_above_head(
         + (
             f"; back-extension lands {out['aim_px']:.0f}px from the ball"
             if out.get("aim_px") is not None else ""
+        )
+    )
+    return out
+
+
+# ── stage 5c: chain along the corridor the AI traced ───────────────────
+
+def chain_along_ai_path(
+    dots: list,
+    ai_path: list,
+    ball_xy,
+    impact_frame: int,
+    frame_h: int,
+    max_frames: int = WIN_POST,
+    corridor_px: float | None = None,
+) -> dict:
+    """Keep the dots that sit ON the trail the AI traced, in frame order.
+
+    The AI reads the trail's SHAPE off the heat map but has no frame
+    numbers — it is looking at an image where the whole flight is
+    superimposed. MOG2 has exact frames but cannot tell the ball's dots
+    from foliage. Intersecting the two gives a path that is both correctly
+    shaped and correctly timed, and neither source can supply that alone.
+
+    Returns {points, reason, rejected}."""
+    out = {"points": [], "reason": None, "rejected": []}
+    if not ai_path or len(ai_path) < 2:
+        out["reason"] = "no AI trail to follow"
+        return out
+    r = max(6.0, 0.012 * float(frame_h))
+    corr = corridor_px if corridor_px is not None else 6.0 * r
+
+    def _dist_to_path(x, y):
+        best = None
+        for a, b in zip(ai_path, ai_path[1:]):
+            ax, ay = float(a["x"]), float(a["y"])
+            bx, by = float(b["x"]), float(b["y"])
+            vx, vy = bx - ax, by - ay
+            L2 = vx * vx + vy * vy
+            t = 0.0 if L2 <= 0 else max(
+                0.0, min(1.0, ((x - ax) * vx + (y - ay) * vy) / L2),
+            )
+            d = math.hypot(x - (ax + t * vx), y - (ay + t * vy))
+            if best is None or d < best:
+                best = d
+        return best if best is not None else 1e9
+
+    f0, f1 = int(impact_frame), int(impact_frame) + int(max_frames)
+    kept = []
+    for d in sorted(
+        [
+            d for d in (dots or [])
+            if d.get("frame") is not None and f0 < int(d["frame"]) <= f1
+            and d.get("x") is not None and d.get("y") is not None
+        ],
+        key=lambda d: int(d["frame"]),
+    ):
+        dd = _dist_to_path(float(d["x"]), float(d["y"]))
+        if dd > corr:
+            out["rejected"].append({
+                "frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"]),
+                "why": "off the AI trail",
+            })
+            continue
+        kept.append({
+            "frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"]),
+            "phase": "up", "path_px": round(dd, 1),
+        })
+
+    # One dot per frame — the nearest to the trail wins, since MOG2 often
+    # fires several times around a moving object.
+    byf: dict = {}
+    for k in kept:
+        cur = byf.get(k["frame"])
+        if cur is None or k["path_px"] < cur["path_px"]:
+            byf[k["frame"]] = k
+    out["points"] = [byf[f] for f in sorted(byf)]
+    out["reason"] = (
+        f"{len(out['points'])} dot(s) on the AI trail "
+        f"(corridor {corr:.0f}px), {len(out['rejected'])} off it"
+        + (
+            f", f{out['points'][0]['frame']}-{out['points'][-1]['frame']}"
+            if out["points"] else ""
         )
     )
     return out
