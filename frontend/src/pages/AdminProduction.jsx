@@ -394,21 +394,16 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   // so reopening the modal shows what's plotted, and Save only sends
   // the diff (new clicks as manual points, un-clicks as cleared).
   const [baked] = useState(() => {
+    // EVERY point in the saved ball track, not just the ones that happen
+    // to sit on a detection dot. Production adds points from the AI launch
+    // plot, the launch tracker and arc completion, none of which coincide
+    // with a clickable dot — so intersecting the two sets left those
+    // points invisible to this editor and impossible to remove. They are
+    // exactly the ones worth removing when the tracer goes wrong.
     const init = {};
-    const byFrame = new Map(
-      (swing.ball_track_frames || [])
-        .filter((r) => r.found && r.x != null && r.y != null)
-        .map((r) => [r.frame, r]),
-    );
-    for (const p of [...dots, ...denseDots]) {
-      const rec = byFrame.get(p.frame);
-      if (
-        rec &&
-        Math.abs(rec.x - p.x) <= 2 &&
-        Math.abs(rec.y - p.y) <= 2 &&
-        init[p.frame] === undefined
-      ) {
-        init[p.frame] = { x: p.x, y: p.y };
+    for (const r of swing.ball_track_frames || []) {
+      if (r.found && r.x != null && r.y != null && init[r.frame] === undefined) {
+        init[r.frame] = { x: r.x, y: r.y };
       }
     }
     return init;
@@ -703,12 +698,13 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           The green line is the swing&apos;s CURRENT saved tracer path —
           where the rendered tracer actually sits. Green dots are already
           in the saved ball track; amber are unused detections. Click a
-          dot to add the ball at exactly that spot for that frame — click
-          a green one to remove it, a different dot on the same frame
-          replaces the pick. To remove a point without hunting for the
-          exact dot, <b>alt-click or right-click</b> it, or use the
-          per-frame list below; <b>Clear all</b> drops every point at
-          once. Zoom past
+          dot to add the ball at exactly that spot for that frame; a
+          different dot on the same frame replaces the pick. The green
+          dots ARE the produced tracer&apos;s points — <b>click one to
+          remove it</b> (it turns into a red dashed ring; click again to
+          put it back). Alt-click or right-click removes without needing
+          an exact hit, the per-frame list below removes by frame number,
+          and <b>Clear all</b> drops every point at once. Zoom past
           {" "}{DENSE_DOT_ZOOM}× to reveal the denser candidate layer.
           Save &amp; close re-renders the tracer with the changes (no AI
           calls) and updates the produced clip.
