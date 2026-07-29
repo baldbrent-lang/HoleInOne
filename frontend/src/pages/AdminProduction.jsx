@@ -3114,17 +3114,27 @@ function Debug2Modal({ state, onClose }) {
                   <b>chain:</b> {sw.chain_reason || "—"}
                   {sw.n_dots != null && ` · ${sw.n_dots} dots in window`}
                   {sw.chain_method && (
-                    <div className="muted">method: {sw.chain_method}</div>
+                    <div className="muted">
+                      method: {sw.chain_method}
+                      <div style={{ opacity: 0.75 }}>
+                        four are tried in order, first one that passes wins:
+                        1 dots on the trail the AI traced · 2 straight runs
+                        in the left/middle/right bands above the club fan ·
+                        3 lock on above head height then walk back down ·
+                        4 walk up from the ball. Every one must rise and
+                        point back at the ball.
+                      </div>
+                    </div>
                   )}
                   {sw.chain_tries?.length > 1 && (
                     <div className="muted">
                       tried: {sw.chain_tries.join("  |  ")}
                     </div>
                   )}
-                  {sw.thirds?.length > 0 && (
+                  {sw.bands?.length > 0 && (
                     <div className="muted">
-                      thirds above the club fan:{" "}
-                      {sw.thirds
+                      bands above the club fan:{" "}
+                      {sw.bands
                         .map(
                           (t) =>
                             `${t.zone} ${t.n_dots} dots` +

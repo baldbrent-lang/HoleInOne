@@ -11353,9 +11353,9 @@ def _debug2_run(row, src_path, db):
                     f" — REJECTED: aims {_aim:.0f}px from the ball "
                     f"(limit {_aim_gate:.0f})"
                 )
-            _tries.append(f"AI trail: {_c1['reason']}")
+            _tries.append(f"1 AI-traced trail: {_c1['reason']}")
             if _ok:
-                ch, method = _c1, "dots on the AI-traced trail"
+                ch, method = _c1, "1 · dots lying on the AI-traced trail"
         if ch is None:
             # THIRDS. Above the club fan the map is nearly empty, so split
             # that band into middle/right/left and hunt each for the
@@ -11368,24 +11368,24 @@ def _debug2_run(row, src_path, db):
             _c15 = d2.chain_by_thirds(
                 pool, club.get("xy"), imp_f, _fh, _fw, _fan_y,
             )
-            entry["thirds"] = _c15.get("thirds")
-            _tries.append(f"thirds: {_c15['reason']}")
+            entry["bands"] = _c15.get("thirds")
+            _tries.append(f"2 L/M/R bands above the club fan: {_c15['reason']}")
             if _c15.get("points"):
                 ch, method = _c15, (
-                    f"straight run in the {_c15.get('zone')} third above "
-                    f"the club fan"
+                    f"2 · straight run in the {_c15.get('zone')} band "
+                    f"above the club fan"
                 )
         if ch is None:
             _c2 = d2.chain_above_head(
                 pool, club.get("xy"), imp_f, _fh, _head_y,
             )
-            _tries.append(f"above-head: {_c2['reason']}")
+            _tries.append(f"3 above-head lock-on: {_c2['reason']}")
             if _c2.get("points"):
-                ch, method = _c2, "above-head lock-on, walked back"
+                ch, method = _c2, "3 · above-head lock-on, walked back down"
         if ch is None:
             ch = d2.chain_from_ball(pool, club.get("xy"), imp_f, _fh)
-            _tries.append(f"up-from-ball: {ch['reason']}")
-            method = "up-from-ball walk"
+            _tries.append(f"4 up-from-ball walk: {ch['reason']}")
+            method = "4 · up-from-ball walk (last resort)"
         entry["chain_method"] = method
         entry["chain_tries"] = _tries
         entry["aim_px"] = ch.get("aim_px")
