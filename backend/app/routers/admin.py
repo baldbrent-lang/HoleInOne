@@ -2647,6 +2647,22 @@ def _process_long_upload_segments(
                     slot = i
                     break
             nsw = dict(swings[slot]) if slot is not None else {"idx": swing_idx}
+            # CLEAR this run's derived evidence before merging. Every
+            # field below is written only "if we have one", so a stage
+            # that didn't run this time left the PREVIOUS run's value in
+            # place — and the debug panel showed it as if it were fresh.
+            # That is how a walk strip rendered by since-reverted code,
+            # and its launch points, kept reappearing next to genuinely
+            # fresh numbers from the same run: half the panel was a ghost.
+            # Operator-owned fields (manual ball, finalized_*, clip_id)
+            # are NOT touched — only what a produce run regenerates.
+            for _stale in (
+                "anchor_check", "mog2_stats", "mog2_overlay_url",
+                "timed_points", "cand_points", "ball_track_frames",
+                "tracer_raw_motion_url", "tracer_debug_url",
+                "tracer_raw_motion_arc_url", "tracer_raw_motion_frames_url",
+            ):
+                nsw.pop(_stale, None)
             # The window of the clip this run actually cut — source of
             # truth for the wizard's start/impact/end frames.
             nsw["start_frame"] = offset
@@ -7842,6 +7858,50 @@ def _mog2_layer_for_ai_track(
         except Exception as exc:  # noqa: BLE001
             log.warning("mog2 layer: anchor check failed: %s", exc)
 
+    # AI LAUNCH PLOT, here, when nobody handed us one. It was only ever
+    # computed in the produce worker behind the practice filter finding
+    # the resting ball — so on every swing where that filter misses (and
+    # it does), the early flight was never plotted at all, the render's
+    # nearest known ball position was hundreds of px up the arc, and the
+    # rest anchor got thrown out for disagreeing with it. This layer has
+    # its own departure-verified rest and impact, which is all the plot
+    # needs. Clip-relative frames throughout, same as the rest of the
+    # layer.
+    _own_launch: list[dict] = []
+    if (
+        not (pipe.get("launch_points") or [])
+        and _rest and len(_rest) == 2 and _imp is not None
+        and os.environ.get("ANTHROPIC_API_KEY")
+    ):
+        try:
+            from ..services.ai_tracer import plot_launch_frames_ai
+
+            _alp = plot_launch_frames_ai(
+                clip_path, (float(_rest[0]), float(_rest[1])),
+                int(_imp), _fps,
+                debug_dir=CLIPS_DIR,
+                debug_prefix=f"ailaunch-{clip_path.stem}",
+            )
+            _own_launch = [
+                {"frame": int(p["frame"]), "x": float(p["x"]),
+                 "y": float(p["y"])}
+                for p in (_alp.get("points") or [])
+                if p.get("frame") is not None
+            ]
+            log.info(
+                "mog2 layer: own AI launch plot -> %d point(s) (%s)",
+                len(_own_launch), _alp.get("reason"),
+            )
+            if anchor_check is None:
+                anchor_check = {"verified": True, "reason": "anchors preverified"}
+            anchor_check["ai_launch_points"] = _own_launch
+            anchor_check["ai_launch_n"] = _alp.get("n_found")
+            anchor_check["ai_launch_reason"] = _alp.get("reason")
+            if _alp.get("image"):
+                anchor_check["ai_launch_image"] = _alp["image"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mog2 layer: own AI launch plot failed: %s", exc)
+
     _pfx = f"mog2layer-{clip_path.stem}"
     _cv_url, cv_info, _cv_traced, _cv_dbg = _run_tracer(
         clip_path,
@@ -7868,9 +7928,14 @@ def _mog2_layer_for_ai_track(
     pool = _mog2_dot_pool(cv_info)
     launch_pts = [
         {"frame": int(pt["frame"]), "x": float(pt["x"]), "y": float(pt["y"])}
-        for pt in (pipe.get("launch_points") or [])
+        for pt in (list(pipe.get("launch_points") or []) + _own_launch)
         if pt.get("frame") is not None and int(pt["frame"]) >= 0
     ]
+    # De-dupe by frame — handed-in points win over our own plot.
+    _lp_seen: dict[int, dict] = {}
+    for _pt in launch_pts:
+        _lp_seen.setdefault(int(_pt["frame"]), _pt)
+    launch_pts = [_lp_seen[k] for k in sorted(_lp_seen)]
     if launch_pts:
         # Adaptive-square tracker points: per-frame, pixel-exact,
         # already ball-verified — they join the dot pool AND go into
