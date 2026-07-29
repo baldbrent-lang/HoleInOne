@@ -1481,8 +1481,14 @@ def _ball_search_box(src_path, wrist_xy, feet_xy):
             bottom = wy + int(0.22 * fh)
         bottom = min(fh, max(top + 32, bottom))
         size = bottom - top
-        # Square, running from the hands toward the target side.
+        # Square, running from the hands toward the target side, then
+        # grown 15% UP and AWAY from the golfer. The bottom and the
+        # golfer-side edge stay put — the extra reach goes where the ball
+        # can actually be (further from the stance, and higher up the
+        # slope), not back across the body.
         left = max(0, min(fw - 16, wx))
+        size = int(round(size * 1.15))
+        top = max(0, bottom - size)
         size = min(size, fw - left, fh - top)
         if size < 32:
             return None
@@ -1515,6 +1521,12 @@ def _save_assumed_impact_frame(
         if not ok or fr is None:
             return None
 
+        if search_box and len(search_box) == 4:
+            _bx, _by, _bw, _bh = (int(v) for v in search_box)
+            cv2.rectangle(
+                fr, (_bx, _by), (_bx + _bw, _by + _bh),
+                (0, 0, 255), 2, cv2.LINE_AA,
+            )
         if box_ball_xy and len(box_ball_xy) == 2:
             cv2.circle(
                 fr, (int(box_ball_xy[0]), int(box_ball_xy[1])),
@@ -1530,8 +1542,8 @@ def _save_assumed_impact_frame(
         _txt = (
             f"ASSUMED impact f{int(frame_idx)} "
             f"({frame_idx / max(1.0, fps):.2f}s) - pose peak, no ball "
-            f"departure; green=ball found in the zoom square, "
-            f"magenta=AI launch picks"
+            f"departure; red=zoom square searched, green=ball found in "
+            f"it, magenta=AI launch picks"
         )
         for _c, _w in (((0, 0, 0), 4), ((255, 255, 255), 1)):
             cv2.putText(
@@ -2412,6 +2424,51 @@ def _run_long_upload_job(
                                                 _found_rest
                                                 or [_first["x"], _first["y"]]
                                             )
+                                            # MOG2 OVER THE SAME FIRST
+                                            # FRAMES. The seeded call
+                                            # below deliberately starts
+                                            # AFTER the last AI point so
+                                            # the two strips read as one
+                                            # chain — which means the
+                                            # frames the AI MISSED inside
+                                            # the launch window were never
+                                            # covered by anything. These
+                                            # are the frames that set the
+                                            # tracer's direction, so run
+                                            # the pixel tracker across
+                                            # them too and let it fill the
+                                            # AI's gaps.
+                                            _lt_early = track_launch_from_rest(
+                                                src_path,
+                                                (float(_tr_from[0]),
+                                                 float(_tr_from[1])),
+                                                _pk_f, tee_fps,
+                                                debug_dir=_dbg_dir,
+                                                debug_prefix=(
+                                                    f"launchearly-"
+                                                    f"{upload_id}-{_tok}"
+                                                ),
+                                                max_seconds=(
+                                                    6.5 / max(1.0, tee_fps)
+                                                ),
+                                            )
+                                            _anchor_rec["early_n"] = (
+                                                _lt_early.get("n_found")
+                                            )
+                                            _anchor_rec["early_reason"] = (
+                                                _lt_early.get("reason")
+                                            )
+                                            _anchor_rec["early_image"] = (
+                                                _lt_early.get("image")
+                                            )
+                                            log.info(
+                                                "long-upload worker: launch "
+                                                "window — AI %d pt(s), MOG2 "
+                                                "%s pt(s) over the same "
+                                                "frames",
+                                                len(_ai_pts),
+                                                _lt_early.get("n_found"),
+                                            )
                                             _lt = track_launch_from_rest(
                                                 src_path,
                                                 (float(_tr_from[0]),
@@ -2429,7 +2486,8 @@ def _run_long_upload_job(
                                                 for q in _ai_pts
                                             }
                                             for q in (
-                                                _lt.get("points") or []
+                                                (_lt_early.get("points") or [])
+                                                + (_lt.get("points") or [])
                                             ):
                                                 _merged_lp.setdefault(
                                                     int(q["frame"]), {
@@ -2491,6 +2549,10 @@ def _run_long_upload_job(
                                             "ai_launch_image",
                                             "ai_launch_points",
                                             "search_box", "box_ball_xy",
+                                        "early_n", "early_reason",
+                                        "early_image",
+                                            "early_n", "early_reason",
+                                            "early_image",
                                         )
                                     }
                             except Exception as exc:  # noqa: BLE001
@@ -2519,6 +2581,8 @@ def _run_long_upload_job(
                                         "assumed_impact",
                                         "assumed_impact_image", "rest_xy",
                                         "search_box", "box_ball_xy",
+                                        "early_n", "early_reason",
+                                        "early_image",
                                         "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
@@ -9684,6 +9748,7 @@ def _run_produce_debug_job(
                         ("launch_image_heat", "launch_image_heat_url"),
                         ("ai_launch_image", "ai_launch_image_url"),
                         ("assumed_impact_image", "assumed_impact_image_url"),
+                        ("early_image", "early_image_url"),
                     ):
                         if _anc.get(_ik) and (
                             CLIPS_DIR / _anc[_ik]

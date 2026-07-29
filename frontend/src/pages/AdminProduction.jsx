@@ -5471,6 +5471,37 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                           below is MOG2-only for this swing.
                         </div>
                       )}
+                      {s.anchor?.early_image_url && (
+                        <div style={{ marginTop: 3 }}>
+                          <div className="tiny">
+                            {"\ud83d\udd0d"} MOG2 across the same launch
+                            window —{" "}
+                            <span
+                              style={{
+                                color: s.anchor.early_n
+                                  ? "#1a9d55"
+                                  : "#b7791f",
+                              }}
+                            >
+                              {s.anchor.early_n ?? 0} point(s)
+                            </span>{" "}
+                            filling the frames the AI missed. AI picks win
+                            per frame; these fill the gaps.
+                          </div>
+                          <a
+                            href={s.anchor.early_image_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ display: "block" }}
+                          >
+                            <img
+                              src={s.anchor.early_image_url}
+                              alt="MOG2 launch-window strip"
+                              style={{ maxWidth: "100%", borderRadius: 6 }}
+                            />
+                          </a>
+                        </div>
+                      )}
                       {s.anchor?.assumed_impact_image_url && (
                         <div style={{ marginTop: 3 }}>
                           <div className="tiny muted">
