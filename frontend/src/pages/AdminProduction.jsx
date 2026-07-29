@@ -3070,6 +3070,7 @@ function Debug2Modal({ state, onClose }) {
                     <span style={{ color: "#1a9d55" }}>
                       {sw.ai_path.length} point(s)
                       {sw.ai_path_confidence && ` · ${sw.ai_path_confidence}`}
+                      {sw.ai_path_source && ` · read off the ${sw.ai_path_source}`}
                       {sw.ai_path_start_px != null &&
                         ` · starts ${sw.ai_path_start_px}px from the club-arc ball`}
                     </span>
@@ -3118,6 +3119,22 @@ function Debug2Modal({ state, onClose }) {
                   {sw.chain_tries?.length > 1 && (
                     <div className="muted">
                       tried: {sw.chain_tries.join("  |  ")}
+                    </div>
+                  )}
+                  {sw.thirds?.length > 0 && (
+                    <div className="muted">
+                      thirds above the club fan:{" "}
+                      {sw.thirds
+                        .map(
+                          (t) =>
+                            `${t.zone} ${t.n_dots} dots` +
+                            (t.chain?.length
+                              ? ` → ${t.chain.length} in line, aims ${Math.round(
+                                  t.aim_px ?? 0,
+                                )}px from the ball`
+                              : " → nothing"),
+                        )
+                        .join("  ·  ")}
                     </div>
                   )}
                   {sw.aim_px != null && (

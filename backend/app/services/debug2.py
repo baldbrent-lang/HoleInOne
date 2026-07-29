@@ -292,6 +292,8 @@ def draw_chain(
     head_y: float | None = None,
     aim_xy=None,
     ai_path=None,
+    fan_y: float | None = None,
+    frame_w: int | None = None,
 ) -> bool:
     """The chain over the windowed heat: the ball, the links, and the
     dots that were considered and thrown out. The rejects are drawn
@@ -303,6 +305,18 @@ def draw_chain(
         img = cv2.imread(str(heat_path))
         if img is None:
             return False
+        if fan_y is not None:
+            # The clean band starts here, and the thirds it was searched
+            # in. Above this line the map is sky and treetops.
+            cv2.line(img, (0, int(fan_y)), (img.shape[1], int(fan_y)),
+                     (0, 0, 255), 2, cv2.LINE_AA)
+            _label2(img, "club-fan line — searched in thirds above here",
+                    int(fan_y) - 6)
+            _w = frame_w or img.shape[1]
+            for k in (1, 2):
+                cv2.line(img, (int(_w * k / 3), 0),
+                         (int(_w * k / 3), int(fan_y)),
+                         (0, 0, 255), 1, cv2.LINE_AA)
         if ai_path and len(ai_path) >= 2:
             # The trail the AI traced off the heat map — the corridor the
             # dots were matched against.
@@ -615,3 +629,212 @@ def chain_along_ai_path(
         )
     )
     return out
+
+
+# ── stage 5d: search the clean band in thirds ──────────────────────────
+
+def fan_line_y(head_xy, feet_xy, frame_h: int) -> float | None:
+    """The line above which the map is clean.
+
+    Not the head — the CLUB FAN reaches well above it, and its streaks are
+    the last strong non-ball feature going up. Half a body-height above
+    the head clears the fan, leaving only sky, treetops and the ball."""
+    if not (head_xy and len(head_xy) == 2):
+        return None
+    hy = float(head_xy[1])
+    if feet_xy and len(feet_xy) == 2:
+        body = max(20.0, float(feet_xy[1]) - hy)
+        return max(0.0, hy - 0.5 * body)
+    return max(0.0, hy - 0.15 * float(frame_h))
+
+
+def chain_by_thirds(
+    dots: list,
+    ball_xy,
+    impact_frame: int,
+    frame_h: int,
+    frame_w: int,
+    top_y: float | None,
+    max_frames: int = WIN_POST,
+) -> dict:
+    """Hunt the flight in the clean band, one third of the frame at a time.
+
+    Above the club fan there is very little left but sky and the ball, so
+    the search space is small. Split that band into left/middle/right and
+    look in each for the signature: three or more dots in a near-straight
+    line, HIGHER MEANING LATER, whose line extended downward points back
+    at the ball. The middle is searched first because a shot down the
+    target line lives there, then right, then left — but every third is
+    searched and the best candidate wins, so a fade or a pull is not
+    missed by the ordering.
+
+    Returns {points, reason, thirds, rejected}."""
+    out = {"points": [], "reason": None, "thirds": [], "rejected": []}
+    if top_y is None:
+        out["reason"] = "no fan line — need a head position"
+        return out
+    r = max(6.0, 0.012 * float(frame_h))
+    f0, f1 = int(impact_frame), int(impact_frame) + int(max_frames)
+    band = [
+        {"frame": int(d["frame"]), "x": float(d["x"]), "y": float(d["y"])}
+        for d in (dots or [])
+        if d.get("frame") is not None and f0 < int(d["frame"]) <= f1
+        and d.get("x") is not None and d.get("y") is not None
+        and float(d["y"]) <= float(top_y)
+    ]
+    if len(band) < 3:
+        out["reason"] = (
+            f"only {len(band)} dot(s) above the fan line (y<={int(top_y)})"
+        )
+        return out
+
+    third = float(frame_w) / 3.0
+    zones = [
+        ("middle", third, 2 * third),
+        ("right", 2 * third, float(frame_w)),
+        ("left", 0.0, third),
+    ]
+    best_overall = None
+    for order, (name, x0, x1) in enumerate(zones):
+        pool = sorted(
+            [d for d in band if x0 <= d["x"] < x1], key=lambda d: d["frame"],
+        )
+        rec = {"zone": name, "n_dots": len(pool), "chain": [], "aim_px": None}
+        cand = _best_line_in(
+            pool, ball_xy, r, impact_frame,
+            aim_gate=max(120.0, 0.20 * float(frame_w)),
+        )
+        if cand:
+            rec["chain"] = cand["points"]
+            rec["aim_px"] = cand["aim_px"]
+            rec["straight_px"] = cand["straight_px"]
+            # More points is better, aiming near the ball is much better,
+            # and a straighter line is better. Zone order only breaks ties.
+            score = (
+                2.0 * len(cand["points"])
+                - cand["straight_px"] / 10.0
+                - 0.01 * order
+            )
+            rec["score"] = round(score, 2)
+            if best_overall is None or score > best_overall[0]:
+                best_overall = (score, name, cand)
+        out["thirds"].append(rec)
+
+    if best_overall is None:
+        out["reason"] = (
+            "no run of 3+ dots in a straight line pointing back at the "
+            "ball, in any third of the clean band"
+        )
+        return out
+    _sc, zone, cand = best_overall
+    out["points"] = [
+        {**p, "phase": "up"} for p in cand["points"]
+    ]
+    out["aim_px"] = cand["aim_px"]
+    out["aim_xy"] = cand["aim_xy"]
+    out["zone"] = zone
+    out["reason"] = (
+        f"{len(cand['points'])} dot(s) in the {zone} third, "
+        f"f{cand['points'][0]['frame']}-{cand['points'][-1]['frame']}, "
+        f"straightness {cand['straight_px']:.0f}px; extended down it lands "
+        f"{cand['aim_px']:.0f}px from the ball"
+    )
+    return out
+
+
+def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
+                  aim_gate: float = 260.0):
+    """Best run of 3+ dots that reads as a ball in flight: higher means
+    later, near-collinear, and pointing back at the ball when extended
+    down. Returns None when nothing qualifies."""
+    n = len(pool)
+    if n < 3:
+        return None
+    best = None
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = pool[i], pool[j]
+            if b["frame"] <= a["frame"]:
+                continue
+            # HIGHER = LATER. A ball climbing away from the camera gains
+            # height as the frames advance; anything falling here is the
+            # club coming down, a bird, or noise.
+            if b["y"] >= a["y"] - 0.5 * r:
+                continue
+            run = [a, b]
+            vx = (b["x"] - a["x"]) / (b["frame"] - a["frame"])
+            vy = (b["y"] - a["y"]) / (b["frame"] - a["frame"])
+            for k in range(j + 1, n):
+                c = pool[k]
+                df = c["frame"] - run[-1]["frame"]
+                if df <= 0:
+                    continue
+                ex = run[-1]["x"] + vx * df
+                ey = run[-1]["y"] + vy * df
+                if math.hypot(c["x"] - ex, c["y"] - ey) <= (2.0 + 0.8 * df) * r:
+                    run.append(c)
+            if len(run) < 3:
+                continue
+            # Straightness: mean distance from the best-fit line.
+            xs = [p["x"] for p in run]
+            ys = [p["y"] for p in run]
+            mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+            sxx = sum((x - mx) ** 2 for x in xs)
+            sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+            if sxx <= 1e-6:
+                straight = sum(abs(x - mx) for x in xs) / len(xs)
+                slope = None
+            else:
+                slope = sxy / sxx
+                straight = sum(
+                    abs(y - (my + slope * (x - mx)))
+                    for x, y in zip(xs, ys)
+                ) / len(run) / math.sqrt(1 + slope * slope)
+            # Extend the run DOWN to the impact frame and see where it
+            # lands. This is the test that separates a ball from a bird:
+            # a ball's line points back at where it was struck.
+            aim_px = aim_xy = None
+            if ball_xy and len(ball_xy) == 2:
+                ex = ey = None
+                # BALLISTIC back-projection when the run is long enough.
+                # A straight line run back from a CURVING arc always
+                # overshoots — measured 127px on a synthetic flight whose
+                # quadratic fit lands far closer — and that penalises the
+                # late, longest part of the flight for being real.
+                if HAS_CV and len(run) >= 4:
+                    try:
+                        _f = np.array([p["frame"] for p in run], float)
+                        _x = np.array([p["x"] for p in run], float)
+                        _y = np.array([p["y"] for p in run], float)
+                        ex = float(np.polyval(np.polyfit(_f, _x, 1), impact_frame))
+                        ey = float(np.polyval(np.polyfit(_f, _y, 2), impact_frame))
+                    except Exception:  # noqa: BLE001
+                        ex = ey = None
+                if ex is None:
+                    df = run[0]["frame"] - int(impact_frame)
+                    ex = run[0]["x"] - vx * df
+                    ey = run[0]["y"] - vy * df
+                aim_px = math.hypot(
+                    ex - float(ball_xy[0]), ey - float(ball_xy[1]),
+                )
+                aim_xy = [int(ex), int(ey)]
+            # AIM IS A GATE, not a tiebreak. "Points back at the ball" is
+            # the thing that separates a ball from a bird, so a run that
+            # misses by more than a fifth of the frame is not a ball at
+            # all — no amount of length or straightness redeems it. Among
+            # what survives, longer and straighter wins.
+            if aim_px is not None and aim_px > aim_gate:
+                continue
+            score = 2.0 * len(run) - straight / 10.0
+            if best is None or score > best[0]:
+                best = (score, {
+                    "points": [
+                        {"frame": p["frame"], "x": int(p["x"]),
+                         "y": int(p["y"])}
+                        for p in run
+                    ],
+                    "straight_px": straight,
+                    "aim_px": aim_px,
+                    "aim_xy": aim_xy,
+                })
+    return best[1] if best else None

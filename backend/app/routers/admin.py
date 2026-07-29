@@ -11240,34 +11240,6 @@ def _debug2_run(row, src_path, db):
         entry["verdict"] = verdict
         entry["verdict_reason"] = reason
 
-        # 3b. SAME COMPOSITE, SECOND QUESTION: trace the ball's dotted
-        # trail. On this map the trail is the most legible thing in the
-        # picture — an evenly-spaced line of blue dots leaving the frame —
-        # and reading it needs no chain to be assembled first. Points come
-        # back as percentages of the composite, so they map onto the source
-        # frame regardless of how the composite was scaled.
-        if verdict != "not_swing" and chk.get("image_clean"):
-            _tp = trace_ball_path_ai(CLIPS_DIR / chk["image_clean"])
-            entry["ai_path_note"] = _tp.get("note") or _tp.get("error")
-            entry["ai_path_confidence"] = _tp.get("confidence")
-            _pts_pct = _tp.get("points_pct") or []
-            entry["ai_path"] = [
-                {
-                    "x": int(round(p["x_pct"] / 100.0 * _fw)),
-                    "y": int(round(p["y_pct"] / 100.0 * _fh)),
-                }
-                for p in _pts_pct
-            ]
-            # Does the AI's trail start where the club arc says the ball
-            # was? Two independent reads agreeing is worth more than
-            # either alone.
-            if entry["ai_path"] and club.get("xy"):
-                _a = entry["ai_path"][0]
-                entry["ai_path_start_px"] = int(round((
-                    (_a["x"] - club["xy"][0]) ** 2
-                    + (_a["y"] - club["xy"][1]) ** 2
-                ) ** 0.5))
-
         if verdict == "not_swing":
             n_judged_out += 1
             rep["swings"].append(entry)
@@ -11308,6 +11280,38 @@ def _debug2_run(row, src_path, db):
         ]
         entry["n_dots"] = len(pool)
 
+        # 4b. TRACE THE TRAIL — on the WINDOWED heat, not the swing-check
+        # composite. The composite spans the whole swing, so the club fan
+        # and the golfer's body dominate it and the ball's dots are a
+        # faint extra; the windowed map holds impact-5..impact+100 and
+        # almost nothing else, which is why the flight reads clearly on it
+        # by eye. Ask the question against the picture where the answer is
+        # actually visible. Falls back to the composite if the windowed
+        # heat was not written.
+        _heat_for_ai = cv_info.get("raw_motion_image") or chk.get("image_clean")
+        if _heat_for_ai and (CLIPS_DIR / _heat_for_ai).exists():
+            _tp = trace_ball_path_ai(CLIPS_DIR / _heat_for_ai)
+            entry["ai_path_note"] = _tp.get("note") or _tp.get("error")
+            entry["ai_path_confidence"] = _tp.get("confidence")
+            entry["ai_path_source"] = (
+                "windowed heat"
+                if _heat_for_ai == cv_info.get("raw_motion_image")
+                else "swing-check composite"
+            )
+            entry["ai_path"] = [
+                {
+                    "x": int(round(p["x_pct"] / 100.0 * _fw)),
+                    "y": int(round(p["y_pct"] / 100.0 * _fh)),
+                }
+                for p in (_tp.get("points_pct") or [])
+            ]
+            if entry["ai_path"] and club.get("xy"):
+                _a = entry["ai_path"][0]
+                entry["ai_path_start_px"] = int(round((
+                    (_a["x"] - club["xy"][0]) ** 2
+                    + (_a["y"] - club["xy"][1]) ** 2
+                ) ** 0.5))
+
         # 5. CHAIN. Lock on ABOVE THE HEAD, where the map is clean and
         # the ball's dots bunch as it slows, then walk back down toward
         # impact. Walking up from the ball starts in the worst place on
@@ -11332,6 +11336,25 @@ def _debug2_run(row, src_path, db):
             _tries.append(f"AI trail: {_c1['reason']}")
             if len(_c1.get("points") or []) >= 3:
                 ch, method = _c1, "dots on the AI-traced trail"
+        if ch is None:
+            # THIRDS. Above the club fan the map is nearly empty, so split
+            # that band into middle/right/left and hunt each for the
+            # signature: 3+ dots in a straight line, higher meaning later,
+            # whose line extended down points back at the ball. Every
+            # third is searched and the best wins, so a fade or a pull is
+            # not missed by the ordering.
+            _fan_y = d2.fan_line_y(_head, c.get("impact_feet_xy"), _fh)
+            entry["fan_y"] = _fan_y
+            _c15 = d2.chain_by_thirds(
+                pool, club.get("xy"), imp_f, _fh, _fw, _fan_y,
+            )
+            entry["thirds"] = _c15.get("thirds")
+            _tries.append(f"thirds: {_c15['reason']}")
+            if _c15.get("points"):
+                ch, method = _c15, (
+                    f"straight run in the {_c15.get('zone')} third above "
+                    f"the club fan"
+                )
         if ch is None:
             _c2 = d2.chain_above_head(
                 pool, club.get("xy"), imp_f, _fh, _head_y,
@@ -11371,6 +11394,8 @@ def _debug2_run(row, src_path, db):
                 head_y=_head_y,
                 aim_xy=ch.get("aim_xy"),
                 ai_path=entry.get("ai_path"),
+                fan_y=entry.get("fan_y"),
+                frame_w=_fw,
             ):
                 entry["chain_image_url"] = _clip_url(name)
         rep["swings"].append(entry)
