@@ -432,17 +432,32 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       ?? 1,
   ) || 1;
 
-  function toggleDot(p) {
+  function toggleDot(p, forceClear = false) {
     const f = p.frame;
     setMarks((m) => {
       const cur = m[f];
-      if (cur && Math.abs(cur.x - p.x) <= 2 && Math.abs(cur.y - p.y) <= 2) {
+      // Clicking the SAME dot again un-marks it (as before). Alt/right
+      // click clears the frame outright, which matters when the mark and
+      // the dot are a few px apart — the position test would otherwise
+      // treat the click as a move and there was no way to remove it.
+      if (forceClear || (cur && Math.abs(cur.x - p.x) <= 2 && Math.abs(cur.y - p.y) <= 2)) {
         const next = { ...m };
         delete next[f];
         return next;
       }
       return { ...m, [f]: { x: p.x, y: p.y } };
     });
+  }
+
+  // Drop every mark. Baked points become cleared frames on save, so this
+  // is "remove the whole plotted track", not just "forget my edits".
+  function clearAllMarks() {
+    setMarks({});
+  }
+
+  // Put it back to whatever was saved before this modal was opened.
+  function resetMarks() {
+    setMarks({ ...baked });
   }
 
   // Diff vs the baked state: new/moved picks become manual points,
@@ -604,6 +619,26 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
             <button
               type="button"
               className="ghost small"
+              onClick={resetMarks}
+              style={{ width: "auto" }}
+              disabled={busy || nChanged === 0}
+              title="Put every point back to what was saved before this modal was opened"
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              onClick={clearAllMarks}
+              style={{ width: "auto" }}
+              disabled={busy || Object.keys(marks).length === 0}
+              title="Remove ALL plotted points for this swing. Saving then re-renders the tracer with none of them."
+            >
+              Clear all ({Object.keys(marks).length})
+            </button>
+            <button
+              type="button"
+              className="ghost small"
               onClick={onClose}
               style={{ width: "auto" }}
               disabled={busy}
@@ -670,11 +705,51 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           in the saved ball track; amber are unused detections. Click a
           dot to add the ball at exactly that spot for that frame — click
           a green one to remove it, a different dot on the same frame
-          replaces the pick. Zoom past
+          replaces the pick. To remove a point without hunting for the
+          exact dot, <b>alt-click or right-click</b> it, or use the
+          per-frame list below; <b>Clear all</b> drops every point at
+          once. Zoom past
           {" "}{DENSE_DOT_ZOOM}× to reveal the denser candidate layer.
           Save &amp; close re-renders the tracer with the changes (no AI
           calls) and updates the produced clip.
         </div>
+
+        {Object.keys(marks).length > 0 && (
+          <div
+            className="tiny"
+            style={{
+              marginTop: 4, display: "flex", flexWrap: "wrap",
+              gap: 4, alignItems: "center",
+            }}
+          >
+            <span className="muted">plotted:</span>
+            {Object.keys(marks)
+              .map((f) => parseInt(f, 10))
+              .sort((a, b) => a - b)
+              .map((f) => (
+                <button
+                  key={`mk-${f}`}
+                  type="button"
+                  className="ghost small"
+                  disabled={busy}
+                  onClick={() =>
+                    setMarks((m) => {
+                      const next = { ...m };
+                      delete next[f];
+                      return next;
+                    })
+                  }
+                  title={`Remove the plotted point on frame ${f}`}
+                  style={{
+                    width: "auto", padding: "0 6px", lineHeight: "18px",
+                    fontSize: 11,
+                  }}
+                >
+                  f{f} ✕
+                </button>
+              ))}
+          </div>
+        )}
 
         {error && <div className="err-text small" style={{ marginTop: 4 }}>{error}</div>}
       </div>
@@ -2972,13 +3047,18 @@ function PlotHeatCanvas({
                 key={`d-${p.frame}-${i}`}
                 onPointerDown={(e) => {
                   e.stopPropagation();
-                  onToggleDot(p);
+                  onToggleDot(p, e.altKey || e.button === 2);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onToggleDot(p, true);
                 }}
                 title={`Frame ${p.frame} · ${p.x}, ${p.y} (candidate) — ${
                   isQueued
                     ? "queued (click to un-queue)"
                     : "click to queue the ball here for this frame"
-                }`}
+                } · alt/right-click clears this frame"`}
                 style={{
                   position: "absolute",
                   left: `${(p.x / frameW) * 100}%`,
@@ -3023,13 +3103,18 @@ function PlotHeatCanvas({
                 key={`${p.frame}-${i}`}
                 onPointerDown={(e) => {
                   e.stopPropagation();
-                  onToggleDot(p);
+                  onToggleDot(p, e.altKey || e.button === 2);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onToggleDot(p, true);
                 }}
                 title={`Frame ${p.frame} · ${p.x}, ${p.y} — ${
                   isQueued
                     ? "queued (click to un-queue)"
                     : "click to queue the ball here for this frame"
-                }`}
+                } · alt/right-click clears this frame`}
                 style={{
                   position: "absolute",
                   left: `${(p.x / frameW) * 100}%`,
