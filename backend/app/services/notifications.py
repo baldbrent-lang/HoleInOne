@@ -20,6 +20,133 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 _UPLOAD_ROOT = _BACKEND_ROOT / settings.upload_dir
 
 
+# ── branding ───────────────────────────────────────────────────────────
+# The logo footer. Plain text cannot carry an image, so every email now
+# goes out as multipart/alternative: the existing plain-text body
+# unchanged (still what text-only clients and screen readers get), plus an
+# HTML alternative that ends with the logo.
+#
+# The logo is attached INLINE by content-id rather than linked to a URL.
+# A linked image is blocked by default in Gmail, Outlook and Apple Mail
+# until the reader clicks "show images", which is exactly the wrong first
+# impression; an inline part renders immediately.
+_LOGO_CID = "golfreelz-logo"
+_LOGO_CANDIDATES = (
+    "frontend/dist/golfreelz-logo.png",
+    "frontend/public/golfreelz-logo.png",
+)
+_LOGO_WIDTH_PX = 280          # 2x the 140px display width, for retina
+_logo_cache: tuple[bytes, str] | None | bool = False   # False = not tried
+
+
+def _logo_png() -> bytes | None:
+    """Small PNG of the logo for the email footer, cached after the first
+    call.
+
+    The source file is 661KB — fine for a web page, wasteful attached to
+    every clip email, and enough to push a multi-clip round summary over
+    the 22MB attachment cap on its own. Downscale once to footer size."""
+    global _logo_cache
+    if _logo_cache is not False:
+        return _logo_cache[0] if _logo_cache else None
+    _logo_cache = None
+    for rel in _LOGO_CANDIDATES:
+        p = Path(rel)
+        if not p.is_file():
+            continue
+        try:
+            raw = p.read_bytes()
+            try:
+                import cv2  # type: ignore
+                import numpy as np  # type: ignore
+
+                # IMREAD_UNCHANGED keeps the alpha channel, so a logo with
+                # a transparent background does not gain a black box.
+                img = cv2.imdecode(
+                    np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED,
+                )
+                if img is not None and img.shape[1] > _LOGO_WIDTH_PX:
+                    scale = _LOGO_WIDTH_PX / float(img.shape[1])
+                    img = cv2.resize(
+                        img,
+                        (_LOGO_WIDTH_PX, max(1, int(img.shape[0] * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                ok, buf = cv2.imencode(".png", img)
+                if ok:
+                    raw = bytes(buf)
+            except Exception as exc:  # noqa: BLE001
+                log.info("email logo: using full-size PNG (%s)", exc)
+            _logo_cache = (raw, "image/png")
+            log.info(
+                "email logo: %s -> %.1fKB", rel, len(raw) / 1024.0,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            log.warning("email logo: could not read %s: %s", rel, exc)
+    if _logo_cache is None:
+        log.info("email logo: not found; emails will go out text-only")
+    return _logo_cache[0] if _logo_cache else None
+
+
+def _html_body(text: str) -> str:
+    """The plain-text body as HTML, with the logo footer.
+
+    Deliberately plain: inline styles only (mail clients strip <style>),
+    a table-free single column, and no remote assets. Bare URLs in the
+    text are made clickable, since that is the whole point of most of
+    these messages."""
+    import html as _html
+    import re as _re
+
+    esc = _html.escape(text)
+    esc = _re.sub(
+        r"(https?://[^\s<]+)",
+        r'<a href="\1" style="color:#047857">\1</a>',
+        esc,
+    )
+    lines = esc.split("\n")
+    para = "<br>".join(lines)
+    return (
+        '<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,'
+        'Arial,sans-serif;font-size:15px;line-height:1.55;color:#111827;'
+        'max-width:560px">'
+        f"<div>{para}</div>"
+        '<div style="margin-top:28px;padding-top:18px;'
+        'border-top:1px solid #e5e7eb;text-align:center">'
+        f'<img src="cid:{_LOGO_CID}" alt="GolfReelz" width="140" '
+        'style="width:140px;height:auto;border:0;display:inline-block">'
+        '<div style="margin-top:8px;font-size:12px;color:#6b7280">'
+        "Every par-3 shot, tracked and delivered."
+        "</div></div></div>"
+    )
+
+
+def _sg_logo_attachment():
+    """The logo as an INLINE SendGrid attachment, or None.
+
+    Same reasoning as the SMTP path: content-id inline rather than a
+    linked image, so it renders without the reader allowing remote
+    content."""
+    _logo = _logo_png()
+    if not _logo:
+        return None
+    import base64
+
+    from sendgrid.helpers.mail import (  # type: ignore
+        Attachment, ContentId, Disposition, FileContent, FileName, FileType,
+    )
+
+    a = Attachment(
+        FileContent(base64.b64encode(_logo).decode()),
+        FileName("golfreelz-logo.png"),
+        FileType("image/png"),
+        Disposition("inline"),
+    )
+    a.content_id = ContentId(_LOGO_CID)
+    return a
+
+
 def _local_path_from_url(url: str | None) -> Path | None:
     if not url:
         return None
@@ -64,6 +191,23 @@ def _send_smtp(
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(body)
+    # HTML alternative carrying the logo footer. The plain-text part above
+    # stays exactly as it was, so nothing is lost for text-only readers —
+    # and if the logo file is missing we simply do not add the HTML part.
+    _logo = _logo_png()
+    if _logo:
+        msg.add_alternative(_html_body(body), subtype="html")
+        # Attach the logo to the HTML part (not the message), so it is a
+        # multipart/related child of the alternative — which is what makes
+        # cid: resolve instead of showing as a second attachment.
+        # disposition="inline" matters: with a filename and no explicit
+        # disposition the part is marked as an attachment, and Outlook then
+        # shows a paperclip beside an image it is already displaying.
+        msg.get_payload()[-1].add_related(
+            _logo, maintype="image", subtype="png",
+            cid=f"<{_LOGO_CID}>", filename="golfreelz-logo.png",
+            disposition="inline",
+        )
     for fname, fbytes, mime in attachments or []:
         maintype, _, subtype = mime.partition("/")
         if not subtype:
@@ -102,6 +246,10 @@ def send_email(to: str | None, subject: str, body: str) -> None:
         subject=subject,
         plain_text_content=body,
     )
+    _lg = _sg_logo_attachment()
+    if _lg is not None:
+        message.add_content(_html_body(body), "text/html")
+        message.add_attachment(_lg)
     SendGridAPIClient(settings.sendgrid_api_key).send(message)
 
 
@@ -143,6 +291,10 @@ def send_email_with_attachment(
         subject=subject,
         plain_text_content=body,
     )
+    _lg = _sg_logo_attachment()
+    if _lg is not None:
+        message.add_content(_html_body(body), "text/html")
+        message.add_attachment(_lg)
     message.attachment = attachment
     SendGridAPIClient(settings.sendgrid_api_key).send(message)
 
@@ -178,6 +330,10 @@ def send_email_with_attachments(
         subject=subject,
         plain_text_content=body,
     )
+    _lg = _sg_logo_attachment()
+    if _lg is not None:
+        message.add_content(_html_body(body), "text/html")
+        message.add_attachment(_lg)
     sg_attachments = []
     for fname, fbytes, mime in attachments:
         sg_attachments.append(Attachment(
