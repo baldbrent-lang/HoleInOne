@@ -8488,6 +8488,14 @@ def _mog2_layer_for_ai_track(
             ),
             impact_frame_idx=int(_imp) if _imp is not None else 0,
             track_frames=merged,
+            # The departure walk watched the ball sit on this spot and
+            # leave it. Tell the renderer, so its "this anchor looks too
+            # far from the track" guard can't overrule a rest position
+            # that was verified frame by frame.
+            rest_verified=bool(
+                (anchor_check and anchor_check.get("verified"))
+                or pipe.get("anchors_preverified")
+            ),
         )
         # The renderer is allowed to MOVE the line's start away from the
         # rest anchor we handed it (wild-offset drop, or the launch-origin
@@ -8759,6 +8767,11 @@ def _trace_segment(
                 ball_rest_xy_native=_rest_m,
                 impact_frame_idx=_imp_m,
                 track_frames=_rt,
+                # _rest_m here IS the departure-verified rest (or the
+                # operator's own marked ball) — not a guess to second-guess.
+                rest_verified=bool(
+                    verified_rest_xy or ball_at_rest_override,
+                ),
             )
             if (
                 _ri.get("ok")

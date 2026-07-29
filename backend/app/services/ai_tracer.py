@@ -3264,6 +3264,7 @@ def render_tracer_video(
     target_xy: tuple[float, float] | None = None,
     write_start: int | None = None,
     write_end: int | None = None,
+    rest_verified: bool = False,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
@@ -3405,7 +3406,16 @@ def render_tracer_video(
             (x, y) for (x, y, _m) in points_by_frame.values()
         ]
         drop_rest = False
-        if len(ref_pts) >= 2:
+        # `rest_verified` = the departure walk WATCHED the ball sit on this
+        # exact spot frame by frame and saw it leave. That is stronger
+        # evidence than anything below, which only reasons about distance
+        # to the tracked points — and the tracked points are the weak part
+        # when the launch is blurred and tracking only locks on later, far
+        # up the flight. Measured on a real clip: anchor pixel-verified,
+        # nearest detection 592px away, guard limit 485px → the correct
+        # anchor was thrown out and the line started 592px up the arc.
+        # A verified rest is never overruled by the track's geometry.
+        if len(ref_pts) >= 2 and not rest_verified:
             diag = math.hypot(width, height) or 1.0
             # Generous threshold: a real ball can rise a long way before the
             # tracker first locks on, so only reject a rest that's WILDLY off
@@ -3437,7 +3447,10 @@ def render_tracer_video(
             # the flight line, relocate it to the physics-implied
             # origin. A genuinely-found rest agrees with the
             # extrapolation and passes through untouched.
-            _orig = _launch_origin()
+            # Same reasoning as the drop guard: this exists to rescue a
+            # WRIST fallback that never saw a ball. A departure-verified
+            # rest is the ball, so the extrapolation doesn't get to move it.
+            _orig = None if rest_verified else _launch_origin()
             if _orig is not None:
                 _diag = math.hypot(width, height) or 1.0
                 _above = _orig[1] - ry  # >0 => anchor is above the origin
