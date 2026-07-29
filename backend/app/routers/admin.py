@@ -1441,6 +1441,38 @@ def ai_trace(
     }
 
 
+def _seg_launch_points(seg: dict) -> list[dict]:
+    """Every AI-plotted launch point we have for this swing, in SOURCE
+    frame numbers.
+
+    These are the magenta dots on the debug flight map — the model's
+    frame-by-frame read of the first moments of flight. They were being
+    DISPLAYED and IGNORED at the same time, because the map reads
+    anchor_rec["ai_launch_points"] while the render reads
+    seg["launch_points"], and only the latter sits behind the produce
+    worker's chain of gates (practice filter found the ball AND the anchor
+    verified AND the merged list came back non-empty). Miss any gate and
+    the points are still computed, still drawn, and never handed over —
+    so the renderer's nearest known ball position is hundreds of pixels up
+    the arc. Take the union so a plotted point cannot be shown and
+    discarded at once."""
+    out: dict[int, dict] = {}
+    for src in (
+        seg.get("launch_points") or [],
+        (seg.get("anchor_rec") or {}).get("ai_launch_points") or [],
+    ):
+        for pt in src:
+            if not isinstance(pt, dict):
+                continue
+            f, x, y = pt.get("frame"), pt.get("x"), pt.get("y")
+            if f is None or x is None or y is None:
+                continue
+            out.setdefault(int(f), {
+                "frame": int(f), "x": float(x), "y": float(y),
+            })
+    return [out[k] for k in sorted(out)]
+
+
 def _utcnow_naive() -> datetime:
     """Naive UTC datetime, matching how the model stores timestamps."""
     return datetime.utcnow()
@@ -2675,8 +2707,17 @@ def _process_long_upload_segments(
                         "verified", "snapped", "snap_px", "impact_delta",
                         "present_ratio_pre", "reason",
                         "ai_fallback_reason", "ai_launch_points",
+                        "ai_launch_n", "ai_launch_reason",
                     )
                 }
+                if _ac.get("ai_launch_image") and (
+                    CLIPS_DIR / _ac["ai_launch_image"]
+                ).exists():
+                    _alp = CLIPS_DIR / _ac["ai_launch_image"]
+                    _ac_entry["ai_launch_image_url"] = (
+                        f"{settings.app_base_url}/uploads/clips/"
+                        f"{_alp.name}?v={int(_alp.stat().st_mtime)}"
+                    )
                 if _ac.get("image") and (CLIPS_DIR / _ac["image"]).exists():
                     _acp = CLIPS_DIR / _ac["image"]
                     _ac_entry["image_url"] = (
@@ -2703,6 +2744,8 @@ def _process_long_upload_segments(
                 )
             if tracer_info.get("mog2"):
                 nsw["mog2_stats"] = tracer_info["mog2"]
+            if tracer_info.get("render_info") is not None:
+                nsw["render_info"] = tracer_info["render_info"]
             # Timed transient dots (mapped to source frames) + the raw
             # motion heat image — the wizard's click-to-plot view opens
             # straight from these, no in-session re-render needed.
@@ -2878,12 +2921,18 @@ def _process_long_upload_segments(
             # not the tracer, so the engine choice doesn't affect the cut.
             _seg_fps = probe_fps(seg_path) or 30.0
             _cut_off = int(round(tee_cut_start * _src_fps))
+            _lp_all = _seg_launch_points(seg)
             _lp_cut = [
                 {**pt, "frame": int(pt["frame"]) - _cut_off}
-                for pt in (seg.get("launch_points") or [])
-                if pt.get("frame") is not None
-                and int(pt["frame"]) >= _cut_off
+                for pt in _lp_all
+                if int(pt["frame"]) >= _cut_off
             ]
+            log.info(
+                "produce: swing hole=%s AI launch points -> render: "
+                "%d of %d (cut_off=f%d)",
+                seg.get("hole_number"), len(_lp_cut), len(_lp_all),
+                _cut_off,
+            )
             _tracer_url, tracer_info, traced_path, _debug_url = _trace_segment(
                 seg_path,
                 ball_at_rest_override=seg.get("impact_wrist_xy"),
@@ -3162,11 +3211,18 @@ def _process_long_upload_segments(
         )
         _seg_fps = probe_fps(seg_path) or 30.0
         _cut_off = int(round(tee_cut_start * _src_fps))
+        _lp_all = _seg_launch_points(seg)
         _lp_cut = [
             {**pt, "frame": int(pt["frame"]) - _cut_off}
-            for pt in (seg.get("launch_points") or [])
-            if pt.get("frame") is not None and int(pt["frame"]) >= _cut_off
+            for pt in _lp_all
+            if int(pt["frame"]) >= _cut_off
         ]
+        log.info(
+            "produce: swing hole=%s AI launch points -> render: "
+            "%d of %d (cut_off=f%d)",
+            seg.get("hole_number"), len(_lp_cut), len(_lp_all),
+            _cut_off,
+        )
         tracer_url, tracer_info, _, _ = _trace_segment(
             seg_path,
             ball_at_rest_override=seg.get("impact_wrist_xy"),
@@ -8298,6 +8354,9 @@ def _mog2_layer_for_ai_track(
         "n_cv": len(pool),
         "n_matched": n_matched,
         "n_added": len(added),
+        # How many AI launch points the caller actually handed us — the
+        # number that makes "plotted but ignored" visible.
+        "n_launch_in": len(launch_pts),
         "n_added_track": len(added_track),
         "n_added_launch": len(added_launch),
         "n_added_mid": len(added_mid),
@@ -8488,6 +8547,12 @@ def _mog2_layer_for_ai_track(
             ),
             impact_frame_idx=int(_imp) if _imp is not None else 0,
             track_frames=merged,
+            # The departure walk watched the ball sit here and leave, and
+            # that same walk is where _imp came from. Start point settled.
+            rest_verified=bool(
+                (anchor_check and anchor_check.get("verified"))
+                or pipe.get("anchors_preverified")
+            ),
         )
         if rr.get("ok") and ext_path.exists():
             compress_for_email(ext_path)
@@ -8588,6 +8653,21 @@ def _trace_segment(
                 # Adaptive-square tracker points (CUT-relative frames)
                 # join the layer's dot pool — per-frame, pixel-exact.
                 r["launch_points"] = launch_points
+            # What the render decided about the line's START. Captured from
+            # the PIPELINE's render as well as the layer's, because the
+            # layer returns early — before it renders anything — whenever
+            # it adds no points to the arc, and then the pipeline's render
+            # is the deliverable. Capturing only the layer's meant the
+            # panel showed nothing on those runs, which reads as "the debug
+            # view stopped working".
+            _render_info = {
+                _k: (r.get("tracer_video_info") or {}).get(_k)
+                for _k in (
+                    "rest_anchor_relocated", "rest_anchor_dropped",
+                    "rest_anchor_synthesized",
+                )
+                if (r.get("tracer_video_info") or {}).get(_k)
+            }
             tvp = r.get("tracer_video_path")
             if r.get("ok"):
                 # The pipeline's own render is optional now: with the AI
@@ -8645,6 +8725,12 @@ def _trace_segment(
                         _layer = None
                     if _layer:
                         info["mog2"] = _layer.get("stats")
+                        for _k in (
+                            "rest_anchor_relocated", "rest_anchor_dropped",
+                            "rest_anchor_synthesized",
+                        ):
+                            if (_layer.get("stats") or {}).get(_k):
+                                _render_info[_k] = _layer["stats"][_k]
                         if _layer.get("overlay_name"):
                             info["mog2_overlay_image"] = _layer["overlay_name"]
                         # Timed heat dots + candidate pool + raw-motion
@@ -8678,6 +8764,10 @@ def _trace_segment(
                         info["n_points"] = len(
                             info.get("ball_track_frames") or [],
                         )
+                        # Present even when empty, so the panel can state
+                        # "start kept on the anchor" rather than render
+                        # nothing and look broken.
+                        info["render_info"] = _render_info
                         log.info(
                             "produce: AI tracer ok for %s", clip_path.name,
                         )
@@ -8747,6 +8837,11 @@ def _trace_segment(
                 ball_rest_xy_native=_rest_m,
                 impact_frame_idx=_imp_m,
                 track_frames=_rt,
+                # _rest_m is the departure-verified rest, or a ball the
+                # operator placed themselves. Neither is a guess.
+                rest_verified=bool(
+                    verified_rest_xy or ball_at_rest_override,
+                ),
             )
             if (
                 _ri.get("ok")
@@ -9527,6 +9622,8 @@ def _run_produce_debug_job(
                                 "tracer_raw_motion_url",
                             ),
                             "timed_points": _sw.get("timed_points"),
+                            "mog2_stats": _sw.get("mog2_stats"),
+                            "render_info": _sw.get("render_info"),
                             # Full mapped track (all sources) so the
                             # flight map can draw the whole arc line.
                             "track_points": [

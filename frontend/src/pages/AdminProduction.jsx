@@ -5949,6 +5949,104 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                     )}
                   </div>
                 )}
+                {s.ai?.anchor_check?.ai_launch_image_url && (
+                  <div style={{ marginTop: 4 }}>
+                    <div className="tiny">
+                      🤖 AI launch plot — how the magenta points are
+                      found:{" "}
+                      <span
+                        style={{
+                          color: s.ai.anchor_check.ai_launch_n
+                            ? "#1a9d55"
+                            : "#b7791f",
+                        }}
+                      >
+                        {s.ai.anchor_check.ai_launch_reason ||
+                          `${s.ai.anchor_check.ai_launch_n ?? 0} frame(s)`}
+                      </span>
+                      . These points are 📍NED in the tracer fit DASH
+                      nothing overrides them.
+                    </div>
+                    <a
+                      href={s.ai.anchor_check.ai_launch_image_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ display: "block" }}
+                      title="The first post-impact frames sent to the vision model, one crop per frame. Magenta ring = its ball pick, cyan ring = the previous position, green border = found, red = not found."
+                    >
+                      <img
+                        src={s.ai.anchor_check.ai_launch_image_url}
+                        alt="AI launch plot film-strip"
+                        style={{ maxWidth: "100%", borderRadius: 6 }}
+                      />
+                    </a>
+                  </div>
+                )}
+                {s.ai?.mog2_stats && (
+                  <div className="tiny muted" style={{ marginTop: 3 }}>
+                    AI launch points handed to the render:{" "}
+                    <b
+                      style={{
+                        color: s.ai.mog2_stats.n_launch_in
+                          ? "inherit"
+                          : "#c0392b",
+                      }}
+                    >
+                      {s.ai.mog2_stats.n_launch_in ?? "?"}
+                    </b>
+                    {" · "}added to the arc: {s.ai.mog2_stats.n_added_track ?? 0}
+                  </div>
+                )}
+                {(() => {
+                  const ri = s.ai?.render_info;
+                  if (!ri) return null;
+                  const moved =
+                    ri.rest_anchor_relocated ||
+                    ri.rest_anchor_dropped ||
+                    ri.rest_anchor_synthesized;
+                  if (!moved) {
+                    return (
+                      <div
+                        className="tiny"
+                        style={{ marginTop: 3, color: "#1a9d55" }}
+                      >
+                        📍 start point LOCKED on the verified rest/impact
+                        — the render did not move it.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div
+                      className="tiny"
+                      style={{ marginTop: 3, color: "#c0392b" }}
+                    >
+                      {ri.rest_anchor_dropped && (
+                        <>
+                          📍 the render DROPPED the rest anchor (
+                          {ri.rest_anchor_dropped.nearest_detection_px}px from
+                          the nearest detection, limit{" "}
+                          {ri.rest_anchor_dropped.threshold_px}px) — the
+                          line starts at the first tracked point instead.
+                        </>
+                      )}
+                      {ri.rest_anchor_relocated && (
+                        <>
+                          📍 the render MOVED the start: (
+                          {ri.rest_anchor_relocated.from?.join(", ")}) → (
+                          {ri.rest_anchor_relocated.to?.join(", ")}),{" "}
+                          {ri.rest_anchor_relocated.dist_px}px.
+                        </>
+                      )}
+                      {ri.rest_anchor_synthesized && (
+                        <>
+                          📍 no rest anchor reached the render — start
+                          synthesized at the extrapolated launch origin (
+                          {ri.rest_anchor_synthesized.xy?.join(", ")}).
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
                 {s.ai?.raw_motion_url &&
                   ((s.ai.timed_points || []).length > 0 ||
                     (s.ai.anchor_check?.ai_launch_points || []).length >

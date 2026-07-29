@@ -3264,6 +3264,7 @@ def render_tracer_video(
     target_xy: tuple[float, float] | None = None,
     write_start: int | None = None,
     write_end: int | None = None,
+    rest_verified: bool = False,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
@@ -3332,6 +3333,17 @@ def render_tracer_video(
     # ball. Manual entries are operator-confirmed: the fit treats them
     # as pinned ground truth (never rejected, heavily weighted).
     points_by_frame: dict[int, tuple[int, int, bool]] = {}
+    # AI-PLOTTED LAUNCH POINTS. The vision model looked at the ball frame
+    # by frame through the motion-blur zone right after impact — the part
+    # of the flight the pixel tracker is worst at and where MOG2 sees only
+    # body motion. They are the best evidence we have for where the flight
+    # begins, so they are treated as ground truth alongside the operator's
+    # own clicks: never outlier-rejected, and weighted so the fitted curve
+    # goes through them rather than averaging them against motion dots.
+    # (Kept separate from the `manual` flag, which ALSO switches the
+    # renderer into operator-plot mode — that would throw away the rest of
+    # the flight.)
+    priority_frames: set[int] = set()
     for rec in track_frames or []:
         if not rec.get("found"):
             continue
@@ -3342,6 +3354,8 @@ def render_tracer_video(
             continue
         try:
             points_by_frame[int(f)] = (int(x), int(y), bool(rec.get("manual", False)))
+            if rec.get("source") in ("launch", "ai") or rec.get("priority"):
+                priority_frames.add(int(f))
         except (TypeError, ValueError):
             continue
 
@@ -3405,7 +3419,17 @@ def render_tracer_video(
             (x, y) for (x, y, _m) in points_by_frame.values()
         ]
         drop_rest = False
-        if len(ref_pts) >= 2:
+        # rest_verified = the departure walk WATCHED the ball sit on this
+        # exact spot frame by frame and saw it leave, which also gave us
+        # the impact frame. When we have that, the start point is settled
+        # and NOTHING below gets to move it. The two guards that follow
+        # both reason from the tracked points — and the tracked points are
+        # the weak part when the launch is blurred and tracking only locks
+        # on far up the flight. Measured on a real swing: rest verified by
+        # departure, nearest detection 592px away, guard limit 485px, so
+        # the correct anchor was discarded and the line started 592px up
+        # the arc.
+        if len(ref_pts) >= 2 and not rest_verified:
             diag = math.hypot(width, height) or 1.0
             # Generous threshold: a real ball can rise a long way before the
             # tracker first locks on, so only reject a rest that's WILDLY off
@@ -3437,7 +3461,11 @@ def render_tracer_video(
             # the flight line, relocate it to the physics-implied
             # origin. A genuinely-found rest agrees with the
             # extrapolation and passes through untouched.
-            _orig = _launch_origin()
+            #
+            # Skipped entirely for a departure-verified rest: this exists
+            # to rescue a WRIST fallback that never saw a ball, and a spot
+            # we watched the ball leave is not that.
+            _orig = None if rest_verified else _launch_origin()
             if _orig is not None:
                 _diag = math.hypot(width, height) or 1.0
                 _above = _orig[1] - ry  # >0 => anchor is above the origin
@@ -3484,10 +3512,13 @@ def render_tracer_video(
     # detected flight vanished from the tracer.
     has_manual = any(m for (_x, _y, m) in points_by_frame.values())
     n_auto_pts = sum(1 for (_x, _y, m) in points_by_frame.values() if not m)
+    priority_anchor_idxs: set[int] = set()
     for f in sorted(points_by_frame):
         x, y, is_manual = points_by_frame[f]
         if is_manual:
             manual_anchor_idxs.add(len(anchors))
+        elif f in priority_frames:
+            priority_anchor_idxs.add(len(anchors))
         anchors.append((f, x, y))
 
     # Fit a smooth parabola through the anchors with iterative outlier
@@ -3616,7 +3647,10 @@ def render_tracer_video(
     # fitted curve is forced to keep (and hug) them instead of tossing
     # them as "outliers" relative to a fit the AI points had skewed.
     rest_is_anchor_zero = rest_added
-    pinned_set: set[int] = set(manual_anchor_idxs)
+    # AI launch points are pinned alongside the operator's clicks: the
+    # request is that nothing overrides them, so they must survive outlier
+    # rejection even when the MOG2 dots outnumber them.
+    pinned_set: set[int] = set(manual_anchor_idxs) | priority_anchor_idxs
     if rest_is_anchor_zero:
         pinned_set.add(0)
     if not pinned_set:
@@ -3629,6 +3663,11 @@ def render_tracer_video(
         weight_list = []
         for i in range(len(anchors)):
             if (rest_is_anchor_zero and i == 0) or i in manual_anchor_idxs:
+                weight_list.append(10.0)
+            elif i in priority_anchor_idxs:
+                # Same standing as a confirmed point — the curve goes
+                # THROUGH the AI plot, it doesn't average it against
+                # foliage flicker.
                 weight_list.append(10.0)
             else:
                 weight_list.append(1.0)
