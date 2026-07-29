@@ -371,6 +371,15 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip
   );
 }
 
+// Frames of clickable detections either side of impact. A few frames of
+// lead-in covers an impact frame estimated slightly late (the assumed-
+// impact path pins it to the pose peak, which can sit a frame or two off
+// the strike); 100 frames after is ~2s of flight at 50fps, by which point
+// the ball is long gone and every remaining dot is the golfer walking off,
+// a cart, or wind in the trees.
+const PLOT_WINDOW_PRE = 5;
+const PLOT_WINDOW_POST = 100;
+
 /**
  * Standalone click-to-plot modal, opened from a production card's
  * 🖱 Click-to-plot button. Big zoomable heat view with every timed dot
@@ -382,13 +391,21 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip
 function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   const swings = row.edit_metrics?.swings || [];
   const swing = swings[swingPos] || {};
-  // Post-impact only: pre-swing motion (waggle, address, shadow) is
-  // noise on this map — the flight starts at impact.
+  // FLIGHT WINDOW. Pre-swing motion (waggle, address, shadow) is noise on
+  // this map, and so is everything long after the ball has gone — the
+  // golfer walking off, a cart, wind in the trees. Both crowd the map with
+  // dots that can only ever be wrong picks. Show impact-5 (a few frames of
+  // lead-in, in case impact is estimated a touch late) through impact+100,
+  // which at 50fps is two seconds of flight.
   const impactF = swing.impact_frame ?? null;
-  const postImpact = (arr) =>
-    impactF == null ? arr : arr.filter((p) => p.frame >= impactF);
-  const dots = postImpact(swing.timed_points || []);
-  const denseDots = postImpact(swing.cand_points || []);
+  const winLo = impactF == null ? null : impactF - PLOT_WINDOW_PRE;
+  const winHi = impactF == null ? null : impactF + PLOT_WINDOW_POST;
+  const inWindow = (arr) =>
+    impactF == null
+      ? arr
+      : arr.filter((p) => p.frame >= winLo && p.frame <= winHi);
+  const dots = inWindow(swing.timed_points || []);
+  const denseDots = inWindow(swing.cand_points || []);
   // Dots that are ALREADY in the swing's saved ball track (from an
   // earlier Save here, or from the tracer itself) start out green —
   // so reopening the modal shows what's plotted, and Save only sends
@@ -595,6 +612,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               {" "}· #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
               {holeNumber} · {dots.length} dots
               {denseDots.length > 0 && ` · ${denseDots.length} candidates`}
+              {winLo != null && ` · showing f${winLo}–f${winHi}`}
             </span>
           </div>
           <div className="row" style={{ gap: 8, alignItems: "center" }}>
@@ -674,15 +692,15 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
                   start_frame:
-                    swing.impact_frame != null
-                      ? Math.max(
-                          swing.start_frame ?? 0,
-                          swing.impact_frame,
-                        )
+                    winLo != null
+                      ? Math.max(swing.start_frame ?? 0, winLo)
                       : swing.start_frame ?? 0,
-                  end_frame: swing.end_frame ?? null,
+                  end_frame:
+                    winHi != null
+                      ? Math.min(swing.end_frame ?? winHi, winHi)
+                      : swing.end_frame ?? null,
                 });
-                return postImpact(out.dots || []);
+                return inWindow(out.dots || []);
               }}
             />
           ) : (
