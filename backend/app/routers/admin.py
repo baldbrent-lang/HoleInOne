@@ -8298,14 +8298,6 @@ def _mog2_layer_for_ai_track(
         "n_cv": len(pool),
         "n_matched": n_matched,
         "n_added": len(added),
-        # How many launch points the caller actually HANDED us. The
-        # magenta launch points on the flight map come from a
-        # display-only field (anchor_check.ai_launch_points); the render
-        # only ever sees pipe["launch_points"]. When the map shows early
-        # points near the ball and this reads 0, they never reached the
-        # renderer — which is how the nearest tracked point ended up
-        # 592px up the flight with the ball plainly plotted at the tee.
-        "n_launch_in": len(launch_pts),
         "n_added_track": len(added_track),
         "n_added_launch": len(added_launch),
         "n_added_mid": len(added_mid),
@@ -8496,27 +8488,7 @@ def _mog2_layer_for_ai_track(
             ),
             impact_frame_idx=int(_imp) if _imp is not None else 0,
             track_frames=merged,
-            # The departure walk watched the ball sit on this spot and
-            # leave it. Tell the renderer, so its "this anchor looks too
-            # far from the track" guard can't overrule a rest position
-            # that was verified frame by frame.
-            rest_verified=bool(
-                (anchor_check and anchor_check.get("verified"))
-                or pipe.get("anchors_preverified")
-            ),
         )
-        # The renderer is allowed to MOVE the line's start away from the
-        # rest anchor we handed it (wild-offset drop, or the launch-origin
-        # relocation). This is the deliverable's own render, and until now
-        # those decisions went only to the server log — from the outside a
-        # relocated start is indistinguishable from a bad anchor. Carry
-        # them out with the stats so the panel can say which happened.
-        for _k in (
-            "rest_anchor_relocated", "rest_anchor_dropped",
-            "rest_anchor_synthesized", "rendered_line",
-        ):
-            if rr.get(_k):
-                stats[_k] = rr[_k]
         if rr.get("ok") and ext_path.exists():
             compress_for_email(ext_path)
             if ext_path.exists() and ext_path.stat().st_size > 0:
@@ -8775,11 +8747,6 @@ def _trace_segment(
                 ball_rest_xy_native=_rest_m,
                 impact_frame_idx=_imp_m,
                 track_frames=_rt,
-                # _rest_m here IS the departure-verified rest (or the
-                # operator's own marked ball) — not a guess to second-guess.
-                rest_verified=bool(
-                    verified_rest_xy or ball_at_rest_override,
-                ),
             )
             if (
                 _ri.get("ok")
@@ -9560,10 +9527,6 @@ def _run_produce_debug_job(
                                 "tracer_raw_motion_url",
                             ),
                             "timed_points": _sw.get("timed_points"),
-                            # Carries rest_anchor_relocated/_dropped —
-                            # whether the renderer kept the start where
-                            # the anchor said.
-                            "mog2_stats": _sw.get("mog2_stats"),
                             # Full mapped track (all sources) so the
                             # flight map can draw the whole arc line.
                             "track_points": [
