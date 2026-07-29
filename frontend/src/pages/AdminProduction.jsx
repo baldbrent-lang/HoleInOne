@@ -2942,6 +2942,127 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
   );
 }
 
+/**
+ * Debug2 report — the five stages, each showing its own work. Read-only:
+ * the run writes evidence images and changes no swing data, so this
+ * modal has nothing to save.
+ */
+function Debug2Modal({ state, onClose }) {
+  if (!state) return null;
+  const rep = state.report;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)",
+        display: "flex", alignItems: "flex-start", justifyContent: "center",
+        zIndex: 1000, padding: 16, overflow: "auto",
+      }}
+    >
+      <div
+        className="card"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 1200, width: "100%", margin: 0 }}
+      >
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <b>🔬 Debug2 — upload #{state.uploadId}</b>
+          <button type="button" className="ghost small"
+            style={{ width: "auto" }} onClick={onClose}>
+            Close ✕
+          </button>
+        </div>
+
+        {state.running && (
+          <div className="small muted" style={{ marginTop: 8 }}>
+            Running the pipeline — pose pass, club-arc ball, AI judge,
+            windowed heat and the chain. Minutes, not seconds.
+          </div>
+        )}
+        {state.error && (
+          <div className="err-text small" style={{ marginTop: 8 }}>
+            {state.error}
+          </div>
+        )}
+
+        {rep?.stages?.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            {rep.stages.map((st) => (
+              <div key={st.n} className="small" style={{ marginBottom: 2 }}>
+                <b>{st.n}. {st.name}</b>{" "}
+                <span className="muted">— {st.detail}</span>{" "}
+                <b style={{ color: st.count ? "var(--emerald-700)" : "#b7791f" }}>
+                  [{st.count}]
+                </b>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {(rep?.swings || []).map((sw) => {
+          const dropped = sw.verdict === "not_swing";
+          return (
+            <div
+              key={sw.idx}
+              style={{
+                border: `1px solid ${dropped ? "rgba(192,57,43,0.5)" : "rgba(26,157,85,0.5)"}`,
+                borderRadius: 8, padding: "8px 12px", marginTop: 12,
+              }}
+            >
+              <div className="small" style={{ fontWeight: 700 }}>
+                candidate {sw.idx + 1} @ {sw.peak_time_sec}s · impact f
+                {sw.impact_frame}
+                {sw.back_bend_deg != null && ` · bend ${sw.back_bend_deg}°`}
+                {sw.ratio != null && ` · speed ×${sw.ratio}`}
+                {" — "}
+                <span style={{ color: dropped ? "#c0392b" : "#1a9d55" }}>
+                  {dropped ? "❌ not a swing" : "✅ swing"}
+                </span>
+              </div>
+              <div className="tiny muted">{sw.verdict_reason}</div>
+
+              <div className="tiny" style={{ marginTop: 6 }}>
+                <b>ball at impact:</b>{" "}
+                {sw.ball ? `${sw.ball[0]}, ${sw.ball[1]}` : "not found"}
+                {" — "}{sw.ball_reason}
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+                {[
+                  ["club arc → ball", sw.ball_image_url],
+                  ["heat composite (what the judge saw)", sw.heat_image_url],
+                  [
+                    sw.window
+                      ? `windowed heat f${sw.window[0]}–f${sw.window[1]}`
+                      : "windowed heat",
+                    sw.heat_window_image_url,
+                  ],
+                  ["chain from the ball", sw.chain_image_url],
+                ].map(([cap, url]) =>
+                  url ? (
+                    <a key={cap} href={url} target="_blank" rel="noreferrer"
+                      style={{ width: 280, display: "block" }}>
+                      <div className="tiny muted">{cap}</div>
+                      <img src={url} alt={cap}
+                        style={{ width: "100%", borderRadius: 6 }} />
+                    </a>
+                  ) : null,
+                )}
+              </div>
+              {!dropped && (
+                <div className="tiny" style={{ marginTop: 4 }}>
+                  <b>chain:</b> {sw.chain_reason || "—"}
+                  {sw.n_dots != null && ` · ${sw.n_dots} dots in window`}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ImageLightbox({ url, title, onClose }) {
   // Full-screen zoom/pan viewer for a single image (the per-frame
   // detector-view JPGs). Wheel or +/− to zoom, drag to pan when zoomed,
@@ -6654,6 +6775,9 @@ export default function AdminProduction() {
   // diagnostic comparing the classical-CV and AI tracers. Hidden unless the
   // backend enables it (PRODUCE_DEBUG_ENABLED on this deployment).
   const [produceDebug, setProduceDebug] = useState({ enabled: false });
+  // Debug2 report — kept in memory only; the run writes images but
+  // changes no swing data, so there is nothing to persist.
+  const [d2, setD2] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -6667,6 +6791,19 @@ export default function AdminProduction() {
       }
     };
     tick();
+  }
+
+  async function handleDebug2(row) {
+    setBusy(true);
+    setD2({ running: true, uploadId: row.id, report: null, error: null });
+    try {
+      const rep = await api.debug2(adminPassword, row.id);
+      setD2({ running: false, uploadId: row.id, report: rep, error: rep.error });
+    } catch (e) {
+      setD2({ running: false, uploadId: row.id, report: null, error: e.message });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleProduceDebug(row) {
@@ -7353,6 +7490,16 @@ export default function AdminProduction() {
                     🐞 Debug
                   </button>
                 )}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
+                    onClick={() => handleDebug2(row)}
+                    disabled={busy}
+                    title="Dev: pose candidates → impact + ball from the club arc → AI judge → windowed MOG2 heat → chain walked up from the ball. Shows every stage."
+                  >
+                    🔬 Debug2
+                  </button>
+                )}
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
@@ -7442,6 +7589,8 @@ export default function AdminProduction() {
           onSaved={refreshAll}
         />
       )}
+
+      {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
     </div>
   );
 }

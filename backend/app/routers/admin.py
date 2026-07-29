@@ -11086,3 +11086,195 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)):
     db.delete(cam)
     db.commit()
     return {"deleted": True, "camera_id": camera_id}
+
+
+# ── Debug2 ─────────────────────────────────────────────────────────────
+# The operator's pipeline, separate from produce and from the original
+# Debug: pose candidates -> impact + ball from the club arc -> AI judge on
+# the heat composite -> windowed MOG2 heat -> a chain walked upward from
+# the ball. Read-only: it writes images and returns a report, and touches
+# neither edit_metrics nor any produced clip.
+
+@router.post("/long-uploads/{upload_id}/debug2")
+def debug2(upload_id: int, db: Session = Depends(get_db)):
+    """Run the five-stage pipeline and return every stage's work."""
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+    if not src_path or not src_path.exists():
+        raise HTTPException(400, "tee video missing on disk")
+
+    from ..services import debug2 as d2
+    from ..services import pose_swing
+    from ..services.tracer import swing_heat_check
+
+    tok = secrets.token_hex(3)
+    fps = float(probe_fps(src_path) or 30.0)
+
+    def _u(name):
+        """Filename under uploads/clips -> public URL. `_public_url` is a
+        nested helper elsewhere and takes a Path, so this endpoint has its
+        own."""
+        if not name:
+            return None
+        p = CLIPS_DIR / name
+        if not p.exists():
+            return None
+        return (
+            f"{settings.app_base_url}/uploads/clips/{p.name}"
+            f"?v={int(p.stat().st_mtime)}"
+        )
+
+    # Frame height sets the ball scale the chain rules are written in.
+    _fh = 720
+    try:
+        import cv2 as _cv2
+
+        _c = _cv2.VideoCapture(str(src_path))
+        _fh = int(_c.get(_cv2.CAP_PROP_FRAME_HEIGHT) or 720) or 720
+        _c.release()
+    except Exception:  # noqa: BLE001
+        pass
+    rep: dict = {
+        "ok": True, "upload_id": upload_id, "fps": round(fps, 2),
+        "stages": [], "swings": [],
+    }
+
+    # 1. CANDIDATES — the same pose detector produce uses.
+    if not pose_swing.available():
+        return {
+            "ok": False,
+            "error": f"pose detector unavailable: {pose_swing.unavailable_reason()}",
+        }
+    try:
+        db.rollback()          # the passes below are slow; don't hold a txn
+    except Exception:  # noqa: BLE001
+        pass
+    pose = pose_swing.detect_swings_from_pose(src_path, fps=fps)
+    cands = list(pose.get("segments") or [])
+    rep["stages"].append({
+        "n": 1, "name": "Pose candidates",
+        "detail": (
+            f"{len(cands)} burst(s) passed the wrist-speed and spine-bend "
+            f"gates"
+        ),
+        "count": len(cands),
+    })
+
+    n_judged_out = 0
+    for i, c in enumerate(cands):
+        peak_t = float(c.get("peak_time_sec") or 0.0)
+        imp_f = int(round(peak_t * fps))
+        entry: dict = {
+            "idx": i, "peak_time_sec": round(peak_t, 2),
+            "impact_frame": imp_f,
+            "back_bend_deg": c.get("back_bend_deg"),
+            "ratio": c.get("ratio"),
+            "wrist_xy": c.get("impact_wrist_xy"),
+        }
+
+        # 2. IMPACT + BALL from the bottom of the club's heat arc.
+        club = d2.club_bottom_ball(
+            src_path, imp_f, fps,
+            hint_xy=c.get("impact_wrist_xy"),
+            debug_dir=CLIPS_DIR,
+            debug_prefix=f"d2club-{upload_id}-{tok}-{i}",
+        )
+        entry["ball"] = club.get("xy")
+        entry["ball_reason"] = club.get("reason")
+        entry["ball_image_url"] = _u(club.get("image"))
+
+        # 3. AI JUDGE on the motion-heat composite.
+        chk = swing_heat_check(
+            src_path, peak_t, fps,
+            ball_hint=c.get("impact_wrist_xy"),
+            debug_dir=CLIPS_DIR,
+            debug_prefix=f"d2heat-{upload_id}-{tok}-{i}",
+        )
+        entry["heat_image_url"] = _u(
+            chk.get("image") or chk.get("image_clean"),
+        )
+        verdict, reason = chk.get("verdict"), "club-fan heuristic (no API key)"
+        if chk.get("image_clean") and os.environ.get("ANTHROPIC_API_KEY"):
+            j = judge_swing_heat_image(CLIPS_DIR / chk["image_clean"])
+            if j.get("is_swing") is True:
+                verdict, reason = "swing", j.get("reason") or "AI judge: swing"
+            elif j.get("is_swing") is False:
+                verdict, reason = "not_swing", j.get("reason") or "AI judge: not a swing"
+            else:
+                reason = f"AI judge unavailable ({j.get('reason')})"
+        entry["verdict"] = verdict
+        entry["verdict_reason"] = reason
+        if verdict == "not_swing":
+            n_judged_out += 1
+            rep["swings"].append(entry)
+            continue
+
+        # 4. WINDOWED MOG2 HEAT — impact-5 .. impact+100 and nothing else.
+        f_lo = max(0, imp_f - d2.WIN_PRE)
+        f_hi = imp_f + d2.WIN_POST
+        entry["window"] = [f_lo, f_hi]
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        _u, cv_info, _t, _d = _run_tracer(
+            src_path,
+            frame_debug_dir=None,
+            impact_frame_hint_override=imp_f,
+            ball_rest_hint=(
+                (float(club["xy"][0]), float(club["xy"][1]))
+                if club.get("xy") else None
+            ),
+            heat_start_frame=f_lo,
+            heat_end_frame=f_hi,
+            render_video=False,
+        )
+        cv_info = cv_info or {}
+        entry["heat_window_image_url"] = _u(
+            cv_info.get("raw_motion_image"),
+        )
+        pool = [
+            p for p in _mog2_dot_pool(cv_info)
+            if p.get("frame") is not None and f_lo <= int(p["frame"]) <= f_hi
+        ]
+        entry["n_dots"] = len(pool)
+
+        # 5. CHAIN upward from the ball.
+        ch = d2.chain_from_ball(
+            pool, club.get("xy"), imp_f, _fh,
+        )
+        entry["chain"] = ch["points"]
+        entry["chain_reason"] = ch["reason"]
+        entry["n_rejected"] = len(ch["rejected"])
+        _heat = cv_info.get("raw_motion_image")
+        if _heat and (CLIPS_DIR / _heat).exists():
+            name = f"d2chain-{upload_id}-{tok}-{i}.jpg"
+            if d2.draw_chain(
+                CLIPS_DIR / _heat, club.get("xy"), ch["points"],
+                ch["rejected"], CLIPS_DIR / name,
+                f"chain f{f_lo}-{f_hi}: {ch['reason']}  "
+                f"(green=ascending, orange=descending, red x=rejected)",
+            ):
+                entry["chain_image_url"] = _u(name)
+        rep["swings"].append(entry)
+
+    n_real = sum(1 for s in rep["swings"] if s.get("verdict") != "not_swing")
+    rep["stages"].extend([
+        {"n": 2, "name": "Impact + ball from the club arc",
+         "detail": "impact = peak wrist speed; ball = the bottom of the "
+                   "club's heat arc through impact",
+         "count": sum(1 for s in rep["swings"] if s.get("ball"))},
+        {"n": 3, "name": "AI judge on the heat composite",
+         "detail": f"{n_real} kept, {n_judged_out} rejected as not a swing",
+         "count": n_real},
+        {"n": 4, "name": "Windowed MOG2 heat",
+         "detail": f"impact−{d2.WIN_PRE} .. impact+{d2.WIN_POST} only",
+         "count": sum(1 for s in rep["swings"] if s.get("heat_window_image_url"))},
+        {"n": 5, "name": "Chain walked up from the ball",
+         "detail": "each step advances in frame, rises while ascending, "
+                   "and drifts sideways far less than it rises",
+         "count": sum(len(s.get("chain") or []) for s in rep["swings"])},
+    ])
+    return rep

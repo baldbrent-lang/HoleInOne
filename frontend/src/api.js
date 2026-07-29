@@ -500,6 +500,15 @@ export const api = {
       }`,
       { method: "POST", adminPassword: key },
     ),
+  debug2: (key, uploadId) =>
+    // Runs the five-stage pipeline synchronously and returns the whole
+    // report — pose passes, club-arc ball, AI judge, windowed heat and
+    // the chain all happen in the request, so give it room.
+    request(`/api/admin/long-uploads/${uploadId}/debug2`, {
+      method: "POST",
+      adminPassword: key,
+      timeoutMs: 10 * 60_000,
+    }),
   produceDebugStatus: (key, uploadId) =>
     request(`/api/admin/long-uploads/${uploadId}/produce-debug/status`, {
       adminPassword: key,
