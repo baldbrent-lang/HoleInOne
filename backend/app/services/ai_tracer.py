@@ -2901,6 +2901,16 @@ TRAJ_OUTLIER_MAX_ITERS = 6
 # rendered curve begins 2 frames before impact instead of at impact.
 REST_ANCHOR_FRAMES_BEFORE_IMPACT = 2
 
+# How many frames of line we are willing to draw BEFORE the first real ball
+# detection when there is no rest anchor to pin the start. The line there is
+# pure extrapolation from the fit, and a parabola run backwards over a long
+# gap leaves the frame: measured on a real clip with impact recorded at f937
+# and the first detection at f1006, the drawn line started at y=1849 on a
+# 720-tall frame - the long straight segment entering from the bottom
+# corner. 15 frames is 0.3s at 50fps, enough to reach a launch the tracker
+# picked up slightly late, short enough that it cannot run off-screen.
+MAX_UNMEASURED_LEAD_FRAMES = 15
+
 
 def _robust_quadratic_fit(
     anchors: list[tuple[int, int, int]],
@@ -3762,7 +3772,29 @@ def render_tracer_video(
                 0, int(impact_frame_idx) - REST_ANCHOR_FRAMES_BEFORE_IMPACT,
             )
             if not manual_render and launch_frame < first_frame:
-                first_frame = launch_frame
+                # Reaching here means there is no rest anchor down at
+                # launch_frame (a rest anchor is pinned, so it would BE
+                # kept[0]). Everything between launch_frame and the first
+                # detection is therefore invented by the fit. A few frames
+                # of that is a reasonable lead-in; 70 of it is a line
+                # across the frame that no measurement supports.
+                _lead = first_frame - launch_frame
+                if _lead <= MAX_UNMEASURED_LEAD_FRAMES:
+                    first_frame = launch_frame
+                else:
+                    info["launch_extension_skipped"] = {
+                        "impact_frame": int(impact_frame_idx),
+                        "first_detection_frame": int(first_frame),
+                        "unmeasured_frames": int(_lead),
+                        "limit": int(MAX_UNMEASURED_LEAD_FRAMES),
+                    }
+                    log.info(
+                        "ai_tracer: NOT extending the line back to impact "
+                        "f%d — the first ball detection is at f%d, %d "
+                        "frames later, with no rest anchor between them. "
+                        "Drawing from the first real point instead.",
+                        int(impact_frame_idx), int(first_frame), int(_lead),
+                    )
             # Apex truncation: stop the line at the parabola's vertex
             # unless the operator marked CLEAR descent past it. In
             # image coords y grows downward, so the vertex of a > 0
