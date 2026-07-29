@@ -1441,6 +1441,60 @@ def ai_trace(
     }
 
 
+def _save_assumed_impact_frame(
+    src_path, frame_idx: int, fps: float, seed_xy, ai_points, name_stem: str,
+) -> str | None:
+    """Write the frame we ASSUMED impact on, annotated. Returns the
+    filename, or None.
+
+    When no ball departure is found the impact frame is a pose-peak
+    estimate rather than something we watched happen, so the panel has to
+    be able to show WHICH frame that is — cyan ring = the pose hands the
+    launch plot was seeded from, magenta = each ball the AI then found."""
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(src_path))
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(max(0, frame_idx)))
+            ok, fr = cap.read()
+        finally:
+            cap.release()
+        if not ok or fr is None:
+            return None
+        if seed_xy and len(seed_xy) == 2:
+            cv2.circle(
+                fr, (int(seed_xy[0]), int(seed_xy[1])),
+                max(10, int(fr.shape[0] * 0.02)),
+                (255, 200, 0), 2, cv2.LINE_AA,
+            )
+        for q in (ai_points or []):
+            cv2.circle(
+                fr, (int(q["x"]), int(q["y"])),
+                max(6, int(fr.shape[0] * 0.012)),
+                (255, 0, 255), 2, cv2.LINE_AA,
+            )
+        _txt = (
+            f"ASSUMED impact f{int(frame_idx)} "
+            f"({frame_idx / max(1.0, fps):.2f}s) - pose peak, no ball "
+            f"departure; cyan=pose hands (launch seed), magenta=AI picks"
+        )
+        for _c, _w in (((0, 0, 0), 4), ((255, 255, 255), 1)):
+            cv2.putText(
+                fr, _txt, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                _c, _w, cv2.LINE_AA,
+            )
+        fname = f"{name_stem}.jpg"
+        cv2.imwrite(
+            str(CLIPS_DIR / fname), fr,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 85],
+        )
+        return fname if (CLIPS_DIR / fname).exists() else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("assumed-impact frame save failed: %s", exc)
+        return None
+
+
 def _seg_launch_points(seg: dict) -> list[dict]:
     """Every AI-plotted launch point we have for this swing, in SOURCE
     frame numbers.
@@ -2150,6 +2204,192 @@ def _run_long_upload_job(
                                     "long-upload worker: departure pin "
                                     "failed: %s", exc,
                                 )
+                        elif v.get("verdict") != "practice":
+                            # NO BALL DEPARTURE, BUT THE SWING PRODUCES.
+                            # The pose burst passed the wrist-speed and
+                            # bend gates and the AI judge called the heat
+                            # a golf swing — the ball just never got found
+                            # before/after, so the departure walk had
+                            # nothing to anchor on and every AI stage was
+                            # skipped. That left these swings on MOG2
+                            # alone, which is the weakest tracer we have.
+                            #
+                            # Assume impact AT THE POSE PEAK and run the
+                            # same chain as a departure-pinned swing: AI
+                            # launch plot over impact..impact+5, then the
+                            # pixel tracker seeded from its last point,
+                            # then MOG2 for the rest of the flight. The
+                            # verdict is recorded as ASSUMED so the debug
+                            # panel never passes it off as a measured
+                            # departure.
+                            try:
+                                from ..services.ai_tracer import (
+                                    plot_launch_frames_ai,
+                                    track_launch_from_rest,
+                                )
+
+                                _pk_f = int(round(
+                                    float(d.get("peak_time_sec") or 0.0)
+                                    * tee_fps,
+                                ))
+                                # Seed the plot at the golfer's hands at
+                                # impact: the ball sits just below them,
+                                # and it is the only position we have.
+                                _seed = d.get("impact_wrist_xy")
+                                if _seed and len(_seed) == 2:
+                                    _tok = secrets.token_hex(3)
+                                    _alp = plot_launch_frames_ai(
+                                        src_path,
+                                        (float(_seed[0]), float(_seed[1])),
+                                        _pk_f, tee_fps,
+                                        debug_dir=_dbg_dir,
+                                        debug_prefix=(
+                                            f"ailaunch-assumed-{upload_id}-"
+                                            f"{_tok}"
+                                        ),
+                                    )
+                                    _ai_pts = [
+                                        {"frame": int(pt["frame"]),
+                                         "x": float(pt["x"]),
+                                         "y": float(pt["y"])}
+                                        for pt in (_alp.get("points") or [])
+                                        if pt.get("frame") is not None
+                                    ]
+                                    log.info(
+                                        "long-upload worker: upload=%s no "
+                                        "departure — ASSUMED impact at pose "
+                                        "peak f%d (%.2fs), AI launch plot "
+                                        "found %d point(s) (%s)",
+                                        upload_id, _pk_f,
+                                        float(d.get("peak_time_sec") or 0.0),
+                                        len(_ai_pts), _alp.get("reason"),
+                                    )
+                                    _anchor_rec = {
+                                        "verified": bool(_ai_pts),
+                                        "assumed_impact": True,
+                                        "impact_frame": _pk_f,
+                                        "impact_delta": 0,
+                                        "snapped": False,
+                                        "snap_px": None,
+                                        "reason": (
+                                            f"no ball departure found — "
+                                            f"impact ASSUMED at the pose "
+                                            f"peak (f{_pk_f}, "
+                                            f"{float(d.get('peak_time_sec') or 0.0):.2f}s); "
+                                            f"ball located by the AI launch "
+                                            f"plot from there"
+                                        ),
+                                        "ai_launch_n": _alp.get("n_found"),
+                                        "ai_launch_reason": _alp.get("reason"),
+                                        "ai_launch_image": _alp.get("image"),
+                                        "ai_launch_points": _ai_pts,
+                                    }
+                                    if _ai_pts:
+                                        # The earliest AI pick IS where the
+                                        # flight starts — the rest anchor,
+                                        # exactly as the departure walk's
+                                        # rest_xy would have been.
+                                        _first = min(
+                                            _ai_pts,
+                                            key=lambda q: int(q["frame"]),
+                                        )
+                                        d["ball_rest_xy"] = [
+                                            float(_first["x"]),
+                                            float(_first["y"]),
+                                        ]
+                                        d["impact_pinned"] = True
+                                        _anchor_rec["rest_xy"] = [
+                                            float(_first["x"]),
+                                            float(_first["y"]),
+                                        ]
+                                        _e["impact_pinned_f"] = _pk_f
+                                        # Same hand-off as the departure
+                                        # path: pixel tracker seeded from
+                                        # the AI's points, then MOG2.
+                                        try:
+                                            _lt = track_launch_from_rest(
+                                                src_path,
+                                                (float(_first["x"]),
+                                                 float(_first["y"])),
+                                                _pk_f, tee_fps,
+                                                debug_dir=_dbg_dir,
+                                                debug_prefix=(
+                                                    f"launchtrk-assumed-"
+                                                    f"{upload_id}-{_tok}"
+                                                ),
+                                                seed_points=_ai_pts,
+                                            )
+                                            _merged_lp = {
+                                                int(q["frame"]): q
+                                                for q in _ai_pts
+                                            }
+                                            for q in (
+                                                _lt.get("points") or []
+                                            ):
+                                                _merged_lp.setdefault(
+                                                    int(q["frame"]), {
+                                                        "frame": int(
+                                                            q["frame"],
+                                                        ),
+                                                        "x": q["x"],
+                                                        "y": q["y"],
+                                                    },
+                                                )
+                                            d["launch_points"] = [
+                                                _merged_lp[k]
+                                                for k in sorted(_merged_lp)
+                                            ]
+                                            _anchor_rec["launch_n"] = (
+                                                _lt.get("n_found")
+                                            )
+                                            _anchor_rec["launch_reason"] = (
+                                                _lt.get("reason")
+                                            )
+                                            _anchor_rec["launch_image"] = (
+                                                _lt.get("image")
+                                            )
+                                            _anchor_rec[
+                                                "launch_image_heat"
+                                            ] = _lt.get("image_heat")
+                                        except Exception as exc:  # noqa: BLE001
+                                            log.warning(
+                                                "assumed-impact launch "
+                                                "tracker failed: %s", exc,
+                                            )
+                                            d["launch_points"] = _ai_pts
+                                    # The frame we ASSUMED impact on, saved
+                                    # so the panel can show exactly which
+                                    # one it is.
+                                    if _dbg_dir is not None:
+                                        _anchor_rec[
+                                            "assumed_impact_image"
+                                        ] = _save_assumed_impact_frame(
+                                            src_path, _pk_f, tee_fps,
+                                            _seed, _ai_pts,
+                                            f"assumedimp-{upload_id}-{_tok}",
+                                        )
+                                    d["anchor_rec"] = {
+                                        k: _anchor_rec.get(k)
+                                        for k in (
+                                            "verified", "assumed_impact",
+                                            "snapped", "snap_px",
+                                            "impact_frame", "impact_delta",
+                                            "reason", "rest_xy",
+                                            "assumed_impact_image",
+                                            "launch_n", "launch_reason",
+                                            "launch_image",
+                                            "launch_image_heat",
+                                            "ai_launch_n",
+                                            "ai_launch_reason",
+                                            "ai_launch_image",
+                                            "ai_launch_points",
+                                        )
+                                    }
+                            except Exception as exc:  # noqa: BLE001
+                                log.warning(
+                                    "long-upload worker: assumed-impact "
+                                    "chain failed: %s", exc,
+                                )
                         _work["practice"].append({
                             # Keyed by the ORIGINAL pose peak — the debug
                             # report matches records on it; the pin above
@@ -2167,6 +2407,9 @@ def _run_long_upload_job(
                                         "impact_frame", "impact_delta",
                                         "reason", "image", "image_mog2",
                                         "ai_fallback_reason",
+                                        # assumed-impact path (no departure)
+                                        "assumed_impact",
+                                        "assumed_impact_image", "rest_xy",
                                         "launch_n",
                                         "launch_reason", "launch_image",
                                         "launch_image_heat",
@@ -9331,6 +9574,7 @@ def _run_produce_debug_job(
                         ("launch_image", "launch_image_url"),
                         ("launch_image_heat", "launch_image_heat_url"),
                         ("ai_launch_image", "ai_launch_image_url"),
+                        ("assumed_impact_image", "assumed_impact_image_url"),
                     ):
                         if _anc.get(_ik) and (
                             CLIPS_DIR / _anc[_ik]

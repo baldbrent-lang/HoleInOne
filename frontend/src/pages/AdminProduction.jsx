@@ -5471,10 +5471,39 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
                           below is MOG2-only for this swing.
                         </div>
                       )}
+                      {s.anchor?.assumed_impact_image_url && (
+                        <div style={{ marginTop: 3 }}>
+                          <div className="tiny muted">
+                            the frame impact was assumed on — cyan = the
+                            pose hands the launch plot was seeded from,
+                            magenta = each ball the AI then found
+                          </div>
+                          <a
+                            href={s.anchor.assumed_impact_image_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ display: "block" }}
+                          >
+                            <img
+                              src={s.anchor.assumed_impact_image_url}
+                              alt="assumed impact frame"
+                              style={{ maxWidth: "100%", borderRadius: 6 }}
+                            />
+                          </a>
+                        </div>
+                      )}
                       {s.anchor && (
                         <div className="tiny" style={{ marginTop: 2 }}>
                           {"\u2693"}{" "}
-                          {s.anchor.verified ? (
+                          {s.anchor.verified && s.anchor.assumed_impact ? (
+                            <span style={{ color: "#b7791f" }}>
+                              impact ASSUMED at f{s.anchor.impact_frame} (the
+                              pose peak) — no ball departure was found, so
+                              this frame is an estimate, not something we
+                              watched happen. Everything below ran from it
+                              exactly as it would from a measured departure.
+                            </span>
+                          ) : s.anchor.verified ? (
                             <span style={{ color: "#1a9d55" }}>
                               impact PINNED at f{s.anchor.impact_frame} by
                               ball departure (MOG2, no AI){" "}
