@@ -3222,6 +3222,44 @@ function Debug3Modal({ state, onClose }) {
               cap="Ball search box at 6x — cyan is where the flight said to look, green is the stationary blob found there" />
             <Img url={sw.flight_image_url}
               cap="Stage 5 — green inliers, red × outliers, cyan the fitted parabola, magenta where the curve says impact was, grey the rejected tracks. Detections behind them ramp blue (early) to orange (late)." />
+
+            {sw.produce && (
+              <div style={{ marginTop: 12 }}>
+                <div className="small">
+                  <b>Stage 6 — produced clip</b>{" "}
+                  <span className={`pill ${sw.produce.ok ? "ok" : "err"}`}>
+                    {sw.produce.ok ? "rendered" : "failed"}
+                  </span>
+                  <div className="tiny muted">
+                    {sw.produce.ok ? (
+                      <>
+                        {sw.produce.tracer_points} tracer point(s) from the
+                        RANSAC inliers, ball ({sw.produce.ball?.[0]},{" "}
+                        {sw.produce.ball?.[1]}), impact f
+                        {sw.produce.impact_frame}
+                        {sw.produce.frame_range && (
+                          <> · frames {sw.produce.frame_range[0]}–
+                            {sw.produce.frame_range[1]}</>
+                        )}
+                      </>
+                    ) : (
+                      sw.produce.error
+                    )}
+                  </div>
+                </div>
+                {sw.produce.clip_url && (
+                  <video
+                    src={sw.produce.clip_url}
+                    controls
+                    playsInline
+                    style={{
+                      width: "100%", borderRadius: 6, marginTop: 8,
+                      background: "#000",
+                    }}
+                  />
+                )}
+              </div>
+            )}
           </div>
         ))}
       </div>

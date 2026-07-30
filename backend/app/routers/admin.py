@@ -11727,6 +11727,7 @@ def _debug3_run(row, src_path, db, progress=None):
     }
 
     n_flights = 0
+    n_produced = 0
     for i, c in enumerate(cands):
         if progress:
             progress(f"candidate {i + 1} of {len(cands)}", i, len(cands))
@@ -11959,6 +11960,50 @@ def _debug3_run(row, src_path, db, progress=None):
         if res.get("ok"):
             n_flights += 1
 
+        # 6. PRODUCE. Everything above is measurement; this is the clip.
+        # Debug3's own numbers go straight into the renderer produce uses --
+        # the ball it settled on, the launch frame the flight derived, and
+        # the RANSAC inliers as the tracer points. Written to its own file,
+        # so nothing here replaces a produced clip or touches edit_metrics.
+        if res.get("ok") and _ball:
+            try:
+                _pts = [
+                    {"frame": int(q["frame"]), "found": True,
+                     "x": float(q["x"]), "y": float(q["y"])}
+                    for q in ((res.get("fit") or {}).get("inliers") or [])
+                ]
+                _f_imp = int(entry.get("launch_frame") or imp_f)
+                # A clip either side of the strike, not the whole window.
+                _w0 = max(0, _f_imp - int(round(0.6 * fps)))
+                _w1 = _f_imp + int(round(2.6 * fps))
+                _out = CLIPS_DIR / f"d3clip-{upload_id}-{tok}-{i}.mp4"
+                _rv = render_tracer_video(
+                    src_path, _out,
+                    (float(_ball[0]), float(_ball[1])),
+                    _f_imp, _pts,
+                    write_start=_w0, write_end=_w1,
+                    # The ball came from the club arc measured at the
+                    # launch frame and was eyeballed against the check
+                    # frame; the renderer's relocation guards would only
+                    # second-guess a better number.
+                    rest_verified=True,
+                )
+                entry["produce"] = {
+                    "ok": bool(_rv.get("ok")),
+                    "error": _rv.get("error"),
+                    "n_points": _rv.get("n_points"),
+                    "frame_range": _rv.get("frame_range"),
+                    "tracer_points": len(_pts),
+                    "impact_frame": _f_imp,
+                    "ball": _ball,
+                }
+                if _rv.get("ok") and _out.exists():
+                    entry["produce"]["clip_url"] = _clip_url(_out.name)
+                    n_produced += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("debug3 produce failed on %s: %s", upload_id, exc)
+                entry["produce"] = {"ok": False, "error": f"{exc}"}
+
         _canvas = (det.get("images") or {}).get("dets")
         if _canvas and (CLIPS_DIR / _canvas).exists():
             nm = f"d3flight-{upload_id}-{tok}-{i}.jpg"
@@ -12012,6 +12057,11 @@ def _debug3_run(row, src_path, db, progress=None):
          "detail": "x linear in t, y quadratic; must rise and must point "
                    "back at the ball",
          "count": n_flights, "counts": "flights accepted"},
+        {"n": 6, "name": "Produce",
+         "detail": "the same renderer produce uses, fed Debug3's ball, "
+                   "launch frame and inliers. Writes its own file; replaces "
+                   "nothing",
+         "count": n_produced, "counts": "clips rendered"},
     ])
     return rep
 
