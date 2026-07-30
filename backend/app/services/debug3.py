@@ -77,6 +77,14 @@ RANSAC_SEED_PTS = 14
 # body reads as foreground on frame one.
 WARMUP_FRAMES = 40
 
+# Work at or below this height. MOG2 plus a connectedComponentsWithStats
+# label array per frame at 1080p is ~25MB of allocation per frame, for every
+# frame of every candidate's window -- enough to get a container killed
+# mid-request, which surfaces as a 502 with no log line of its own. A ball
+# is 5-7px across at 720p and was detected in 100 of 101 frames there, so
+# there is nothing to gain from the extra resolution.
+WORK_HEIGHT = 720
+
 
 # ── stages A-C: MOG2, drop the golfer, keep ball-sized blobs ────────────
 
@@ -117,8 +125,16 @@ def detect_ball_blobs(
         if not cap.isOpened():
             out["reason"] = "could not open video"
             return out
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # Downscale for the pass, then report detections in FULL-RES
+        # coordinates so the caller never has to know this happened.
+        scale = min(1.0, float(WORK_HEIGHT) / float(max(1, src_h)))
+        w = max(1, int(round(src_w * scale)))
+        h = max(1, int(round(src_h * scale)))
+        out["scale"] = round(scale, 4)
+        out["work_frame"] = [w, h]
+        inv = 1.0 / scale if scale else 1.0
         # "Big" = the golfer. Scaled to the frame so it survives a change of
         # camera or resolution.
         golfer_area = max(400.0, 0.0008 * float(w) * float(h))
@@ -149,6 +165,8 @@ def detect_ball_blobs(
             ok, fr = cap.read()
             if not ok or fr is None:
                 break
+            if scale < 1.0:
+                fr = cv2.resize(fr, (w, h), interpolation=cv2.INTER_AREA)
             fg = mog.apply(fr)
             if f < int(f0):
                 continue                # warm-up only
@@ -204,8 +222,10 @@ def detect_ball_blobs(
                     continue
                 if a <= BALL_AREA_STRICT:
                     n_strict += 1
-                d = {"frame": f, "x": cx, "y": cy, "area": a,
-                     "w": bw, "h": bh}
+                d = {"frame": f, "x": cx * inv, "y": cy * inv, "area": a,
+                     "w": bw, "h": bh,
+                     # working-frame position, for the debug draws
+                     "wx": cx, "wy": cy}
                 dets.append(d)
                 kept_this.append(d)
                 out["stats"]["kept"] += 1
@@ -245,7 +265,7 @@ def detect_ball_blobs(
                     + 0.4 * np.array([40, 40, 220])
                 ).astype(np.uint8)
                 for d in kept_this:
-                    cv2.circle(img, (int(d["x"]), int(d["y"])),
+                    cv2.circle(img, (int(d["wx"]), int(d["wy"])),
                                max(8, int(0.012 * h)), (0, 255, 0), 2,
                                cv2.LINE_AA)
                 _label(
@@ -266,7 +286,7 @@ def detect_ball_blobs(
             for d in dets:
                 t = (d["frame"] - int(f0)) / span
                 col = (int(255 * (1 - t)), int(80 + 100 * t), int(255 * t))
-                cv2.circle(img, (int(d["x"]), int(d["y"])), 4, col, -1,
+                cv2.circle(img, (int(d["wx"]), int(d["wy"])), 4, col, -1,
                            cv2.LINE_AA)
             _label(
                 img,
@@ -593,8 +613,16 @@ def draw_flight(
     winner: dict | None,
     fit: dict | None,
     caption: str,
+    scale: float = 1.0,
 ) -> bool:
-    """Draw every track dim, the winner bright, and the fitted parabola."""
+    """Draw every track dim, the winner bright, and the fitted parabola.
+
+    Detections come back in FULL-RES coordinates while the canvas is the
+    downscaled working frame, so everything drawn here is multiplied by the
+    same scale the detection pass used. Getting this wrong does not throw --
+    it just draws the whole flight 1.5x off the ball, which looks like a
+    tracking failure.
+    """
     if not HAS_CV:
         return False
     try:
@@ -602,6 +630,11 @@ def draw_flight(
         if img is None:
             return False
         h, w = img.shape[:2]
+        sc = float(scale) or 1.0
+
+        def _p(px, py):
+            return int(round(float(px) * sc)), int(round(float(py) * sc))
+
         win_pts = {(p["frame"], p["x"], p["y"])
                    for p in (winner or {}).get("points", [])}
         for tr in tracks[:40]:
@@ -609,7 +642,7 @@ def draw_flight(
             if {(p["frame"], p["x"], p["y"]) for p in pts} == win_pts:
                 continue
             for a, b in zip(pts, pts[1:]):
-                cv2.line(img, (a["x"], a["y"]), (b["x"], b["y"]),
+                cv2.line(img, _p(a["x"], a["y"]), _p(b["x"], b["y"]),
                          (120, 120, 120), 1, cv2.LINE_AA)
         if fit and fit.get("coef"):
             cx, cy = fit["coef"]["x"], fit["coef"]["y"]
@@ -617,24 +650,24 @@ def draw_flight(
             if fs:
                 prev = None
                 for f in range(min(fs) - 2, max(fs) + 3):
-                    px = int(np.polyval(cx, float(f)))
-                    py = int(np.polyval(cy, float(f)))
+                    cur = _p(float(np.polyval(cx, float(f))),
+                             float(np.polyval(cy, float(f))))
                     if prev is not None:
-                        cv2.line(img, prev, (px, py), (255, 200, 0), 2,
+                        cv2.line(img, prev, cur, (255, 200, 0), 2,
                                  cv2.LINE_AA)
-                    prev = (px, py)
+                    prev = cur
             for p in fit.get("outliers") or []:
-                cv2.drawMarker(img, (int(p["x"]), int(p["y"])), (0, 0, 255),
+                cv2.drawMarker(img, _p(p["x"], p["y"]), (0, 0, 255),
                                cv2.MARKER_TILTED_CROSS, 12, 2)
             for p in fit.get("inliers") or []:
-                cv2.circle(img, (int(p["x"]), int(p["y"])),
+                cv2.circle(img, _p(p["x"], p["y"]),
                            max(7, int(0.010 * h)), (0, 255, 0), 2,
                            cv2.LINE_AA)
             if fit.get("at_impact"):
-                cv2.drawMarker(img, tuple(fit["at_impact"]), (255, 0, 255),
+                cv2.drawMarker(img, _p(*fit["at_impact"]), (255, 0, 255),
                                cv2.MARKER_CROSS, 22, 2)
         if ball_xy and len(ball_xy) == 2:
-            cv2.circle(img, (int(ball_xy[0]), int(ball_xy[1])),
+            cv2.circle(img, _p(ball_xy[0], ball_xy[1]),
                        max(10, int(0.014 * h)), (0, 255, 0), 3, cv2.LINE_AA)
         _label(img, caption)
         cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 86])

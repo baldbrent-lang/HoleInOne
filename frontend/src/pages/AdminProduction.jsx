@@ -3155,7 +3155,7 @@ function Debug3Modal({ state, onClose }) {
               )}
             </div>
             <Img url={sw.flight_image_url}
-              cap="Stage 5 — green inliers, red × outliers, amber the fitted parabola, magenta where the curve says impact was, grey the rejected tracks" />
+              cap="Stage 5 — green inliers, red × outliers, cyan the fitted parabola, magenta where the curve says impact was, grey the rejected tracks. Detections behind them ramp blue (early) to orange (late)." />
           </div>
         ))}
       </div>

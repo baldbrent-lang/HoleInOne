@@ -11669,8 +11669,9 @@ def _debug3_run(row, src_path, db):
                 tracks, (res.get("flight") or {}).get("track"),
                 fit or None,
                 f"f{f_lo}-{f_hi}: {res.get('reason')} "
-                f"(green=inliers, red x=outliers, amber=fitted parabola, "
+                f"(green=inliers, red x=outliers, cyan=fitted parabola, "
                 f"magenta=where it says impact was, grey=rejected tracks)",
+                scale=det.get("scale") or 1.0,
             ):
                 entry["flight_image_url"] = _clip_url(nm)
         rep["swings"].append(entry)
