@@ -369,7 +369,26 @@ def chain_from_ball(
 
 # ── drawing ────────────────────────────────────────────────────────────
 
+_ASCII_MAP = {
+    "\u2014": "-", "\u2013": "-", "\u2192": "->", "\u00b7": ".",
+    "\u2265": ">=", "\u2264": "<=", "\u00d7": "x", "\u2026": "...",
+    "\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'",
+}
+
+
+def _ascii(text: str) -> str:
+    """Fold to something OpenCV's Hershey font can actually draw."""
+    for k, v in _ASCII_MAP.items():
+        text = text.replace(k, v)
+    return text.encode("ascii", "replace").decode("ascii")
+
+
 def _label2(img, text: str, y: int) -> None:
+    # Hershey fonts are ASCII only: an em-dash or a middot renders as "???"
+    # on the image, which is how "head line - lock on above here" came out
+    # as "head line ??? lock on above here". Fold to ASCII once, here, so no
+    # caller has to remember.
+    text = _ascii(text)
     for colour, weight in (((0, 0, 0), 3), ((255, 255, 255), 1)):
         cv2.putText(img, text, (10, max(12, y)), cv2.FONT_HERSHEY_SIMPLEX,
                     0.45, colour, weight, cv2.LINE_AA)
@@ -379,6 +398,7 @@ def _label(img, text: str) -> None:
     """Header text, WRAPPED. OpenCV does not wrap, so a long reason string
     ran off the edge and the outline pass overprinted itself into an
     unreadable smear — which is what a caption is for, so it has to fit."""
+    text = _ascii(text)
     scale, thick = 0.58, 1
     max_w = img.shape[1] - 20
     words, lines, cur = text.split(), [], ""

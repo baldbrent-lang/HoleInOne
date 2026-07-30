@@ -109,6 +109,19 @@ EDGE_MARGIN_PX = 6
 
 MAX_TRACKS_TESTED = 120
 
+# Gate for a track's FIRST link, in multiples of r. A track with one point
+# has no velocity yet, so its prediction is "stay put" -- and a golf ball
+# covers far more ground than the steady-state gate allows. Measured on real
+# footage: consecutive flight detections were ~60px apart at 1080p while the
+# gate was 31px, so the ball could never acquire and only slow junk ever
+# formed tracks. Wide here, tight once a velocity exists.
+ACQUIRE_GATE_R = 12.0
+
+# Extra gate slack proportional to speed. A prediction's error grows with
+# how fast the thing is moving, so a fixed radius is either too tight for
+# the ball or too loose for everything else.
+GATE_SPEED_FRAC = 0.25
+
 # Seed points for the parabola RANSAC. 14 gives C(14,3) = 364 candidate
 # fits, which is fast and plenty for a curve with three parameters.
 RANSAC_SEED_PTS = 14
@@ -523,7 +536,12 @@ def build_tracks(
                 continue
             px = last["x"] + tr["vx"] * df
             py = last["y"] + tr["vy"] * df
-            gate = (1.5 + 0.9 * df) * r
+            if len(tr["pts"]) < 2:
+                # No velocity yet: acquisition, not tracking.
+                gate = ACQUIRE_GATE_R * r * df
+            else:
+                speed = math.hypot(tr["vx"], tr["vy"])
+                gate = (1.5 + 0.9 * df) * r + GATE_SPEED_FRAC * speed * df
             best_i = None
             best_d = None
             for i, c in enumerate(cands):
