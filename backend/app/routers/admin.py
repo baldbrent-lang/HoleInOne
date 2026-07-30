@@ -11836,6 +11836,16 @@ def _debug3_run(row, src_path, db, progress=None):
                         _prev[0] - _lg["xy"][0], _prev[1] - _lg["xy"][1],
                     ), 1)
                 _ball = _lg["xy"]
+                # Re-aim against the ball we actually ended up with. The
+                # flight's reason string was written before the swap, so it
+                # still quotes the aim against the discarded position and
+                # still says to suspect it -- which reads as "nothing
+                # changed" when in fact the ball moved.
+                _ai = (res.get("fit") or {}).get("at_impact")
+                if _ai:
+                    entry["aim_vs_final_px"] = round(math.hypot(
+                        _ai[0] - _ball[0], _ai[1] - _ball[1],
+                    ), 1)
 
             # The blob search is kept, but only as CONFIRMATION -- it can
             # agree or say nothing, and it can no longer overrule the curve
@@ -11881,9 +11891,27 @@ def _debug3_run(row, src_path, db, progress=None):
                 CLIPS_DIR / _canvas, CLIPS_DIR / nm, _ball,
                 tracks, (res.get("flight") or {}).get("track"),
                 fit or None,
-                f"f{f_lo}-{f_hi}: {res.get('reason')} "
-                f"(green=inliers, red x=outliers, cyan=fitted parabola, "
-                f"magenta=where it says impact was, grey=rejected tracks)",
+                (
+                    # Lead with the ball, because that is what changed and
+                    # the flight's own reason string was written before the
+                    # swap -- quoting an aim against a position we have
+                    # since discarded reads as "nothing happened".
+                    (
+                        f"BALL from the flight: ({_ball[0]},{_ball[1]}) "
+                        f"at f{entry.get('launch_frame')}, "
+                        f"{entry.get('ball_disagree_px')}px from the "
+                        f"{entry.get('ball_alt_source')}. "
+                        if entry.get("ball_source", "").startswith("flight")
+                        else ""
+                    )
+                    + f"f{f_lo}-{f_hi}: {(fit or {}).get('n_inliers')}/"
+                      f"{len((res.get('flight') or {}).get('track', {}).get('points') or [])}"
+                      f" on a parabola, rms {(fit or {}).get('rms_px')}px. "
+                    + (f"aim vs this ball {entry['aim_vs_final_px']}px. "
+                       if entry.get("aim_vs_final_px") is not None else "")
+                    + "green=inliers red x=outliers cyan=fit "
+                      "magenta=impact grey=rejected"
+                ),
                 scale=det.get("scale") or 1.0,
             ):
                 entry["flight_image_url"] = _clip_url(nm)
