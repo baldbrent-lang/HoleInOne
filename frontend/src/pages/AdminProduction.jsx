@@ -68,7 +68,10 @@ function addSeconds(iso, sec) {
   return new Date(d.getTime() + sec * 1000).toISOString();
 }
 
-function uploadState(row) {
+function uploadState(row, busy) {
+  // The optimistic flag first: the POST returns before the worker flips
+  // processing_status, and without this the card un-greys in that gap.
+  if (busy) return "processing";
   // Anything mid-production blocks every action until it finishes.
   if (row.processing_status === "processing") return "processing";
   // Anything that finished a run (clips emitted) is "produced".
@@ -7605,12 +7608,29 @@ export default function AdminProduction() {
       fd.append("starting_hole", "1");
       await api.reprocessLongUpload(adminPassword, row.id, fd);
       await refreshAll();
+      // Busy is NOT cleared here. The POST returns before the worker flips
+      // processing_status, so clearing it in a finally left a gap where the
+      // row un-greyed and the button looked unpressed, then greyed again a
+      // few seconds later. The effect below hands over once the server's
+      // own status says processing.
     } catch (e) {
       setError(e.message);
-    } finally {
-      setBusyId(null);
+      setBusyId((cur) => (cur === row.id ? null : cur));
     }
   }
+
+  // Hand the greyed-out state from the optimistic flag to the server's
+  // status, without a gap between them.
+  useEffect(() => {
+    if (busyId == null) return;
+    const r = (rows || []).find((x) => x.id === busyId);
+    if (!r) return;
+    if (r.processing_status === "processing"
+        || r.processing_status === "completed"
+        || r.processing_status === "failed") {
+      setBusyId(null);
+    }
+  }, [rows, busyId]);
 
   if (!adminPassword) {
     return (
@@ -7791,7 +7811,7 @@ export default function AdminProduction() {
       )}
 
       {visibleRows?.map((row) => {
-        const state = uploadState(row);
+        const state = uploadState(row, busyId === row.id);
         const greyed = state === "processing";
         const busy = busyId === row.id;
         return (
