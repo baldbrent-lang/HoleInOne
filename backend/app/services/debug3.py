@@ -656,6 +656,18 @@ def ransac_parabola(
         return out
     if tol is None:
         tol = max(6.0, 1.2 * r)
+    # X IS NOT LINEAR IN TIME. The model was x linear, y quadratic -- true
+    # for a projectile in the world, but this is an IMAGE. A ball flying
+    # away from the camera covers less and less image width per frame, so
+    # its x decelerates through perspective alone. Forcing x straight makes
+    # the fit split the difference, and the frames where the ball moves
+    # fastest across the frame -- the first ones after the strike -- get
+    # thrown out as outliers. Those are the points closest to the ball and
+    # the ones the launch extrapolation most needs.
+    #
+    # Fit x quadratic once there are enough points to support it. Same rule
+    # the production tracer already uses in _robust_quadratic_fit.
+    x_deg = 2 if len(points) >= 6 else 1
     t = np.array([p["frame"] for p in points], float)
     x = np.array([p["x"] for p in points], float)
     y = np.array([p["y"] for p in points], float)
@@ -673,7 +685,7 @@ def ransac_parabola(
         if len(set(ti.tolist())) < 3:
             continue
         try:
-            cx = np.polyfit(ti, xi, 1)
+            cx = np.polyfit(ti, xi, x_deg)
             cy = np.polyfit(ti, yi, 2)
         except Exception:  # noqa: BLE001
             continue
@@ -695,7 +707,8 @@ def ransac_parabola(
     # Refit on the inliers — the 3 seed points chose the model, they should
     # not define it.
     try:
-        cx = np.polyfit(t[inl], x[inl], 1)
+        _d = 2 if int(inl.sum()) >= 6 else 1
+        cx = np.polyfit(t[inl], x[inl], _d)
         cy = np.polyfit(t[inl], y[inl], 2) if int(inl.sum()) >= 3 else cy
     except Exception:  # noqa: BLE001
         pass
@@ -714,9 +727,10 @@ def ransac_parabola(
             math.hypot(ix - float(ball_xy[0]), iy - float(ball_xy[1])), 1,
         )
     out["ok"] = True
+    out["x_degree"] = int(len(cx) - 1)
     out["reason"] = (
-        f"{out['n_inliers']}/{len(points)} points on a parabola, "
-        f"rms {out['rms_px']}px"
+        f"{out['n_inliers']}/{len(points)} points on a parabola "
+        f"(x deg {out['x_degree']}), rms {out['rms_px']}px"
         + (f"; run back to impact it lands {out['aim_px']}px from the ball"
            if out["aim_px"] is not None else "")
     )

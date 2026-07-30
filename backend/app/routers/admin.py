@@ -11998,6 +11998,12 @@ def _debug3_run(row, src_path, db, progress=None):
                     "ball": _ball,
                 }
                 if _rv.get("ok") and _out.exists():
+                    # render_tracer_video writes with the mp4v fourcc
+                    # (ai_tracer.py:3917), which browsers refuse to play in a
+                    # <video> tag -- the panel showed a rendered clip that
+                    # sat black at 0:00. Produce runs every clip through this
+                    # for exactly that reason; Debug3 was not.
+                    entry["produce"]["h264"] = bool(transcode_for_web(_out))
                     entry["produce"]["clip_url"] = _clip_url(_out.name)
                     n_produced += 1
             except Exception as exc:  # noqa: BLE001
