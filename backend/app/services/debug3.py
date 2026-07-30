@@ -723,6 +723,64 @@ def ransac_parabola(
     return out
 
 
+def rest_check_image(
+    input_path: Path,
+    frame_no: int,
+    ball_xy,
+    r: float,
+    debug_dir: Path,
+    debug_prefix: str = "d3rest",
+    zoom: int = 6,
+) -> str | None:
+    """A frame from BEFORE impact with our ball estimate ringed on it.
+
+    The point is to look at the ball sitting there. Every other panel shows
+    frames from the swing itself, by which time the ball has gone -- and a
+    ball position can look plausible on an empty patch of turf. Ringing it
+    on a frame where the ball is still present is the only check that
+    settles it by eye.
+
+    Returns the written filename, or None.
+    """
+    if not HAS_CV or not ball_xy or len(ball_xy) != 2:
+        return None
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            return None
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(frame_no)))
+        ok, fr = cap.read()
+        cap.release()
+        if not ok or fr is None:
+            return None
+        h, w = fr.shape[:2]
+        bx, by = int(ball_xy[0]), int(ball_xy[1])
+        cv2.circle(fr, (bx, by), max(10, int(2.0 * r)), (0, 255, 0), 2,
+                   cv2.LINE_AA)
+        # A zoomed inset, because a golf ball at this range is a few pixels
+        # and "is it there" is not answerable at 1:1.
+        pad = int(max(30.0, 6.0 * r))
+        x0, y0 = max(0, bx - pad), max(0, by - pad)
+        x1, y1 = min(w, bx + pad), min(h, by + pad)
+        if x1 - x0 > 8 and y1 - y0 > 8:
+            crop = cv2.resize(fr[y0:y1, x0:x1], None, fx=zoom, fy=zoom,
+                              interpolation=cv2.INTER_NEAREST)
+            ch, cw = crop.shape[:2]
+            ch, cw = min(ch, h // 2), min(cw, w // 2)
+            crop = crop[:ch, :cw]
+            fr[0:ch, w - cw:w] = crop
+            cv2.rectangle(fr, (w - cw, 0), (w - 1, ch), (0, 255, 0), 2)
+        _label(fr, f"frame {frame_no} -- BEFORE impact, ball should still be "
+                   f"here. green = our estimate ({bx},{by}). inset {zoom}x")
+        nm = f"{debug_prefix}.jpg"
+        cv2.imwrite(str(Path(debug_dir) / nm), fr,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        return nm
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3 rest_check_image failed: %s", exc)
+        return None
+
+
 def launch_from_ground(fit: dict, ground_y: float | None) -> dict:
     """Where the fitted flight leaves the ground. THE ball position.
 
@@ -1204,5 +1262,5 @@ __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "detect_ball_blobs", "draw_flight", "pick_flight",
-    "ransac_parabola", "launch_from_ground", "refine_ball_from_flight",
+    "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",
 ]

@@ -3194,6 +3194,20 @@ function Debug3Modal({ state, onClose }) {
                 )}
               </div>
             )}
+            <Img url={sw.rest_check_image_url}
+              cap={`Ball at rest — frame ${sw.rest_check_frame} (5 before launch), our estimate ringed, with a 6x inset. This is the frame where the ball should still be sitting there.`} />
+            {sw.club_arc_relocated && (
+              <div className="tiny muted" style={{ marginTop: 6 }}>
+                <b>Club arc, re-run at the launch frame</b> (f
+                {sw.club_arc_relocated.frame}):{" "}
+                {sw.club_arc_relocated.xy
+                  ? `(${sw.club_arc_relocated.xy[0]}, ${sw.club_arc_relocated.xy[1]}) — ${sw.club_arc_relocated.vs_launch_px}px from the extrapolated launch`
+                  : "not found"}
+                <div>{sw.club_arc_relocated.reason}</div>
+              </div>
+            )}
+            <Img url={sw.club_arc_relocated_image_url}
+              cap="Club arc re-measured over the real downswing, not the pose peak's window" />
             {sw.refine && (
               <div className="tiny muted" style={{ marginTop: 6 }}>
                 <b>Blob check (confirmation only):</b>{" "}
