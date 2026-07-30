@@ -757,8 +757,15 @@ def pick_flight(
                 tr["points"][0]["x"] - float(ball_xy[0]),
                 tr["points"][0]["y"] - float(ball_xy[1]),
             )
+            # The floor was a flat 60px, which is a 1080p number and too
+            # tight besides: the BALL POSITION is itself only good to a few
+            # tens of pixels, so a 60px floor demands the back-projection
+            # agree more precisely than the thing it is compared against.
+            # 6r scales with the frame and is about the ball's own
+            # uncertainty. The 0.30*d0 term still dominates for any track
+            # that starts far away, which is where the test does real work.
             limit = min(max(120.0, 0.20 * float(frame_w)),
-                        max(60.0, 0.30 * d0))
+                        max(6.0 * r, 0.30 * d0))
             if fit["aim_px"] > limit:
                 rec["verdict"] = (
                     f"aims {fit['aim_px']:.0f}px from the ball "
@@ -787,8 +794,40 @@ def pick_flight(
         if out["flight"] is None or score > out["flight"]["score"]:
             out["flight"] = {"score": score, "track": tr, "fit": fit}
     if out["flight"] is None:
+        # Say WHICH test rejected them, and how close the best one came.
+        # "none survived" sends you back to the panel to expand a table; the
+        # caption should carry the answer.
+        buckets: dict[str, int] = {}
+        for rec in out["tried"]:
+            v = str(rec.get("verdict") or "?")
+            key = (
+                "too few inliers" if "inliers" in v
+                else "does not rise" if "rise" in v
+                else "aims wide of the ball" if "aims" in v
+                else "baseline too short" if "baseline" in v
+                else "no parabola fit" if "no fit" in v
+                else v
+            )
+            buckets[key] = buckets.get(key, 0) + 1
+        why = ", ".join(f"{n} {k}" for k, n in
+                        sorted(buckets.items(), key=lambda kv: -kv[1]))
+        # The near miss is the useful one -- it is the track to argue about.
+        near = None
+        for rec in out["tried"]:
+            if rec.get("aim_px") is not None and (rec.get("n_inliers") or 0) >= 3:
+                if near is None or rec["aim_px"] < near["aim_px"]:
+                    near = rec
+        detail = ""
+        if near:
+            detail = (
+                f". Closest: {near['n_points']} points, "
+                f"{near['n_inliers']} inliers, rises {near['rise_px']}px, "
+                f"aims {near['aim_px']}px from the ball -- "
+                f"{near.get('verdict')}"
+            )
         out["reason"] = (
             f"{len(tracks)} track(s) built, none survived the flight tests"
+            + (f" ({why})" if why else "") + detail
         )
         return out
     out["ok"] = True
