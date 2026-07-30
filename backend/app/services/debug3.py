@@ -69,6 +69,14 @@ BALL_DIAM_FRAC = 0.014        # of frame height
 BALL_AREA_BLEED = 1.6         # MOG2 + open, vs the geometric disc
 MIN_KEPT_FOR_TRACKING = 6
 
+# Detections kept per frame. On a synthetic scene a frame yields a handful;
+# on a real course, wind in the trees and moving grass push it far higher,
+# and the tracker's cost grows with the SQUARE of the per-frame count. Cap
+# it and keep the most ball-like -- smallest first, since everything here
+# has already passed the area window and a golf ball is at the bottom of it.
+# The report says how many were dropped so a starved frame is visible.
+MAX_DETS_PER_FRAME = 10
+
 # Seed points for the parabola RANSAC. 14 gives C(14,3) = 364 candidate
 # fits, which is fast and plenty for a curve with three parameters.
 RANSAC_SEED_PTS = 14
@@ -100,6 +108,7 @@ def detect_ball_blobs(
     f1: int,
     max_area: int | None = None,
     min_area: int = BALL_AREA_MIN,
+    max_per_frame: int = MAX_DETS_PER_FRAME,
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -222,13 +231,23 @@ def detect_ball_blobs(
                     continue
                 if a <= BALL_AREA_STRICT:
                     n_strict += 1
-                d = {"frame": f, "x": cx * inv, "y": cy * inv, "area": a,
-                     "w": bw, "h": bh,
-                     # working-frame position, for the debug draws
-                     "wx": cx, "wy": cy}
-                dets.append(d)
-                kept_this.append(d)
-                out["stats"]["kept"] += 1
+                kept_this.append({
+                    "frame": f, "x": cx * inv, "y": cy * inv, "area": a,
+                    "w": bw, "h": bh,
+                    # working-frame position, for the debug draws
+                    "wx": cx, "wy": cy,
+                })
+
+            if len(kept_this) > max_per_frame:
+                kept_this.sort(key=lambda d: d["area"])
+                out["stats"]["over_cap"] = (
+                    out["stats"].get("over_cap", 0)
+                    + len(kept_this) - max_per_frame
+                )
+                kept_this = kept_this[:max_per_frame]
+                out["stats"]["kept"] -= 0     # counted below instead
+            dets.extend(kept_this)
+            out["stats"]["kept"] += len(kept_this)
 
             if len(kept_this) > best_frame_n:
                 best_frame_n = len(kept_this)
@@ -250,7 +269,8 @@ def detect_ball_blobs(
             f"(area {min_area}-{max_area}px, max side {int(_side)}px; "
             f"dropped {s['golfer']} golfer, {s['on_golfer']} on the golfer, "
             f"{s['too_big']} too big, {s.get('too_long', 0)} too long, "
-            f"{s['too_small']} too small). "
+            f"{s['too_small']} too small, {s.get('over_cap', 0)} over the "
+            f"{max_per_frame}/frame cap). "
             f"A flat {BALL_AREA_STRICT}px cap would have kept {n_strict}."
         )
 

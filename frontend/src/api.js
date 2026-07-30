@@ -500,23 +500,31 @@ export const api = {
       }`,
       { method: "POST", adminPassword: key },
     ),
+  // Debug2/Debug3 START a background run and return immediately; the work
+  // arrives via the matching *Status poll. They used to run inside the
+  // request, which overran Replit's proxy timeout: the connection was
+  // dropped (a 502 page) and the request retried from the top, so one
+  // button press ran pose four times and never finished.
   debug2: (key, uploadId) =>
-    // Runs the five-stage pipeline synchronously and returns the whole
-    // report — pose passes, club-arc ball, AI judge, windowed heat and
-    // the chain all happen in the request, so give it room.
     request(`/api/admin/long-uploads/${uploadId}/debug2`, {
       method: "POST",
       adminPassword: key,
-      timeoutMs: 10 * 60_000,
+    }),
+
+  debug2Status: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/debug2/status`, {
+      adminPassword: key,
     }),
 
   debug3: (key, uploadId) =>
-    // The blob-and-track method. Per-frame MOG2 over the whole flight
-    // window for every candidate, so if anything it is slower than debug2.
     request(`/api/admin/long-uploads/${uploadId}/debug3`, {
       method: "POST",
       adminPassword: key,
-      timeoutMs: 10 * 60_000,
+    }),
+
+  debug3Status: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/debug3/status`, {
+      adminPassword: key,
     }),
   emailStatus: (key) =>
     request("/api/admin/email-status", { adminPassword: key }),

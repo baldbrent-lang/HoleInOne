@@ -11097,26 +11097,18 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)):
 # neither edit_metrics nor any produced clip.
 
 @router.post("/long-uploads/{upload_id}/debug2")
-def debug2(upload_id: int, db: Session = Depends(get_db)):
-    """Run the five-stage pipeline and return every stage's work."""
-    row = db.get(LongVideoUpload, upload_id)
-    if not row:
-        raise HTTPException(404, "long upload not found")
-    src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
-    if not src_path or not src_path.exists():
-        raise HTTPException(400, "tee video missing on disk")
-
-    try:
-        return _debug2_run(row, src_path, db)
-    except Exception as exc:  # noqa: BLE001
-        # A debug tool that 500s tells the operator nothing. Hand the
-        # failure back as data so the panel can show which stage died.
-        log.warning("debug2 failed for upload=%s: %s", upload_id, exc,
-                    exc_info=True)
-        return {"ok": False, "upload_id": upload_id, "error": f"{exc}"}
+def debug2_start(upload_id: int):
+    """Start Debug2. Poll /debug2/status — see _debugx_start for why this
+    cannot run inside the request."""
+    return _debugx_start("debug2", upload_id, _debug2_run)
 
 
-def _debug2_run(row, src_path, db):
+@router.get("/long-uploads/{upload_id}/debug2/status")
+def debug2_status(upload_id: int):
+    return _debugx_get("debug2", upload_id)
+
+
+def _debug2_run(row, src_path, db, progress=None):
     upload_id = row.id
     from ..services import debug2 as d2
     from ..services import pose_swing
@@ -11482,6 +11474,76 @@ def _debug2_run(row, src_path, db):
     return rep
 
 
+
+# ── Debug2/Debug3 background runner ────────────────────────────────────
+# Both pipelines run pose over the whole video and then several seconds of
+# per-frame work PER CANDIDATE. Measured on upload 501: pose 26s, then ~82s
+# for candidate 0 alone, with 3 candidates. Held inside the HTTP request
+# that overruns Replit's proxy timeout, the connection is dropped (the
+# operator sees a 502 "we couldn't reach this app") and the request is
+# RETRIED from the top -- so the logs show pose running four times for one
+# button press and no run ever finishes. Run them on a thread and let the
+# UI poll instead.
+
+_debugx_lock = threading.Lock()
+_debugx_state: dict[tuple[str, int], dict] = {}
+
+
+def _debugx_set(kind: str, upload_id: int, **fields) -> None:
+    with _debugx_lock:
+        st = _debugx_state.setdefault((kind, upload_id), {})
+        st.update(fields)
+
+
+def _debugx_get(kind: str, upload_id: int) -> dict:
+    with _debugx_lock:
+        return dict(_debugx_state.get((kind, upload_id)) or {"running": False})
+
+
+def _debugx_start(kind: str, upload_id: int, runner) -> dict:
+    """Kick `runner(row, src_path, db, progress)` on a thread."""
+    with _debugx_lock:
+        if (_debugx_state.get((kind, upload_id)) or {}).get("running"):
+            return {"ok": True, "running": True, "upload_id": upload_id,
+                    "note": "already running"}
+        _debugx_state[(kind, upload_id)] = {
+            "running": True, "stage": "starting", "done": 0, "total": 0,
+            "report": None, "error": None,
+        }
+
+    def _job() -> None:
+        db = SessionLocal()
+        try:
+            row = db.get(LongVideoUpload, upload_id)
+            if not row or not row.tee_filename:
+                raise RuntimeError("upload not found or has no tee video")
+            storage.ensure_local(CLIPS_DIR, row.tee_filename)
+            src_path = CLIPS_DIR / row.tee_filename
+            if not src_path.exists():
+                raise RuntimeError("tee source missing on disk")
+
+            def _prog(stage: str, done: int = 0, total: int = 0) -> None:
+                _debugx_set(kind, upload_id, stage=stage, done=done,
+                            total=total)
+
+            rep = runner(row, src_path, db, _prog)
+            _debugx_set(kind, upload_id, running=False, report=rep,
+                        stage="done",
+                        error=(rep or {}).get("error")
+                        if (rep or {}).get("ok") is False else None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s failed for upload=%s: %s", kind, upload_id, exc,
+                        exc_info=True)
+            _debugx_set(kind, upload_id, running=False, error=f"{exc}",
+                        stage="failed")
+        finally:
+            db.close()
+
+    threading.Thread(target=_job, daemon=True,
+                     name=f"{kind}-{upload_id}").start()
+    return {"ok": True, "running": True, "upload_id": upload_id}
+
+
 # ── Debug3 ─────────────────────────────────────────────────────────────
 # A third method, and a deliberately different one. Debug2 reads the shape
 # the swing draws in a motion COMPOSITE. Debug3 never looks at a composite:
@@ -11500,23 +11562,17 @@ def _debug2_run(row, src_path, db):
 # edit_metrics nor any produced clip.
 
 @router.post("/long-uploads/{upload_id}/debug3")
-def debug3(upload_id: int, db: Session = Depends(get_db)):
-    """Run the blob-and-track pipeline and return every stage's work."""
-    row = db.get(LongVideoUpload, upload_id)
-    if not row:
-        raise HTTPException(404, "long upload not found")
-    src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
-    if not src_path or not src_path.exists():
-        raise HTTPException(400, "tee video missing on disk")
-    try:
-        return _debug3_run(row, src_path, db)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("debug3 failed for upload=%s: %s", upload_id, exc,
-                    exc_info=True)
-        return {"ok": False, "upload_id": upload_id, "error": f"{exc}"}
+def debug3(upload_id: int):
+    """Start the blob-and-track pipeline. Poll /debug3/status for the work."""
+    return _debugx_start("debug3", upload_id, _debug3_run)
 
 
-def _debug3_run(row, src_path, db):
+@router.get("/long-uploads/{upload_id}/debug3/status")
+def debug3_status(upload_id: int):
+    return _debugx_get("debug3", upload_id)
+
+
+def _debug3_run(row, src_path, db, progress=None):
     upload_id = row.id
     from ..services import debug2 as d2
     from ..services import debug3 as d3
@@ -11578,6 +11634,8 @@ def _debug3_run(row, src_path, db):
 
     n_flights = 0
     for i, c in enumerate(cands):
+        if progress:
+            progress(f"candidate {i + 1} of {len(cands)}", i, len(cands))
         peak_t = float(c.get("peak_time_sec") or 0.0)
         imp_f = int(round(peak_t * fps))
         f_lo = max(0, imp_f - d3.WIN_PRE)

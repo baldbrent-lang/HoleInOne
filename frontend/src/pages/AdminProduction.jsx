@@ -2995,9 +2995,10 @@ function Debug3Modal({ state, onClose }) {
                   verticalAlign: "middle",
                 }}
               />
-              Running — one synchronous pass. This one runs MOG2 on every
-              frame of every candidate&apos;s flight window, so it is slower
-              than Debug2.
+              Running in the background{state.stage ? ` — ${state.stage}` : ""}
+              {state.total ? ` (${state.done}/${state.total})` : ""}. MOG2 runs
+              on every frame of every candidate&apos;s flight window, so this
+              takes a few minutes. You can leave this open.
             </div>
             <ol className="tiny muted" style={{ marginTop: 8, paddingLeft: 18 }}>
               <li>Pose candidates — wrist speed + spine bend</li>
@@ -7139,6 +7140,37 @@ export default function AdminProduction() {
     tick();
   }
 
+  // Debug2/Debug3 are background runs now: POST kicks them off, then we
+  // poll. Holding the connection open for the whole pipeline is what
+  // produced the 502s -- the proxy dropped it and the browser retried,
+  // restarting the run from scratch each time.
+  function pollDebugX(kind, uploadId, setter) {
+    const statusCall =
+      kind === "debug3" ? api.debug3Status : api.debug2Status;
+    const tick = async () => {
+      try {
+        const st = await statusCall(adminPassword, uploadId);
+        setter({
+          running: !!st.running,
+          uploadId,
+          stage: st.stage,
+          done: st.done,
+          total: st.total,
+          report: st.report || null,
+          error: st.error || null,
+        });
+        if (st.running) setTimeout(tick, 2500);
+        else setBusyId((cur) => (cur === uploadId ? null : cur));
+      } catch (e) {
+        setter({
+          running: false, uploadId, report: null, error: e.message,
+        });
+        setBusyId((cur) => (cur === uploadId ? null : cur));
+      }
+    };
+    setTimeout(tick, 1200);
+  }
+
   async function handleDebug2(row) {
     // Open the window FIRST. Anything that throws after this still leaves
     // the operator with a visible panel carrying the error, instead of a
@@ -7146,16 +7178,12 @@ export default function AdminProduction() {
     setD2({ running: true, uploadId: row.id, report: null, error: null });
     setBusyId(row.id);
     try {
-      const rep = await api.debug2(adminPassword, row.id);
-      setD2({
-        running: false, uploadId: row.id, report: rep,
-        error: rep?.ok === false ? rep.error : null,
-      });
+      await api.debug2(adminPassword, row.id);
+      pollDebugX("debug2", row.id, setD2);
     } catch (e) {
       setD2({
         running: false, uploadId: row.id, report: null, error: e.message,
       });
-    } finally {
       setBusyId((cur) => (cur === row.id ? null : cur));
     }
   }
@@ -7166,16 +7194,12 @@ export default function AdminProduction() {
     setD3({ running: true, uploadId: row.id, report: null, error: null });
     setBusyId(row.id);
     try {
-      const rep = await api.debug3(adminPassword, row.id);
-      setD3({
-        running: false, uploadId: row.id, report: rep,
-        error: rep?.ok === false ? rep.error : null,
-      });
+      await api.debug3(adminPassword, row.id);
+      pollDebugX("debug3", row.id, setD3);
     } catch (e) {
       setD3({
         running: false, uploadId: row.id, report: null, error: e.message,
       });
-    } finally {
       setBusyId((cur) => (cur === row.id ? null : cur));
     }
   }
