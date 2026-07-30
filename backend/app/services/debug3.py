@@ -80,6 +80,27 @@ MIN_KEPT_FOR_TRACKING = 6
 # keeps is the SMALLEST-AREA blobs only as a last resort.
 MAX_DETS_PER_FRAME = 40
 
+# A pixel that is foreground in more than this fraction of the window is
+# not a ball. The ball crosses any given pixel ONCE -- about 1% of a 106
+# frame window -- while the golfer's body occupies its own region for the
+# whole swing and wind-blown foliage re-lights the same leaves over and
+# over. This one test removes both, and unlike an area threshold it does
+# not care that MOG2 renders a person as scattered edge fragments rather
+# than a silhouette.
+BUSY_PIXEL_FRAC = 0.20
+
+# Foreground is dilated by this much before the occupancy count, so the
+# measure is "is this REGION always active" rather than "is this exact
+# pixel". Without it the mask comes out empty on real motion.
+BUSY_DILATE_PX = 9
+
+# Kernel used ONLY to decide what is the golfer. Closing the foreground
+# joins a person's separate edge fragments -- collar, hems, limb
+# boundaries -- into one blob big enough to recognise. The ball detection
+# itself still runs on the un-closed mask, or closing would merge the ball
+# into whatever it flies past.
+GOLFER_CLOSE_PX = 13
+
 # Ignore this many pixels around the frame border. Compression and sensor
 # noise light up the outermost columns every frame, and those blobs are
 # both plentiful and perfectly ball-sized. A ball that is genuinely in the
@@ -113,6 +134,29 @@ def ball_area_cap(frame_h: int) -> tuple[float, float]:
     return BALL_AREA_BLEED * (math.pi / 4.0) * d * d, 3.0 * d
 
 
+
+def body_box_from_pose(head_xy, feet_xy, frame_w: int, frame_h: int,
+                       pad_frac: float = 0.40):
+    """(x0, y0, x1, y1) covering the golfer, in FULL-RES coordinates.
+
+    Spans head to feet vertically with a little headroom for the club at the
+    top of the backswing, and pad_frac of a body height either side for the
+    arms. Returns None without pose.
+    """
+    if not (head_xy and feet_xy and len(head_xy) == 2 and len(feet_xy) == 2):
+        return None
+    hx, hy = float(head_xy[0]), float(head_xy[1])
+    fx, fy = float(feet_xy[0]), float(feet_xy[1])
+    body = max(40.0, fy - hy)
+    cx = 0.5 * (hx + fx)
+    return (
+        max(0.0, cx - pad_frac * body),
+        max(0.0, hy - 0.15 * body),
+        min(float(frame_w), cx + pad_frac * body),
+        min(float(frame_h), fy + 0.08 * body),
+    )
+
+
 def detect_ball_blobs(
     input_path: Path,
     f0: int,
@@ -120,6 +164,7 @@ def detect_ball_blobs(
     max_area: int | None = None,
     min_area: int = BALL_AREA_MIN,
     max_per_frame: int = MAX_DETS_PER_FRAME,
+    body_box=None,
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -160,6 +205,22 @@ def detect_ball_blobs(
         golfer_area = max(400.0, 0.0008 * float(w) * float(h))
         golfer_h = 0.12 * float(h)
         # The ball-size window, derived from the frame unless overridden.
+        # POSE BODY BOX, in working coordinates. This is the only body
+        # exclusion that does not depend on how MOG2 happens to render a
+        # person. Area and height thresholds assume the body arrives as one
+        # big component; on real footage it does not -- a person in flat
+        # clothing has no interior motion, so MOG2 returns scattered edge
+        # fragments and one swing produced under one "golfer" component per
+        # frame. Pose already told us where the golfer is, so use that.
+        #
+        # It costs the first couple of detections after impact, while the
+        # ball is still inside the box. That is affordable: the ball clears
+        # it in two or three frames, and the parabola run back to the impact
+        # frame recovers the launch point to about a pixel.
+        bbox = None
+        if body_box and len(body_box) == 4:
+            bbox = tuple(int(round(v * scale)) for v in body_box)
+            out["body_box"] = list(bbox)
         _cap, _side = ball_area_cap(h)
         if max_area is None:
             max_area = int(round(_cap))
@@ -173,6 +234,10 @@ def detect_ball_blobs(
         start = max(0, int(f0) - WARMUP_FRAMES)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
         kernel = np.ones((3, 3), np.uint8)
+        close_k = np.ones((GOLFER_CLOSE_PX, GOLFER_CLOSE_PX), np.uint8)
+        busy_k = np.ones((BUSY_DILATE_PX, BUSY_DILATE_PX), np.uint8)
+        # How often each pixel is foreground across the window.
+        occ = np.zeros((h, w), np.uint16)
 
         base = None                     # first frame of the window, for draws
         best_frame_img = None           # frame with the most kept blobs
@@ -195,19 +260,34 @@ def detect_ball_blobs(
             out["stats"]["frames"] += 1
             # Open to kill single-pixel speckle without eating a 3px ball.
             fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, kernel)
+            # Accumulate a DILATED foreground. Per-pixel occupancy measured
+            # nothing: a body fragment wobbling a few pixels never lands on
+            # the same pixel often enough, so the mask came out empty. What
+            # is actually constant is the REGION -- the golfer's outline
+            # keeps re-lighting slightly different pixels in the same place.
+            # A ball crossing that region still contributes its own footprint
+            # once, so this separates "always busy here" from "something
+            # passed through".
+            occ += (cv2.dilate(fg, busy_k) > 0).astype(np.uint16)
             n, lab, stats, cent = cv2.connectedComponentsWithStats(fg, 8)
             out["stats"]["components"] += max(0, n - 1)
+            # Golfer detection runs on a CLOSED copy so a fragmented body
+            # reads as one blob; the ball pass below keeps the raw mask.
+            fg_body = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, close_k)
+            nb, labb, statsb, _cb = cv2.connectedComponentsWithStats(
+                fg_body, 8,
+            )
 
             # Pass 1: find the golfer. Big blobs are not candidates, they are
             # an exclusion zone — a ball crossing the body cannot be told
             # from a moving sleeve, so we do not try.
             golfer = np.zeros((h, w), np.uint8)
             big = False
-            for i in range(1, n):
-                a = int(stats[i, cv2.CC_STAT_AREA])
-                bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+            for i in range(1, nb):
+                a = int(statsb[i, cv2.CC_STAT_AREA])
+                bh = int(statsb[i, cv2.CC_STAT_HEIGHT])
                 if a >= golfer_area or bh >= golfer_h:
-                    golfer[lab == i] = 255
+                    golfer[labb == i] = 255
                     out["stats"]["golfer"] += 1
                     big = True
             if big:
@@ -228,6 +308,12 @@ def detect_ball_blobs(
                         or cy > h - EDGE_MARGIN_PX):
                     out["stats"]["on_edge"] = (
                         out["stats"].get("on_edge", 0) + 1
+                    )
+                    continue
+                if bbox and (bbox[0] <= cx <= bbox[2]
+                             and bbox[1] <= cy <= bbox[3]):
+                    out["stats"]["in_body_box"] = (
+                        out["stats"].get("in_body_box", 0) + 1
                     )
                     continue
                 if golfer[min(h - 1, max(0, int(cy))),
@@ -273,6 +359,27 @@ def detect_ball_blobs(
                 best_frame_draw = (kept_this, golfer.copy(), f)
 
         cap.release()
+
+        # Drop anything sitting in a pixel that is foreground most of the
+        # time. Done after the loop so the threshold is a fraction of the
+        # frames actually read rather than the frames requested.
+        n_frames = max(1, out["stats"]["frames"])
+        busy = (occ >= max(2, int(BUSY_PIXEL_FRAC * n_frames)))
+        out["stats"]["busy_px"] = int(busy.sum())
+        kept_dets = []
+        for d in dets:
+            iy = min(h - 1, max(0, int(d["wy"])))
+            ix = min(w - 1, max(0, int(d["wx"])))
+            if busy[iy, ix]:
+                out["stats"]["in_busy_region"] = (
+                    out["stats"].get("in_busy_region", 0) + 1
+                )
+                continue
+            kept_dets.append(d)
+        dets = kept_dets
+        out["stats"]["kept"] = len(dets)
+        out["busy_mask"] = busy
+
         out["dets"] = dets
         out["areas"] = areas
         out["n_at_strict_cap"] = n_strict
@@ -285,11 +392,14 @@ def detect_ball_blobs(
             f"{s['kept']} ball-sized blob(s) kept from {s['components']} "
             f"component(s) over {s['frames']} frames "
             f"(area {min_area}-{max_area}px, max side {int(_side)}px; "
-            f"dropped {s['golfer']} golfer, {s['on_golfer']} on the golfer, "
+            f"dropped {s['golfer']} golfer, {s.get('in_body_box', 0)} in "
+            f"the pose body box, {s['on_golfer']} on the golfer, "
             f"{s['too_big']} too big, {s.get('too_long', 0)} too long, "
             f"{s['too_small']} too small, {s.get('on_edge', 0)} on the "
             f"frame border, {s.get('over_cap', 0)} over the "
-            f"{max_per_frame}/frame cap). "
+            f"{max_per_frame}/frame cap, {s.get('in_busy_region', 0)} in a "
+            f"busy region -- pixels lit in >={int(BUSY_PIXEL_FRAC * 100)}% "
+            f"of frames, which is the golfer and the moving trees). "
             f"A flat {BALL_AREA_STRICT}px cap would have kept {n_strict}."
         )
 
@@ -321,6 +431,15 @@ def detect_ball_blobs(
             # Image 2: every kept detection over the window, coloured by
             # time. A flight shows as a coherent colour ramp; noise does not.
             img = base.copy()
+            # Show the excluded region, since "why was my flight dropped"
+            # is answered by looking at what this covers.
+            if bbox:
+                cv2.rectangle(img, (bbox[0], bbox[1]), (bbox[2], bbox[3]),
+                              (0, 140, 255), 2)
+            _b = out.get("busy_mask")
+            if _b is not None:
+                img[_b] = (0.55 * img[_b]
+                           + 0.45 * np.array([40, 40, 200])).astype(np.uint8)
             span = max(1, int(f1) - int(f0))
             for d in dets:
                 t = (d["frame"] - int(f0)) / span
@@ -330,7 +449,9 @@ def detect_ball_blobs(
             _label(
                 img,
                 f"all {len(dets)} kept detections, f{f0}-{f1}. "
-                f"blue = early, red = late",
+                f"blue = early, orange = late. red tint = busy region "
+                f"(lit in >={int(BUSY_PIXEL_FRAC * 100)}% of frames -- the "
+                f"golfer and the moving trees), excluded",
             )
             nm = f"{debug_prefix}-dets.jpg"
             cv2.imwrite(str(Path(debug_dir) / nm), img,
@@ -731,7 +852,7 @@ def draw_flight(
 
 
 __all__ = [
-    "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap",
+    "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "detect_ball_blobs", "draw_flight", "pick_flight",
     "ransac_parabola",

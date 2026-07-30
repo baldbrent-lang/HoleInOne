@@ -11755,8 +11755,14 @@ def _debug3_run(row, src_path, db, progress=None):
 
         # A-C: per-frame detections.
         _ball = entry.get("ball")
+        # Pose knows where the golfer is; use it rather than hoping MOG2
+        # renders the body as one big component.
+        _bbox = d3.body_box_from_pose(
+            c.get("impact_head_xy"), c.get("impact_feet_xy"), _fw, _fh,
+        )
+        entry["body_box"] = list(_bbox) if _bbox else None
         det = d3.detect_ball_blobs(
-            src_path, f_lo, f_hi,
+            src_path, f_lo, f_hi, body_box=_bbox,
             debug_dir=CLIPS_DIR,
             debug_prefix=f"d3blob-{upload_id}-{tok}-{i}",
         )
