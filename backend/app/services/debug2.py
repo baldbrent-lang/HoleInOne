@@ -421,6 +421,7 @@ def draw_chain(
     head_y: float | None = None,
     aim_xy=None,
     ai_path=None,
+    ai_used: bool | None = None,
     fan_y: float | None = None,
     frame_w: int | None = None,
 ) -> bool:
@@ -447,15 +448,26 @@ def draw_chain(
                          (int(_w * k / 3), int(fan_y)),
                          (0, 0, 255), 1, cv2.LINE_AA)
         if ai_path and len(ai_path) >= 2:
-            # The trail the AI traced off the heat map — the corridor the
-            # dots were matched against.
-            for a, b in zip(ai_path, ai_path[1:]):
+            # The trail the AI traced off the heat map. Drawn in solid white
+            # when it supplied the tracer and in dim grey, dotted, when it
+            # was rejected — an unqualified white line through empty sky
+            # reads as "the AI chose this", which is the opposite of what a
+            # rejection means.
+            _col = (255, 255, 255) if ai_used else (150, 150, 150)
+            _pts = list(ai_path)
+            for _i, (a, b) in enumerate(zip(_pts, _pts[1:])):
+                if not ai_used and _i % 2:
+                    continue                      # dotted = not used
                 cv2.line(img, (int(a["x"]), int(a["y"])),
                          (int(b["x"]), int(b["y"])),
-                         (255, 255, 255), 1, cv2.LINE_AA)
-            for a in ai_path:
-                cv2.circle(img, (int(a["x"]), int(a["y"])), 3,
-                           (255, 255, 255), -1, cv2.LINE_AA)
+                         _col, 1, cv2.LINE_AA)
+            for a in _pts:
+                cv2.circle(img, (int(a["x"]), int(a["y"])),
+                           3 if ai_used else 2, _col, -1, cv2.LINE_AA)
+            if ai_used is False:
+                _ax = int(_pts[0]["x"])
+                _ay = int(_pts[0]["y"])
+                _label2(img, "AI trail - REJECTED, not used", max(12, _ay - 8))
         if head_y is not None:
             # The line the lock-on happens above. Everything over it is
             # sky and trees, which is why the dots up there are clean.
@@ -868,30 +880,52 @@ def chain_by_thirds(
             [d for d in band if x0 <= d["x"] < x1], key=lambda d: d["frame"],
         )
         rec = {"zone": name, "n_dots": len(pool), "chain": [], "aim_px": None}
+        zstats: dict = {}
         cand = _best_line_in(
             pool, ball_xy, r, impact_frame,
             aim_gate=max(120.0, 0.20 * float(frame_w)),
+            stats=zstats,
         )
+        rec["rejects"] = zstats
         if cand:
             rec["chain"] = cand["points"]
             rec["aim_px"] = cand["aim_px"]
             rec["straight_px"] = cand["straight_px"]
-            # More points is better, aiming near the ball is much better,
-            # and a straighter line is better. Zone order only breaks ties.
+            # More points is better, a longer reach is better, and a
+            # straighter line is better. Zone order only breaks ties.
+            # MUST match the term set _best_line_in uses to pick within a
+            # zone: scoring reach there and ignoring it here would let a
+            # clump from one third beat a real flight from another.
+            _span = float(cand.get("span_px") or 0.0)
+            _d0 = float(cand.get("dist_to_ball_px") or 0.0)
+            _reach = min(1.0, _span / max(1.0, 0.5 * _d0)) if _d0 > 1.0 else 0.0
             score = (
                 2.0 * len(cand["points"])
+                + 2.0 * _reach
                 - cand["straight_px"] / 10.0
                 - 0.01 * order
             )
+            rec["span_px"] = cand.get("span_px")
             rec["score"] = round(score, 2)
             if best_overall is None or score > best_overall[0]:
                 best_overall = (score, name, cand)
         out["thirds"].append(rec)
 
     if best_overall is None:
+        # Say WHICH test did the rejecting — "nothing qualified" sends you
+        # looking at the dots when the gate is what needs adjusting.
+        tot: dict = {}
+        for _rec in out["thirds"]:
+            for k, v in (_rec.get("rejects") or {}).items():
+                tot[k] = tot.get(k, 0) + int(v)
+        _why = ", ".join(
+            f"{v} {k.replace('_', ' ')}" for k, v in sorted(tot.items())
+            if v
+        )
         out["reason"] = (
             "no run of 3+ dots in a straight line pointing back at the "
             "ball, in any third of the clean band"
+            + (f" (rejected: {_why})" if _why else "")
         )
         return out
     _sc, zone, cand = best_overall
@@ -904,6 +938,8 @@ def chain_by_thirds(
     out["reason"] = (
         f"{len(cand['points'])} dot(s) in the {zone} third, "
         f"f{cand['points'][0]['frame']}-{cand['points'][-1]['frame']}, "
+        f"spanning {cand.get('span_px')}px "
+        f"({cand.get('dist_to_ball_px')}px from the ball), "
         f"straightness {cand['straight_px']:.0f}px; extended down it lands "
         f"{cand['aim_px']:.0f}px from the ball"
     )
@@ -911,13 +947,19 @@ def chain_by_thirds(
 
 
 def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
-                  aim_gate: float = 260.0):
+                  aim_gate: float = 260.0, stats: dict | None = None):
     """Best run of 3+ dots that reads as a ball in flight: higher means
-    later, near-collinear, and pointing back at the ball when extended
-    down. Returns None when nothing qualifies."""
+    later, near-collinear, spanning a real distance, and pointing back at
+    the ball when extended down. Returns None when nothing qualifies.
+
+    stats, when given, is filled with a count per rejection reason so the
+    panel can say why nothing was picked."""
     n = len(pool)
     if n < 3:
         return None
+    if stats is not None:
+        for _k in ("rise", "too_few", "short_baseline", "aim"):
+            stats.setdefault(_k, 0)
     best = None
     for i in range(n):
         for j in range(i + 1, n):
@@ -928,6 +970,8 @@ def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
             # height as the frames advance; anything falling here is the
             # club coming down, a bird, or noise.
             if b["y"] >= a["y"] - 0.5 * r:
+                if stats is not None:
+                    stats["rise"] += 1
                 continue
             run = [a, b]
             vx = (b["x"] - a["x"]) / (b["frame"] - a["frame"])
@@ -942,6 +986,8 @@ def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
                 if math.hypot(c["x"] - ex, c["y"] - ey) <= (2.0 + 0.8 * df) * r:
                     run.append(c)
             if len(run) < 3:
+                if stats is not None:
+                    stats["too_few"] += 1
                 continue
             # Straightness: mean distance from the best-fit line.
             xs = [p["x"] for p in run]
@@ -993,15 +1039,39 @@ def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
             # line. A fixed fraction-of-frame limit let a short run
             # hugging the golfer pass with an aim that pointed nowhere
             # near the ball, purely because the frame was wide.
+            span = math.hypot(
+                run[-1]["x"] - run[0]["x"], run[-1]["y"] - run[0]["y"],
+            )
+            d0 = math.hypot(
+                run[0]["x"] - float(ball_xy[0]),
+                run[0]["y"] - float(ball_xy[1]),
+            ) if ball_xy and len(ball_xy) == 2 else 0.0
             if aim_px is not None:
-                d0 = math.hypot(
-                    run[0]["x"] - float(ball_xy[0]),
-                    run[0]["y"] - float(ball_xy[1]),
-                ) if ball_xy and len(ball_xy) == 2 else 0.0
                 limit = min(aim_gate, max(60.0, 0.30 * d0))
-                if aim_px > limit:
+                # THE BASELINE HAS TO BE LONG ENOUGH FOR THE AIM TEST TO
+                # MEAN ANYTHING. Each dot is located to about r, so a run of
+                # length `span` fixes its direction to roughly 2r/span, and
+                # extending that back d0 to the ball smears the landing
+                # point by d0 * 2r/span. If that smear exceeds the aim
+                # limit, passing the aim test is luck, not evidence: a
+                # 20px-wide clump of three dots 600px above the ball has a
+                # ~600px error bar and will sometimes point straight at it.
+                # This is what let tight clumps at the fan line win.
+                need = 2.0 * r * max(1.0, d0) / max(1.0, limit)
+                if span < max(4.0 * r, need):
+                    if stats is not None:
+                        stats["short_baseline"] += 1
                     continue
-            score = 2.0 * len(run) - straight / 10.0
+                if aim_px > limit:
+                    if stats is not None:
+                        stats["aim"] += 1
+                    continue
+            # Reward REACH as well as dot count. Two runs of three dots are
+            # not equally good if one crosses half the frame and the other
+            # fits in a thumbnail; the long one is a flight and the short
+            # one is a clump. Capped so it cannot outvote collinearity.
+            reach = min(1.0, span / max(1.0, 0.5 * d0)) if d0 > 1.0 else 0.0
+            score = 2.0 * len(run) + 2.0 * reach - straight / 10.0
             if best is None or score > best[0]:
                 best = (score, {
                     "points": [
@@ -1012,6 +1082,8 @@ def _best_line_in(pool: list, ball_xy, r: float, impact_frame: int,
                     "straight_px": straight,
                     "aim_px": aim_px,
                     "aim_xy": aim_xy,
+                    "span_px": round(span, 1),
+                    "dist_to_ball_px": round(d0, 1),
                 })
     return best[1] if best else None
 

@@ -11450,6 +11450,9 @@ def _debug2_run(row, src_path, db):
                 head_y=_head_y,
                 aim_xy=ch.get("aim_xy"),
                 ai_path=entry.get("ai_path"),
+                # So a rejected AI trail is drawn as rejected. Method "1" is
+                # the AI corridor; anything else means the trail lost.
+                ai_used=str(method or "").startswith("1"),
                 fan_y=entry.get("fan_y"),
                 frame_w=_fw,
             ):
