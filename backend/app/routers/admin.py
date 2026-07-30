@@ -9058,6 +9058,67 @@ def _trace_segment(
             log.warning("debug3 tracer failed, falling back: %s", exc)
             _d3 = None
 
+    # RENDER STRAIGHT FROM DEBUG3. Pinning the ball and impact was not
+    # enough: the log for upload 495 shows the pin applied --
+    #
+    #   ai_tracer: ball-at-rest overridden -- (526, 640)
+    #   ai_tracer: ball track SKIPPED (disabled by config)
+    #
+    # -- and then, because ai_ball_track_enabled is off, produce fell
+    # through to the CLASSICAL tracer, which found its own ball at
+    # (590, 611), its own impact frame 79, and its own 29 points. Debug3's 7
+    # arrived as a minority in the merge (n_cv: 29, n_added: 7) and the
+    # rendered line was the classical answer. That is the clip that kept
+    # coming back unchanged.
+    #
+    # So when Debug3 has a flight, nothing else runs. Same renderer, same
+    # three inputs, same output as the Debug3 panel shows -- because it is
+    # now literally the same call.
+    if _d3 and _d3.get("ok"):
+        try:
+            _o = clip_path.with_name(clip_path.stem + "_d3_tracer.mp4")
+            _pts3 = [
+                {"frame": int(z["frame"]), "found": True,
+                 "x": float(z["x"]), "y": float(z["y"])}
+                for z in (_d3.get("points") or [])
+            ]
+            _rv3 = render_tracer_video(
+                clip_path, _o,
+                (float(_d3["ball"][0]), float(_d3["ball"][1])),
+                int(_d3["launch_frame"]), _pts3,
+                rest_verified=True,
+            )
+            if _rv3.get("ok") and _o.exists() and _o.stat().st_size > 0:
+                transcode_for_web(_o)
+                compress_for_email(_o)
+                _info3 = {
+                    "ok": True,
+                    "engine": "debug3",
+                    "ball_track_frames": _pts3,
+                    "n_points": len(_pts3),
+                    "impact_frame": int(_d3["launch_frame"]),
+                    "ball": {"x": float(_d3["ball"][0]),
+                             "y": float(_d3["ball"][1]),
+                             "source": _d3.get("ball_source")},
+                    "render_info": _rv3,
+                    "debug3": {"reason": _d3.get("reason")},
+                }
+                _u3 = (
+                    f"{settings.app_base_url}/uploads/clips/{_o.name}"
+                    f"?v={int(_o.stat().st_mtime)}"
+                )
+                log.info(
+                    "debug3 tracer: rendered %s directly (%d points) -- "
+                    "classical tracer not run", _o.name, len(_pts3),
+                )
+                return _u3, _info3, _o, None
+            log.warning(
+                "debug3 tracer: direct render failed (%s) -- falling through",
+                _rv3.get("error"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("debug3 tracer: direct render crashed: %s", exc)
+
     # A departure-pinned swing with the AI ball track disabled makes
     # ZERO api calls in the pipeline — it may run without a key.
     _pinned_zero_ai = (
