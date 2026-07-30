@@ -11863,31 +11863,64 @@ def _debug3_run(row, src_path, db, progress=None):
                         debug_prefix=f"d3rest-{upload_id}-{tok}-{i}",
                     )
                 )
-                # Re-run the club arc over the REAL downswing now that we
-                # know when it was, so the alternate is a fair comparison
-                # rather than a measurement of the wrong ten frames.
-                if abs(int(_lg["frame"]) - imp_f) >= 3:
-                    _club2 = d2.club_bottom_ball(
-                        src_path, int(_lg["frame"]), fps,
-                        hint_xy=c.get("impact_wrist_xy"),
-                        feet_xy=c.get("impact_feet_xy"),
-                        head_xy=c.get("impact_head_xy"),
-                        debug_dir=CLIPS_DIR,
-                        debug_prefix=f"d3club2-{upload_id}-{tok}-{i}",
+                # THE SYNTHESIS. Each method does the job it is actually
+                # good at:
+                #
+                #   the FLIGHT gives us WHEN. Its ground crossing is derived
+                #   from the ball's own trajectory, and it beats the pose
+                #   peak, which is maximum wrist speed and ran ten frames
+                #   late on the swings measured.
+                #
+                #   the CLUB ARC gives us WHERE. Given the right ten frames
+                #   it measures the club meeting the ball at full
+                #   resolution: it landed within 3px of a ball visible in
+                #   the check frame, while the flight extrapolation was 67px
+                #   right of it. That bias is structural -- the
+                #   extrapolation runs 250px past its last data point, and
+                #   the detections nearest the ball are precisely the ones
+                #   the body box removes.
+                #
+                # So run the arc at the launch frame and prefer its answer.
+                _club2 = d2.club_bottom_ball(
+                    src_path, int(_lg["frame"]), fps,
+                    hint_xy=c.get("impact_wrist_xy"),
+                    feet_xy=c.get("impact_feet_xy"),
+                    head_xy=c.get("impact_head_xy"),
+                    debug_dir=CLIPS_DIR,
+                    debug_prefix=f"d3club2-{upload_id}-{tok}-{i}",
+                )
+                entry["club_arc_relocated"] = {
+                    "frame": int(_lg["frame"]),
+                    "xy": _club2.get("xy"),
+                    "reason": _club2.get("reason"),
+                    "vs_launch_px": (
+                        round(math.hypot(
+                            _club2["xy"][0] - _ball[0],
+                            _club2["xy"][1] - _ball[1]), 1)
+                        if _club2.get("xy") else None
+                    ),
+                }
+                entry["club_arc_relocated_image_url"] = _clip_url(
+                    _club2.get("image"))
+                if _club2.get("ok") and _club2.get("xy"):
+                    entry["ball_alt"] = _ball
+                    entry["ball_alt_source"] = (
+                        "flight extrapolated to the ground")
+                    entry["ball_alt_reason"] = _lg.get("reason")
+                    entry["ball"] = _club2["xy"]
+                    entry["ball_source"] = (
+                        "club arc at the flight's launch frame")
+                    entry["ball_reason"] = _club2.get("reason")
+                    entry["ball_disagree_px"] = (
+                        entry["club_arc_relocated"]["vs_launch_px"])
+                    _ball = _club2["xy"]
+                    # Redraw the rest check against the ball we settled on.
+                    entry["rest_check_image_url"] = _clip_url(
+                        d3.rest_check_image(
+                            src_path, _rest_f, _ball, _r, CLIPS_DIR,
+                            debug_prefix=f"d3rest-{upload_id}-{tok}-{i}",
+                        )
                     )
-                    entry["club_arc_relocated"] = {
-                        "frame": int(_lg["frame"]),
-                        "xy": _club2.get("xy"),
-                        "reason": _club2.get("reason"),
-                        "vs_launch_px": (
-                            round(math.hypot(
-                                _club2["xy"][0] - _ball[0],
-                                _club2["xy"][1] - _ball[1]), 1)
-                            if _club2.get("xy") else None
-                        ),
-                    }
-                    entry["club_arc_relocated_image_url"] = _clip_url(
-                        _club2.get("image"))
 
             # The blob search is kept, but only as CONFIRMATION -- it can
             # agree or say nothing, and it can no longer overrule the curve
