@@ -11544,7 +11544,7 @@ def email_send_templates(
     which = payload.get("templates") or "all"
     from types import SimpleNamespace
 
-    from ..models import VideoClip
+    from ..models import Course, VideoClip
     from ..services import notifications as N
 
     gallery = f"{settings.app_base_url}/g/sample-token"
@@ -11580,10 +11580,16 @@ def email_send_templates(
         fake_participant = SimpleNamespace(
             id=0, name="Ben", email=to, gallery_token="sample-token",
         )
+        # VideoClip carries course_id, not a `course` relationship, so the
+        # course has to be fetched. Use its real name and yardages when we
+        # found a clip, so the preview matches what a golfer would get.
+        course_row = (
+            db.get(Course, clip_row.course_id) if clip_row else None
+        )
         fake_course = SimpleNamespace(
-            name=(clip_row.course.name if clip_row and clip_row.course
-                  else "Baldwin Links"),
-            hole_yardages={"3": 173},
+            name=(course_row.name if course_row else "Baldwin Links"),
+            hole_yardages=(course_row.hole_yardages or {}) if course_row
+            else {"3": 173},
         )
         fake_clip = SimpleNamespace(
             id=0,
