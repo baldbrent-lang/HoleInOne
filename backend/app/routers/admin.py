@@ -11803,6 +11803,39 @@ def _debug3_run(row, src_path, db, progress=None):
         )
         entry["flight_reason"] = res.get("reason")
         entry["aim_disagrees"] = bool(res.get("aim_disagrees"))
+
+        # BEST BALL: once a flight is fitted, its parabola run back to the
+        # impact frame says where the ball was to a couple of pixels, and
+        # that turns a blind whole-frame hunt into a search of one small box
+        # in the frames before impact. Nothing that is not in the box can
+        # win it -- which is how a white trainer beat the blind detector.
+        if res.get("ok"):
+            _ref = d3.refine_ball_from_flight(
+                src_path, res.get("fit") or {}, imp_f, _r,
+                debug_dir=CLIPS_DIR,
+                debug_prefix=f"d3ref-{upload_id}-{tok}-{i}",
+            )
+            entry["refine"] = {
+                "ok": _ref.get("ok"), "xy": _ref.get("xy"),
+                "reason": _ref.get("reason"),
+                "moved_px": _ref.get("moved_px"),
+                "seen_in": _ref.get("seen_in"),
+                "spread_px": _ref.get("spread_px"),
+            }
+            entry["refine_image_url"] = _clip_url(_ref.get("image"))
+            if _ref.get("ok"):
+                _prev = entry.get("ball")
+                entry["ball_alt"] = _prev
+                entry["ball_alt_source"] = entry.get("ball_source")
+                entry["ball_alt_reason"] = entry.get("ball_reason")
+                entry["ball"] = _ref["xy"]
+                entry["ball_source"] = "flight-guided rest search"
+                entry["ball_reason"] = _ref.get("reason")
+                if _prev:
+                    entry["ball_disagree_px"] = round(math.hypot(
+                        _prev[0] - _ref["xy"][0], _prev[1] - _ref["xy"][1],
+                    ), 1)
+                _ball = _ref["xy"]
         entry["tried"] = res.get("tried")
         fit = res.get("fit") or {}
         entry["fit"] = {

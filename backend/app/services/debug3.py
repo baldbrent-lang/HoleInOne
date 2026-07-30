@@ -716,6 +716,158 @@ def ransac_parabola(
     return out
 
 
+def refine_ball_from_flight(
+    input_path: Path,
+    fit: dict,
+    impact_frame: int,
+    r: float,
+    search_r: float = 5.0,
+    look_back: int = 14,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "d3ball",
+) -> dict:
+    """Locate the ball at rest by looking where the FLIGHT says it was.
+
+    Every other ball finder here searches blind and can be beaten by
+    anything small, white and round -- a trainer, a sprinkler head, a daisy.
+    But once a flight has been fitted, running its parabola back to the
+    impact frame gives a launch point good to a couple of pixels, and that
+    turns the problem into a tiny constrained search: find the stationary
+    bright blob inside a box a few ball-widths across, in the frames BEFORE
+    impact while the ball is still sitting there.
+
+    A shoe cannot win this because it is not in the box.
+
+    Stationarity is the test that separates the ball from the club sole
+    arriving at address: across the frames examined, the ball does not move.
+
+    Returns {ok, xy, moved_px, seen_in, spread_px, reason, image}.
+    """
+    out = {"ok": False, "xy": None, "moved_px": None, "seen_in": 0,
+           "spread_px": None, "reason": None, "image": None}
+    if not HAS_CV or not fit or not fit.get("at_impact"):
+        out["reason"] = "no fitted flight to search from"
+        return out
+    try:
+        bx, by = float(fit["at_impact"][0]), float(fit["at_impact"][1])
+        box = max(18.0, search_r * r)
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open video"
+            return out
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        x0 = int(max(0, bx - box))
+        y0 = int(max(0, by - box))
+        x1 = int(min(W, bx + box))
+        y1 = int(min(H, by + box))
+        if x1 - x0 < 6 or y1 - y0 < 6:
+            out["reason"] = "search box fell outside the frame"
+            return out
+        # BEFORE impact only: after it, the ball is gone and the club is
+        # sweeping through.
+        f0 = max(0, int(impact_frame) - look_back)
+        f1 = max(f0, int(impact_frame) - 2)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, f0)
+        area_max, _side = ball_area_cap(H)
+        hits: list[tuple[float, float]] = []
+        first_crop = None
+        for _f in range(f0, f1 + 1):
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            crop = fr[y0:y1, x0:x1]
+            if first_crop is None:
+                first_crop = crop.copy()
+            g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            # WHITE TOP-HAT, not a brightness threshold. The crop is mostly
+            # grass, so any percentile of the raw image sits at grass level
+            # and the mask fills with texture -- measured: the "ball" then
+            # wandered 27px frame to frame because it was picking a
+            # different blade of grass each time. A top-hat with a kernel a
+            # little larger than the ball keeps small bright objects and
+            # discards everything smoothly varying, which is exactly the
+            # distinction between a ball and the turf it sits on.
+            kk = int(max(5, 2.5 * r)) | 1
+            th = cv2.morphologyEx(
+                g, cv2.MORPH_TOPHAT,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk, kk)),
+            )
+            thr = max(12.0, float(np.percentile(th, 99.0)))
+            m = (th >= thr).astype(np.uint8) * 255
+            m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+            n, _lab, st, cent = cv2.connectedComponentsWithStats(m, 8)
+            best = None
+            for i in range(1, n):
+                a = int(st[i, cv2.CC_STAT_AREA])
+                bw = int(st[i, cv2.CC_STAT_WIDTH])
+                bh = int(st[i, cv2.CC_STAT_HEIGHT])
+                if a < 2 or a > area_max:
+                    continue
+                if max(bw, bh) > 4.0 * r or min(bw, bh) < 1:
+                    continue
+                # Roundish: a ball's bounding box is near-square.
+                if max(bw, bh) > 2.2 * max(1, min(bw, bh)):
+                    continue
+                d = math.hypot(float(cent[i][0]) + x0 - bx,
+                               float(cent[i][1]) + y0 - by)
+                if best is None or d < best[0]:
+                    best = (d, float(cent[i][0]) + x0,
+                            float(cent[i][1]) + y0)
+            if best:
+                hits.append((best[1], best[2]))
+        cap.release()
+        if len(hits) < 3:
+            out["reason"] = (
+                f"only {len(hits)} bright blob(s) in the "
+                f"{int(2 * box)}px box over f{f0}-{f1}"
+            )
+            return out
+        xs = np.array([h[0] for h in hits])
+        ys = np.array([h[1] for h in hits])
+        mx, my = float(np.median(xs)), float(np.median(ys))
+        spread = float(np.median(np.hypot(xs - mx, ys - my)))
+        out["seen_in"] = len(hits)
+        out["spread_px"] = round(spread, 1)
+        # A ball at rest does not move. Anything wandering more than about a
+        # ball width across these frames is the club, a shadow edge, or
+        # glare -- not the thing we are looking for.
+        if spread > 1.5 * r:
+            out["reason"] = (
+                f"the brightest blob wandered {spread:.0f}px over "
+                f"{len(hits)} frames -- not a ball at rest"
+            )
+            return out
+        out["ok"] = True
+        out["xy"] = [int(round(mx)), int(round(my))]
+        out["moved_px"] = round(math.hypot(mx - bx, my - by), 1)
+        out["reason"] = (
+            f"stationary bright blob in {len(hits)} of {f1 - f0 + 1} frames "
+            f"before impact, spread {spread:.1f}px, "
+            f"{out['moved_px']}px from where the flight said to look"
+        )
+        if debug_dir is not None and first_crop is not None:
+            z = 6
+            img = cv2.resize(first_crop, None, fx=z, fy=z,
+                             interpolation=cv2.INTER_NEAREST)
+            cv2.circle(img, (int((bx - x0) * z), int((by - y0) * z)),
+                       int(1.2 * r * z / 2), (255, 200, 0), 2, cv2.LINE_AA)
+            cv2.circle(img, (int((mx - x0) * z), int((my - y0) * z)),
+                       int(1.2 * r * z / 2), (0, 255, 0), 2, cv2.LINE_AA)
+            _label(img, f"ball search box, {z}x. cyan = where the flight "
+                        f"said to look, green = the stationary blob found. "
+                        f"{out['reason']}")
+            nm = f"{debug_prefix}-refine.jpg"
+            cv2.imwrite(str(Path(debug_dir) / nm), img,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            out["image"] = nm
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3 refine_ball_from_flight failed: %s", exc)
+        out["reason"] = f"failed: {exc}"
+        return out
+
+
 def pick_flight(
     tracks: list,
     impact_frame: int,
@@ -950,5 +1102,5 @@ __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "detect_ball_blobs", "draw_flight", "pick_flight",
-    "ransac_parabola",
+    "ransac_parabola", "refine_ball_from_flight",
 ]

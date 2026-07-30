@@ -3179,6 +3179,16 @@ function Debug3Modal({ state, onClose }) {
                 </details>
               )}
             </div>
+            {sw.refine && (
+              <div className="small" style={{ marginTop: 10 }}>
+                <b>Ball, re-found from the flight:</b>{" "}
+                {sw.refine.ok ? `(${sw.refine.xy[0]}, ${sw.refine.xy[1]})`
+                              : "not found"}
+                <div className="tiny muted">{sw.refine.reason}</div>
+              </div>
+            )}
+            <Img url={sw.refine_image_url}
+              cap="Ball search box at 6x — cyan is where the flight said to look, green is the stationary blob found there" />
             <Img url={sw.flight_image_url}
               cap="Stage 5 — green inliers, red × outliers, cyan the fitted parabola, magenta where the curve says impact was, grey the rejected tracks. Detections behind them ramp blue (early) to orange (late)." />
           </div>
