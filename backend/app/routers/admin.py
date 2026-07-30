@@ -9000,6 +9000,55 @@ def _trace_segment(
     it leave). When set they become hard overrides in the AI pipeline —
     which then SKIPS its audio impact, vision impact, refine, address
     and handedness calls entirely (frame indices are CUT-relative)."""
+    # DEBUG3 IN PRODUCTION. The blob-and-track pipeline measures the same
+    # three things the AI tracer does -- where the ball was, when it was
+    # struck, and where it went -- and on the swings compared it did so more
+    # accurately and without an API call. Its answers are fed in through the
+    # existing pin: verified_rest_xy / verified_impact_frame are already
+    # HARD overrides, and launch_points already flow through tracer_info
+    # into edit_metrics, which is what click-to-plot reads.
+    #
+    # An explicitly pinned swing (the departure detector, or an operator)
+    # still wins -- this only fills in when nothing else has.
+    _d3 = None
+    if (settings.debug3_tracer and verified_impact_frame is None
+            and not verified_rest_xy):
+        try:
+            from ..services import debug3 as _d3mod
+            from ..services import pose_swing as _ps
+
+            _hd = _ft = None
+            _imp = None
+            if _ps.available():
+                _c3 = list(_ps.detect_swings_from_pose(clip_path) or [])
+                if _c3:
+                    # The cut holds one swing; take the strongest burst.
+                    _best = max(
+                        _c3, key=lambda z: float(z.get("ratio") or 0.0))
+                    _hd = _best.get("impact_head_xy")
+                    _ft = _best.get("impact_feet_xy")
+                    _pt = float(_best.get("peak_time_sec") or 0.0)
+                    _imp = int(round(_pt * (probe_fps(clip_path) or 30.0)))
+            _d3 = _d3mod.find_flight(
+                clip_path, probe_fps(clip_path) or 30.0,
+                impact_frame=_imp, head_xy=_hd, feet_xy=_ft,
+            )
+            if _d3.get("ok"):
+                verified_rest_xy = tuple(_d3["ball"])
+                verified_impact_frame = int(_d3["launch_frame"])
+                launch_points = [
+                    {"frame": int(z["frame"]), "x": float(z["x"]),
+                     "y": float(z["y"])}
+                    for z in _d3.get("points") or []
+                ]
+                log.info("debug3 tracer: %s", _d3.get("reason"))
+            else:
+                log.info("debug3 tracer: no flight (%s) -- falling back",
+                         _d3.get("reason"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("debug3 tracer failed, falling back: %s", exc)
+            _d3 = None
+
     # A departure-pinned swing with the AI ball track disabled makes
     # ZERO api calls in the pipeline — it may run without a key.
     _pinned_zero_ai = (
@@ -9265,6 +9314,34 @@ def _trace_segment(
             "produce: classical modern re-render failed (%s) — keeping "
             "legacy render", exc,
         )
+    # GUARANTEE the Debug3 points reach the Edit wizard. _persist_swing_track
+    # reads tracer_info["ball_track_frames"] (or ["track"]), and that is what
+    # click-to-plot renders. The AI path feeds launch_points into the MOG2
+    # layer's dot pool and the classical path merges them into the render
+    # track, so they usually arrive -- but "usually" is not good enough for
+    # the points the tracer was actually drawn from. Merge them in here,
+    # where there is exactly one exit and the answer is known.
+    if _d3 and _d3.get("ok") and isinstance(info, dict):
+        _have = info.get("ball_track_frames")
+        _key = "ball_track_frames" if _have is not None else "track"
+        _cur = list(info.get(_key) or [])
+        _seen = {int(z["frame"]) for z in _cur if z.get("frame") is not None}
+        for _q in _d3.get("points") or []:
+            if int(_q["frame"]) in _seen:
+                continue
+            _cur.append({
+                "frame": int(_q["frame"]), "found": True,
+                "x": float(_q["x"]), "y": float(_q["y"]),
+                "source": "debug3",
+            })
+            _seen.add(int(_q["frame"]))
+        _cur.sort(key=lambda z: int(z.get("frame") or 0))
+        info[_key] = _cur
+        info["debug3"] = {
+            "ball": _d3.get("ball"), "launch_frame": _d3.get("launch_frame"),
+            "n_points": len(_d3.get("points") or []),
+            "reason": _d3.get("reason"),
+        }
     return url, info, traced, dbg
 
 

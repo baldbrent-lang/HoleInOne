@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     smtp_from: str = ""  # defaults to smtp_user when empty
     smtp_use_ssl: bool = False  # True for port 465; False for 587 STARTTLS
 
+    # Debug3 in production. When on, every produced swing gets its ball,
+    # impact frame and tracer points from the blob-and-track pipeline
+    # (services/debug3.py) instead of the AI tracer's. Set DEBUG3_TRACER=0
+    # to fall straight back to the previous behaviour.
+    debug3_tracer: bool = True
+
     shot_tracer_webhook_secret: str = ""
 
     default_minutes_per_hole: int = 14

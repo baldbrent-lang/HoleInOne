@@ -737,6 +737,94 @@ def ransac_parabola(
     return out
 
 
+def find_flight(
+    input_path: Path,
+    fps: float,
+    impact_frame: int | None = None,
+    head_xy=None,
+    feet_xy=None,
+    frame_w: int | None = None,
+    frame_h: int | None = None,
+) -> dict:
+    """The whole Debug3 pipeline, no debug images. For PRODUCTION.
+
+    Detect ball-sized off-body blobs, link them, fit the flight, and derive
+    the ball and the launch frame from the fit. Returns exactly the three
+    things produce needs to pin a tracer:
+
+        {ok, ball, launch_frame, points, reason}
+
+    `points` are the RANSAC inliers, in the frame space of `input_path` --
+    so when this is run on a CUT segment the frames come back cut-relative,
+    which is what _trace_segment wants.
+
+    Pose is optional. Given head/feet it excludes the golfer by body box and
+    derives the ground line, which is what makes the launch point reliable;
+    without them it still tracks and fits, it just has no ground line and
+    falls back to the parabola at the impact frame.
+    """
+    out = {"ok": False, "ball": None, "launch_frame": None, "points": [],
+           "reason": None}
+    if not HAS_CV:
+        out["reason"] = "opencv not installed"
+        return out
+    try:
+        if frame_w is None or frame_h is None:
+            cap = cv2.VideoCapture(str(input_path))
+            frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+            frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            cap.release()
+        else:
+            n_frames = 0
+        r = max(6.0, 0.012 * float(frame_h))
+        if impact_frame is None:
+            # No impact hint: search the whole clip. A cut segment is short,
+            # so this is affordable and it keeps the function usable when
+            # pose found nothing.
+            f_lo, f_hi = 0, (n_frames - 1 if n_frames else 400)
+        else:
+            f_lo = max(0, int(impact_frame) - WIN_PRE)
+            f_hi = int(impact_frame) + WIN_POST
+        bbox = body_box_from_pose(head_xy, feet_xy, frame_w, frame_h)
+        det = detect_ball_blobs(input_path, f_lo, f_hi, body_box=bbox)
+        if not det.get("ok"):
+            out["reason"] = det.get("reason")
+            return out
+        tracks = build_tracks(det.get("dets") or [], r)
+        gy = float(feet_xy[1]) if feet_xy and len(feet_xy) == 2 else None
+        res = pick_flight(
+            tracks, int(impact_frame or f_lo), None,
+            frame_w=frame_w, frame_h=frame_h, r=r,
+        )
+        if not res.get("ok"):
+            out["reason"] = res.get("reason")
+            return out
+        fit = res.get("fit") or {}
+        out["points"] = [
+            {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"])}
+            for q in (fit.get("inliers") or [])
+        ]
+        lg = launch_from_ground(fit, gy)
+        if lg.get("ok"):
+            out["ball"] = lg["xy"]
+            out["launch_frame"] = lg["frame"]
+        else:
+            out["ball"] = fit.get("at_impact")
+            out["launch_frame"] = int(impact_frame or f_lo)
+        out["ok"] = bool(out["points"]) and out["ball"] is not None
+        out["reason"] = (
+            f"{len(out['points'])} tracer point(s), ball {out['ball']}, "
+            f"launch f{out['launch_frame']} ({fit.get('n_inliers')} inliers "
+            f"at {fit.get('rms_px')}px rms)"
+        )
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3 find_flight failed: %s", exc)
+        out["reason"] = f"failed: {exc}"
+        return out
+
+
 def rest_check_image(
     input_path: Path,
     frame_no: int,
@@ -1275,6 +1363,6 @@ def draw_flight(
 __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
-    "build_tracks", "detect_ball_blobs", "draw_flight", "pick_flight",
+    "build_tracks", "find_flight", "detect_ball_blobs", "draw_flight", "pick_flight",
     "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",
 ]

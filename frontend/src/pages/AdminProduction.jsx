@@ -7150,6 +7150,13 @@ function ProduceDebugModal({ data, adminPassword, onRerun, onClose }) {
   );
 }
 
+// Debug and Debug2 are retired: Debug3's pipeline now runs inside produce
+// (settings.debug3_tracer). The code and endpoints are left in place so a
+// swing can still be compared against the old methods by flipping this,
+// but the buttons are off by default -- three diagnostic buttons on every
+// row is noise once one of them is the thing that actually ships.
+const SHOW_LEGACY_DEBUG = false;
+
 export default function AdminProduction() {
   const adminPassword =
     localStorage.getItem(ADMIN_PW_STORAGE) ||
@@ -7990,7 +7997,7 @@ export default function AdminProduction() {
                     </button>
                   )
                 )}
-                {produceDebug.enabled && (
+                {SHOW_LEGACY_DEBUG && produceDebug.enabled && (
                   <button
                     className="small ghost"
                     onClick={() => handleProduceDebug(row)}
@@ -8000,7 +8007,7 @@ export default function AdminProduction() {
                     🐞 Debug
                   </button>
                 )}
-                {produceDebug.enabled && (
+                {SHOW_LEGACY_DEBUG && produceDebug.enabled && (
                   <button
                     className="small ghost"
                     onClick={() => handleDebug2(row)}
