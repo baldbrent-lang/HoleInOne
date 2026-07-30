@@ -7488,12 +7488,31 @@ export default function AdminProduction() {
     try {
       await api.reprocessCameraEvent(adminPassword, ev.id);
       await refreshAll();
+      // Do NOT clear busy here. The POST returns before the worker has
+      // flipped the event to "processing", so clearing it in a finally
+      // produced: grey for a second -> back to normal -> grey again a few
+      // seconds later. The effect below hands over to the server's status
+      // once that status actually says processing, so the row never
+      // un-greys in between.
     } catch (e) {
       setError(e.message);
-    } finally {
-      setBusyEventId(null);
+      setBusyEventId((cur) => (cur === ev.id ? null : cur));
     }
   }
+
+  // Hand off from the optimistic busy flag to the server's own status.
+  useEffect(() => {
+    if (busyEventId == null) return;
+    const ev = (events || []).find((e) => e.id === busyEventId);
+    if (!ev) return;
+    // Once the worker owns it, the status badge carries the state and the
+    // local flag has done its job. Also release if the run already finished
+    // (fast swings), so the row cannot stick.
+    if (ev.status === "processing" || ev.status === "processed"
+        || ev.status === "failed") {
+      setBusyEventId(null);
+    }
+  }, [events, busyEventId]);
 
   async function handleDeleteEvent(ev) {
     if (!confirm(
