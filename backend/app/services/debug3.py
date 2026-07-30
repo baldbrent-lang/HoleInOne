@@ -69,13 +69,24 @@ BALL_DIAM_FRAC = 0.014        # of frame height
 BALL_AREA_BLEED = 1.6         # MOG2 + open, vs the geometric disc
 MIN_KEPT_FOR_TRACKING = 6
 
-# Detections kept per frame. On a synthetic scene a frame yields a handful;
-# on a real course, wind in the trees and moving grass push it far higher,
-# and the tracker's cost grows with the SQUARE of the per-frame count. Cap
-# it and keep the most ball-like -- smallest first, since everything here
-# has already passed the area window and a golf ball is at the bottom of it.
-# The report says how many were dropped so a starved frame is visible.
-MAX_DETS_PER_FRAME = 10
+# Detections kept per frame. This used to be 10, keeping the SMALLEST, on
+# the reasoning that a ball is small. On a real wide shot that threw the
+# ball away: the golfer is tiny in frame so the ball is only a few pixels,
+# and there are dozens of even smaller movers -- grass shimmer, leaf
+# flicker, compression noise at the frame border -- that outrank it. One
+# swing dropped 1913 detections to the cap and kept 10 blobs sitting on the
+# frame edges. The sequential tracker is cheap enough not to need a tight
+# cap, so this is now a runaway guard rather than a filter, and what it
+# keeps is the SMALLEST-AREA blobs only as a last resort.
+MAX_DETS_PER_FRAME = 40
+
+# Ignore this many pixels around the frame border. Compression and sensor
+# noise light up the outermost columns every frame, and those blobs are
+# both plentiful and perfectly ball-sized. A ball that is genuinely in the
+# outermost few pixels has already left the shot.
+EDGE_MARGIN_PX = 6
+
+MAX_TRACKS_TESTED = 120
 
 # Seed points for the parabola RANSAC. 14 gives C(14,3) = 364 candidate
 # fits, which is fast and plenty for a curve with three parameters.
@@ -212,6 +223,13 @@ def detect_ball_blobs(
                     continue
                 cx, cy = float(cent[i][0]), float(cent[i][1])
                 areas.append(a)
+                if (cx < EDGE_MARGIN_PX or cy < EDGE_MARGIN_PX
+                        or cx > w - EDGE_MARGIN_PX
+                        or cy > h - EDGE_MARGIN_PX):
+                    out["stats"]["on_edge"] = (
+                        out["stats"].get("on_edge", 0) + 1
+                    )
+                    continue
                 if golfer[min(h - 1, max(0, int(cy))),
                           min(w - 1, max(0, int(cx)))]:
                     out["stats"]["on_golfer"] += 1
@@ -269,7 +287,8 @@ def detect_ball_blobs(
             f"(area {min_area}-{max_area}px, max side {int(_side)}px; "
             f"dropped {s['golfer']} golfer, {s['on_golfer']} on the golfer, "
             f"{s['too_big']} too big, {s.get('too_long', 0)} too long, "
-            f"{s['too_small']} too small, {s.get('over_cap', 0)} over the "
+            f"{s['too_small']} too small, {s.get('on_edge', 0)} on the "
+            f"frame border, {s.get('over_cap', 0)} over the "
             f"{max_per_frame}/frame cap). "
             f"A flat {BALL_AREA_STRICT}px cap would have kept {n_strict}."
         )
@@ -332,16 +351,30 @@ def build_tracks(
     max_gap: int = 4,
     min_len: int = 3,
 ) -> list:
-    """Link detections into constant-velocity tracks.
+    """Link detections into constant-velocity tracks, one track per object.
 
-    A nearest-neighbour tracker with a predicted position and a gate that
-    widens with the frame gap. This is what a Kalman filter buys you for a
-    ballistic target — a prediction plus an uncertainty that grows when you
-    miss a frame — without the covariance tuning, and it is inspectable:
-    every accepted link is a distance you can print.
+    A SEQUENTIAL multi-target tracker: walk the frames in order, predict
+    where each open track should be, associate the nearest detection inside
+    a gate that widens when a frame is missed, and start a new track from
+    anything left over. Tracks that go unmatched for longer than max_gap are
+    closed.
+
+    This replaced a version that seeded a track from every pair of
+    detections and extended each one. That was combinatorial: on real
+    footage a single object produced hundreds of overlapping near-duplicate
+    tracks -- 2132 of them on one swing -- and since the caller can only
+    afford to fit the first N, the real flight was pushed off the end of the
+    list by copies of noise. One object should yield one track.
+
+    Established tracks associate FIRST (longest first), so a two-frame piece
+    of noise cannot steal a detection from a flight that has been running
+    for thirty frames.
 
     Velocity is smoothed as the track grows, so one noisy detection bends
-    the prediction a little rather than throwing it off.
+    the prediction a little rather than throwing it off. That plus the
+    widening gate is what a Kalman filter would give a ballistic target,
+    without the covariance tuning, and every accepted link is a distance you
+    can print.
 
     Returns tracks sorted longest-first, each {points, span_px, rise_px}.
     """
@@ -349,93 +382,83 @@ def build_tracks(
         [d for d in (dets or [])],
         key=lambda d: (d["frame"], d["x"]),
     )
-    n = len(pool)
-    tracks: list[dict] = []
-    if n < min_len:
-        return tracks
-    # Index by frame. Seeding over every PAIR and then scanning the whole
-    # pool to extend is O(n^3) in Python, and a two-second window with a few
-    # detections per frame is 500+ points -- tens of millions of operations
-    # for work that only ever looks a few frames ahead. Both the seeding and
-    # the extension are frame-local, so index once and the cost becomes
-    # linear in detections times the square of the per-frame count.
+    if len(pool) < min_len:
+        return []
     by_frame: dict[int, list] = {}
     for d in pool:
         by_frame.setdefault(int(d["frame"]), []).append(d)
-    frames = sorted(by_frame)
 
-    def _ahead(f: int):
-        """Detections in frames f+1 .. f+max_gap."""
-        for g in range(f + 1, f + max_gap + 1):
-            for d in by_frame.get(g, ()):
-                yield g, d
+    open_tracks: list[dict] = []
+    closed: list[dict] = []
+    for f in sorted(by_frame):
+        cands = by_frame[f]
+        taken: set[int] = set()
+        # Longest first: seniority decides who gets an ambiguous detection.
+        open_tracks.sort(key=lambda t: -len(t["pts"]))
+        for tr in open_tracks:
+            last = tr["pts"][-1]
+            df = f - last["frame"]
+            if df <= 0:
+                continue
+            px = last["x"] + tr["vx"] * df
+            py = last["y"] + tr["vy"] * df
+            gate = (1.5 + 0.9 * df) * r
+            best_i = None
+            best_d = None
+            for i, c in enumerate(cands):
+                if i in taken:
+                    continue
+                dist = math.hypot(c["x"] - px, c["y"] - py)
+                if dist <= gate and (best_d is None or dist < best_d):
+                    best_i, best_d = i, dist
+            if best_i is None:
+                continue
+            taken.add(best_i)
+            c = cands[best_i]
+            nvx = (c["x"] - last["x"]) / df
+            nvy = (c["y"] - last["y"]) / df
+            if len(tr["pts"]) == 1:
+                tr["vx"], tr["vy"] = nvx, nvy      # first link sets it
+            else:
+                tr["vx"] = 0.5 * tr["vx"] + 0.5 * nvx
+                tr["vy"] = 0.5 * tr["vy"] + 0.5 * nvy
+            tr["pts"].append(c)
+        # Retire anything that has gone quiet.
+        still = []
+        for tr in open_tracks:
+            if f - tr["pts"][-1]["frame"] > max_gap:
+                closed.append(tr)
+            else:
+                still.append(tr)
+        open_tracks = still
+        # Everything unclaimed opens a track of its own.
+        for i, c in enumerate(cands):
+            if i not in taken:
+                open_tracks.append({"pts": [c], "vx": 0.0, "vy": 0.0})
+    closed.extend(open_tracks)
 
-    for a in pool:
-        for df0, b in _ahead(int(a["frame"])):
-            df0 = df0 - int(a["frame"])
-            vx = (b["x"] - a["x"]) / df0
-            vy = (b["y"] - a["y"]) / df0
-            # A ball in flight moves. A pair that has not moved is two
-            # frames of the same piece of background noise.
-            if math.hypot(vx, vy) < 0.35 * r:
-                continue
-            run = [a, b]
-            while True:
-                last = run[-1]
-                best_c = None
-                best_d = None
-                for gf, c in _ahead(int(last["frame"])):
-                    df = gf - int(last["frame"])
-                    px = last["x"] + vx * df
-                    py = last["y"] + vy * df
-                    gate = (1.5 + 0.9 * df) * r
-                    dist = math.hypot(c["x"] - px, c["y"] - py)
-                    if dist > gate:
-                        continue
-                    # NEAREST neighbour, not first-found: with several
-                    # detections in a frame the closest to the prediction is
-                    # the one the tracker should take.
-                    if best_d is None or dist < best_d:
-                        best_c, best_d, best_df = c, dist, df
-                if best_c is None:
-                    break
-                nvx = (best_c["x"] - last["x"]) / best_df
-                nvy = (best_c["y"] - last["y"]) / best_df
-                # Smoothed velocity update — the Kalman-lite step.
-                vx = 0.5 * vx + 0.5 * nvx
-                vy = 0.5 * vy + 0.5 * nvy
-                run.append(best_c)
-            if len(run) < min_len:
-                continue
-            span = math.hypot(run[-1]["x"] - run[0]["x"],
-                              run[-1]["y"] - run[0]["y"])
-            tracks.append({
-                "points": [
-                    {"frame": int(p["frame"]), "x": int(p["x"]),
-                     "y": int(p["y"]), "area": int(p["area"])}
-                    for p in run
-                ],
-                "span_px": round(span, 1),
-                "rise_px": round(run[0]["y"] - run[-1]["y"], 1),
-            })
-    # Collapse near-duplicates. The seed loop finds the same flight from
-    # every starting pair along it, so one ball produces dozens of tracks
-    # differing by an endpoint. A strict subset test barely helps -- they
-    # are not subsets, they overlap -- so drop anything sharing most of its
-    # points with a longer track already kept. Without this a real flight
-    # can be pushed past the caller's try-limit by 40 copies of a bird.
-    tracks.sort(key=lambda t: -len(t["points"]))
-    kept: list[dict] = []
-    keysets: list[set] = []
-    for t in tracks:
-        keyset = {(p["frame"], p["x"], p["y"]) for p in t["points"]}
-        if any(
-            len(keyset & ks) >= 0.7 * len(keyset) for ks in keysets
-        ):
+    tracks: list[dict] = []
+    for tr in closed:
+        pts = tr["pts"]
+        if len(pts) < min_len:
             continue
-        kept.append(t)
-        keysets.append(keyset)
-    return kept
+        span = math.hypot(pts[-1]["x"] - pts[0]["x"],
+                          pts[-1]["y"] - pts[0]["y"])
+        # A track that never went anywhere is a piece of background flicker
+        # rediscovered every frame, not an object in motion.
+        if span < 2.0 * r:
+            continue
+        tracks.append({
+            "points": [
+                {"frame": int(p["frame"]), "x": int(p["x"]),
+                 "y": int(p["y"]), "area": int(p["area"])}
+                for p in pts
+            ],
+            "span_px": round(span, 1),
+            "rise_px": round(pts[0]["y"] - pts[-1]["y"], 1),
+        })
+    tracks.sort(key=lambda t: -len(t["points"]))
+    return tracks
 
 
 # ── stage E: RANSAC parabola ───────────────────────────────────────────
@@ -558,7 +581,17 @@ def pick_flight(
     """
     out = {"ok": False, "flight": None, "fit": None, "tried": [],
            "reason": None}
-    for tr in tracks[:40]:
+    # The old combinatorial tracker produced thousands of near-duplicate
+    # tracks and only the first 40 could be afforded, which is how a real
+    # flight got pushed off the end by copies of noise. One track per object
+    # plus a fit that costs ~10ms means the limit can be generous; it is a
+    # runaway guard now, not a budget.
+    if len(tracks) > MAX_TRACKS_TESTED:
+        out["note"] = (
+            f"{len(tracks)} tracks built, testing the {MAX_TRACKS_TESTED} "
+            f"longest"
+        )
+    for tr in tracks[:MAX_TRACKS_TESTED]:
         fit = ransac_parabola(tr["points"], impact_frame, ball_xy, r=r)
         rec = {
             "n_points": len(tr["points"]),
