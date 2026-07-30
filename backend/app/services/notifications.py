@@ -18,6 +18,7 @@ MAX_ATTACH_BYTES = 22 * 1024 * 1024
 # Resolve once so file lookups don't traverse on every call.
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 _UPLOAD_ROOT = _BACKEND_ROOT / settings.upload_dir
+_REPO_ROOT = _BACKEND_ROOT.parent
 
 
 # ── branding ───────────────────────────────────────────────────────────
@@ -31,9 +32,13 @@ _UPLOAD_ROOT = _BACKEND_ROOT / settings.upload_dir
 # until the reader clicks "show images", which is exactly the wrong first
 # impression; an inline part renders immediately.
 _LOGO_CID = "golfreelz-logo"
+# Anchored to the repo root, NOT the working directory: start.sh runs
+# uvicorn from inside backend/, so a bare "frontend/dist/..." resolves to
+# backend/frontend/dist/... and silently finds nothing — emails then go out
+# text-only with no logo and only an INFO line to say so.
 _LOGO_CANDIDATES = (
-    "frontend/dist/golfreelz-logo.png",
-    "frontend/public/golfreelz-logo.png",
+    _REPO_ROOT / "frontend" / "dist" / "golfreelz-logo.png",
+    _REPO_ROOT / "frontend" / "public" / "golfreelz-logo.png",
 )
 _LOGO_WIDTH_PX = 280          # 2x the 140px display width, for retina
 _logo_cache: tuple[bytes, str] | None | bool = False   # False = not tried
@@ -50,8 +55,7 @@ def _logo_png() -> bytes | None:
     if _logo_cache is not False:
         return _logo_cache[0] if _logo_cache else None
     _logo_cache = None
-    for rel in _LOGO_CANDIDATES:
-        p = Path(rel)
+    for p in _LOGO_CANDIDATES:
         if not p.is_file():
             continue
         try:
@@ -79,11 +83,11 @@ def _logo_png() -> bytes | None:
                 log.info("email logo: using full-size PNG (%s)", exc)
             _logo_cache = (raw, "image/png")
             log.info(
-                "email logo: %s -> %.1fKB", rel, len(raw) / 1024.0,
+                "email logo: %s -> %.1fKB", p, len(raw) / 1024.0,
             )
             break
         except Exception as exc:  # noqa: BLE001
-            log.warning("email logo: could not read %s: %s", rel, exc)
+            log.warning("email logo: could not read %s: %s", p, exc)
     if _logo_cache is None:
         log.info("email logo: not found; emails will go out text-only")
     return _logo_cache[0] if _logo_cache else None
