@@ -723,6 +723,56 @@ def ransac_parabola(
     return out
 
 
+def launch_from_ground(fit: dict, ground_y: float | None) -> dict:
+    """Where the fitted flight leaves the ground. THE ball position.
+
+    No image search. Once a flight is fitted, the ball's launch point is a
+    property of the curve: solve y(t) = ground_y and take the earlier root
+    (y opens upward in image coordinates, so the later root is the landing).
+    x follows from the linear fit at that t.
+
+    This replaced a search for a stationary bright blob near the same point.
+    That search measurably added nothing -- on both synthetics the
+    extrapolation alone landed 1.4-2.2px from truth and the "refined"
+    answer was also 1.4px -- while adding a failure mode that put the ball
+    400px up a tree, because a branch is stationary and bright too. When the
+    line is this clear, the line IS the answer.
+
+    Returns {ok, xy, frame, reason}.
+    """
+    out = {"ok": False, "xy": None, "frame": None, "reason": None}
+    co = (fit or {}).get("coef") or {}
+    if not co.get("y") or not co.get("x"):
+        out["reason"] = "no fitted curve"
+        return out
+    if ground_y is None:
+        out["reason"] = "no ground line (pose gave no feet)"
+        return out
+    a, b, c0 = (float(v) for v in co["y"])
+    if abs(a) < 1e-9:
+        out["reason"] = "the fit is a straight line, it never meets the ground"
+        return out
+    disc = b * b - 4.0 * a * (c0 - float(ground_y))
+    if disc < 0.0:
+        out["reason"] = "the flight never reaches the ground line"
+        return out
+    t_lo = (-b - math.sqrt(disc)) / (2.0 * a)
+    t_hi = (-b + math.sqrt(disc)) / (2.0 * a)
+    t = min(t_lo, t_hi)
+    x = float(np.polyval(co["x"], t)) if HAS_CV else None
+    if x is None:
+        out["reason"] = "numpy unavailable"
+        return out
+    out["ok"] = True
+    out["xy"] = [int(round(x)), int(round(float(ground_y)))]
+    out["frame"] = int(round(t))
+    out["reason"] = (
+        f"the fitted flight leaves the ground line at f{out['frame']}, "
+        f"({out['xy'][0]}, {out['xy'][1]})"
+    )
+    return out
+
+
 def refine_ball_from_flight(
     input_path: Path,
     fit: dict,
@@ -1154,5 +1204,5 @@ __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "detect_ball_blobs", "draw_flight", "pick_flight",
-    "ransac_parabola", "refine_ball_from_flight",
+    "ransac_parabola", "launch_from_ground", "refine_ball_from_flight",
 ]

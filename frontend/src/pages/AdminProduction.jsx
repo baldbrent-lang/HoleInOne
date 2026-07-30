@@ -3179,12 +3179,29 @@ function Debug3Modal({ state, onClose }) {
                 </details>
               )}
             </div>
-            {sw.refine && (
+            {sw.launch && (
               <div className="small" style={{ marginTop: 10 }}>
-                <b>Ball, re-found from the flight:</b>{" "}
-                {sw.refine.ok ? `(${sw.refine.xy[0]}, ${sw.refine.xy[1]})`
-                              : "not found"}
-                <div className="tiny muted">{sw.refine.reason}</div>
+                <b>Launch, from the flight itself:</b>{" "}
+                {sw.launch.ok
+                  ? `(${sw.launch.xy[0]}, ${sw.launch.xy[1]}) at f${sw.launch.frame}`
+                  : "not available"}
+                <div className="tiny muted">{sw.launch.reason}</div>
+                {sw.launch_vs_pose_frames != null && (
+                  <div className="tiny muted">
+                    that is {sw.launch_vs_pose_frames > 0 ? "+" : ""}
+                    {sw.launch_vs_pose_frames} frames from the pose peak
+                  </div>
+                )}
+              </div>
+            )}
+            {sw.refine && (
+              <div className="tiny muted" style={{ marginTop: 6 }}>
+                <b>Blob check (confirmation only):</b>{" "}
+                {sw.refine.ok
+                  ? `found at (${sw.refine.xy[0]}, ${sw.refine.xy[1]}), ` +
+                    `${sw.refine.agrees_px}px from the extrapolated launch`
+                  : "nothing conclusive"}
+                <div>{sw.refine.reason}</div>
               </div>
             )}
             <Img url={sw.refine_image_url}

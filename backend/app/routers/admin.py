@@ -11811,36 +11811,52 @@ def _debug3_run(row, src_path, db, progress=None):
         # win it -- which is how a white trainer beat the blind detector.
         if res.get("ok"):
             _feet = c.get("impact_feet_xy")
+            _gy = float(_feet[1]) if _feet and len(_feet) == 2 else None
+            # THE BALL IS WHERE THE FLIGHT LEAVES THE GROUND. No image
+            # search: with a fitted flight this is a property of the curve,
+            # and a searched-for blob measurably added nothing while being
+            # able to land on a branch.
+            _lg = d3.launch_from_ground(res.get("fit") or {}, _gy)
+            entry["launch"] = _lg
+            if _lg.get("ok"):
+                _prev = entry.get("ball")
+                entry["ball_alt"] = _prev
+                entry["ball_alt_source"] = entry.get("ball_source")
+                entry["ball_alt_reason"] = entry.get("ball_reason")
+                entry["ball"] = _lg["xy"]
+                entry["ball_source"] = "flight extrapolated to the ground"
+                entry["ball_reason"] = _lg.get("reason")
+                entry["launch_frame"] = _lg.get("frame")
+                entry["launch_vs_pose_frames"] = (
+                    _lg["frame"] - imp_f if _lg.get("frame") is not None
+                    else None
+                )
+                if _prev:
+                    entry["ball_disagree_px"] = round(math.hypot(
+                        _prev[0] - _lg["xy"][0], _prev[1] - _lg["xy"][1],
+                    ), 1)
+                _ball = _lg["xy"]
+
+            # The blob search is kept, but only as CONFIRMATION -- it can
+            # agree or say nothing, and it can no longer overrule the curve
+            # or send us back to whatever the blind detector picked.
             _ref = d3.refine_ball_from_flight(
-                src_path, res.get("fit") or {}, imp_f, _r,
-                ground_y=(float(_feet[1]) if _feet and len(_feet) == 2
-                          else None),
+                src_path, res.get("fit") or {}, imp_f, _r, ground_y=_gy,
                 debug_dir=CLIPS_DIR,
                 debug_prefix=f"d3ref-{upload_id}-{tok}-{i}",
             )
             entry["refine"] = {
                 "ok": _ref.get("ok"), "xy": _ref.get("xy"),
                 "reason": _ref.get("reason"),
-                "moved_px": _ref.get("moved_px"),
                 "seen_in": _ref.get("seen_in"),
                 "spread_px": _ref.get("spread_px"),
-                "launch_frame": _ref.get("launch_frame"),
-                "from": _ref.get("from"),
+                "agrees_px": (
+                    round(math.hypot(_ref["xy"][0] - _ball[0],
+                                     _ref["xy"][1] - _ball[1]), 1)
+                    if _ref.get("ok") and _ball else None
+                ),
             }
             entry["refine_image_url"] = _clip_url(_ref.get("image"))
-            if _ref.get("ok"):
-                _prev = entry.get("ball")
-                entry["ball_alt"] = _prev
-                entry["ball_alt_source"] = entry.get("ball_source")
-                entry["ball_alt_reason"] = entry.get("ball_reason")
-                entry["ball"] = _ref["xy"]
-                entry["ball_source"] = "flight-guided rest search"
-                entry["ball_reason"] = _ref.get("reason")
-                if _prev:
-                    entry["ball_disagree_px"] = round(math.hypot(
-                        _prev[0] - _ref["xy"][0], _prev[1] - _ref["xy"][1],
-                    ), 1)
-                _ball = _ref["xy"]
         entry["tried"] = res.get("tried")
         fit = res.get("fit") or {}
         entry["fit"] = {
