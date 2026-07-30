@@ -11211,11 +11211,15 @@ def _debug2_run(row, src_path, db):
         club = d2.club_bottom_ball(
             src_path, imp_f, fps,
             hint_xy=c.get("impact_wrist_xy"),
+            feet_xy=c.get("impact_feet_xy"),
+            head_xy=c.get("impact_head_xy"),
             debug_dir=CLIPS_DIR,
             debug_prefix=f"d2club-{upload_id}-{tok}-{i}",
         )
         entry["ball"] = club.get("xy")
         entry["ball_reason"] = club.get("reason")
+        entry["ball_side"] = club.get("side")
+        entry["ball_offset_body"] = club.get("offset_body")
         entry["ball_image_url"] = _clip_url(club.get("image"))
 
         # 3. AI JUDGE on the motion-heat composite.

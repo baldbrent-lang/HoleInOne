@@ -63,6 +63,8 @@ def club_bottom_ball(
     impact_frame: int,
     fps: float,
     hint_xy=None,
+    feet_xy=None,
+    head_xy=None,
     debug_dir: Path | None = None,
     debug_prefix: str = "d2club",
 ) -> dict:
@@ -75,8 +77,21 @@ def club_bottom_ball(
     vision call and does not care whether the ball is bright, shadowed, or
     a few pixels across.
 
-    Returns {ok, xy, arc_px, reason, image}. Never raises."""
-    out = {"ok": False, "xy": None, "arc_px": 0, "reason": None, "image": None}
+    Where the search happens matters as much as what it looks for. The ball
+    sits ON THE GROUND, IN FRONT OF THE GOLFER — so when pose gives us the
+    feet (feet_xy) and the head (head_xy, for scale) we search a band
+    straddling the ground line at the feet, on the ball side only. That
+    excludes the two things that used to win the vote: the golfer's torso
+    and arms (above the band) and the shoes and shadow (at the feet, on the
+    wrong side of the minimum offset).
+
+    Without feet_xy it falls back to the old wrist-centred box, which is
+    much weaker — the reason string says which was used.
+
+    Returns {ok, xy, arc_px, reason, image, side, offset_body}. Never
+    raises."""
+    out = {"ok": False, "xy": None, "arc_px": 0, "reason": None, "image": None,
+           "side": None, "offset_body": None}
     if not HAS_CV:
         out["reason"] = "opencv not installed"
         return out
@@ -120,9 +135,35 @@ def club_bottom_ball(
             mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8),
         )
 
-        # Confine to the golfer's neighbourhood. Without this the lowest
-        # bright pixel in frame is a shadow at the bottom edge, every time.
-        if hint_xy and len(hint_xy) == 2:
+        # Where to look. Anchored on the ground line at the feet when pose
+        # gave them to us, because that is what "the base of where the club
+        # hits the ground" actually means.
+        win = None            # (x_lo, y_lo, x_hi, y_hi) for the debug draw
+        ground_y = None
+        body = 0.0
+        if feet_xy and len(feet_xy) == 2:
+            fx, fy = int(feet_xy[0]), int(feet_xy[1])
+            if head_xy and len(head_xy) == 2:
+                body = float(fy - int(head_xy[1]))
+            if body < 40.0:
+                body = 0.45 * h          # nothing better to scale by
+            ground_y = fy
+            # A band straddling the ground line. The club head at impact and
+            # the ball centre are both within a fraction of a body height of
+            # the ground; the torso, arms and club shaft are not.
+            y_lo = max(0, int(fy - 0.16 * body))
+            y_hi = min(h, int(fy + 0.06 * body))
+            # The ball is never more than about a body height to the side.
+            x_lo = max(0, int(fx - 1.0 * body))
+            x_hi = min(w, int(fx + 1.0 * body))
+            box = np.zeros_like(mask)
+            box[y_lo:y_hi, x_lo:x_hi] = 255
+            mask = cv2.bitwise_and(mask, box)
+            win = (x_lo, y_lo, x_hi, y_hi)
+        elif hint_xy and len(hint_xy) == 2:
+            # Legacy fallback: a symmetric box around the wrist. Keeps the
+            # stage working when pose has no feet, but it cannot tell which
+            # side of the golfer the ball is on.
             hx, hy = int(hint_xy[0]), int(hint_xy[1])
             rx = int(0.22 * w)
             ry_lo = max(0, hy - int(0.10 * h))
@@ -130,6 +171,7 @@ def club_bottom_ball(
             box = np.zeros_like(mask)
             box[ry_lo:ry_hi, max(0, hx - rx):min(w, hx + rx)] = 255
             mask = cv2.bitwise_and(mask, box)
+            win = (max(0, hx - rx), ry_lo, min(w, hx + rx), ry_hi)
 
         ys, xs = np.nonzero(mask)
         out["arc_px"] = int(xs.size)
@@ -137,27 +179,86 @@ def club_bottom_ball(
             out["reason"] = f"club arc too faint ({xs.size}px)"
             return out
 
-        # The bottom of the arc: take the lowest band of arc pixels and
-        # use its median x. A single lowest pixel is noise; the band is
-        # the club at the bottom of its sweep.
-        y_bot = int(np.percentile(ys, 99.0))
-        band = ys >= (y_bot - max(3, int(0.006 * h)))
-        bx = int(np.median(xs[band]))
-        by = int(np.median(ys[band]))
-        out["ok"] = True
-        out["xy"] = [bx, by]
-        out["reason"] = f"bottom of a {xs.size}px club arc"
+        if ground_y is not None:
+            fx = int(feet_xy[0])
+            # Drop the columns at the feet. The shoes shift and the shadow
+            # moves with them, and both are far bigger blobs than a club
+            # head — left in, they win the median and drag the answer onto
+            # the golfer. Two-sided: we are not assuming a side here.
+            min_off = max(4.0, 0.05 * body)
+            keep = np.abs(xs - fx) >= min_off
+            if int(keep.sum()) < 12:
+                out["reason"] = (
+                    f"all the ground-band motion is at the feet "
+                    f"({int(keep.sum())}px clear of them) — no club arc"
+                )
+                return out
+            sx, sy = xs[keep], ys[keep]
+            # The vertex of the arc. The club's path through impact is a
+            # parabola whose LOW POINT is where it meets the ground, so the
+            # lowest thin band of it straddles that point and its median x
+            # is the vertex — no assumption about which side the ball is on,
+            # which matters because this window holds 8 frames of approach
+            # and only 2 of follow-through and is lopsided by construction.
+            y_bot = float(np.percentile(sy, 96.0))
+            band = sy >= (y_bot - max(3.0, 0.02 * body))
+            bx = int(np.median(sx[band]))
+            by = int(np.median(sy[band]))
+            off = abs(bx - fx) / max(1.0, body)
+            out["side"] = "right" if bx >= fx else "left"
+            out["offset_body"] = round(off, 2)
+            if off > 0.9:
+                # A club arc bottoming out a whole body-height from the feet
+                # is not a golf swing's low point; say so instead of
+                # returning a confident wrong number.
+                out["reason"] = (
+                    f"arc bottom is {off:.2f} body-heights to the "
+                    f"{out['side']} of the feet — too far to be the ball"
+                )
+                return out
+            out["ok"] = True
+            out["xy"] = [bx, by]
+            out["reason"] = (
+                f"club arc vertex {off:.2f} body-heights to the "
+                f"{out['side']} of the feet, {by - ground_y:+d}px vs the "
+                f"ground line ({int(sx.size)} of {xs.size}px clear of "
+                f"the feet)"
+            )
+        else:
+            # Legacy path: lowest band of the whole box, median x.
+            y_bot = int(np.percentile(ys, 99.0))
+            band = ys >= (y_bot - max(3, int(0.006 * h)))
+            bx = int(np.median(xs[band]))
+            by = int(np.median(ys[band]))
+            out["ok"] = True
+            out["xy"] = [bx, by]
+            out["reason"] = (
+                f"bottom of a {xs.size}px club arc (no pose feet — "
+                f"wrist box, less reliable)"
+            )
 
         if debug_dir is not None:
             img = base.copy()
             img[mask > 0] = (0.35 * img[mask > 0] + 0.65
                              * np.array([255, 120, 0])).astype(np.uint8)
+            # Show the constraint, not just the answer — when the ball lands
+            # somewhere silly the window is usually why.
+            if win is not None:
+                cv2.rectangle(img, (win[0], win[1]), (win[2], win[3]),
+                              (60, 60, 235), 2)
+            if ground_y is not None:
+                cv2.line(img, (0, ground_y), (w, ground_y),
+                         (200, 200, 60), 1, cv2.LINE_AA)
+                cv2.drawMarker(img, (int(feet_xy[0]), ground_y),
+                               (200, 200, 60), cv2.MARKER_TILTED_CROSS, 18, 2)
             cv2.circle(img, (bx, by), max(10, int(0.02 * h)),
                        (0, 255, 0), 3, cv2.LINE_AA)
             _label(
                 img,
-                f"club arc f{f0}-{f1} ({xs.size}px); green = its bottom "
-                f"= ball at impact ({bx},{by})",
+                f"f{f0}-{f1}, {xs.size}px of club arc. red = ground-band "
+                f"window, yellow = ground line at feet, green = ball "
+                f"({bx},{by}), {out.get('offset_body')} body-heights "
+                f"{out.get('side')} of the feet",
             )
             name = f"{debug_prefix}.jpg"
             cv2.imwrite(str(Path(debug_dir) / name), img,
@@ -301,9 +402,13 @@ def _label(img, text: str) -> None:
     ).astype(img.dtype)
     for i, ln in enumerate(lines):
         y = 24 + 22 * i
-        for colour, weight in (((0, 0, 0), 3), ((255, 255, 255), 1)):
-            cv2.putText(img, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
-                        scale, colour, weight, cv2.LINE_AA)
+        # ONE pass. A black-at-thickness-3 outline under white-at-1 does not
+        # register: Hershey advance widths grow with thickness (1068px vs
+        # 1126px for the same string), so the outline runs past the fill and
+        # its tail shows as a bold fragment off the end of the line. The
+        # darkened band above is what makes the text readable.
+        cv2.putText(img, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, (255, 255, 255), 1, cv2.LINE_AA)
 
 
 def draw_chain(
