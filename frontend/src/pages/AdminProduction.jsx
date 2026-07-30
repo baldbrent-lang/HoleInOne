@@ -3042,6 +3042,30 @@ function Debug3Modal({ state, onClose }) {
               {rep.frame?.[0]}×{rep.frame?.[1]} @ {rep.fps}fps · ball scale
               r = {rep.r_px}px
             </div>
+            {rep.produced && (
+              <div
+                className="small"
+                style={{
+                  marginTop: 8, padding: "8px 10px", borderRadius: 6,
+                  background: rep.produced.ok
+                    ? "var(--primary-soft)" : "rgba(192,57,43,0.08)",
+                  border: `1px solid ${rep.produced.ok
+                    ? "var(--emerald-200)" : "rgba(192,57,43,0.35)"}`,
+                }}
+              >
+                <b style={{
+                  color: rep.produced.ok
+                    ? "var(--emerald-800)" : "#c0392b",
+                }}>
+                  {rep.produced.ok
+                    ? "Re-produced — the card's clip and click-to-plot are updated"
+                    : "Re-produce failed"}
+                </b>
+                <div className="muted">
+                  {rep.produced.detail || rep.produced.error}
+                </div>
+              </div>
+            )}
             {rep.rest_ball && (
               <div className="tiny muted" style={{ marginTop: 4 }}>
                 <b>Resting ball:</b> {rep.rest_ball.reason}
@@ -3229,7 +3253,7 @@ function Debug3Modal({ state, onClose }) {
             {sw.produce && (
               <div style={{ marginTop: 12 }}>
                 <div className="small">
-                  <b>Stage 6 — produced clip</b>{" "}
+                  <b>Stage 6 — preview clip</b>{" "}
                   <span className={`pill ${sw.produce.ok ? "ok" : "err"}`}>
                     {sw.produce.ok ? "rendered" : "failed"}
                   </span>

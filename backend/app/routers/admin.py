@@ -12002,6 +12002,43 @@ def _debug3_run(row, src_path, db, progress=None):
 
         rep["swings"].append(entry)
 
+    # 7. PRODUCE FOR REAL. Stage 6 renders a preview into its own file and
+    # replaces nothing -- that was right when Debug3 was a read-only
+    # diagnostic, and wrong now that it IS the process. Kick the same job
+    # the Produce button runs. Produce calls find_flight, so this regenerates
+    # the shipped clip, the composite and edit_metrics (which is what
+    # click-to-plot reads) from these very numbers.
+    #
+    # Synchronous on purpose: we are already on the debug3 background
+    # thread, and the status poll keeps the panel honest about it.
+    if n_flights:
+        if progress:
+            progress("producing the real clip", len(cands), len(cands))
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _run_long_upload_job(
+                upload_id=upload_id,
+                seg_list=[],
+                auto_detect_swings=True,
+                starting_hole=1,
+                ai_tracer_model=None,
+            )
+            rep["produced"] = {
+                "ok": True,
+                "detail": (
+                    "re-produced this upload through the normal pipeline -- "
+                    "the clip on the card and click-to-plot are now built "
+                    "from the numbers above"
+                ),
+            }
+            log.info("debug3: re-produced upload=%s after analysis", upload_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("debug3: re-produce failed for %s: %s", upload_id, exc)
+            rep["produced"] = {"ok": False, "error": f"{exc}"}
+
     rep["stages"].extend([
         {"n": 2, "name": "Ball at impact",
          "detail": "club-arc vertex on the ground line at the feet",
@@ -12023,11 +12060,17 @@ def _debug3_run(row, src_path, db, progress=None):
          "detail": "x linear in t, y quadratic; must rise and must point "
                    "back at the ball",
          "count": n_flights, "counts": "flights accepted"},
-        {"n": 6, "name": "Produce",
+        {"n": 6, "name": "Preview clip",
          "detail": "the same renderer produce uses, fed Debug3's ball, "
-                   "launch frame and inliers. Writes its own file; replaces "
-                   "nothing",
-         "count": n_produced, "counts": "clips rendered"},
+                   "launch frame and inliers -- rendered here so the answer "
+                   "can be judged before it ships",
+         "count": n_produced, "counts": "previews rendered"},
+        {"n": 7, "name": "Produced for real",
+         "detail": ((rep.get("produced") or {}).get("detail")
+                    or (rep.get("produced") or {}).get("error")
+                    or "no flight, so nothing was re-produced"),
+         "count": 1 if (rep.get("produced") or {}).get("ok") else 0,
+         "counts": "uploads re-produced"},
     ])
     return rep
 
