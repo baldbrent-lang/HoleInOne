@@ -11826,224 +11826,67 @@ def _debug3_run(row, src_path, db, progress=None):
             "impact_frame": imp_f, "window": [f_lo, f_hi],
         }
 
-        # Ball at impact: the club-arc vertex on the ground line at the
-        # feet. Shared with Debug2 on purpose — a different flight-finder
-        # judged against the same origin is the comparison worth having.
-        club = d2.club_bottom_ball(
-            src_path, imp_f, fps,
-            hint_xy=c.get("impact_wrist_xy"),
-            feet_xy=c.get("impact_feet_xy"),
+        # ONE PIPELINE. This endpoint does not re-implement the stages -- it
+        # calls the same function produce calls and asks it to show its work.
+        # The two had already drifted once (the ball came from the club arc
+        # here and from the extrapolation there, 3px versus 67px on the same
+        # swing), which is what two implementations of one process always
+        # eventually do.
+        _ff = d3.find_flight(
+            src_path, fps, impact_frame=imp_f,
             head_xy=c.get("impact_head_xy"),
+            feet_xy=c.get("impact_feet_xy"),
+            frame_w=_fw, frame_h=_fh,
             debug_dir=CLIPS_DIR,
-            debug_prefix=f"d3ball-{upload_id}-{tok}-{i}",
+            debug_prefix=f"d3-{upload_id}-{tok}-{i}-",
         )
-        _resolve_ball(entry, rest, peak_t, club)
-        entry["ball_image_url"] = _clip_url(club.get("image"))
-
-        # A-C: per-frame detections.
-        _ball = entry.get("ball")
-        # Pose knows where the golfer is; use it rather than hoping MOG2
-        # renders the body as one big component.
-        _bbox = d3.body_box_from_pose(
-            c.get("impact_head_xy"), c.get("impact_feet_xy"), _fw, _fh,
+        _dbg = _ff.get("debug") or {}
+        _ball = _ff.get("ball")
+        entry["ball"] = _ball
+        entry["ball_source"] = _ff.get("ball_source")
+        entry["ball_reason"] = (_dbg.get("club_arc") or {}).get("reason")
+        entry["ball_alt"] = _dbg.get("ball_alt")
+        entry["ball_alt_source"] = _dbg.get("ball_alt_source")
+        entry["ball_disagree_px"] = (
+            (_dbg.get("club_arc") or {}).get("vs_extrapolated_px"))
+        entry["launch"] = _dbg.get("launch")
+        entry["launch_frame"] = _ff.get("launch_frame")
+        entry["launch_vs_pose_frames"] = (
+            int(_ff["launch_frame"]) - imp_f
+            if _ff.get("launch_frame") is not None else None
         )
-        entry["body_box"] = list(_bbox) if _bbox else None
-        det = d3.detect_ball_blobs(
-            src_path, f_lo, f_hi, body_box=_bbox,
-            debug_dir=CLIPS_DIR,
-            debug_prefix=f"d3blob-{upload_id}-{tok}-{i}",
-        )
-        entry["detect_reason"] = det.get("reason")
-        entry["detect_stats"] = det.get("stats")
-        entry["max_area"] = det.get("max_area")
-        entry["max_side"] = det.get("max_side")
-        entry["n_at_strict_cap"] = det.get("n_at_strict_cap")
-        # The raw area list is thousands of ints; summarise it. It is the
-        # number to look at when deciding the cap is wrong.
-        _areas = det.get("areas") or []
-        if _areas:
-            _a = sorted(_areas)
-            entry["area_summary"] = {
-                "n": len(_a),
-                "median": _a[len(_a) // 2],
-                "p90": _a[int(0.90 * (len(_a) - 1))],
-                "max": _a[-1],
-            }
-        entry["frame_image_url"] = _clip_url(
-            (det.get("images") or {}).get("frame"))
-        entry["dets_image_url"] = _clip_url(
-            (det.get("images") or {}).get("dets"))
-
-        # D: tracks.
-        tracks = d3.build_tracks(det.get("dets") or [], _r)
-        entry["n_tracks"] = len(tracks)
-        entry["tracks_preview"] = [
-            {"n": len(t["points"]), "span_px": t["span_px"],
-             "rise_px": t["rise_px"],
-             "frames": [t["points"][0]["frame"], t["points"][-1]["frame"]]}
-            for t in tracks[:6]
-        ]
-
-        # E: RANSAC parabola + the flight tests.
-        res = d3.pick_flight(
-            tracks, imp_f, _ball, frame_w=_fw, frame_h=_fh, r=_r,
-        )
-        entry["flight_reason"] = res.get("reason")
-        entry["aim_disagrees"] = bool(res.get("aim_disagrees"))
-
-        # BEST BALL: once a flight is fitted, its parabola run back to the
-        # impact frame says where the ball was to a couple of pixels, and
-        # that turns a blind whole-frame hunt into a search of one small box
-        # in the frames before impact. Nothing that is not in the box can
-        # win it -- which is how a white trainer beat the blind detector.
-        if res.get("ok"):
-            _feet = c.get("impact_feet_xy")
-            _gy = float(_feet[1]) if _feet and len(_feet) == 2 else None
-            # THE BALL IS WHERE THE FLIGHT LEAVES THE GROUND. No image
-            # search: with a fitted flight this is a property of the curve,
-            # and a searched-for blob measurably added nothing while being
-            # able to land on a branch.
-            _lg = d3.launch_from_ground(res.get("fit") or {}, _gy)
-            entry["launch"] = _lg
-            if _lg.get("ok"):
-                _prev = entry.get("ball")
-                entry["ball_alt"] = _prev
-                entry["ball_alt_source"] = entry.get("ball_source")
-                entry["ball_alt_reason"] = entry.get("ball_reason")
-                entry["ball"] = _lg["xy"]
-                entry["ball_source"] = "flight extrapolated to the ground"
-                entry["ball_reason"] = _lg.get("reason")
-                entry["launch_frame"] = _lg.get("frame")
-                entry["launch_vs_pose_frames"] = (
-                    _lg["frame"] - imp_f if _lg.get("frame") is not None
-                    else None
-                )
-                if _prev:
-                    entry["ball_disagree_px"] = round(math.hypot(
-                        _prev[0] - _lg["xy"][0], _prev[1] - _lg["xy"][1],
-                    ), 1)
-                _ball = _lg["xy"]
-                # Re-aim against the ball we actually ended up with. The
-                # flight's reason string was written before the swap, so it
-                # still quotes the aim against the discarded position and
-                # still says to suspect it -- which reads as "nothing
-                # changed" when in fact the ball moved.
-                _ai = (res.get("fit") or {}).get("at_impact")
-                if _ai:
-                    entry["aim_vs_final_px"] = round(math.hypot(
-                        _ai[0] - _ball[0], _ai[1] - _ball[1],
-                    ), 1)
-
-                # A frame from BEFORE the ball left, with our estimate ringed
-                # on it. Everything else in this panel is drawn on frames
-                # from the swing, by which time the ball has gone -- and a
-                # ball position looks perfectly plausible on bare turf. The
-                # pose peak has been running LATE (observed: launch f1001 vs
-                # pose peak f1011, so the club-arc window f1003-1013 was
-                # entirely after the ball left, which is why its answer was
-                # 132px out). Anchor this to the LAUNCH frame, not the peak.
-                _rest_f = max(0, int(_lg["frame"]) - 5)
-                entry["rest_check_frame"] = _rest_f
-                entry["rest_check_image_url"] = _clip_url(
-                    d3.rest_check_image(
-                        src_path, _rest_f, _ball, _r, CLIPS_DIR,
-                        debug_prefix=f"d3rest-{upload_id}-{tok}-{i}",
-                    )
-                )
-                # THE SYNTHESIS. Each method does the job it is actually
-                # good at:
-                #
-                #   the FLIGHT gives us WHEN. Its ground crossing is derived
-                #   from the ball's own trajectory, and it beats the pose
-                #   peak, which is maximum wrist speed and ran ten frames
-                #   late on the swings measured.
-                #
-                #   the CLUB ARC gives us WHERE. Given the right ten frames
-                #   it measures the club meeting the ball at full
-                #   resolution: it landed within 3px of a ball visible in
-                #   the check frame, while the flight extrapolation was 67px
-                #   right of it. That bias is structural -- the
-                #   extrapolation runs 250px past its last data point, and
-                #   the detections nearest the ball are precisely the ones
-                #   the body box removes.
-                #
-                # So run the arc at the launch frame and prefer its answer.
-                _club2 = d2.club_bottom_ball(
-                    src_path, int(_lg["frame"]), fps,
-                    hint_xy=c.get("impact_wrist_xy"),
-                    feet_xy=c.get("impact_feet_xy"),
-                    head_xy=c.get("impact_head_xy"),
-                    debug_dir=CLIPS_DIR,
-                    debug_prefix=f"d3club2-{upload_id}-{tok}-{i}",
-                )
-                entry["club_arc_relocated"] = {
-                    "frame": int(_lg["frame"]),
-                    "xy": _club2.get("xy"),
-                    "reason": _club2.get("reason"),
-                    "vs_launch_px": (
-                        round(math.hypot(
-                            _club2["xy"][0] - _ball[0],
-                            _club2["xy"][1] - _ball[1]), 1)
-                        if _club2.get("xy") else None
-                    ),
-                }
-                entry["club_arc_relocated_image_url"] = _clip_url(
-                    _club2.get("image"))
-                if _club2.get("ok") and _club2.get("xy"):
-                    entry["ball_alt"] = _ball
-                    entry["ball_alt_source"] = (
-                        "flight extrapolated to the ground")
-                    entry["ball_alt_reason"] = _lg.get("reason")
-                    entry["ball"] = _club2["xy"]
-                    entry["ball_source"] = (
-                        "club arc at the flight's launch frame")
-                    entry["ball_reason"] = _club2.get("reason")
-                    entry["ball_disagree_px"] = (
-                        entry["club_arc_relocated"]["vs_launch_px"])
-                    _ball = _club2["xy"]
-                    # Redraw the rest check against the ball we settled on.
-                    entry["rest_check_image_url"] = _clip_url(
-                        d3.rest_check_image(
-                            src_path, _rest_f, _ball, _r, CLIPS_DIR,
-                            debug_prefix=f"d3rest-{upload_id}-{tok}-{i}",
-                        )
-                    )
-
-            # The blob search is kept, but only as CONFIRMATION -- it can
-            # agree or say nothing, and it can no longer overrule the curve
-            # or send us back to whatever the blind detector picked.
-            _ref = d3.refine_ball_from_flight(
-                src_path, res.get("fit") or {}, imp_f, _r, ground_y=_gy,
-                debug_dir=CLIPS_DIR,
-                debug_prefix=f"d3ref-{upload_id}-{tok}-{i}",
-            )
-            entry["refine"] = {
-                "ok": _ref.get("ok"), "xy": _ref.get("xy"),
-                "reason": _ref.get("reason"),
-                "seen_in": _ref.get("seen_in"),
-                "spread_px": _ref.get("spread_px"),
-                "agrees_px": (
-                    round(math.hypot(_ref["xy"][0] - _ball[0],
-                                     _ref["xy"][1] - _ball[1]), 1)
-                    if _ref.get("ok") and _ball else None
-                ),
-            }
-            entry["refine_image_url"] = _clip_url(_ref.get("image"))
-        entry["tried"] = res.get("tried")
-        fit = res.get("fit") or {}
+        entry["body_box"] = _dbg.get("body_box")
+        _d = _dbg.get("detect") or {}
+        entry["detect_reason"] = _d.get("reason")
+        entry["detect_stats"] = _d.get("stats")
+        entry["max_area"] = _d.get("max_area")
+        entry["max_side"] = _d.get("max_side")
+        entry["n_at_strict_cap"] = _d.get("n_at_strict_cap")
+        entry["area_summary"] = _d.get("area_summary")
+        entry["frame_image_url"] = _clip_url((_d.get("images") or {}).get("frame"))
+        entry["dets_image_url"] = _clip_url((_d.get("images") or {}).get("dets"))
+        entry["n_tracks"] = _dbg.get("n_tracks")
+        entry["tracks_preview"] = _dbg.get("tracks_preview")
+        _fl = _dbg.get("flight") or {}
+        entry["flight_reason"] = _fl.get("reason")
+        entry["tried"] = _fl.get("tried")
         entry["fit"] = {
-            "n_inliers": fit.get("n_inliers"),
-            "rms_px": fit.get("rms_px"),
-            "aim_px": fit.get("aim_px"),
-            "at_impact": fit.get("at_impact"),
-        } if fit else None
-        # The inliers ARE the tracer points — outliers are excluded on
-        # purpose, that is what the RANSAC pass is for.
-        entry["flight"] = [
-            {"frame": p["frame"], "x": int(p["x"]), "y": int(p["y"])}
-            for p in (fit.get("inliers") or [])
-        ]
-        if res.get("ok"):
+            "n_inliers": _fl.get("n_inliers"), "rms_px": _fl.get("rms_px"),
+            "at_impact": _fl.get("at_impact"), "x_degree": _fl.get("x_degree"),
+        }
+        entry["flight"] = _ff.get("points") or []
+        entry["ball_image_url"] = _clip_url(
+            (_dbg.get("club_arc") or {}).get("image"))
+        entry["rest_check_frame"] = _dbg.get("rest_check_frame")
+        entry["rest_check_image_url"] = _clip_url(_dbg.get("rest_check_image"))
+        entry["flight_image_url"] = _clip_url(_dbg.get("flight_image"))
+        res = {"ok": _ff.get("ok"), "fit": {
+            "inliers": [
+                {"frame": q["frame"], "x": q["x"], "y": q["y"]}
+                for q in (_ff.get("points") or [])
+            ],
+        }}
+        if _ff.get("ok"):
             n_flights += 1
 
         # 6. PRODUCE. Everything above is measurement; this is the clip.
@@ -12096,37 +11939,6 @@ def _debug3_run(row, src_path, db, progress=None):
                 log.warning("debug3 produce failed on %s: %s", upload_id, exc)
                 entry["produce"] = {"ok": False, "error": f"{exc}"}
 
-        _canvas = (det.get("images") or {}).get("dets")
-        if _canvas and (CLIPS_DIR / _canvas).exists():
-            nm = f"d3flight-{upload_id}-{tok}-{i}.jpg"
-            if d3.draw_flight(
-                CLIPS_DIR / _canvas, CLIPS_DIR / nm, _ball,
-                tracks, (res.get("flight") or {}).get("track"),
-                fit or None,
-                (
-                    # Lead with the ball, because that is what changed and
-                    # the flight's own reason string was written before the
-                    # swap -- quoting an aim against a position we have
-                    # since discarded reads as "nothing happened".
-                    (
-                        f"BALL from the flight: ({_ball[0]},{_ball[1]}) "
-                        f"at f{entry.get('launch_frame')}, "
-                        f"{entry.get('ball_disagree_px')}px from the "
-                        f"{entry.get('ball_alt_source')}. "
-                        if entry.get("ball_source", "").startswith("flight")
-                        else ""
-                    )
-                    + f"f{f_lo}-{f_hi}: {(fit or {}).get('n_inliers')}/"
-                      f"{len((res.get('flight') or {}).get('track', {}).get('points') or [])}"
-                      f" on a parabola, rms {(fit or {}).get('rms_px')}px. "
-                    + (f"aim vs this ball {entry['aim_vs_final_px']}px. "
-                       if entry.get("aim_vs_final_px") is not None else "")
-                    + "green=inliers red x=outliers cyan=fit "
-                      "magenta=impact grey=rejected"
-                ),
-                scale=det.get("scale") or 1.0,
-            ):
-                entry["flight_image_url"] = _clip_url(nm)
         rep["swings"].append(entry)
 
     rep["stages"].extend([
@@ -12143,7 +11955,8 @@ def _debug3_run(row, src_path, db, progress=None):
         {"n": 4, "name": "Nearest-neighbour tracking",
          "detail": "constant-velocity prediction with a gate that widens "
                    "on a missed frame",
-         "count": sum(s.get("n_tracks", 0) for s in rep["swings"]),
+         "count": sum(int(s.get("n_tracks") or 0)
+                      for s in rep["swings"]),
          "counts": "tracks built"},
         {"n": 5, "name": "RANSAC parabola + flight tests",
          "detail": "x linear in t, y quadratic; must rise and must point "

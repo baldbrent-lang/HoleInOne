@@ -745,26 +745,28 @@ def find_flight(
     feet_xy=None,
     frame_w: int | None = None,
     frame_h: int | None = None,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "d3",
 ) -> dict:
-    """The whole Debug3 pipeline, no debug images. For PRODUCTION.
+    """THE pipeline. One implementation, used by produce and by Debug3.
 
-    Detect ball-sized off-body blobs, link them, fit the flight, and derive
-    the ball and the launch frame from the fit. Returns exactly the three
-    things produce needs to pin a tracer:
+    Debug3 and produce must not be two pieces of code that happen to agree
+    today -- they had already drifted, with Debug3 taking its ball from the
+    club arc at the launch frame while produce took the extrapolation, a
+    difference measured at 3px versus 67px on the same swing. So this is the
+    whole thing, and `debug_dir` is the only difference between the two
+    callers: pass it and every stage also writes its image and its numbers
+    into the returned `debug` block; leave it None and the identical
+    arithmetic runs silently.
 
-        {ok, ball, launch_frame, points, reason}
+    Stages: blobs -> tracks -> RANSAC flight -> launch frame from the ground
+    crossing -> ball from the club arc measured AT that frame.
 
-    `points` are the RANSAC inliers, in the frame space of `input_path` --
-    so when this is run on a CUT segment the frames come back cut-relative,
-    which is what _trace_segment wants.
-
-    Pose is optional. Given head/feet it excludes the golfer by body box and
-    derives the ground line, which is what makes the launch point reliable;
-    without them it still tracks and fits, it just has no ground line and
-    falls back to the parabola at the impact frame.
+    Returns {ok, ball, ball_source, launch_frame, points, reason, debug}.
     """
-    out = {"ok": False, "ball": None, "launch_frame": None, "points": [],
-           "reason": None}
+    out = {"ok": False, "ball": None, "ball_source": None,
+           "launch_frame": None, "points": [], "reason": None, "debug": {}}
+    dbg = out["debug"]
     if not HAS_CV:
         out["reason"] = "opencv not installed"
         return out
@@ -779,44 +781,138 @@ def find_flight(
             n_frames = 0
         r = max(6.0, 0.012 * float(frame_h))
         if impact_frame is None:
-            # No impact hint: search the whole clip. A cut segment is short,
-            # so this is affordable and it keeps the function usable when
-            # pose found nothing.
             f_lo, f_hi = 0, (n_frames - 1 if n_frames else 400)
         else:
             f_lo = max(0, int(impact_frame) - WIN_PRE)
             f_hi = int(impact_frame) + WIN_POST
+        dbg["window"] = [f_lo, f_hi]
+        dbg["r_px"] = round(r, 1)
+
+        # A-C: detections.
         bbox = body_box_from_pose(head_xy, feet_xy, frame_w, frame_h)
-        det = detect_ball_blobs(input_path, f_lo, f_hi, body_box=bbox)
+        dbg["body_box"] = list(bbox) if bbox else None
+        det = detect_ball_blobs(
+            input_path, f_lo, f_hi, body_box=bbox,
+            debug_dir=debug_dir, debug_prefix=f"{debug_prefix}blob",
+        )
+        dbg["detect"] = {
+            "reason": det.get("reason"), "stats": det.get("stats"),
+            "max_area": det.get("max_area"), "max_side": det.get("max_side"),
+            "n_at_strict_cap": det.get("n_at_strict_cap"),
+            "images": det.get("images"),
+        }
+        _a = sorted(det.get("areas") or [])
+        if _a:
+            dbg["detect"]["area_summary"] = {
+                "n": len(_a), "median": _a[len(_a) // 2],
+                "p90": _a[int(0.90 * (len(_a) - 1))], "max": _a[-1],
+            }
         if not det.get("ok"):
             out["reason"] = det.get("reason")
             return out
+
+        # D: tracks.
         tracks = build_tracks(det.get("dets") or [], r)
+        dbg["n_tracks"] = len(tracks)
+        dbg["tracks_preview"] = [
+            {"n": len(t["points"]), "span_px": t["span_px"],
+             "rise_px": t["rise_px"],
+             "frames": [t["points"][0]["frame"], t["points"][-1]["frame"]]}
+            for t in tracks[:6]
+        ]
+
+        # E: the flight.
         gy = float(feet_xy[1]) if feet_xy and len(feet_xy) == 2 else None
         res = pick_flight(
             tracks, int(impact_frame or f_lo), None,
             frame_w=frame_w, frame_h=frame_h, r=r,
         )
+        fit = res.get("fit") or {}
+        dbg["flight"] = {
+            "reason": res.get("reason"), "tried": res.get("tried"),
+            "n_inliers": fit.get("n_inliers"), "rms_px": fit.get("rms_px"),
+            "at_impact": fit.get("at_impact"),
+            "x_degree": fit.get("x_degree"),
+        }
         if not res.get("ok"):
             out["reason"] = res.get("reason")
             return out
-        fit = res.get("fit") or {}
         out["points"] = [
             {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"])}
             for q in (fit.get("inliers") or [])
         ]
+
+        # The launch FRAME, from where the flight meets the ground.
         lg = launch_from_ground(fit, gy)
+        dbg["launch"] = lg
         if lg.get("ok"):
-            out["ball"] = lg["xy"]
             out["launch_frame"] = lg["frame"]
+            out["ball"] = lg["xy"]
+            out["ball_source"] = "flight extrapolated to the ground"
         else:
-            out["ball"] = fit.get("at_impact")
             out["launch_frame"] = int(impact_frame or f_lo)
+            out["ball"] = fit.get("at_impact")
+            out["ball_source"] = "the fit at the impact frame"
+
+        # The ball POSITION, from the club arc measured at that frame. The
+        # flight gives the better frame; the arc gives the better position,
+        # measured at full resolution over the real downswing. On the swing
+        # this was settled against, the arc landed 3px from a ball visible
+        # in the check frame while the extrapolation was 67px right of it.
+        if out["launch_frame"] is not None:
+            from .debug2 import club_bottom_ball
+
+            club = club_bottom_ball(
+                input_path, int(out["launch_frame"]), fps,
+                feet_xy=feet_xy, head_xy=head_xy,
+                debug_dir=debug_dir, debug_prefix=f"{debug_prefix}club",
+            )
+            dbg["club_arc"] = {
+                "frame": int(out["launch_frame"]), "xy": club.get("xy"),
+                "reason": club.get("reason"), "image": club.get("image"),
+                "vs_extrapolated_px": (
+                    round(math.hypot(club["xy"][0] - out["ball"][0],
+                                     club["xy"][1] - out["ball"][1]), 1)
+                    if club.get("xy") and out["ball"] else None
+                ),
+            }
+            if club.get("ok") and club.get("xy"):
+                dbg["ball_alt"] = out["ball"]
+                dbg["ball_alt_source"] = out["ball_source"]
+                out["ball"] = club["xy"]
+                out["ball_source"] = "club arc at the flight's launch frame"
+
+        # A frame from before the strike with the answer ringed on it.
+        if debug_dir is not None and out["ball"]:
+            _rf = max(0, int(out["launch_frame"]) - 5)
+            dbg["rest_check_frame"] = _rf
+            dbg["rest_check_image"] = rest_check_image(
+                input_path, _rf, out["ball"], r, debug_dir,
+                debug_prefix=f"{debug_prefix}rest",
+            )
+
+        # The flight drawing, on the detections canvas.
+        if debug_dir is not None:
+            _canvas = (det.get("images") or {}).get("dets")
+            if _canvas and (Path(debug_dir) / _canvas).exists():
+                _nm = f"{debug_prefix}flight.jpg"
+                if draw_flight(
+                    Path(debug_dir) / _canvas, Path(debug_dir) / _nm,
+                    out["ball"], tracks,
+                    (res.get("flight") or {}).get("track"), fit,
+                    f"BALL: {out['ball_source']} {out['ball']} at f"
+                    f"{out['launch_frame']}. {fit.get('n_inliers')} inliers, "
+                    f"rms {fit.get('rms_px')}px. green=inliers red x=outliers "
+                    f"cyan=fit magenta=impact grey=rejected",
+                    scale=det.get("scale") or 1.0,
+                ):
+                    dbg["flight_image"] = _nm
+
         out["ok"] = bool(out["points"]) and out["ball"] is not None
         out["reason"] = (
-            f"{len(out['points'])} tracer point(s), ball {out['ball']}, "
-            f"launch f{out['launch_frame']} ({fit.get('n_inliers')} inliers "
-            f"at {fit.get('rms_px')}px rms)"
+            f"{len(out['points'])} tracer point(s), ball {out['ball']} "
+            f"({out['ball_source']}), launch f{out['launch_frame']} "
+            f"({fit.get('n_inliers')} inliers at {fit.get('rms_px')}px rms)"
         )
         return out
     except Exception as exc:  # noqa: BLE001
