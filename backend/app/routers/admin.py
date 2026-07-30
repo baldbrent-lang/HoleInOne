@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import secrets
 import threading
@@ -11187,8 +11188,18 @@ def _debug2_run(row, src_path, db, progress=None):
         "count": len(cands), "counts": "candidates",
     })
 
+    if progress:
+        progress("resting-ball departures", 0, len(cands))
+    rest = _rest_ball_departures(src_path, fps, db, row)
+    rep["rest_ball"] = {
+        "reason": rest.get("reason"), "roi": rest.get("roi"),
+        "departures": rest.get("deps"),
+    }
+
     n_judged_out = 0
     for i, c in enumerate(cands):
+        if progress:
+            progress(f"candidate {i + 1} of {len(cands)}", i, len(cands))
         peak_t = float(c.get("peak_time_sec") or 0.0)
         imp_f = int(round(peak_t * fps))
         entry: dict = {
@@ -11208,11 +11219,14 @@ def _debug2_run(row, src_path, db, progress=None):
             debug_dir=CLIPS_DIR,
             debug_prefix=f"d2club-{upload_id}-{tok}-{i}",
         )
-        entry["ball"] = club.get("xy")
-        entry["ball_reason"] = club.get("reason")
+        _resolve_ball(entry, rest, peak_t, club)
         entry["ball_side"] = club.get("side")
         entry["ball_offset_body"] = club.get("offset_body")
         entry["ball_image_url"] = _clip_url(club.get("image"))
+        # Everything downstream -- the AI corridor, the band search, the
+        # chain walks, the drawing -- must agree on ONE ball, or the aim
+        # tests are measured against a point the panel never shows.
+        _ball = entry.get("ball")
 
         # 3. AI JUDGE on the motion-heat composite.
         chk = swing_heat_check(
@@ -11260,7 +11274,7 @@ def _debug2_run(row, src_path, db, progress=None):
             impact_frame_hint_override=imp_f,
             ball_rest_hint=(
                 (float(club["xy"][0]), float(club["xy"][1]))
-                if club.get("xy") else None
+                if _ball else None
             ),
             heat_start_frame=f_lo,
             heat_end_frame=f_hi,
@@ -11333,7 +11347,7 @@ def _debug2_run(row, src_path, db, progress=None):
                 }
                 for p in (_tp.get("points_pct") or [])
             ]
-            if entry["ai_path"] and club.get("xy"):
+            if entry["ai_path"] and _ball:
                 _a = entry["ai_path"][0]
                 entry["ai_path_start_px"] = int(round((
                     (_a["x"] - club["xy"][0]) ** 2
@@ -11360,7 +11374,7 @@ def _debug2_run(row, src_path, db, progress=None):
         _aim_gate = max(120.0, 0.20 * float(_fw))
         if entry.get("ai_path"):
             _c1 = d2.chain_along_ai_path(
-                pool, entry["ai_path"], club.get("xy"), imp_f, _fh,
+                pool, entry["ai_path"], _ball, imp_f, _fh,
             )
             # The AI's trail gets NO free pass. It once traced a roughly
             # horizontal line across the treetops; the corridor collected
@@ -11394,7 +11408,7 @@ def _debug2_run(row, src_path, db, progress=None):
             _fan_y = d2.fan_line_y(_head, c.get("impact_feet_xy"), _fh)
             entry["fan_y"] = _fan_y
             _c15 = d2.chain_by_thirds(
-                pool, club.get("xy"), imp_f, _fh, _fw, _fan_y,
+                pool, _ball, imp_f, _fh, _fw, _fan_y,
             )
             entry["bands"] = _c15.get("thirds")
             _tries.append(f"2 L/M/R bands above the club fan: {_c15['reason']}")
@@ -11405,13 +11419,13 @@ def _debug2_run(row, src_path, db, progress=None):
                 )
         if ch is None:
             _c2 = d2.chain_above_head(
-                pool, club.get("xy"), imp_f, _fh, _head_y,
+                pool, _ball, imp_f, _fh, _head_y,
             )
             _tries.append(f"3 above-head lock-on: {_c2['reason']}")
             if _c2.get("points"):
                 ch, method = _c2, "3 · above-head lock-on, walked back down"
         if ch is None:
-            ch = d2.chain_from_ball(pool, club.get("xy"), imp_f, _fh)
+            ch = d2.chain_from_ball(pool, _ball, imp_f, _fh)
             _tries.append(f"4 up-from-ball walk: {ch['reason']}")
             method = "4 · up-from-ball walk (last resort)"
         entry["chain_method"] = method
@@ -11434,7 +11448,7 @@ def _debug2_run(row, src_path, db, progress=None):
         if _heat and (CLIPS_DIR / _heat).exists():
             name = f"d2chain-{upload_id}-{tok}-{i}.jpg"
             if d2.draw_chain(
-                CLIPS_DIR / _heat, club.get("xy"), ch["points"],
+                CLIPS_DIR / _heat, _ball, ch["points"],
                 ch.get("rejected") or [], CLIPS_DIR / name,
                 f"chain f{f_lo}-{f_hi}: {ch['reason']}  "
                 f"(green=chain, magenta x=where it aims back to, "
@@ -11473,6 +11487,77 @@ def _debug2_run(row, src_path, db, progress=None):
     ])
     return rep
 
+
+
+
+# ── shared: the resting ball, from the detector the original Debug uses ──
+# club_bottom_ball infers the ball from the club-arc vertex. That is an
+# indirect argument and it is only as good as the arc. detect_swings_from_ball
+# looks for the thing itself: a small, white, round blob that sits STILL for
+# most of a second inside the course's hand-drawn tee-box ROI, and then
+# leaves. When it fires it is the better answer, so Debug2 and Debug3 both
+# prefer it and keep the club arc as the fallback.
+
+def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
+    """Every resting-ball departure in this video, with the ROI used."""
+    out = {"deps": [], "roi": None, "reason": None}
+    try:
+        course = db.get(Course, row.course_id) if row.course_id else None
+        out["roi"] = course.ball_roi if course else None
+    except Exception:  # noqa: BLE001
+        pass
+    dbg: dict = {}
+    try:
+        detect_swings_from_ball(src_path, fps=fps, roi=out["roi"], debug=dbg)
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"departure detector crashed: {exc}"
+        return out
+    out["deps"] = list(dbg.get("departures") or [])
+    out["reason"] = dbg.get("reason") or (
+        f"{len(out['deps'])} resting-ball departure(s)"
+        + (" (no tee-box ROI set for this course)" if not out["roi"] else "")
+    )
+    return out
+
+
+def _departure_for(deps: list, peak_t: float, tol_sec: float = 1.5):
+    """The departure nearest this candidate's peak, or (None, None).
+
+    Tolerance is generous because the two clocks measure different things:
+    the pose peak is maximum wrist speed, the departure is when the ball is
+    gone for good, and the detector samples at 15Hz.
+    """
+    best = None
+    for d in deps or []:
+        dt = abs(float(d.get("t") or 0.0) - float(peak_t))
+        if dt <= tol_sec and (best is None or dt < best[0]):
+            best = (dt, d)
+    return (best[1], best[0]) if best else (None, None)
+
+
+def _resolve_ball(entry: dict, rest: dict, peak_t: float, club: dict) -> None:
+    """Choose between the departure detector and the club arc, and record
+    BOTH so a disagreement is visible rather than silently resolved."""
+    dep, dt = _departure_for(rest.get("deps") or [], peak_t)
+    club_xy = club.get("xy")
+    if dep:
+        entry["ball"] = [int(dep["x"]), int(dep["y"])]
+        entry["ball_source"] = "resting-ball departure"
+        entry["ball_reason"] = (
+            f"sat still {dep.get('rest_sec')}s, left at {dep.get('t')}s "
+            f"({dt:.2f}s from the pose peak)"
+        )
+        entry["ball_alt"] = club_xy
+        entry["ball_alt_source"] = "club-arc vertex"
+        entry["ball_alt_reason"] = club.get("reason")
+        if club_xy:
+            entry["ball_disagree_px"] = round(
+                math.hypot(club_xy[0] - dep["x"], club_xy[1] - dep["y"]), 1,
+            )
+    else:
+        entry["ball"] = club_xy
+        entry["ball_source"] = "club-arc vertex (no departure matched)"
+        entry["ball_reason"] = club.get("reason")
 
 
 # ── Debug2/Debug3 background runner ────────────────────────────────────
@@ -11632,6 +11717,15 @@ def _debug3_run(row, src_path, db, progress=None):
         "count": len(cands), "counts": "candidates",
     })
 
+    # Once per upload, not per candidate: it samples the whole video.
+    if progress:
+        progress("resting-ball departures", 0, len(cands))
+    rest = _rest_ball_departures(src_path, fps, db, row)
+    rep["rest_ball"] = {
+        "reason": rest.get("reason"), "roi": rest.get("roi"),
+        "departures": rest.get("deps"),
+    }
+
     n_flights = 0
     for i, c in enumerate(cands):
         if progress:
@@ -11656,11 +11750,11 @@ def _debug3_run(row, src_path, db, progress=None):
             debug_dir=CLIPS_DIR,
             debug_prefix=f"d3ball-{upload_id}-{tok}-{i}",
         )
-        entry["ball"] = club.get("xy")
-        entry["ball_reason"] = club.get("reason")
+        _resolve_ball(entry, rest, peak_t, club)
         entry["ball_image_url"] = _clip_url(club.get("image"))
 
         # A-C: per-frame detections.
+        _ball = entry.get("ball")
         det = d3.detect_ball_blobs(
             src_path, f_lo, f_hi,
             debug_dir=CLIPS_DIR,
@@ -11699,7 +11793,7 @@ def _debug3_run(row, src_path, db, progress=None):
 
         # E: RANSAC parabola + the flight tests.
         res = d3.pick_flight(
-            tracks, imp_f, club.get("xy"), frame_w=_fw, r=_r,
+            tracks, imp_f, _ball, frame_w=_fw, r=_r,
         )
         entry["flight_reason"] = res.get("reason")
         entry["tried"] = res.get("tried")
@@ -11723,7 +11817,7 @@ def _debug3_run(row, src_path, db, progress=None):
         if _canvas and (CLIPS_DIR / _canvas).exists():
             nm = f"d3flight-{upload_id}-{tok}-{i}.jpg"
             if d3.draw_flight(
-                CLIPS_DIR / _canvas, CLIPS_DIR / nm, club.get("xy"),
+                CLIPS_DIR / _canvas, CLIPS_DIR / nm, _ball,
                 tracks, (res.get("flight") or {}).get("track"),
                 fit or None,
                 f"f{f_lo}-{f_hi}: {res.get('reason')} "

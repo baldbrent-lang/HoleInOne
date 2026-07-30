@@ -3039,6 +3039,16 @@ function Debug3Modal({ state, onClose }) {
               {rep.frame?.[0]}×{rep.frame?.[1]} @ {rep.fps}fps · ball scale
               r = {rep.r_px}px
             </div>
+            {rep.rest_ball && (
+              <div className="tiny muted" style={{ marginTop: 4 }}>
+                <b>Resting ball:</b> {rep.rest_ball.reason}
+                {(rep.rest_ball.departures || []).map((d, k) => (
+                  <span key={k} style={{ marginLeft: 6 }}>
+                    [{d.t}s ({d.x},{d.y}) rest {d.rest_sec}s]
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -3061,7 +3071,21 @@ function Debug3Modal({ state, onClose }) {
             <div className="small" style={{ marginTop: 10 }}>
               <b>Ball at impact:</b>{" "}
               {sw.ball ? `(${sw.ball[0]}, ${sw.ball[1]})` : "not found"}
+              {sw.ball_source && (
+                <span className="pill" style={{ marginLeft: 6 }}>
+                  {sw.ball_source}
+                </span>
+              )}
               <div className="tiny muted">{sw.ball_reason}</div>
+              {sw.ball_alt && (
+                <div className="tiny muted" style={{ marginTop: 2 }}>
+                  {sw.ball_alt_source}: ({sw.ball_alt[0]}, {sw.ball_alt[1]})
+                  {sw.ball_disagree_px != null && (
+                    <> — the two disagree by <b>{sw.ball_disagree_px}px</b></>
+                  )}
+                  <div>{sw.ball_alt_reason}</div>
+                </div>
+              )}
             </div>
             <Img url={sw.ball_image_url}
               cap="Stage 2 — club arc in the ground band at the feet; green is the vertex" />
@@ -3307,7 +3331,16 @@ function Debug2Modal({ state, onClose }) {
               <div className="tiny" style={{ marginTop: 6 }}>
                 <b>ball at impact:</b>{" "}
                 {sw.ball ? `${sw.ball[0]}, ${sw.ball[1]}` : "not found"}
+                {sw.ball_source ? ` (${sw.ball_source})` : ""}
                 {" — "}{sw.ball_reason}
+                {sw.ball_alt && (
+                  <div className="muted">
+                    {sw.ball_alt_source}: {sw.ball_alt[0]}, {sw.ball_alt[1]}
+                    {sw.ball_disagree_px != null
+                      ? ` — the two disagree by ${sw.ball_disagree_px}px`
+                      : ""}
+                  </div>
+                )}
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
                 {[
