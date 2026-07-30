@@ -11482,6 +11482,223 @@ def _debug2_run(row, src_path, db):
     return rep
 
 
+# ── Debug3 ─────────────────────────────────────────────────────────────
+# A third method, and a deliberately different one. Debug2 reads the shape
+# the swing draws in a motion COMPOSITE. Debug3 never looks at a composite:
+# it asks per frame which connected blobs are ball-sized and off-body, then
+# links those detections over time and fits a ballistic curve to them.
+#
+#   A-C  MOG2 -> connected components -> the big ones are the golfer (a
+#        mask, not a detection) -> keep only ball-sized blobs
+#   D    link across frames with a constant-velocity predictor and a
+#        nearest-neighbour gate
+#   E    RANSAC parabola (x linear in t, y quadratic), then the same two
+#        flight tests Debug2 uses: it must rise, and run back to the impact
+#        frame it must land near the ball
+#
+# Read-only, like Debug2: writes images, returns a report, touches neither
+# edit_metrics nor any produced clip.
+
+@router.post("/long-uploads/{upload_id}/debug3")
+def debug3(upload_id: int, db: Session = Depends(get_db)):
+    """Run the blob-and-track pipeline and return every stage's work."""
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+    if not src_path or not src_path.exists():
+        raise HTTPException(400, "tee video missing on disk")
+    try:
+        return _debug3_run(row, src_path, db)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3 failed for upload=%s: %s", upload_id, exc,
+                    exc_info=True)
+        return {"ok": False, "upload_id": upload_id, "error": f"{exc}"}
+
+
+def _debug3_run(row, src_path, db):
+    upload_id = row.id
+    from ..services import debug2 as d2
+    from ..services import debug3 as d3
+    from ..services import pose_swing
+
+    tok = secrets.token_hex(3)
+    fps = float(probe_fps(src_path) or 30.0)
+
+    def _clip_url(name):
+        if not name:
+            return None
+        p = CLIPS_DIR / name
+        if not p.exists():
+            return None
+        return (
+            f"{settings.app_base_url}/uploads/clips/{p.name}"
+            f"?v={int(p.stat().st_mtime)}"
+        )
+
+    _fw, _fh = 1280, 720
+    try:
+        import cv2 as _cv2
+
+        _c = _cv2.VideoCapture(str(src_path))
+        _fw = int(_c.get(_cv2.CAP_PROP_FRAME_WIDTH) or 1280) or 1280
+        _fh = int(_c.get(_cv2.CAP_PROP_FRAME_HEIGHT) or 720) or 720
+        _c.release()
+    except Exception:  # noqa: BLE001
+        pass
+    # Same ball scale Debug2 works in, so the gates mean the same thing.
+    _r = max(6.0, 0.012 * float(_fh))
+
+    rep: dict = {
+        "ok": True, "upload_id": upload_id, "fps": round(fps, 2),
+        "frame": [_fw, _fh], "r_px": round(_r, 1),
+        "stages": [], "swings": [],
+    }
+
+    if not pose_swing.available():
+        return {
+            "ok": False,
+            "error": f"pose detector unavailable: "
+                     f"{pose_swing.unavailable_reason()}",
+        }
+    try:
+        db.rollback()          # the passes below are slow; don't hold a txn
+    except Exception:  # noqa: BLE001
+        pass
+    pose_dbg: dict = {}
+    cands = list(
+        pose_swing.detect_swings_from_pose(src_path, fps=fps, debug=pose_dbg)
+        or []
+    )
+    rep["stages"].append({
+        "n": 1, "name": "Pose candidates",
+        "detail": "wrist speed + spine bend, the detector produce uses",
+        "count": len(cands), "counts": "candidates",
+    })
+
+    n_flights = 0
+    for i, c in enumerate(cands):
+        peak_t = float(c.get("peak_time_sec") or 0.0)
+        imp_f = int(round(peak_t * fps))
+        f_lo = max(0, imp_f - d3.WIN_PRE)
+        f_hi = imp_f + d3.WIN_POST
+        entry: dict = {
+            "idx": i, "peak_time_sec": round(peak_t, 2),
+            "impact_frame": imp_f, "window": [f_lo, f_hi],
+        }
+
+        # Ball at impact: the club-arc vertex on the ground line at the
+        # feet. Shared with Debug2 on purpose — a different flight-finder
+        # judged against the same origin is the comparison worth having.
+        club = d2.club_bottom_ball(
+            src_path, imp_f, fps,
+            hint_xy=c.get("impact_wrist_xy"),
+            feet_xy=c.get("impact_feet_xy"),
+            head_xy=c.get("impact_head_xy"),
+            debug_dir=CLIPS_DIR,
+            debug_prefix=f"d3ball-{upload_id}-{tok}-{i}",
+        )
+        entry["ball"] = club.get("xy")
+        entry["ball_reason"] = club.get("reason")
+        entry["ball_image_url"] = _clip_url(club.get("image"))
+
+        # A-C: per-frame detections.
+        det = d3.detect_ball_blobs(
+            src_path, f_lo, f_hi,
+            debug_dir=CLIPS_DIR,
+            debug_prefix=f"d3blob-{upload_id}-{tok}-{i}",
+        )
+        entry["detect_reason"] = det.get("reason")
+        entry["detect_stats"] = det.get("stats")
+        entry["max_area"] = det.get("max_area")
+        entry["max_side"] = det.get("max_side")
+        entry["n_at_strict_cap"] = det.get("n_at_strict_cap")
+        # The raw area list is thousands of ints; summarise it. It is the
+        # number to look at when deciding the cap is wrong.
+        _areas = det.get("areas") or []
+        if _areas:
+            _a = sorted(_areas)
+            entry["area_summary"] = {
+                "n": len(_a),
+                "median": _a[len(_a) // 2],
+                "p90": _a[int(0.90 * (len(_a) - 1))],
+                "max": _a[-1],
+            }
+        entry["frame_image_url"] = _clip_url(
+            (det.get("images") or {}).get("frame"))
+        entry["dets_image_url"] = _clip_url(
+            (det.get("images") or {}).get("dets"))
+
+        # D: tracks.
+        tracks = d3.build_tracks(det.get("dets") or [], _r)
+        entry["n_tracks"] = len(tracks)
+        entry["tracks_preview"] = [
+            {"n": len(t["points"]), "span_px": t["span_px"],
+             "rise_px": t["rise_px"],
+             "frames": [t["points"][0]["frame"], t["points"][-1]["frame"]]}
+            for t in tracks[:6]
+        ]
+
+        # E: RANSAC parabola + the flight tests.
+        res = d3.pick_flight(
+            tracks, imp_f, club.get("xy"), frame_w=_fw, r=_r,
+        )
+        entry["flight_reason"] = res.get("reason")
+        entry["tried"] = res.get("tried")
+        fit = res.get("fit") or {}
+        entry["fit"] = {
+            "n_inliers": fit.get("n_inliers"),
+            "rms_px": fit.get("rms_px"),
+            "aim_px": fit.get("aim_px"),
+            "at_impact": fit.get("at_impact"),
+        } if fit else None
+        # The inliers ARE the tracer points — outliers are excluded on
+        # purpose, that is what the RANSAC pass is for.
+        entry["flight"] = [
+            {"frame": p["frame"], "x": int(p["x"]), "y": int(p["y"])}
+            for p in (fit.get("inliers") or [])
+        ]
+        if res.get("ok"):
+            n_flights += 1
+
+        _canvas = (det.get("images") or {}).get("dets")
+        if _canvas and (CLIPS_DIR / _canvas).exists():
+            nm = f"d3flight-{upload_id}-{tok}-{i}.jpg"
+            if d3.draw_flight(
+                CLIPS_DIR / _canvas, CLIPS_DIR / nm, club.get("xy"),
+                tracks, (res.get("flight") or {}).get("track"),
+                fit or None,
+                f"f{f_lo}-{f_hi}: {res.get('reason')} "
+                f"(green=inliers, red x=outliers, amber=fitted parabola, "
+                f"magenta=where it says impact was, grey=rejected tracks)",
+            ):
+                entry["flight_image_url"] = _clip_url(nm)
+        rep["swings"].append(entry)
+
+    rep["stages"].extend([
+        {"n": 2, "name": "Ball at impact",
+         "detail": "club-arc vertex on the ground line at the feet",
+         "count": sum(1 for s in rep["swings"] if s.get("ball")),
+         "counts": "balls located"},
+        {"n": 3, "name": "MOG2 + component + area filter",
+         "detail": "big blobs become a golfer mask; only ball-sized "
+                   "off-body blobs survive",
+         "count": sum((s.get("detect_stats") or {}).get("kept", 0)
+                      for s in rep["swings"]),
+         "counts": "detections kept"},
+        {"n": 4, "name": "Nearest-neighbour tracking",
+         "detail": "constant-velocity prediction with a gate that widens "
+                   "on a missed frame",
+         "count": sum(s.get("n_tracks", 0) for s in rep["swings"]),
+         "counts": "tracks built"},
+        {"n": 5, "name": "RANSAC parabola + flight tests",
+         "detail": "x linear in t, y quadratic; must rise and must point "
+                   "back at the ball",
+         "count": n_flights, "counts": "flights accepted"},
+    ])
+    return rep
+
+
 # ── Email setup + test send ────────────────────────────────────────────
 
 @router.get("/email-status")

@@ -509,6 +509,15 @@ export const api = {
       adminPassword: key,
       timeoutMs: 10 * 60_000,
     }),
+
+  debug3: (key, uploadId) =>
+    // The blob-and-track method. Per-frame MOG2 over the whole flight
+    // window for every candidate, so if anything it is slower than debug2.
+    request(`/api/admin/long-uploads/${uploadId}/debug3`, {
+      method: "POST",
+      adminPassword: key,
+      timeoutMs: 10 * 60_000,
+    }),
   emailStatus: (key) =>
     request("/api/admin/email-status", { adminPassword: key }),
   emailSendTemplates: (key, to) =>

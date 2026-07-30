@@ -2943,6 +2943,227 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
 }
 
 /**
+ * Debug3 report — the blob-and-track method. Where Debug2 reads the shape
+ * the swing draws in a motion composite, this one never looks at a
+ * composite: per-frame MOG2, drop the golfer, keep ball-sized blobs, link
+ * them over time, fit a parabola. Read-only, so nothing to save.
+ */
+function Debug3Modal({ state, onClose }) {
+  if (!state) return null;
+  const rep = state.report;
+  const Img = ({ url, cap }) =>
+    url ? (
+      <figure style={{ margin: "8px 0" }}>
+        <a href={url} target="_blank" rel="noreferrer">
+          <img src={url} alt={cap} style={{ width: "100%", borderRadius: 6 }} />
+        </a>
+        <figcaption className="tiny muted" style={{ marginTop: 4 }}>{cap}</figcaption>
+      </figure>
+    ) : null;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)",
+        display: "flex", alignItems: "flex-start", justifyContent: "center",
+        zIndex: 1000, padding: 16, overflow: "auto",
+      }}
+    >
+      <div
+        className="card"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 1200, width: "100%", margin: 0 }}
+      >
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <b>🧿 Debug3 — upload #{state.uploadId}</b>
+          <button type="button" className="ghost small"
+            style={{ width: "auto" }} onClick={onClose}>
+            Close ✕
+          </button>
+        </div>
+
+        {state.running && (
+          <div style={{ marginTop: 10 }}>
+            <div className="small">
+              <span
+                className="shimmer"
+                style={{
+                  display: "inline-block", width: 12, height: 12,
+                  borderRadius: "50%", marginRight: 8,
+                  verticalAlign: "middle",
+                }}
+              />
+              Running — one synchronous pass. This one runs MOG2 on every
+              frame of every candidate&apos;s flight window, so it is slower
+              than Debug2.
+            </div>
+            <ol className="tiny muted" style={{ marginTop: 8, paddingLeft: 18 }}>
+              <li>Pose candidates — wrist speed + spine bend</li>
+              <li>Ball at impact — club-arc vertex on the ground line</li>
+              <li>MOG2 → connected components → golfer masked → ball-sized blobs kept</li>
+              <li>Link detections across frames (constant velocity + gate)</li>
+              <li>RANSAC parabola, then: must rise, must point back at the ball</li>
+            </ol>
+          </div>
+        )}
+        {state.error && (
+          <div className="err-text small" style={{ marginTop: 8 }}>
+            {state.error}
+          </div>
+        )}
+
+        {rep?.stages?.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            {rep.stages.map((st) => (
+              <div key={st.n} className="small"
+                style={{
+                  display: "flex", gap: 10, padding: "6px 0",
+                  borderBottom: "1px solid var(--line)",
+                }}
+              >
+                <b style={{ minWidth: 18 }}>{st.n}</b>
+                <div style={{ flex: 1 }}>
+                  <b>{st.name}</b>
+                  <div className="tiny muted">{st.detail}</div>
+                </div>
+                <div style={{ textAlign: "right", minWidth: 120 }}>
+                  <b>{st.count}</b>
+                  <div className="tiny muted">{st.counts}</div>
+                </div>
+              </div>
+            ))}
+            <div className="tiny muted" style={{ marginTop: 6 }}>
+              {rep.frame?.[0]}×{rep.frame?.[1]} @ {rep.fps}fps · ball scale
+              r = {rep.r_px}px
+            </div>
+          </div>
+        )}
+
+        {(rep?.swings || []).map((sw) => (
+          <div key={sw.idx} className="card"
+            style={{ marginTop: 14, background: "var(--surface-2)" }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <b>Candidate {sw.idx + 1} · {sw.peak_time_sec}s</b>
+              <span className={`pill ${sw.flight?.length ? "ok" : "warn"}`}>
+                {sw.flight?.length
+                  ? `${sw.flight.length} tracer points`
+                  : "no flight"}
+              </span>
+            </div>
+            <div className="tiny muted" style={{ marginTop: 2 }}>
+              impact frame {sw.impact_frame} · window f{sw.window?.[0]}–
+              f{sw.window?.[1]}
+            </div>
+
+            <div className="small" style={{ marginTop: 10 }}>
+              <b>Ball at impact:</b>{" "}
+              {sw.ball ? `(${sw.ball[0]}, ${sw.ball[1]})` : "not found"}
+              <div className="tiny muted">{sw.ball_reason}</div>
+            </div>
+            <Img url={sw.ball_image_url}
+              cap="Stage 2 — club arc in the ground band at the feet; green is the vertex" />
+
+            <div className="small" style={{ marginTop: 10 }}>
+              <b>Detections:</b> {sw.detect_reason}
+              {sw.area_summary && (
+                <div className="tiny muted">
+                  blob areas: n={sw.area_summary.n} · median=
+                  {sw.area_summary.median}px · p90={sw.area_summary.p90}px ·
+                  max={sw.area_summary.max}px — cap in use {sw.max_area}px,
+                  max side {sw.max_side}px
+                  {sw.n_at_strict_cap != null && (
+                    <> · a flat 30px cap would have kept {sw.n_at_strict_cap}</>
+                  )}
+                </div>
+              )}
+            </div>
+            <Img url={sw.frame_image_url}
+              cap="Stage 3 — one frame classified: red is the golfer mask (excluded), green are ball-sized blobs kept" />
+            <Img url={sw.dets_image_url}
+              cap="Stage 3 — every kept detection over the window, blue early to red late" />
+
+            <div className="small" style={{ marginTop: 10 }}>
+              <b>Tracks:</b> {sw.n_tracks} built
+              {(sw.tracks_preview || []).length > 0 && (
+                <table className="tiny" style={{ width: "100%", marginTop: 4 }}>
+                  <thead>
+                    <tr>
+                      <th align="left">points</th>
+                      <th align="left">frames</th>
+                      <th align="right">span</th>
+                      <th align="right">rise</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sw.tracks_preview.map((t, k) => (
+                      <tr key={k}>
+                        <td>{t.n}</td>
+                        <td>f{t.frames?.[0]}–{t.frames?.[1]}</td>
+                        <td align="right">{t.span_px}px</td>
+                        <td align="right">{t.rise_px}px</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="small" style={{ marginTop: 10 }}>
+              <b>Flight:</b> {sw.flight_reason}
+              {sw.fit && (
+                <div className="tiny muted">
+                  {sw.fit.n_inliers} inliers · rms {sw.fit.rms_px}px · aims{" "}
+                  {sw.fit.aim_px}px from the ball · says impact was at (
+                  {sw.fit.at_impact?.[0]}, {sw.fit.at_impact?.[1]})
+                </div>
+              )}
+              {(sw.tried || []).length > 0 && (
+                <details style={{ marginTop: 6 }}>
+                  <summary className="tiny muted">
+                    every track that was tested ({sw.tried.length})
+                  </summary>
+                  <table className="tiny" style={{ width: "100%", marginTop: 4 }}>
+                    <thead>
+                      <tr>
+                        <th align="left">pts</th>
+                        <th align="right">inliers</th>
+                        <th align="right">rise</th>
+                        <th align="right">aim</th>
+                        <th align="left">verdict</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sw.tried.map((t, k) => (
+                        <tr key={k}
+                          style={{
+                            color: String(t.verdict || "").startsWith("accepted")
+                              ? "var(--emerald-700)" : undefined,
+                          }}
+                        >
+                          <td>{t.n_points}</td>
+                          <td align="right">{t.n_inliers}</td>
+                          <td align="right">{t.rise_px}</td>
+                          <td align="right">{t.aim_px}</td>
+                          <td>{t.verdict}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </details>
+              )}
+            </div>
+            <Img url={sw.flight_image_url}
+              cap="Stage 5 — green inliers, red × outliers, amber the fitted parabola, magenta where the curve says impact was, grey the rejected tracks" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Debug2 report — the five stages, each showing its own work. Read-only:
  * the run writes evidence images and changes no swing data, so this
  * modal has nothing to save.
@@ -6901,6 +7122,8 @@ export default function AdminProduction() {
   // Debug2 report — kept in memory only; the run writes images but
   // changes no swing data, so there is nothing to persist.
   const [d2, setD2] = useState(null);
+  // Debug3 report — same deal: images on disk, no swing data touched.
+  const [d3, setD3] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -6930,6 +7153,26 @@ export default function AdminProduction() {
       });
     } catch (e) {
       setD2({
+        running: false, uploadId: row.id, report: null, error: e.message,
+      });
+    } finally {
+      setBusyId((cur) => (cur === row.id ? null : cur));
+    }
+  }
+
+  async function handleDebug3(row) {
+    // Window first, same reason as Debug2: a throw after this still leaves
+    // a visible panel carrying the error.
+    setD3({ running: true, uploadId: row.id, report: null, error: null });
+    setBusyId(row.id);
+    try {
+      const rep = await api.debug3(adminPassword, row.id);
+      setD3({
+        running: false, uploadId: row.id, report: rep,
+        error: rep?.ok === false ? rep.error : null,
+      });
+    } catch (e) {
+      setD3({
         running: false, uploadId: row.id, report: null, error: e.message,
       });
     } finally {
@@ -7631,6 +7874,16 @@ export default function AdminProduction() {
                     🔬 Debug2
                   </button>
                 )}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
+                    onClick={() => handleDebug3(row)}
+                    disabled={busy}
+                    title="Dev: MOG2 per frame → drop the golfer → keep ball-sized blobs → link across frames → RANSAC parabola. A different method from Debug2; shows every stage."
+                  >
+                    🧿 Debug3
+                  </button>
+                )}
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
@@ -7722,6 +7975,7 @@ export default function AdminProduction() {
       )}
 
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
+      {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
     </div>
   );
 }
