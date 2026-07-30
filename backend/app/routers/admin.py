@@ -9008,11 +9008,16 @@ def _trace_segment(
     # HARD overrides, and launch_points already flow through tracer_info
     # into edit_metrics, which is what click-to-plot reads.
     #
-    # An explicitly pinned swing (the departure detector, or an operator)
-    # still wins -- this only fills in when nothing else has.
+    # DEBUG3 WINS over the departure pin. This was written to defer to any
+    # existing anchor, which meant a re-produce -- where seg["ball_rest_xy"]
+    # is already filled in from the departure detector -- skipped Debug3
+    # entirely and re-rendered an identical clip. Deferring was wrong on the
+    # merits too: the departure detector is the component that put the ball
+    # on a golfer's trainer, 120px from the real one. Operator marks are
+    # applied later, through the Edit wizard and click-to-plot, so nothing
+    # hand-made is overridden here.
     _d3 = None
-    if (settings.debug3_tracer and verified_impact_frame is None
-            and not verified_rest_xy):
+    if settings.debug3_tracer:
         try:
             from ..services import debug3 as _d3mod
             from ..services import pose_swing as _ps
@@ -9034,6 +9039,7 @@ def _trace_segment(
                 impact_frame=_imp, head_xy=_hd, feet_xy=_ft,
             )
             if _d3.get("ok"):
+                _was = (verified_rest_xy, verified_impact_frame)
                 verified_rest_xy = tuple(_d3["ball"])
                 verified_impact_frame = int(_d3["launch_frame"])
                 launch_points = [
@@ -9041,7 +9047,10 @@ def _trace_segment(
                      "y": float(z["y"])}
                     for z in _d3.get("points") or []
                 ]
-                log.info("debug3 tracer: %s", _d3.get("reason"))
+                log.info(
+                    "debug3 tracer: %s (replaced rest=%s impact=%s)",
+                    _d3.get("reason"), _was[0], _was[1],
+                )
             else:
                 log.info("debug3 tracer: no flight (%s) -- falling back",
                          _d3.get("reason"))
