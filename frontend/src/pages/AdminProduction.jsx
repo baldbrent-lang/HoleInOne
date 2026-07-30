@@ -7511,8 +7511,10 @@ export default function AdminProduction() {
     // Once the worker owns it, the status badge carries the state and the
     // local flag has done its job. Also release if the run already finished
     // (fast swings), so the row cannot stick.
-    if (ev.status === "processing" || ev.status === "processed"
-        || ev.status === "failed") {
+    // Only "processing" -- see the note on the upload effect above: the
+    // event is already "processed" when the operator clicks, so accepting
+    // terminal states here cleared busy immediately.
+    if (ev.status === "processing") {
       setBusyEventId(null);
     }
   }, [events, busyEventId]);
@@ -7625,9 +7627,12 @@ export default function AdminProduction() {
     if (busyId == null) return;
     const r = (rows || []).find((x) => x.id === busyId);
     if (!r) return;
-    if (r.processing_status === "processing"
-        || r.processing_status === "completed"
-        || r.processing_status === "failed") {
+    // ONLY "processing". Including the terminal states was the bug: the
+    // row is ALREADY "completed" from its last run at the moment you click
+    // Re-Produce, so this effect fired on the very next render and cleared
+    // busy instantly -- which is the flicker. Wait for the worker to
+    // actually claim it.
+    if (r.processing_status === "processing") {
       setBusyId(null);
     }
   }, [rows, busyId]);
