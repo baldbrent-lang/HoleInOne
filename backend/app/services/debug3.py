@@ -728,6 +728,7 @@ def refine_ball_from_flight(
     fit: dict,
     impact_frame: int,
     r: float,
+    ground_y: float | None = None,
     search_r: float = 5.0,
     look_back: int = 14,
     debug_dir: Path | None = None,
@@ -751,12 +752,41 @@ def refine_ball_from_flight(
     Returns {ok, xy, moved_px, seen_in, spread_px, reason, image}.
     """
     out = {"ok": False, "xy": None, "moved_px": None, "seen_in": 0,
-           "spread_px": None, "reason": None, "image": None}
+           "spread_px": None, "reason": None, "image": None,
+           "launch_frame": None, "from": None}
     if not HAS_CV or not fit or not fit.get("at_impact"):
         out["reason"] = "no fitted flight to search from"
         return out
     try:
         bx, by = float(fit["at_impact"][0]), float(fit["at_impact"][1])
+        f_ball = int(impact_frame)
+        out["from"] = "the impact frame"
+        # WHERE THE FLIGHT MEETS THE GROUND, not where it is at a guessed
+        # impact frame. The pose peak is maximum wrist speed, which is only
+        # approximately impact -- and if it is off by a few frames the
+        # parabola evaluated there lands in mid-air, where any static branch
+        # or gap of sky passes a "stationary bright blob" test. A ball at
+        # rest is on the ground, so solve for the ground crossing.
+        _co = (fit or {}).get("coef") or {}
+        if ground_y is not None and _co.get("y") and _co.get("x"):
+            a, b, c0 = (float(v) for v in _co["y"])
+            if abs(a) > 1e-9:
+                disc = b * b - 4.0 * a * (c0 - float(ground_y))
+                if disc >= 0.0:
+                    # y opens upward in image coordinates (the ball rises,
+                    # y falls, then it comes back down), so the EARLIER root
+                    # is the launch and the later one is the landing.
+                    t_lo = (-b - math.sqrt(disc)) / (2.0 * a)
+                    t_hi = (-b + math.sqrt(disc)) / (2.0 * a)
+                    t_g = min(t_lo, t_hi)
+                    gx = float(np.polyval(_co["x"], t_g))
+                    # Only trust it if it lands somewhere sane: within the
+                    # frame and not miles from the assumed impact frame.
+                    if abs(t_g - impact_frame) <= 60:
+                        bx, by = gx, float(ground_y)
+                        f_ball = int(round(t_g))
+                        out["from"] = "where the flight meets the ground"
+        out["launch_frame"] = f_ball
         box = max(18.0, search_r * r)
         cap = cv2.VideoCapture(str(input_path))
         if not cap.isOpened():
@@ -773,8 +803,8 @@ def refine_ball_from_flight(
             return out
         # BEFORE impact only: after it, the ball is gone and the club is
         # sweeping through.
-        f0 = max(0, int(impact_frame) - look_back)
-        f1 = max(f0, int(impact_frame) - 2)
+        f0 = max(0, f_ball - look_back)
+        f1 = max(f0, f_ball - 2)
         cap.set(cv2.CAP_PROP_POS_FRAMES, f0)
         area_max, _side = ball_area_cap(H)
         hits: list[tuple[float, float]] = []
@@ -845,13 +875,23 @@ def refine_ball_from_flight(
                 f"{len(hits)} frames -- not a ball at rest"
             )
             return out
+        # A ball at rest is ON THE GROUND. Whatever was found in the sky is
+        # a branch or a gap between leaves -- both perfectly stationary, both
+        # perfectly bright, neither a golf ball. This is the guard that would
+        # have caught a marker sitting 400px above the turf.
+        if ground_y is not None and abs(my - float(ground_y)) > 4.0 * r:
+            out["reason"] = (
+                f"the blob found is {abs(my - float(ground_y)):.0f}px off "
+                f"the ground line at the feet -- not a ball at rest"
+            )
+            return out
         out["ok"] = True
         out["xy"] = [int(round(mx)), int(round(my))]
         out["moved_px"] = round(math.hypot(mx - bx, my - by), 1)
         out["reason"] = (
             f"stationary bright blob in {len(hits)} of {f1 - f0 + 1} frames "
-            f"before impact, spread {spread:.1f}px, "
-            f"{out['moved_px']}px from where the flight said to look"
+            f"before f{f_ball}, spread {spread:.1f}px, {out['moved_px']}px "
+            f"from where the flight said to look ({out['from']})"
         )
         if debug_dir is not None and first_crop is not None:
             z = 6

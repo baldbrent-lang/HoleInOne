@@ -11810,8 +11810,11 @@ def _debug3_run(row, src_path, db, progress=None):
         # in the frames before impact. Nothing that is not in the box can
         # win it -- which is how a white trainer beat the blind detector.
         if res.get("ok"):
+            _feet = c.get("impact_feet_xy")
             _ref = d3.refine_ball_from_flight(
                 src_path, res.get("fit") or {}, imp_f, _r,
+                ground_y=(float(_feet[1]) if _feet and len(_feet) == 2
+                          else None),
                 debug_dir=CLIPS_DIR,
                 debug_prefix=f"d3ref-{upload_id}-{tok}-{i}",
             )
@@ -11821,6 +11824,8 @@ def _debug3_run(row, src_path, db, progress=None):
                 "moved_px": _ref.get("moved_px"),
                 "seen_in": _ref.get("seen_in"),
                 "spread_px": _ref.get("spread_px"),
+                "launch_frame": _ref.get("launch_frame"),
+                "from": _ref.get("from"),
             }
             entry["refine_image_url"] = _clip_url(_ref.get("image"))
             if _ref.get("ok"):
