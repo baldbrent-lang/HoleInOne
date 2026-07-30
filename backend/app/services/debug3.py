@@ -131,7 +131,14 @@ GATE_SPEED_FRAC = 0.25
 # aim becomes a reported disagreement rather than a veto, and the panel says
 # the ball position is the thing to doubt.
 SELF_EVIDENT_INLIERS = 8
-SELF_EVIDENT_RMS_PX = 4.0
+# Residual budget for "this is obviously a flight". A flat 4px came from
+# synthetic footage, where the fit lands at 0.9px because the ball is a
+# clean disc on a clean background. A real ball smears at speed and its
+# MOG2 centroid jitters, so the honest test is whether the residual is
+# small COMPARED TO THE TRACK -- scale-free, and it does not punish a long
+# flight for being long.
+SELF_EVIDENT_RMS_R = 0.6        # of the ball scale r
+SELF_EVIDENT_RMS_SPAN = 0.02    # of the track's own span
 SELF_EVIDENT_RISE_FRAC = 0.15      # of frame height
 SELF_EVIDENT_SPAN_FRAC = 0.15      # of frame width
 
@@ -932,9 +939,12 @@ def pick_flight(
             # that starts far away, which is where the test does real work.
             limit = min(max(120.0, 0.20 * float(frame_w)),
                         max(6.0 * r, 0.30 * d0))
+            _rms_budget = max(SELF_EVIDENT_RMS_R * r,
+                              SELF_EVIDENT_RMS_SPAN * float(tr["span_px"]))
+            rec["rms_budget"] = round(_rms_budget, 1)
             _self_evident = (
                 fit["n_inliers"] >= SELF_EVIDENT_INLIERS
-                and (fit["rms_px"] or 99.0) <= SELF_EVIDENT_RMS_PX
+                and (fit["rms_px"] or 99.0) <= _rms_budget
                 and tr["rise_px"] >= SELF_EVIDENT_RISE_FRAC * float(frame_h)
                 and tr["span_px"] >= SELF_EVIDENT_SPAN_FRAC * float(frame_w)
             )
@@ -1007,7 +1017,9 @@ def pick_flight(
         if near:
             detail = (
                 f". Closest: {near['n_points']} points, "
-                f"{near['n_inliers']} inliers, rises {near['rise_px']}px, "
+                f"{near['n_inliers']} inliers, rms {near.get('rms_px')}px "
+                f"(budget {near.get('rms_budget')}), spans "
+                f"{near.get('span_px')}px, rises {near['rise_px']}px, "
                 f"aims {near['aim_px']}px from the ball -- "
                 f"{near.get('verdict')}"
             )
