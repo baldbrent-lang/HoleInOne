@@ -7519,6 +7519,12 @@ export default function AdminProduction() {
     }
   }, [events, busyEventId]);
 
+  useEffect(() => {
+    if (busyEventId == null) return undefined;
+    const t = setTimeout(() => setBusyEventId(null), 180_000);
+    return () => clearTimeout(t);
+  }, [busyEventId]);
+
   async function handleDeleteEvent(ev) {
     if (!confirm(
       `Delete camera event #${ev.id}? This removes the raw tee/green clips and the produced clip.`,
@@ -7636,6 +7642,14 @@ export default function AdminProduction() {
       setBusyId(null);
     }
   }, [rows, busyId]);
+
+  // Failsafe: never leave a card greyed for good if the worker dies before
+  // it claims the row, or crashes without setting a status.
+  useEffect(() => {
+    if (busyId == null) return undefined;
+    const t = setTimeout(() => setBusyId(null), 180_000);
+    return () => clearTimeout(t);
+  }, [busyId]);
 
   if (!adminPassword) {
     return (
