@@ -11799,9 +11799,10 @@ def _debug3_run(row, src_path, db, progress=None):
 
         # E: RANSAC parabola + the flight tests.
         res = d3.pick_flight(
-            tracks, imp_f, _ball, frame_w=_fw, r=_r,
+            tracks, imp_f, _ball, frame_w=_fw, frame_h=_fh, r=_r,
         )
         entry["flight_reason"] = res.get("reason")
+        entry["aim_disagrees"] = bool(res.get("aim_disagrees"))
         entry["tried"] = res.get("tried")
         fit = res.get("fit") or {}
         entry["fit"] = {

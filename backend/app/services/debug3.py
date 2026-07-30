@@ -122,6 +122,19 @@ ACQUIRE_GATE_R = 12.0
 # the ball or too loose for everything else.
 GATE_SPEED_FRAC = 0.25
 
+# A track this good does not need the ball's permission. The aim test exists
+# to reject noise, but a long run of detections lying on a parabola, rising
+# most of the frame, IS a ball flight -- it is stronger evidence than a rest
+# detection that may have locked onto a white shoe. Observed: a 33-point
+# track with 26 inliers rising 374px was thrown out for aiming 262px from a
+# ball marker sitting on the golfer's trainer. When a track clears these,
+# aim becomes a reported disagreement rather than a veto, and the panel says
+# the ball position is the thing to doubt.
+SELF_EVIDENT_INLIERS = 8
+SELF_EVIDENT_RMS_PX = 4.0
+SELF_EVIDENT_RISE_FRAC = 0.15      # of frame height
+SELF_EVIDENT_SPAN_FRAC = 0.15      # of frame width
+
 # Seed points for the parabola RANSAC. 14 gives C(14,3) = 364 candidate
 # fits, which is fast and plenty for a curve with three parameters.
 RANSAC_SEED_PTS = 14
@@ -708,6 +721,7 @@ def pick_flight(
     impact_frame: int,
     ball_xy=None,
     frame_w: int = 1920,
+    frame_h: int = 1080,
     r: float = 12.0,
 ) -> dict:
     """Score every track's RANSAC fit and return the best real flight.
@@ -766,13 +780,29 @@ def pick_flight(
             # that starts far away, which is where the test does real work.
             limit = min(max(120.0, 0.20 * float(frame_w)),
                         max(6.0 * r, 0.30 * d0))
-            if fit["aim_px"] > limit:
+            _self_evident = (
+                fit["n_inliers"] >= SELF_EVIDENT_INLIERS
+                and (fit["rms_px"] or 99.0) <= SELF_EVIDENT_RMS_PX
+                and tr["rise_px"] >= SELF_EVIDENT_RISE_FRAC * float(frame_h)
+                and tr["span_px"] >= SELF_EVIDENT_SPAN_FRAC * float(frame_w)
+            )
+            if fit["aim_px"] > limit and not _self_evident:
                 rec["verdict"] = (
                     f"aims {fit['aim_px']:.0f}px from the ball "
                     f"(limit {limit:.0f})"
                 )
                 out["tried"].append(rec)
                 continue
+            if fit["aim_px"] > limit:
+                rec["aim_disagrees"] = True
+                rec["note"] = (
+                    f"accepted on its own fit despite aiming "
+                    f"{fit['aim_px']:.0f}px from the ball (limit "
+                    f"{limit:.0f}) -- {fit['n_inliers']} inliers on a "
+                    f"parabola at {fit['rms_px']}px rms, rising "
+                    f"{tr['rise_px']:.0f}px, is a flight. SUSPECT THE BALL "
+                    f"POSITION."
+                )
             # And the baseline has to support that aim — see Debug2: a
             # short run's back-projection is luck, not evidence.
             need = 2.0 * r * max(1.0, d0) / max(1.0, limit)
@@ -788,11 +818,15 @@ def pick_flight(
             + 2.0 * min(1.0, tr["span_px"] / max(1.0, 0.5 * float(frame_w)))
             - (fit["rms_px"] or 0.0) / 10.0
         )
-        rec["verdict"] = f"accepted, score {score:.2f}"
+        rec["verdict"] = (
+            f"accepted, score {score:.2f}"
+            + (" (aim disagrees)" if rec.get("aim_disagrees") else "")
+        )
         rec["score"] = round(score, 2)
         out["tried"].append(rec)
         if out["flight"] is None or score > out["flight"]["score"]:
-            out["flight"] = {"score": score, "track": tr, "fit": fit}
+            out["flight"] = {"score": score, "track": tr, "fit": fit,
+                             "note": rec.get("note")}
     if out["flight"] is None:
         # Say WHICH test rejected them, and how close the best one came.
         # "none survived" sends you back to the panel to expand a table; the
@@ -833,6 +867,10 @@ def pick_flight(
     out["ok"] = True
     out["fit"] = out["flight"]["fit"]
     out["reason"] = out["flight"]["fit"]["reason"]
+    _w = out["flight"].get("note")
+    if _w:
+        out["aim_disagrees"] = True
+        out["reason"] += ". " + _w
     return out
 
 
