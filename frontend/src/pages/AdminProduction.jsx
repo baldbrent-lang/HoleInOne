@@ -5477,7 +5477,17 @@ function CameraEventCard({
   // in a flex row on the left, status pill + action buttons stacked
   // vertically on the right — so the operator sees a consistent
   // language across both kinds of queue items.
-  const badge = eventStatusBadge(ev.status);
+  // Show "processing" the instant the operator clicks, not when the POST
+  // returns. ev.status is SERVER state, so it cannot change until the
+  // request completes and the list refetches -- about three seconds, during
+  // which the row looked untouched and the button looked unpressed.
+  const badge = busy
+    ? {
+        label: "Production in Progress",
+        bg: "rgba(214, 158, 46, 0.15)",
+        border: "rgba(214, 158, 46, 0.5)",
+      }
+    : eventStatusBadge(ev.status);
   const triggeredAt = ev.triggered_at;
   const teeStartsAt = triggeredAt;
   // Green starts ~5s before trigger because of pre-roll; we don't
