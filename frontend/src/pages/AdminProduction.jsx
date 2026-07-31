@@ -226,8 +226,14 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip
   // per-swing overlay (raw motion heat + AI picks + MOG2 chain/added
   // points) + the timed heat dots into edit_metrics.swings — clip
   // order matches swing order.
+  // A swing has something to plot if ANY of these carry points. Gating on
+  // the MOG2 overlay and timed points alone hid the button on every clip
+  // the debug3 engine produced, because that engine does not run the MOG2
+  // layer -- and ball_track_frames is exactly the track the editor draws.
   const hasEvidence = (s) =>
-    s?.mog2_overlay_url || (s?.timed_points || []).length > 0;
+    s?.mog2_overlay_url
+    || (s?.timed_points || []).length > 0
+    || (s?.ball_track_frames || []).length > 0;
   const withOverlay = (swings || []).filter(hasEvidence);
   // Match the SELECTED CLIP to its swing by the stored clip_id first —
   // positional (idx) matching breaks the moment a clip is deleted (the

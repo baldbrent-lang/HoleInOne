@@ -9095,6 +9095,17 @@ def _trace_segment(
                     "ok": True,
                     "engine": "debug3",
                     "ball_track_frames": _pts3,
+                    # timed_points is what the card's click-to-plot button
+                    # is gated on (hasEvidence in ProducedTile: an overlay
+                    # url OR timed points). The MOG2 layer used to fill it,
+                    # and that layer no longer runs -- so without this the
+                    # button silently disappears on every clip Debug3
+                    # produces. Same points, the shape the wizard expects.
+                    "timed_points": [
+                        {"frame": int(z["frame"]), "x": float(z["x"]),
+                         "y": float(z["y"])}
+                        for z in (_d3.get("points") or [])
+                    ],
                     "n_points": len(_pts3),
                     "impact_frame": int(_d3["launch_frame"]),
                     "ball": {"x": float(_d3["ball"][0]),
