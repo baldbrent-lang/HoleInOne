@@ -272,6 +272,19 @@ def _migrate() -> None:
         mlog.info("migrate: applied %d statement(s); connection pool reset", ran)
 
 
+def _sweep_d3_previews() -> None:
+    """Clear aged-out Debug3 preview clips at boot. Each run also sweeps
+    its own, but a run killed by a restart never got the chance."""
+    try:
+        from .routers.admin import sweep_d3_previews
+
+        n = sweep_d3_previews()
+        if n:
+            _glog.info("startup: swept %d stale d3clip preview(s)", n)
+    except Exception as exc:  # noqa: BLE001
+        _glog.warning("startup: d3clip sweep failed: %s", exc)
+
+
 def _reap_orphaned_jobs() -> None:
     """A backend restart kills any in-flight produce thread, but the
     LongVideoUpload row stays stuck at 'processing'/'pending' (the dead thread
@@ -364,6 +377,7 @@ def _startup() -> None:
     _heal_media_urls()
     _reap_orphaned_jobs()
     _remove_retired_courses()
+    _sweep_d3_previews()
     _seed_default_courses()
     _seed_showcase_slots()
     # Produce tee-only when a paired event's green half never arrives, so a

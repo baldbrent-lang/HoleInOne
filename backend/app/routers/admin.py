@@ -2983,10 +2983,64 @@ def _process_long_upload_segments(
     # Source fps, probed once — used to map each swing's segment-relative
     # ball track back into full-clip frame indices for the Edit wizard.
     _src_fps = probe_fps(src_path) or 30.0
+    # Native TEE frame size, probed once. Every consumer of the persisted
+    # pixel coords — click-to-plot (`p.x / frame_width`), the follow-the-
+    # shot crop, the Edit wizard — normalizes against edit_metrics
+    # .frame_width / tee_width, which are BOTH the native tee source size.
+    # The pipeline, however, measures on the cut, and the cut is not
+    # guaranteed to still be native (see _persist_swing_track).
+    _src_info = probe_video_info(src_path) or {}
+    _src_w = float(_src_info.get("width") or 0)
+    _src_h = float(_src_info.get("height") or 0)
+
+    def _reusable_clip(_db, swing_idx):
+        """The VideoClip a PREVIOUS produce run created for this swing,
+        so a re-produce UPDATES it rather than inserting a second row.
+
+        Re-produce wrote new files and a brand-new clip row every time
+        and left the old row untouched. The production card renders
+        `produced_clips[0]`; that list is ordered by captured_at alone,
+        and a re-produce of the same source computes the SAME
+        captured_at (base_dt + tee_cut_start) — so old and new tie and
+        the card kept showing whichever row the database happened to
+        return first, which is the older one. That is exactly why
+        re-uploading the same video "worked": a fresh upload has no
+        older row to tie with.
+
+        Updating the row the swing already points at fixes the card and
+        stops duplicates accumulating, and because the id survives so do
+        the clip's participant match, its highlight flag, and any link
+        already shared for it."""
+        if progress_upload_id is None:
+            return None
+        try:
+            _row = _db.get(LongVideoUpload, progress_upload_id)
+            if _row is None:
+                return None
+            for sw in (_row.edit_metrics or {}).get("swings") or []:
+                if not isinstance(sw, dict):
+                    continue
+                if int(sw.get("idx", -1)) != swing_idx:
+                    continue
+                _cid = sw.get("clip_id")
+                if _cid is None:
+                    return None
+                _c = _db.get(VideoClip, int(_cid))
+                # Only ever reuse a clip belonging to THIS upload — a
+                # stale/foreign id must fall through to a fresh insert.
+                if _c is not None and _c.long_upload_id == progress_upload_id:
+                    return _c
+                return None
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "re-produce: could not resolve the prior clip for swing "
+                "%s (%s) — inserting a new one", swing_idx, exc,
+            )
+        return None
 
     def _persist_swing_track(
         swing_idx, tracer_info, tracer_url, cut_start_sec, cut_end_sec=None,
-        clip_id=None,
+        clip_id=None, seg_path=None,
     ):
         """Save everything this swing's production run figured out into
         edit_metrics.swings, so the Edit wizard opens fully pre-populated
@@ -2997,12 +3051,55 @@ def _process_long_upload_segments(
 
         The pipeline runs on the CUT segment (frame 0 = the cut's start),
         so every FRAME index is shifted by the cut's start offset to land
-        in the full-clip frame space the wizard works in. Pixel coords
-        (ball x/y, track x/y) need no mapping — the cut trims time, not
-        space. An operator-marked ball (ball_manual) is never overwritten."""
+        in the full-clip frame space the wizard works in.
+
+        PIXEL coords need mapping too — the old comment here claimed "the
+        cut trims time, not space", and that is only true of cut_segment
+        itself. compress_for_email re-encodes IN PLACE through
+        `scale=min(1280,iw)`, and the single-camera branch calls it on the
+        segment BEFORE tracing it. On a 1920-wide tee source that leaves
+        every measured point in 1280-wide space while click-to-plot
+        divides by frame_width=1920 — so a dot at the true centre renders
+        at 33% instead of 50%, i.e. shifted left, worsening across the
+        frame. Scale detections back into the native tee space here so
+        there is exactly ONE pixel space in edit_metrics. Non-native cuts
+        are the exception, so the factor is normally 1.0 and this is a
+        no-op. An operator-marked ball (ball_manual) is never
+        overwritten."""
         if progress_upload_id is None or not tracer_info:
             return
         offset = int(round((cut_start_sec or 0.0) * _src_fps))
+        # Cut → native pixel scale. Probed off the segment as it stands
+        # NOW (i.e. after any in-place re-encode), not assumed.
+        _sx = _sy = 1.0
+        if seg_path is not None and _src_w > 0 and _src_h > 0:
+            try:
+                _seg_info = probe_video_info(seg_path) or {}
+                _seg_w = float(_seg_info.get("width") or 0)
+                _seg_h = float(_seg_info.get("height") or 0)
+                if _seg_w > 0 and _seg_h > 0:
+                    _sx, _sy = _src_w / _seg_w, _src_h / _seg_h
+            except Exception as exc:  # noqa: BLE001
+                log.warning("swing %s: cut probe failed (%s) — assuming "
+                            "native pixel space", swing_idx, exc)
+        _scaled = abs(_sx - 1.0) > 1e-6 or abs(_sy - 1.0) > 1e-6
+        if _scaled:
+            log.info(
+                "swing %s: cut is %.0fx%.0f vs native %.0fx%.0f — scaling "
+                "detections by (%.4f, %.4f) into tee pixel space",
+                swing_idx, _src_w / _sx, _src_h / _sy, _src_w, _src_h,
+                _sx, _sy,
+            )
+
+        # Cut-space → native-space. None passes through, and when the cut
+        # IS native the value is handed back untouched rather than
+        # round-tripped through float — the unscaled path stays exactly
+        # what it was before this mapping existed.
+        def _mx(v):
+            return v if (v is None or not _scaled) else float(v) * _sx
+
+        def _my(v):
+            return v if (v is None or not _scaled) else float(v) * _sy
         # AI engine emits ball_track_frames; the classical fallback emits
         # `track` ({frame,x,y} raw detections) — same shape after mapping.
         seg_frames = tracer_info.get("ball_track_frames") or []
@@ -3020,8 +3117,8 @@ def _process_long_upload_segments(
             mapped.append({
                 "frame": int(f) + offset,
                 "found": bool(rec.get("found")),
-                "x": rec.get("x"),
-                "y": rec.get("y"),
+                "x": _mx(rec.get("x")),
+                "y": _my(rec.get("y")),
                 "confidence": rec.get("confidence"),
                 "manual": bool(rec.get("manual", False)),
                 # 'mog2' when the point came from the MOG2 layer-in
@@ -3047,6 +3144,14 @@ def _process_long_upload_segments(
             if cut_end_sec is not None:
                 nsw["end_frame"] = int(round(float(cut_end_sec) * _src_fps))
             nsw["fps"] = round(_src_fps, 2)
+            # The pixel space the coords above are in, stated rather than
+            # implied. Always the native tee size after the scaling above;
+            # recorded so a consumer can assert it instead of guessing,
+            # and so a future mismatch shows up in the debug report.
+            if _src_w > 0 and _src_h > 0:
+                nsw["track_frame_width"] = int(_src_w)
+                nsw["track_frame_height"] = int(_src_h)
+                nsw["track_scaled_from_cut"] = _scaled
             # Stamp WHEN this record was written: the debug report's
             # production-tracer poll uses it to reject a previous run's
             # leftover entry (same swing idx, valid tracer_url) that
@@ -3082,8 +3187,8 @@ def _process_long_upload_segments(
                 and not nsw.get("ball_manual")
             ):
                 nsw["ball"] = {
-                    "x": int(round(float(_rest[0]))),
-                    "y": int(round(float(_rest[1]))),
+                    "x": int(round(_mx(_rest[0]))),
+                    "y": int(round(_my(_rest[1]))),
                 }
             if mapped:
                 nsw["ball_track_frames"] = mapped
@@ -3149,8 +3254,8 @@ def _process_long_upload_segments(
                 nsw["timed_points"] = [
                     {
                         "frame": int(p["frame"]) + offset,
-                        "x": int(round(float(p["x"]))),
-                        "y": int(round(float(p["y"]))),
+                        "x": int(round(_mx(p["x"]))),
+                        "y": int(round(_my(p["y"]))),
                     }
                     for p in _tp
                     if p.get("frame") is not None
@@ -3167,8 +3272,8 @@ def _process_long_upload_segments(
                 nsw["cand_points"] = [
                     {
                         "frame": int(p["frame"]) + offset,
-                        "x": int(round(float(p["x"]))),
-                        "y": int(round(float(p["y"]))),
+                        "x": int(round(_mx(p["x"]))),
+                        "y": int(round(_my(p["y"]))),
                     }
                     for p in _cp
                     if p.get("frame") is not None
@@ -3516,7 +3621,7 @@ def _process_long_upload_segments(
             _clip_holder: dict = {}
 
             def _insert_clip(_db):
-                _c = VideoClip(
+                _fields = dict(
                     course_id=course_id,
                     hole_number=hole_number,
                     camera_type=camera_type,
@@ -3540,7 +3645,19 @@ def _process_long_upload_segments(
                         ball_verdict=seg.get("ball_verdict"),
                     ),
                 )
-                _db.add(_c)
+                # Re-produce updates this swing's existing row in place
+                # (see _reusable_clip); only a first run inserts.
+                _c = _reusable_clip(_db, idx)
+                if _c is None:
+                    _c = VideoClip(**_fields)
+                    _db.add(_c)
+                else:
+                    for _k, _v in _fields.items():
+                        setattr(_c, _k, _v)
+                    log.info(
+                        "re-produce: swing %s updating clip %s in place",
+                        idx, _c.id,
+                    )
                 _db.flush()
                 participant = match_clip(_db, _c)
                 if participant and _c.ball_in_cup:
@@ -3570,7 +3687,7 @@ def _process_long_upload_segments(
                 tracer_info.setdefault("anchor_check", seg["anchor_rec"])
             _persist_swing_track(
                 idx, tracer_info, _tracer_url, tee_cut_start, tee_cut_end,
-                clip_id=clip.id,
+                clip_id=clip.id, seg_path=seg_path,
             )
 
             results.append(
@@ -3597,7 +3714,13 @@ def _process_long_upload_segments(
             continue
 
         # --- Single-camera (original) branch ----------------------
-        compress_for_email(seg_path)
+        # NOTE: compress_for_email(seg_path) runs AFTER the tracer, not
+        # before it. It re-encodes in place through scale=min(1280,iw),
+        # so calling it first handed the tracer a downscaled segment while
+        # the launch points fed IN (_lp_cut) and every consumer of the
+        # points coming OUT stayed in native tee pixels — the mismatch
+        # behind the left-shifted click-to-plot dots. The dual-camera
+        # branch above already traces before it compresses.
         thumb_path = extract_thumbnail(seg_path)
         thumb_url = (
             f"{settings.app_base_url}/uploads/clips/{thumb_path.name}"
@@ -3628,9 +3751,12 @@ def _process_long_upload_segments(
             ),
             launch_points=_lp_cut or None,
         )
+        # Now that nothing measures against it, shrink the segment for
+        # delivery (source_url below serves this exact file).
+        compress_for_email(seg_path)
 
         captured_dt = base_dt + timedelta(seconds=tee_cut_start)
-        clip = VideoClip(
+        _fields = dict(
             course_id=course_id,
             hole_number=hole_number,
             camera_type=camera_type,
@@ -3649,7 +3775,18 @@ def _process_long_upload_segments(
                 None, None, ball_verdict=seg.get("ball_verdict"),
             ),
         )
-        db.add(clip)
+        # Re-produce updates this swing's existing row in place (see
+        # _reusable_clip); only a first run inserts.
+        clip = _reusable_clip(db, idx)
+        if clip is None:
+            clip = VideoClip(**_fields)
+            db.add(clip)
+        else:
+            for _k, _v in _fields.items():
+                setattr(clip, _k, _v)
+            log.info(
+                "re-produce: swing %s updating clip %s in place", idx, clip.id,
+            )
         db.flush()
 
         participant = match_clip(db, clip)
@@ -3664,7 +3801,7 @@ def _process_long_upload_segments(
             tracer_info.setdefault("anchor_check", seg["anchor_rec"])
         _persist_swing_track(
             idx, tracer_info, tracer_url, tee_cut_start, tee_cut_end,
-            clip_id=clip.id,
+            clip_id=clip.id, seg_path=seg_path,
         )
 
         results.append(
@@ -4548,7 +4685,16 @@ def list_long_uploads(
         produced_rows = (
             db.query(VideoClip)
             .filter(VideoClip.long_upload_id.in_(upload_ids))
-            .order_by(VideoClip.captured_at.asc())
+            # captured_at alone is NOT a total order here: it is derived
+            # from the cut start, so every clip a re-produce made for the
+            # same swing carries the identical timestamp. Without a
+            # tiebreak the card (which renders produced_clips[0]) showed
+            # whichever of the tied rows the database felt like returning
+            # first — in practice the oldest, so a re-produce appeared to
+            # do nothing. New runs update in place rather than duplicate
+            # (see _reusable_clip), but rows that already piled up still
+            # need the newest to win its slot.
+            .order_by(VideoClip.captured_at.asc(), VideoClip.id.desc())
             .all()
         )
         for clip in produced_rows:
@@ -11850,12 +11996,69 @@ def debug3_status(upload_id: int):
     return _debugx_get("debug3", upload_id)
 
 
+# How long a d3clip-* preview stays on disk. They exist to be looked at
+# in the Debug3 panel during the run that made them; nothing links to one
+# afterwards, and a stale one is only ever a confusing older render.
+D3_PREVIEW_MAX_AGE_HOURS = 6
+
+
+def sweep_d3_previews(current_upload_id: int | None = None) -> int:
+    """Delete stale `d3clip-*.mp4` previews from CLIPS_DIR.
+
+    Stage 6 of a Debug3 run writes one preview clip PER SWING, named
+    d3clip-<upload>-<token>-<i>.mp4, with a fresh random token every run
+    — so re-running Debug3 on one upload left the previous run's files
+    behind forever. They are pure diagnostics (the shipped clip comes
+    from the produce path), nothing references them once the panel is
+    closed, and each is a full H.264 encode, so on a busy day they were
+    the largest thing in the directory.
+
+    Two rules, both safe to run at any time:
+      * anything older than D3_PREVIEW_MAX_AGE_HOURS goes;
+      * every preview belonging to `current_upload_id` goes regardless
+        of age, because the run about to start supersedes them.
+
+    Returns the number of files removed. Never raises — a sweep that
+    cannot delete must not take a Debug3 run or a boot down with it.
+    """
+    removed = 0
+    try:
+        cutoff = time.time() - D3_PREVIEW_MAX_AGE_HOURS * 3600
+        prefix = (
+            f"d3clip-{int(current_upload_id)}-"
+            if current_upload_id is not None else None
+        )
+        for path in CLIPS_DIR.glob("d3clip-*.mp4"):
+            try:
+                superseded = bool(prefix and path.name.startswith(prefix))
+                if not superseded and path.stat().st_mtime >= cutoff:
+                    continue
+                path.unlink(missing_ok=True)
+                removed += 1
+            except OSError as exc:
+                log.warning("d3clip sweep: could not remove %s: %s",
+                            path.name, exc)
+        if removed:
+            log.info(
+                "d3clip sweep: removed %d stale preview(s) (older than %dh"
+                "%s)", removed, D3_PREVIEW_MAX_AGE_HOURS,
+                f", plus upload {current_upload_id}'s previous run"
+                if current_upload_id is not None else "",
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3clip sweep failed: %s", exc)
+    return removed
+
+
 def _debug3_run(row, src_path, db, progress=None):
     upload_id = row.id
     from ..services import debug2 as d2
     from ..services import debug3 as d3
     from ..services import pose_swing
 
+    # This run's previews replace the last run's — clear them (and
+    # anything else that has aged out) before writing more.
+    sweep_d3_previews(current_upload_id=upload_id)
     tok = secrets.token_hex(3)
     fps = float(probe_fps(src_path) or 30.0)
 

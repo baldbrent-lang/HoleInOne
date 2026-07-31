@@ -451,8 +451,23 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [busyMsg, setBusyMsg] = useState(null);
   const [error, setError] = useState(null);
-  const frameW = row.edit_metrics?.frame_width ?? row.tee_width ?? null;
-  const frameH = row.edit_metrics?.frame_height ?? row.tee_height ?? null;
+  // THE PIXEL SPACE THE DOTS ARE IN — this swing's own, when produce
+  // recorded it. Every dot is placed by `p.x / frameW`, so frameW has to
+  // be the width the points were MEASURED at, not merely the width of
+  // the tee source. Those were assumed identical and are not: the
+  // pipeline measures on the cut segment, and a cut that has been
+  // re-encoded through compress_for_email is capped at 1280 on the long
+  // edge, which parks every dot at 1280/1920 of its true x — the whole
+  // plot shifted left, worse the further right the point. Produce now
+  // scales detections back to native and stamps the space it used;
+  // prefer that stamp, and fall back to the upload-level width for rows
+  // persisted before it existed.
+  const frameW =
+    swing.track_frame_width
+    ?? row.edit_metrics?.frame_width ?? row.tee_width ?? null;
+  const frameH =
+    swing.track_frame_height
+    ?? row.edit_metrics?.frame_height ?? row.tee_height ?? null;
   const bgUrl = swing.tracer_raw_motion_url || swing.mog2_overlay_url;
   // Resolve this swing's produced clip by IDENTITY (clip_id) first —
   // positional lookup goes stale as soon as a clip is deleted.
@@ -871,7 +886,14 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
             </div>
           )}
         </div>
-        <div className="tiny muted" style={{ marginTop: 6 }}>
+        {/* The legend is a dozen lines of prose that was pushing the map
+            up the screen on every open, long after the operator had read
+            it once. Collapsed by default; the map gets the height. */}
+        <details style={{ marginTop: 6 }}>
+        <summary className="tiny muted" style={{ cursor: "pointer" }}>
+          How this map works (legend &amp; shortcuts)
+        </summary>
+        <div className="tiny muted" style={{ marginTop: 4 }}>
           The green line is the swing&apos;s CURRENT saved tracer path —
           where the rendered tracer actually sits. Green dots are already
           in the saved ball track; amber are unused detections. Click a
@@ -889,6 +911,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           Save &amp; close re-renders the tracer with the changes (no AI
           calls) and updates the produced clip.
         </div>
+        </details>
 
         {Object.keys(marks).length > 0 && (
           <div
@@ -3757,8 +3780,10 @@ function PlotHeatCanvas({
         alignItems: "stretch",
       }}
     >
-      {/* Image area. The toolbar is a SIBLING rendered above it
-          (order:-1), so controls never cover the map. */}
+      {/* Image area — takes the whole box. The zoom / scan / pan controls
+          are absolutely positioned INSIDE it (see the overlay below)
+          rather than stacked above, so nothing but the map competes for
+          the modal's height. */}
       <div
         style={{
           position: "relative",
@@ -4068,6 +4093,8 @@ function PlotHeatCanvas({
             background: "rgba(0,0,0,0.55)", color: "#fde047",
             padding: "3px 10px", borderRadius: 6, fontSize: 12,
             pointerEvents: "none", backdropFilter: "blur(4px)",
+            // Stay clear of the control overlay in the opposite corner.
+            maxWidth: "min(55%, 520px)",
           }}
         >
           {scanNote
@@ -4075,15 +4102,26 @@ function PlotHeatCanvas({
             : `🔍 zoom to ${DENSE_DOT_ZOOM}×+ to reveal ${extraDots.length} more clickable detections`}
         </div>
       )}
-      </div>
+      {/* FLOATING CONTROLS. These used to be a SIBLING above the image
+          (order:-1) to keep them off the map, which cost the map a whole
+          toolbar's height on every screen — on a 16:9 frame in a 96vh
+          modal that is the difference between a comfortable click target
+          and a squint. Floating them bottom-right instead gives the map
+          the full box: they sit over the one corner the ball flight has
+          already left, they blur out what is behind them, and pointer
+          events stop here so a click on a button is never also a click
+          on the map. */}
       <div
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
         style={{
-          order: -1, alignSelf: "flex-end",
+          position: "absolute", right: 8, bottom: 8, zIndex: 30,
           display: "flex", gap: 6, flexWrap: "wrap",
-          background: "rgba(0,0,0,0.45)", padding: "4px 6px",
-          borderRadius: 6,
+          justifyContent: "flex-end", maxWidth: "calc(100% - 16px)",
+          background: "rgba(0,0,0,0.6)", padding: "5px 7px",
+          borderRadius: 8, backdropFilter: "blur(6px)",
+          border: "1px solid rgba(255,255,255,0.16)",
+          boxShadow: "0 4px 14px rgba(0,0,0,0.45)",
         }}
       >
         <button
@@ -4174,6 +4212,7 @@ function PlotHeatCanvas({
             title="Close this view"
           >Close</button>
         )}
+      </div>
       </div>
     </div>
   );
