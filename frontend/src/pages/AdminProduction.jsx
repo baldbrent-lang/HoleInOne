@@ -3303,26 +3303,57 @@ function Debug3Modal({ state, onClose }) {
                       <tr>
                         <th align="left">pts</th>
                         <th align="right">inliers</th>
+                        <th align="right">span</th>
                         <th align="right">rise</th>
-                        <th align="right">aim</th>
+                        {/* Shape: a ball rises, peaks once, falls. ↑↓ is
+                            the apex count, ↓↑ the physically impossible
+                            reversal. mono 1.0 = a clean profile. */}
+                        <th align="right" title="rise→fall (apex) / fall→rise (impossible)">↑↓ / ↓↑</th>
+                        <th align="right" title="1.0 is a clean rise-peak-fall profile">mono</th>
+                        <th align="right" title="net displacement ÷ path length; ~0 wanders in place">direct</th>
+                        <th align="right">score</th>
+                        {/* What the old count-driven formula would have
+                            picked — shown so a disagreement is visible
+                            rather than silent. */}
+                        <th align="right" title="the old score: 2×inliers + capped span − rms/10">was</th>
                         <th align="left">verdict</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {sw.tried.map((t, k) => (
+                      {sw.tried.map((t, k) => {
+                        const accepted = String(t.verdict || "").startsWith("accepted");
+                        // Flag rows the two formulas rank differently.
+                        const best = sw.tried.reduce((a, b) =>
+                          (b.score ?? -1e9) > (a.score ?? -1e9) ? b : a, sw.tried[0]);
+                        const bestLegacy = sw.tried.reduce((a, b) =>
+                          (b.score_legacy ?? -1e9) > (a.score_legacy ?? -1e9) ? b : a, sw.tried[0]);
+                        const flipped = best !== bestLegacy && t === bestLegacy;
+                        return (
                         <tr key={k}
                           style={{
-                            color: String(t.verdict || "").startsWith("accepted")
-                              ? "var(--emerald-700)" : undefined,
+                            color: accepted ? "var(--emerald-700)" : undefined,
+                            background: flipped
+                              ? "rgba(192,57,43,0.07)" : undefined,
                           }}
+                          title={flipped
+                            ? "the old score would have picked this one"
+                            : undefined}
                         >
                           <td>{t.n_points}</td>
                           <td align="right">{t.n_inliers}</td>
+                          <td align="right">{t.span_px}</td>
                           <td align="right">{t.rise_px}</td>
-                          <td align="right">{t.aim_px}</td>
+                          <td align="right">
+                            {t.n_rise_to_fall ?? "–"} / {t.n_fall_to_rise ?? "–"}
+                          </td>
+                          <td align="right">{t.monotonicity ?? "–"}</td>
+                          <td align="right">{t.directness ?? "–"}</td>
+                          <td align="right"><b>{t.score ?? "–"}</b></td>
+                          <td align="right" className="muted">{t.score_legacy ?? "–"}</td>
                           <td>{t.verdict}</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </details>

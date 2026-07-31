@@ -1260,6 +1260,78 @@ def refine_ball_from_flight(
         return out
 
 
+# A struck ball's vertical profile has ONE shape: it rises, it peaks, it
+# falls. It cannot resume rising. Everything below measures how far a
+# track departs from that.
+#
+# Deadband, as a fraction of the ball scale r, per frame. Detection
+# centroids jitter by a pixel or two; without this, a dead-flat noise
+# track and a real flight both look like they reverse constantly.
+SHAPE_DEADBAND_R = 0.15
+# Apex count. One rise→fall is the apex. More than one means the track
+# went up, came down, and went up again — not a ball.
+MAX_RISE_TO_FALL = 1
+# Falling and then rising again is the physically impossible one. Zero is
+# the honest answer; 1 is tolerated because a single mis-linked detection
+# near the apex can manufacture one.
+MAX_FALL_TO_RISE = 1
+
+
+def flight_shape(points: list, r: float) -> dict:
+    """How closely a track follows the one profile a struck ball can draw.
+
+    Image y is DOWN-positive, so rising is dy < 0.
+
+    Two guards keep this from firing on a real flight. Steps are
+    normalised by the frame gap (`dy/df`), so a missed frame reads as one
+    long step rather than a lurch; and steps below the deadband are
+    treated as flat and dropped, so centroid jitter is not a reversal.
+
+    Returns {n_rise_to_fall, n_fall_to_rise, monotonicity, directness,
+    n_steps}. `monotonicity` is 1.0 for a clean rise-peak-fall and falls
+    towards 0 as the track zig-zags; `directness` is net displacement
+    over path length — 1.0 for a straight line, ~0 for something that
+    wanders in place.
+    """
+    out = {"n_rise_to_fall": 0, "n_fall_to_rise": 0,
+           "monotonicity": 0.0, "directness": 0.0, "n_steps": 0}
+    pts = [p for p in (points or []) if p.get("y") is not None]
+    if len(pts) < 3:
+        return out
+
+    dead = SHAPE_DEADBAND_R * float(r)
+    signs = []
+    path = 0.0
+    for a, b in zip(pts, pts[1:]):
+        df = max(1, int(b.get("frame", 0)) - int(a.get("frame", 0)))
+        dy = (float(b["y"]) - float(a["y"])) / df
+        path += math.hypot(float(b["x"]) - float(a["x"]),
+                           float(b["y"]) - float(a["y"]))
+        if abs(dy) >= dead:                 # flat steps carry no direction
+            signs.append(1 if dy > 0 else -1)   # +1 falling, -1 rising
+
+    out["n_steps"] = len(signs)
+    for s0, s1 in zip(signs, signs[1:]):
+        if s0 == -1 and s1 == 1:
+            out["n_rise_to_fall"] += 1
+        elif s0 == 1 and s1 == -1:
+            out["n_fall_to_rise"] += 1
+
+    reversals = out["n_rise_to_fall"] + out["n_fall_to_rise"]
+    # One reversal is free — that's the apex.
+    out["monotonicity"] = (
+        1.0 if len(signs) < 2
+        else max(0.0, 1.0 - max(0, reversals - 1) / float(len(signs) - 1))
+    )
+    if path > 0:
+        out["directness"] = round(
+            math.hypot(float(pts[-1]["x"]) - float(pts[0]["x"]),
+                       float(pts[-1]["y"]) - float(pts[0]["y"])) / path, 3,
+        )
+    out["monotonicity"] = round(out["monotonicity"], 3)
+    return out
+
+
 def pick_flight(
     tracks: list,
     impact_frame: int,
@@ -1360,9 +1432,59 @@ def pick_flight(
                 )
                 out["tried"].append(rec)
                 continue
+        # ── shape: does this track obey ball physics? ──────────────
+        shape = flight_shape(tr["points"], r)
+        rec.update({
+            "monotonicity": shape["monotonicity"],
+            "directness": shape["directness"],
+            "n_rise_to_fall": shape["n_rise_to_fall"],
+            "n_fall_to_rise": shape["n_fall_to_rise"],
+        })
+        # A ball rises, peaks once, and falls. It never resumes rising.
+        # Observed: a 38-point blob inside a 50px box in the tree canopy
+        # beat a 636px real flight by 0.21 because it had one more inlier.
+        # Its dy sign flips constantly; the flight's does not.
+        if shape["n_fall_to_rise"] > MAX_FALL_TO_RISE:
+            rec["verdict"] = (
+                f"falls then rises again x{shape['n_fall_to_rise']} — "
+                f"not a ball flight"
+            )
+            out["tried"].append(rec)
+            continue
+        if shape["n_rise_to_fall"] > MAX_RISE_TO_FALL:
+            rec["verdict"] = (
+                f"peaks {shape['n_rise_to_fall']}x — a ball peaks once"
+            )
+            out["tried"].append(rec)
+            continue
+
+        # ── score, every term relative to the track's own scale ────
+        # The old score was ~97% raw inlier count: span was capped at 2.0
+        # (one inlier), and rms was compared in absolute pixels, which
+        # REWARDED blobs — a tight cluster fits any parabola closely by
+        # construction. Measured against its own span instead, the same
+        # 3.78px that looked excellent on a 50px track (7.6% of span) is
+        # correctly worse than 4.19px on a 637px flight (0.66%).
+        _span = float(tr["span_px"] or 0.0)
+        _npts = max(1, len(tr["points"]))
+        span_frac = min(1.0, _span / max(1.0, 0.5 * float(frame_w)))
+        inlier_frac = fit["n_inliers"] / float(_npts)
+        rms_frac = min(
+            1.0,
+            (fit["rms_px"] or 0.0) / max(1.0, SELF_EVIDENT_RMS_SPAN * _span),
+        )
         score = (
+            10.0 * span_frac              # went somewhere
+            + 10.0 * shape["monotonicity"]  # went there like a ball
+            + 5.0 * inlier_frac           # and the parabola explains it
+            - 5.0 * rms_frac              # scale-free residual
+            + 0.05 * fit["n_inliers"]     # count breaks ties, nothing more
+        )
+        # What the old formula would have picked, carried alongside so a
+        # disagreement is visible in the panel instead of silent.
+        legacy = (
             2.0 * fit["n_inliers"]
-            + 2.0 * min(1.0, tr["span_px"] / max(1.0, 0.5 * float(frame_w)))
+            + 2.0 * span_frac
             - (fit["rms_px"] or 0.0) / 10.0
         )
         rec["verdict"] = (
@@ -1370,10 +1492,11 @@ def pick_flight(
             + (" (aim disagrees)" if rec.get("aim_disagrees") else "")
         )
         rec["score"] = round(score, 2)
+        rec["score_legacy"] = round(legacy, 2)
         out["tried"].append(rec)
         if out["flight"] is None or score > out["flight"]["score"]:
             out["flight"] = {"score": score, "track": tr, "fit": fit,
-                             "note": rec.get("note")}
+                             "note": rec.get("note"), "shape": shape}
     if out["flight"] is None:
         # Say WHICH test rejected them, and how close the best one came.
         # "none survived" sends you back to the panel to expand a table; the
@@ -1382,7 +1505,9 @@ def pick_flight(
         for rec in out["tried"]:
             v = str(rec.get("verdict") or "?")
             key = (
-                "too few inliers" if "inliers" in v
+                "falls then rises again" if "falls then rises" in v
+                else "peaks more than once" if "peaks" in v
+                else "too few inliers" if "inliers" in v
                 else "does not rise" if "rise" in v
                 else "aims wide of the ball" if "aims" in v
                 else "baseline too short" if "baseline" in v
@@ -1416,6 +1541,16 @@ def pick_flight(
     out["ok"] = True
     out["fit"] = out["flight"]["fit"]
     out["reason"] = out["flight"]["fit"]["reason"]
+    # Carry the winner's shape into the caption and the log — the number
+    # that decides between a flight and a blob should be readable without
+    # expanding the table.
+    _sh = out["flight"].get("shape") or {}
+    if _sh:
+        out["shape"] = _sh
+        out["reason"] += (
+            f"; rises {_sh.get('monotonicity')} monotonic, "
+            f"{_sh.get('directness')} direct"
+        )
     _w = out["flight"].get("note")
     if _w:
         out["aim_disagrees"] = True
