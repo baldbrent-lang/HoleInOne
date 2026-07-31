@@ -9091,6 +9091,32 @@ def _trace_segment(
             if _rv3.get("ok") and _o.exists() and _o.stat().st_size > 0:
                 transcode_for_web(_o)
                 compress_for_email(_o)
+                # A BACKGROUND for click-to-plot. The editor draws its dots
+                # over tracer_raw_motion_url, which the MOG2 layer used to
+                # write -- and that layer no longer runs, so the modal opened
+                # with the point list populated and nothing to draw on. Use
+                # the frame at launch: for placing a ball by eye it is a
+                # better canvas than a motion composite anyway, because it
+                # shows the scene rather than an accumulation of it.
+                _bgn = f"{clip_path.stem}_d3_plotbg.jpg"
+                try:
+                    import cv2 as _cv3
+
+                    _cap3 = _cv3.VideoCapture(str(clip_path))
+                    _cap3.set(_cv3.CAP_PROP_POS_FRAMES,
+                              max(0, int(_d3["launch_frame"])))
+                    _okf, _fr3 = _cap3.read()
+                    _cap3.release()
+                    if _okf and _fr3 is not None:
+                        _cv3.imwrite(
+                            str(CLIPS_DIR / _bgn), _fr3,
+                            [int(_cv3.IMWRITE_JPEG_QUALITY), 88],
+                        )
+                    else:
+                        _bgn = None
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("debug3: plot background failed: %s", exc)
+                    _bgn = None
                 _info3 = {
                     "ok": True,
                     "engine": "debug3",
@@ -9114,6 +9140,8 @@ def _trace_segment(
                     "render_info": _rv3,
                     "debug3": {"reason": _d3.get("reason")},
                 }
+                if _bgn:
+                    _info3["raw_motion_image"] = _bgn
                 _u3 = (
                     f"{settings.app_base_url}/uploads/clips/{_o.name}"
                     f"?v={int(_o.stat().st_mtime)}"
