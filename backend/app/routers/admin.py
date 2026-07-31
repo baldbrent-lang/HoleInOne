@@ -3040,7 +3040,7 @@ def _process_long_upload_segments(
 
     def _persist_swing_track(
         swing_idx, tracer_info, tracer_url, cut_start_sec, cut_end_sec=None,
-        clip_id=None, seg_path=None,
+        clip_id=None, seg_dims=None,
     ):
         """Save everything this swing's production run figured out into
         edit_metrics.swings, so the Edit wizard opens fully pre-populated
@@ -3053,35 +3053,42 @@ def _process_long_upload_segments(
         so every FRAME index is shifted by the cut's start offset to land
         in the full-clip frame space the wizard works in.
 
-        PIXEL coords need mapping too — the old comment here claimed "the
-        cut trims time, not space", and that is only true of cut_segment
-        itself. compress_for_email re-encodes IN PLACE through
-        `scale=min(1280,iw)`, and the single-camera branch calls it on the
-        segment BEFORE tracing it. On a 1920-wide tee source that leaves
-        every measured point in 1280-wide space while click-to-plot
-        divides by frame_width=1920 — so a dot at the true centre renders
-        at 33% instead of 50%, i.e. shifted left, worsening across the
-        frame. Scale detections back into the native tee space here so
-        there is exactly ONE pixel space in edit_metrics. Non-native cuts
-        are the exception, so the factor is normally 1.0 and this is a
-        no-op. An operator-marked ball (ball_manual) is never
+        PIXEL coords can need mapping too. The old comment here claimed
+        "the cut trims time, not space", which is true of cut_segment but
+        not of compress_for_email — that re-encodes IN PLACE through
+        `scale=min(1280,iw)`, and the single-camera branch used to run it
+        on the segment BEFORE tracing. On a 1920-wide tee source that left
+        every point in 1280 space while click-to-plot divided by
+        frame_width=1920, so a dot at the true centre landed at 33%
+        instead of 50%: the whole plot shifted left, worsening across the
+        frame.
+
+        Both branches now trace BEFORE that re-encode, so the tracer reads
+        native pixels and the factor below is 1.0. `seg_dims` is the size
+        the caller saw at trace time and keeps that guarantee honest
+        rather than assumed — but it has to be measured there, because by
+        the time this runs the delivery re-encode has already shrunk the
+        file on disk. (Probing the file here instead is what briefly
+        pushed the plot off to the RIGHT: correct native points multiplied
+        by a phantom 1.5.) An operator-marked ball (ball_manual) is never
         overwritten."""
         if progress_upload_id is None or not tracer_info:
             return
         offset = int(round((cut_start_sec or 0.0) * _src_fps))
-        # Cut → native pixel scale. Probed off the segment as it stands
-        # NOW (i.e. after any in-place re-encode), not assumed.
+        # Cut → native pixel scale. seg_dims MUST be the size the segment
+        # was when the TRACER read it, captured by the caller right
+        # before the trace — NOT probed here. By the time this runs the
+        # caller has already sent the segment through compress_for_email
+        # for delivery, so the file on disk is 1280-capped whatever the
+        # tracer saw; probing it here read 1280 against a 1920 source and
+        # scaled correct native points UP by 1.5, throwing the plot off
+        # to the right exactly as far as it had previously been off to
+        # the left.
         _sx = _sy = 1.0
-        if seg_path is not None and _src_w > 0 and _src_h > 0:
-            try:
-                _seg_info = probe_video_info(seg_path) or {}
-                _seg_w = float(_seg_info.get("width") or 0)
-                _seg_h = float(_seg_info.get("height") or 0)
-                if _seg_w > 0 and _seg_h > 0:
-                    _sx, _sy = _src_w / _seg_w, _src_h / _seg_h
-            except Exception as exc:  # noqa: BLE001
-                log.warning("swing %s: cut probe failed (%s) — assuming "
-                            "native pixel space", swing_idx, exc)
+        if seg_dims and _src_w > 0 and _src_h > 0:
+            _seg_w, _seg_h = (float(seg_dims[0] or 0), float(seg_dims[1] or 0))
+            if _seg_w > 0 and _seg_h > 0:
+                _sx, _sy = _src_w / _seg_w, _src_h / _seg_h
         _scaled = abs(_sx - 1.0) > 1e-6 or abs(_sy - 1.0) > 1e-6
         if _scaled:
             log.info(
@@ -3420,6 +3427,12 @@ def _process_long_upload_segments(
             # classical fallback. The cut to green is driven by tee_video_dur,
             # not the tracer, so the engine choice doesn't affect the cut.
             _seg_fps = probe_fps(seg_path) or 30.0
+            # The pixel space the tracer is about to measure in. Probed
+            # HERE because the segment gets re-encoded (and downscaled)
+            # for delivery further down, so this is the last moment the
+            # file still has the dimensions the detections will be in.
+            _seg_i = probe_video_info(seg_path) or {}
+            _seg_dims = (_seg_i.get("width"), _seg_i.get("height"))
             _cut_off = int(round(tee_cut_start * _src_fps))
             _lp_all = _seg_launch_points(seg)
             _lp_cut = [
@@ -3687,7 +3700,7 @@ def _process_long_upload_segments(
                 tracer_info.setdefault("anchor_check", seg["anchor_rec"])
             _persist_swing_track(
                 idx, tracer_info, _tracer_url, tee_cut_start, tee_cut_end,
-                clip_id=clip.id, seg_path=seg_path,
+                clip_id=clip.id, seg_dims=_seg_dims,
             )
 
             results.append(
@@ -3728,6 +3741,10 @@ def _process_long_upload_segments(
             else None
         )
         _seg_fps = probe_fps(seg_path) or 30.0
+        # See the dual-camera branch: the tracer's pixel space, probed
+        # before the delivery re-encode shrinks the file underneath us.
+        _seg_i = probe_video_info(seg_path) or {}
+        _seg_dims = (_seg_i.get("width"), _seg_i.get("height"))
         _cut_off = int(round(tee_cut_start * _src_fps))
         _lp_all = _seg_launch_points(seg)
         _lp_cut = [
@@ -3801,7 +3818,7 @@ def _process_long_upload_segments(
             tracer_info.setdefault("anchor_check", seg["anchor_rec"])
         _persist_swing_track(
             idx, tracer_info, tracer_url, tee_cut_start, tee_cut_end,
-            clip_id=clip.id, seg_path=seg_path,
+            clip_id=clip.id, seg_dims=_seg_dims,
         )
 
         results.append(
