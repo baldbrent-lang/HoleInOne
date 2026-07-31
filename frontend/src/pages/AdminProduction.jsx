@@ -8084,6 +8084,23 @@ export default function AdminProduction() {
                   {row.swing_count === "single" ? "One swing" : "Multiple swings"}
                 </span>
               )}
+              {row.queue_state === "queued" && (
+                <span
+                  className="small"
+                  style={{
+                    padding: "2px 8px",
+                    borderRadius: 999,
+                    background: "rgba(234, 179, 8, 0.14)",
+                    border: "1px solid rgba(234, 179, 8, 0.45)",
+                  }}
+                  title="Produce runs one upload at a time, oldest first."
+                >
+                  Waiting to produce
+                  {row.queue_position
+                    ? ` · ${row.queue_position} of ${row.queue_depth}`
+                    : ""}
+                </span>
+              )}
               <span className="small muted">·</span>
               <span className="small muted">
                 {row.source?.kind === "camera"

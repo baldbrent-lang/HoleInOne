@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import functools
+import itertools
 import json
 import logging
 import math
 import os
+import queue
 import secrets
 import threading
 import time
@@ -4381,12 +4383,7 @@ async def quick_upload_videos(
         # No pre-screen here: produce's own pose pass IS the non-golf
         # screen (zero swings detected -> the job auto-deletes), so a
         # separate mediapipe scan would just duplicate the work.
-        threading.Thread(
-            target=run_produce_job,
-            kwargs={"upload_id": upload_row.id, "hole_number": 1},
-            daemon=True,
-            name=f"long-upload-{upload_row.id}",
-        ).start()
+        enqueue_produce_job(upload_id=upload_row.id, hole_number=1)
         message = (
             "Multiple-swing upload — processing started in the "
             "background. Produced clips will appear on Broadcast when "
@@ -4622,15 +4619,9 @@ async def upload_long_video(
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
                 log.warning("could not persist green delta: %s", exc)
-        threading.Thread(
-            target=run_produce_job,
-            kwargs={
-                "upload_id": upload_id,
-                "hole_number": int(starting_hole or 1),
-            },
-            daemon=True,
-            name=f"long-upload-{upload_id}",
-        ).start()
+        enqueue_produce_job(
+            upload_id=upload_id, hole_number=int(starting_hole or 1),
+        )
 
     return {
         "upload_id": upload_id,
@@ -4833,6 +4824,28 @@ def list_long_uploads(
             )
         return out
 
+    # Produce is serialised, so a card can sit at "pending" simply because
+    # it is waiting its turn. Say which, rather than looking stuck. Queue
+    # order is by upload time, so we can name the exact position.
+    _q = produce_queue_status()
+    _q_running = _q["running_upload_id"]
+    _q_waiting = _q["queued_upload_ids"]
+    _q_pos: dict[int, int] = {}
+    if _q_waiting:
+        try:
+            _q_rows = (
+                db.query(LongVideoUpload.id, LongVideoUpload.created_at)
+                .filter(LongVideoUpload.id.in_(_q_waiting))
+                .all()
+            )
+            _by_time = sorted(
+                _q_rows, key=lambda t: (t[1] or _utcnow_naive(), t[0]),
+            )
+            _q_pos = {int(t[0]): i + 1 for i, t in enumerate(_by_time)}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not order produce queue for display: %s", exc)
+            _q_pos = {int(u): 0 for u in _q_waiting}
+
     out = []
     for r in rows:
         tee_path = CLIPS_DIR / r.tee_filename if r.tee_filename else None
@@ -4953,6 +4966,12 @@ def list_long_uploads(
                 ),
                 "last_error": r.last_error,
                 "source": source,
+                "queue_state": (
+                    "running" if r.id == _q_running
+                    else ("queued" if r.id in _q_pos else None)
+                ),
+                "queue_position": _q_pos.get(r.id),
+                "queue_depth": len(_q_waiting),
             }
         )
     return out
@@ -12047,6 +12066,13 @@ def _debugx_start(kind: str, upload_id: int, runner) -> dict:
         }
 
     def _job() -> None:
+        # Same gate the produce queue holds: an operator hitting
+        # Re-Produce while a batch of uploads is producing waits its
+        # turn rather than adding a fifth job to the pile.
+        with _produce_gate:
+            _debugx_job(kind, upload_id, runner)
+
+    def _debugx_job(kind: str, upload_id: int, runner) -> None:
         db = SessionLocal()
         try:
             row = db.get(LongVideoUpload, upload_id)
@@ -12105,6 +12131,159 @@ def debug3(upload_id: int):
 @router.get("/long-uploads/{upload_id}/debug3/status")
 def debug3_status(upload_id: int):
     return _debugx_get("debug3", upload_id)
+
+
+# ── produce queue ──────────────────────────────────────────────────────
+# Produce runs ONE AT A TIME, oldest upload first.
+#
+# Every path used to spawn its own unbounded thread, so four uploads
+# landing together meant four jobs racing. The work is CPU- and
+# memory-bound and cv2/ffmpeg release the GIL, so they genuinely compete
+# — and debug3's own note says a single MOG2 pass at 1080p allocates
+# ~25MB per frame, "enough to get a container killed mid-request, which
+# surfaces as a 502 with no log line of its own". Multiply that by four
+# on one container and the process dies, taking the web server and every
+# in-flight upload with it. Serialised, four jobs also finish SOONER in
+# wall-clock than four thrashing the same two cores.
+#
+# A semaphore would bound concurrency but not ordering — Python makes no
+# promise about wake order — so this is a real priority queue keyed on
+# the upload's created_at. Whoever was uploaded first produces first,
+# regardless of which request happened to finish enqueuing first.
+_produce_q: "queue.PriorityQueue[tuple]" = queue.PriorityQueue()
+_produce_seq = itertools.count()
+_produce_lock = threading.Lock()
+_produce_pending: dict[int, dict] = {}   # upload_id -> task, for dedupe
+_produce_running: int | None = None
+_produce_worker: threading.Thread | None = None
+# Held for the duration of a produce. The queue worker takes it, and so
+# does Debug3 / Re-Produce (which run on their own thread so the panel
+# can poll status) — so nothing produces concurrently, whatever started
+# it, even though only queued uploads are ordered among themselves.
+_produce_gate = threading.Lock()
+
+
+def _produce_worker_loop() -> None:
+    global _produce_running
+    while True:
+        try:
+            _key, _seq, task = _produce_q.get()
+        except Exception:  # noqa: BLE001
+            continue
+        uid = task["upload_id"]
+        try:
+            with _produce_lock:
+                _produce_pending.pop(uid, None)
+                _produce_running = uid
+            waiting = _produce_q.qsize()
+            log.info(
+                "produce queue: starting upload %s (%d still waiting)",
+                uid, waiting,
+            )
+            with _produce_gate:
+                task["result"] = run_produce_job(
+                    upload_id=uid,
+                    hole_number=task.get("hole_number"),
+                    debug_artifacts=task.get("debug_artifacts", False),
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A crash must never kill the worker — the whole queue would
+            # stall silently behind it.
+            log.exception("produce queue: upload %s crashed: %s", uid, exc)
+            task["result"] = {"ok": False, "error": f"{exc}"}
+        finally:
+            with _produce_lock:
+                _produce_running = None
+            task["done"].set()
+            _produce_q.task_done()
+
+
+def _ensure_produce_worker() -> None:
+    global _produce_worker
+    with _produce_lock:
+        if _produce_worker is not None and _produce_worker.is_alive():
+            return
+        _produce_worker = threading.Thread(
+            target=_produce_worker_loop, daemon=True, name="produce-queue",
+        )
+        _produce_worker.start()
+
+
+def enqueue_produce_job(
+    upload_id: int,
+    hole_number: int | None = None,
+    debug_artifacts: bool = False,
+    wait: bool = False,
+    db=None,
+) -> dict:
+    """Queue an upload to be produced. Returns immediately unless `wait`.
+
+    Ordering is by the upload's `created_at`, so a batch produces oldest
+    first even if the requests finished out of order. `wait=True` blocks
+    until this job is done — the camera path needs it, because it stamps
+    the CameraEvent's terminal status from the job's outcome.
+
+    Re-queuing an upload that is already queued is a no-op; re-queuing
+    one that is currently RUNNING queues it again, since that is a
+    genuine request to redo it with whatever changed.
+    """
+    # Sort key from the upload's own creation time, not from now.
+    created = None
+    try:
+        _db = db or SessionLocal()
+        try:
+            _row = _db.get(LongVideoUpload, upload_id)
+            created = getattr(_row, "created_at", None)
+        finally:
+            if db is None:
+                _db.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("produce queue: could not read created_at for %s: %s",
+                    upload_id, exc)
+    key = (created or _utcnow_naive()).timestamp()
+
+    with _produce_lock:
+        existing = _produce_pending.get(upload_id)
+        if existing is not None:
+            log.info("produce queue: upload %s already queued", upload_id)
+            if wait:
+                pass          # fall through and wait on the existing task
+            else:
+                return {"queued": True, "duplicate": True,
+                        "position": _produce_q.qsize()}
+            task = existing
+        else:
+            task = {
+                "upload_id": upload_id,
+                "hole_number": hole_number,
+                "debug_artifacts": debug_artifacts,
+                "done": threading.Event(),
+                "result": None,
+            }
+            _produce_pending[upload_id] = task
+            _produce_q.put((key, next(_produce_seq), task))
+
+    _ensure_produce_worker()
+    position = _produce_q.qsize()
+    log.info(
+        "produce queue: upload %s queued (%d ahead, running=%s)",
+        upload_id, max(0, position - 1), _produce_running,
+    )
+    if wait:
+        task["done"].wait()
+        return task.get("result") or {"ok": False, "error": "no result"}
+    return {"queued": True, "duplicate": False, "position": position}
+
+
+def produce_queue_status() -> dict:
+    """What the queue is doing — surfaced so a card sitting at 'pending'
+    can say it is waiting its turn rather than looking stuck."""
+    with _produce_lock:
+        return {
+            "running_upload_id": _produce_running,
+            "queued_upload_ids": sorted(_produce_pending.keys()),
+            "depth": _produce_q.qsize(),
+        }
 
 
 def run_produce_job(

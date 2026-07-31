@@ -672,7 +672,7 @@ def _process_camera_event_job(event_id: int) -> None:
     """
     # Imported here to dodge a circular import (admin.py imports
     # heavy modules at top level).
-    from .admin import run_produce_job
+    from .admin import enqueue_produce_job
     from ..models import LongVideoUpload
 
     db = SessionLocal()
@@ -767,9 +767,14 @@ def _process_camera_event_job(event_id: int) -> None:
             # now, and the flight from Debug3, so a capture behaves
             # identically however it was started. A camera covers one
             # par-3, so its hole is passed through rather than inferred.
-            run_produce_job(
+            # wait=True: produce is queued and serialised with every
+            # other upload, but this thread blocks until its turn is
+            # done so the CameraEvent's terminal status is stamped from
+            # the actual outcome rather than from "we started it".
+            enqueue_produce_job(
                 upload_id=lvu.id,
                 hole_number=int(event.hole_number),
+                wait=True,
             )
         except Exception as exc:
             log.exception(
