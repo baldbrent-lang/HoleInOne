@@ -4382,14 +4382,8 @@ async def quick_upload_videos(
         # screen (zero swings detected -> the job auto-deletes), so a
         # separate mediapipe scan would just duplicate the work.
         threading.Thread(
-            target=_run_long_upload_job,
-            kwargs={
-                "upload_id": upload_row.id,
-                "seg_list": [],
-                "auto_detect_swings": True,
-                "starting_hole": 1,
-                "ai_tracer_model": None,
-            },
+            target=run_produce_job,
+            kwargs={"upload_id": upload_row.id, "hole_number": 1},
             daemon=True,
             name=f"long-upload-{upload_row.id}",
         ).start()
@@ -4580,26 +4574,63 @@ async def upload_long_video(
         daemon=True, name=f"long-upload-preview-{upload_id}",
     ).start()
 
-    threading.Thread(
-        target=_run_long_upload_job,
-        kwargs={
-            "upload_id": upload_id,
-            "seg_list": list(seg_list),
-            "auto_detect_swings": bool(auto_detect_swings),
-            "starting_hole": int(starting_hole or 1),
-            "ai_tracer_model": ai_tracer_model,
-            "audio_min_peak_ratio": float(audio_min_peak_ratio),
-            "motion_ratio": float(motion_ratio),
-            "combined_pair_window_sec": float(combined_pair_window_sec),
-            "tee_green_delta_sec": float(tee_green_delta_sec),
-            # motion_only mirrors the live camera detector; when set, all
-            # swings are on one hole (single_hole) as with camera events.
-            "motion_only": bool(motion_only),
-            "single_hole": bool(motion_only),
-        },
-        daemon=True,
-        name=f"long-upload-{upload_id}",
-    ).start()
+    # AUTO-PRODUCE runs THE produce path — the same one Debug3,
+    # Re-Produce and the cameras run — so a clip is the same clip
+    # however it was started.
+    #
+    # The exception is an operator who cut the swings by hand: Debug3
+    # always auto-detects from pose and has nowhere to put a supplied
+    # segment list, so a manual cut still goes through the old
+    # per-segment pipeline. That is the only remaining caller of it, and
+    # it is a deliberate one rather than a path nobody migrated.
+    if seg_list:
+        threading.Thread(
+            target=_run_long_upload_job,
+            kwargs={
+                "upload_id": upload_id,
+                "seg_list": list(seg_list),
+                "auto_detect_swings": bool(auto_detect_swings),
+                "starting_hole": int(starting_hole or 1),
+                "ai_tracer_model": ai_tracer_model,
+                "audio_min_peak_ratio": float(audio_min_peak_ratio),
+                "motion_ratio": float(motion_ratio),
+                "combined_pair_window_sec": float(combined_pair_window_sec),
+                "tee_green_delta_sec": float(tee_green_delta_sec),
+                # motion_only mirrors the live camera detector; when set,
+                # all swings are on one hole (single_hole) as with
+                # camera events.
+                "motion_only": bool(motion_only),
+                "single_hole": bool(motion_only),
+            },
+            daemon=True,
+            name=f"long-upload-manual-{upload_id}",
+        ).start()
+    else:
+        # An operator-supplied tee→green offset is real information the
+        # cameras couldn't provide — persist it where the produce path's
+        # sync lookup will find it.
+        if tee_green_delta_sec:
+            try:
+                _r = db.get(LongVideoUpload, upload_id)
+                if _r is not None:
+                    _em = dict(_r.edit_metrics or {})
+                    _em["tee_green_delta_sec"] = round(
+                        float(tee_green_delta_sec), 4,
+                    )
+                    _r.edit_metrics = _em
+                    db.commit()
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                log.warning("could not persist green delta: %s", exc)
+        threading.Thread(
+            target=run_produce_job,
+            kwargs={
+                "upload_id": upload_id,
+                "hole_number": int(starting_hole or 1),
+            },
+            daemon=True,
+            name=f"long-upload-{upload_id}",
+        ).start()
 
     return {
         "upload_id": upload_id,
@@ -12076,6 +12107,56 @@ def debug3_status(upload_id: int):
     return _debugx_get("debug3", upload_id)
 
 
+def run_produce_job(
+    upload_id: int,
+    hole_number: int | None = None,
+    debug_artifacts: bool = False,
+) -> dict:
+    """Produce an upload. THE entry point — every caller uses this.
+
+    Wraps `_debug3_run` with the row/source plumbing each caller was
+    otherwise repeating: rehydrate the source from object storage,
+    resolve it on disk, own a DB session, and never let an exception
+    escape into a request handler or a camera callback.
+
+    Synchronous. Callers that must not block (HTTP handlers) run it on a
+    thread; the camera path deliberately blocks so it can stamp the
+    CameraEvent's terminal status in one pass.
+
+    Returns the Debug3 report, or {"ok": False, "error": ...}.
+    """
+    db = SessionLocal()
+    try:
+        row = db.get(LongVideoUpload, upload_id)
+        if row is None:
+            return {"ok": False, "error": f"upload {upload_id} not found"}
+        if row.tee_filename:
+            storage.ensure_local(CLIPS_DIR, row.tee_filename)
+        if row.green_filename:
+            storage.ensure_local(CLIPS_DIR, row.green_filename)
+        src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+        if not src_path or not src_path.exists():
+            _err = f"tee source missing on disk: {row.tee_filename}"
+            try:
+                row.processing_status = "failed"
+                row.processing_completed_at = _utcnow_naive()
+                row.last_error = _err
+                db.commit()
+            except Exception:  # noqa: BLE001
+                db.rollback()
+            return {"ok": False, "error": _err}
+        return _debug3_run(
+            row, src_path, db,
+            debug_artifacts=debug_artifacts,
+            hole_number=hole_number,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.exception("produce job %s crashed: %s", upload_id, exc)
+        return {"ok": False, "error": f"{exc}"}
+    finally:
+        db.close()
+
+
 # How long a d3clip-* preview stays on disk. They exist to be looked at
 # in the Debug3 panel during the run that made them; nothing links to one
 # afterwards, and a stale one is only ever a confusing older render.
@@ -12253,7 +12334,8 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
         log.warning("d3 produce: could not save swing %s: %s", idx, exc)
 
 
-def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
+def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
+                     hole_number=None) -> dict:
     """Build the shipped clip STRAIGHT from Debug3's numbers.
 
     Stage 7 used to re-run the whole production pipeline
@@ -12323,7 +12405,9 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
         _old = db.query(VideoClip).filter(
             VideoClip.long_upload_id == row.id,
         ).all()
-        _hole = next(
+        # The caller's hole wins (a camera covers one par-3 and knows
+        # which); otherwise inherit from the clips being replaced.
+        _hole = int(hole_number) if hole_number else next(
             (int(c.hole_number) for c in _old if c.hole_number), 1,
         )
         for _c in _old:
@@ -12332,7 +12416,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
             db.commit()
     except Exception as exc:  # noqa: BLE001
         db.rollback()
-        _hole = 1
+        _hole = int(hole_number) if hole_number else 1
         log.warning("d3 produce: could not clear prior clips: %s", exc)
 
     tok = secrets.token_hex(4)
@@ -12529,7 +12613,8 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
     return out
 
 
-def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True):
+def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
+                hole_number=None):
     """THE production pipeline. Analyse, then build the clip.
 
     Debug3 and Re-Produce are the same run — this function — because
@@ -12832,7 +12917,10 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True):
             pass
         _t0 = time.perf_counter()
         try:
-            _fp = _d3_fast_produce(row, src_path, db, rep, fps, progress)
+            _fp = _d3_fast_produce(
+                row, src_path, db, rep, fps, progress,
+                hole_number=hole_number,
+            )
             _n_made = sum(1 for c in _fp["clips"] if c.get("clip_id"))
             rep["produced"] = {
                 "ok": bool(_fp["ok"]),
@@ -12969,9 +13057,14 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True):
     if n_flights and _prod.get("ok"):
         _set_status("completed")
     else:
+        # "no swings detected" is load-bearing: the camera path matches
+        # on that prefix to tell a capture with nothing in it (not an
+        # error — the Pi did its job, nobody hit a ball) from a real
+        # failure, and flags the event red only for the latter.
         _set_status("failed", (
             _prod.get("error")
-            or (f"{len(cands)} pose candidate(s), no ball flight found"
+            or (f"no swings detected: {len(cands)} pose candidate(s), "
+                f"no ball flight found"
                 if not n_flights else "produce made no clip")
         )[:2000])
     return rep

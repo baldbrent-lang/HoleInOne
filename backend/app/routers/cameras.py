@@ -672,7 +672,7 @@ def _process_camera_event_job(event_id: int) -> None:
     """
     # Imported here to dodge a circular import (admin.py imports
     # heavy modules at top level).
-    from .admin import _run_long_upload_job
+    from .admin import run_produce_job
     from ..models import LongVideoUpload
 
     db = SessionLocal()
@@ -756,27 +756,24 @@ def _process_camera_event_job(event_id: int) -> None:
             event.id, lvu.id,
         )
 
-        # Status flips to 'processed' (or 'failed') from inside
-        # _run_long_upload_job's LongVideoUpload bookkeeping; mirror
-        # that onto the CameraEvent at the end. We block this thread on
-        # the job so the camera-event row gets its terminal status set
-        # in one pass.
+        # Status flips to 'processed' (or 'failed') from inside the
+        # produce job's LongVideoUpload bookkeeping; mirror that onto the
+        # CameraEvent at the end. We block this thread on the job so the
+        # camera-event row gets its terminal status set in one pass.
         try:
-            _run_long_upload_job(
+            # THE produce path — the same one Debug3 and Re-Produce run.
+            # This used to call _run_long_upload_job with motion-only
+            # audio+motion detection; swings come from the pose detector
+            # now, and the flight from Debug3, so a capture behaves
+            # identically however it was started. A camera covers one
+            # par-3, so its hole is passed through rather than inferred.
+            run_produce_job(
                 upload_id=lvu.id,
-                seg_list=[],
-                auto_detect_swings=True,
-                starting_hole=int(event.hole_number),
-                ai_tracer_model=None,
-                # A camera covers one par-3, so every swing is on the same
-                # hole. Detect from video alone (no audio) and keep only
-                # confirmed golf shots — the ball must leave the tee.
-                single_hole=True,
-                motion_only=True,
+                hole_number=int(event.hole_number),
             )
         except Exception as exc:
             log.exception(
-                "cameras: event %s long-upload job crashed: %s", event.id, exc,
+                "cameras: event %s produce job crashed: %s", event.id, exc,
             )
 
         # Re-fetch both rows post-job. The long-upload worker uses its
