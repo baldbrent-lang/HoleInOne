@@ -5,6 +5,56 @@ import LeaderboardCard from "../components/LeaderboardCard.jsx";
 import { api } from "../api.js";
 import useAuth from "../hooks/useAuth.js";
 
+// The four prize games, in the order they matter to a player standing on
+// the tee: the one you could win today, the one you could win with one
+// swing, the weekly, then the monthly. Cadence and prize are deliberately
+// on the card -- "what could I win and how often" is the whole question.
+//
+// Design and rules live in docs/contests.md. Prize copy is hard-coded for
+// launch; when the amounts move with volume it should come from the API.
+const GAMES = [
+  {
+    key: "ctp",
+    title: "Closest to the Pin",
+    cadence: "Daily · per course",
+    icon: "flag",
+    blurb:
+      "Nearest the hole on any camera'd par 3 at your course wins the day. Resets at midnight.",
+    prize: "Free round",
+    to: "/contests#ctp",
+  },
+  {
+    key: "ace",
+    title: "Hole-in-One",
+    cadence: "Anytime",
+    icon: "dollar",
+    blurb:
+      "Every ace is on camera and on the wall. One swing, any round, any course.",
+    prize: "Cash prize",
+    to: "/contests#ace",
+  },
+  {
+    key: "sotw",
+    title: "Shot of the Week",
+    cadence: "Weekly · all courses",
+    icon: "sparkle",
+    blurb:
+      "The best tracer of the week, voted by players. Winner gets posted on our socials.",
+    prize: "Cash prize",
+    to: "/contests#sotw",
+  },
+  {
+    key: "draw",
+    title: "Monthly Draw",
+    cadence: "Monthly · all courses",
+    icon: "users",
+    blurb:
+      "Every round you play is one entry. Play more, more chances. Drawn on the 1st.",
+    prize: "Cash prize",
+    to: "/contests#draw",
+  },
+];
+
 export default function Home() {
   const { user } = useAuth();
   const [showcase, setShowcase] = useState(null);
@@ -108,44 +158,61 @@ export default function Home() {
           </div>
         )}
 
+        {/* THE GAMES. Four cards, each a doorway to its own leaderboard.
+            This replaced a "Current leaderboard" block that showed two
+            boards inline: the prizes are the reason to play, so they lead,
+            and the standings are one tap away rather than in the way. */}
         <div className="card" style={{ marginBottom: 0 }}>
-          <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-            <h3>Current leaderboard</h3>
-            <div className="small" style={{ display: "flex", gap: 12 }}>
-              <Link to="/contests">Daily / monthly / yearly →</Link>
-              <Link to="/leaderboards">All-time →</Link>
+          <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
+            <h3>Games &amp; prizes</h3>
+            <div className="small">
+              <Link to="/leaderboards">All-time leaderboards →</Link>
             </div>
           </div>
-          {!contestData ? (
-            <div className="shimmer" style={{ height: 220 }} />
-          ) : (
-            <div className="stack" style={{ gap: 14 }}>
-              <LeaderboardCard
-                title={monthlyContest?.title || "Most Rounds Played"}
-                icon={monthlyContest?.icon || "users"}
-                rows={(monthlyContest?.rows || []).slice(0, 3)}
-                emptyText="No rounds logged this month — be the first."
-                footer={monthlyContest && (
-                  <div className="small center" style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", color: "var(--ink-soft)" }}>
-                    <span className="tiny upper muted" style={{ marginRight: 6 }}>This month</span>
-                    <b style={{ color: "var(--emerald-700)" }}>{monthlyContest.prize}</b>
-                  </div>
-                )}
-              />
-              <LeaderboardCard
-                title={yearlyContest?.title || "Most Hole-in-Ones"}
-                icon={yearlyContest?.icon || "dollar"}
-                rows={(yearlyContest?.rows || []).slice(0, 3)}
-                emptyText="No aces yet — be the first to grab the pool."
-                footer={yearlyContest && (
-                  <div className="small center" style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", color: "var(--ink-soft)" }}>
-                    <span className="tiny upper muted" style={{ marginRight: 6 }}>This year</span>
-                    <b style={{ color: "var(--emerald-700)" }}>{yearlyContest.prize}</b>
-                  </div>
-                )}
-              />
-            </div>
-          )}
+          <p className="small muted" style={{ marginBottom: 14 }}>
+            Every round you play enters you automatically. Tap a game for
+            the current standings.
+          </p>
+          <div
+            className="grid"
+            style={{
+              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: 12,
+            }}
+          >
+            {GAMES.map((g) => (
+              <Link
+                key={g.key}
+                to={g.to}
+                className="game-card"
+                style={{
+                  display: "block", textDecoration: "none", color: "inherit",
+                  border: "1px solid var(--border)", borderRadius: 12,
+                  padding: 14, background: "var(--surface)",
+                }}
+              >
+                <div className="inline" style={{ gap: 8, marginBottom: 6 }}>
+                  <div className="icon"><Icon name={g.icon} /></div>
+                  <b>{g.title}</b>
+                </div>
+                <div className="tiny upper muted">{g.cadence}</div>
+                <p className="small" style={{ margin: "6px 0 10px" }}>
+                  {g.blurb}
+                </p>
+                <div
+                  className="small"
+                  style={{
+                    display: "flex", justifyContent: "space-between",
+                    alignItems: "center", paddingTop: 8,
+                    borderTop: "1px solid var(--border)",
+                  }}
+                >
+                  <b style={{ color: "var(--emerald-700)" }}>{g.prize}</b>
+                  <span className="muted">Standings →</span>
+                </div>
+              </Link>
+            ))}
+          </div>
         </div>
       </div>
 
