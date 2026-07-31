@@ -5307,139 +5307,6 @@ def reprocess_long_upload(
     }
 
 
-# Raw window cut around a candidate so the operator can WATCH the swing
-# a filter threw away. Generous and asymmetric — the detector's peak is
-# at impact, so most of what you want to see is before it.
-SWING_AUDIT_PRE_SEC = 3.0
-SWING_AUDIT_POST_SEC = 4.0
-
-
-def _swing_audit_entries(row) -> list[dict]:
-    """Every swing this upload's last run CONSIDERED, kept or not.
-
-    Two producers write a per-candidate record and they have different
-    shapes, so normalise them here rather than making the endpoint (or
-    the UI) know which pipeline ran:
-
-      * `produce_decisions` — the audio+motion pipeline that still serves
-        initial uploads. Carries the practice-filter verdict, which is
-        the usual reason a swing silently vanishes.
-      * `swing_audit` — the Debug3 pipeline (Re-Produce). Carries the
-        flight-test verdict for candidates the pose detector found but
-        that produced no clip.
-
-    Ordered by time so the list reads like the session did.
-    """
-    em = (row.edit_metrics or {}) if row else {}
-    out: list[dict] = []
-
-    for d in (em.get("produce_decisions") or []):
-        if not isinstance(d, dict):
-            continue
-        kept = bool(d.get("kept", True))
-        why = d.get("dropped_by") or ""
-        reason = d.get("practice_reason") or d.get("reason") or ""
-        out.append({
-            "t": float(d.get("t") or 0.0),
-            "kept": kept,
-            "source": "audio+motion",
-            "dropped_by": why or None,
-            "reason": (
-                f"{why}: {reason}" if why and reason
-                else (why or reason or ("produced" if kept else "dropped"))
-            ),
-        })
-
-    for s in (em.get("swing_audit") or []):
-        if not isinstance(s, dict):
-            continue
-        out.append({
-            "t": float(s.get("t") or 0.0),
-            "kept": bool(s.get("kept")),
-            "source": "pose (debug3)",
-            "dropped_by": s.get("dropped_by"),
-            "reason": s.get("reason") or "",
-            "clip_id": s.get("clip_id"),
-        })
-
-    out.sort(key=lambda e: e["t"])
-    return out
-
-
-@router.get("/long-uploads/{upload_id}/swing-audit")
-def swing_audit(upload_id: int, db: Session = Depends(get_db)):
-    """Every candidate swing the last run considered, with a playable cut
-    of the RAW source around each one.
-
-    The point is the ones that did NOT become clips: 'four swings went in
-    and one came out' is otherwise only answerable by scrubbing the whole
-    upload. The source is never consumed by producing — clips are cut
-    FROM it — so every rejected swing is still there to watch.
-
-    Cuts are stream-copied (`fast=True`): no re-encode, so a handful cost
-    well under a second and re-opening the panel re-uses them. The seek
-    snaps to the nearest keyframe, which is why the window is padded
-    either side rather than tight to the strike.
-    """
-    row = db.get(LongVideoUpload, upload_id)
-    if not row:
-        raise HTTPException(404, "long upload not found")
-
-    entries = _swing_audit_entries(row)
-    src_path = None
-    if row.tee_filename:
-        storage.ensure_local(CLIPS_DIR, row.tee_filename)
-        _p = CLIPS_DIR / row.tee_filename
-        if _p.exists():
-            src_path = _p
-
-    # Which candidates actually became clips, by time — so an entry can
-    # link to its clip instead of just claiming it was kept.
-    clips = (
-        db.query(VideoClip)
-        .filter(VideoClip.long_upload_id == upload_id)
-        .all()
-    )
-    base = row.base_captured_at
-
-    for e in entries:
-        if src_path is not None:
-            t0 = max(0.0, e["t"] - SWING_AUDIT_PRE_SEC)
-            t1 = e["t"] + SWING_AUDIT_POST_SEC
-            name = f"swingaudit-{upload_id}-{int(round(e['t'] * 100))}.mp4"
-            path = CLIPS_DIR / name
-            if not path.exists() or path.stat().st_size == 0:
-                if not cut_segment(src_path, path, t0, t1, fast=True):
-                    path = None
-            if path is not None and path.exists():
-                e["video_url"] = (
-                    f"{settings.app_base_url}/uploads/clips/{name}"
-                    f"?v={int(path.stat().st_mtime)}"
-                )
-                e["window_sec"] = [round(t0, 2), round(t1, 2)]
-        if e.get("clip_id") is None and base is not None:
-            # Match a produced clip by capture time — the produce path
-            # stamps captured_at as base + the cut's start offset.
-            for c in clips:
-                if c.captured_at is None:
-                    continue
-                if abs((c.captured_at - base).total_seconds() - e["t"]) < 6.0:
-                    e["clip_id"] = c.id
-                    e["clip_url"] = c.tracer_url or c.source_url
-                    break
-
-    return {
-        "upload_id": upload_id,
-        "tee_duration_sec": (probe_video_info(src_path) or {}).get("duration")
-        if src_path else None,
-        "source_available": src_path is not None,
-        "n_considered": len(entries),
-        "n_kept": sum(1 for e in entries if e["kept"]),
-        "n_dropped": sum(1 for e in entries if not e["kept"]),
-        "swings": entries,
-    }
-
-
 @router.post("/long-uploads/{upload_id}/detect-swings")
 def detect_swings_for_upload(
     upload_id: int,
@@ -12241,14 +12108,7 @@ def sweep_d3_previews(current_upload_id: int | None = None) -> int:
             f"d3clip-{int(current_upload_id)}-"
             if current_upload_id is not None else None
         )
-        # swingaudit-* are the raw cuts the swing-audit panel plays. Same
-        # deal: cheap to regenerate on demand, so they age out too.
-        _stale = list(CLIPS_DIR.glob("d3clip-*.mp4"))
-        _stale += [
-            p for p in CLIPS_DIR.glob("swingaudit-*.mp4")
-            if p.stat().st_mtime < cutoff
-        ]
-        for path in _stale:
+        for path in CLIPS_DIR.glob("d3clip-*.mp4"):
             try:
                 superseded = bool(prefix and path.name.startswith(prefix))
                 if not superseded and path.stat().st_mtime >= cutoff:
@@ -12987,55 +12847,6 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True):
             log.warning("debug3: produce failed for %s: %s", upload_id, exc)
             rep["produced"] = {"ok": False, "error": f"{exc}"}
         _add("produce_real", time.perf_counter() - _t0)
-
-    # AUDIT. Every pose candidate and what became of it, persisted so the
-    # operator can watch the raw video of a swing that produced nothing
-    # (see /swing-audit). Without this, "I hit four and got one" is only
-    # answerable by scrubbing the whole upload by hand.
-    try:
-        _made = {
-            int(c["clip_id"]): c
-            for c in ((rep.get("produced") or {}).get("clips") or [])
-            if c.get("clip_id") is not None
-        }
-        _made_by_idx = list(_made.values())
-        _audit = []
-        for _i, _s in enumerate(rep["swings"]):
-            _has = bool(_s.get("ball")) and bool(_s.get("flight"))
-            _cid = None
-            if _has and _made_by_idx:
-                _cid = (_made_by_idx.pop(0) or {}).get("clip_id")
-            _audit.append({
-                "t": round(float(_s.get("peak_time_sec") or 0.0), 2),
-                "kept": _cid is not None,
-                "clip_id": _cid,
-                "dropped_by": None if _cid is not None else (
-                    "no_ball" if not _s.get("ball")
-                    else "no_flight" if not _s.get("flight")
-                    else "produce_failed"
-                ),
-                "reason": (
-                    _s.get("flight_reason")
-                    or _s.get("ball_reason")
-                    or _s.get("detect_reason")
-                    or ""
-                )[:400],
-            })
-        _row2 = db.get(LongVideoUpload, upload_id)
-        if _row2 is not None:
-            _em2 = dict(_row2.edit_metrics or {})
-            _em2["swing_audit"] = _audit
-            _row2.edit_metrics = _em2
-            db.add(_row2)
-            db.commit()
-        log.info(
-            "debug3: swing audit for upload=%s — %d considered, %d produced",
-            upload_id, len(_audit), sum(1 for a in _audit if a["kept"]),
-        )
-    except Exception as exc:  # noqa: BLE001
-        db.rollback()
-        log.warning("debug3: could not save swing audit: %s", exc)
-
     # Consumed (or not needed) — keep them out of the panel payload.
     for _s in rep["swings"]:
         _s.pop("candidates", None)
