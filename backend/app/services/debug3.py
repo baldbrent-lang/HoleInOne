@@ -37,6 +37,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -788,6 +789,27 @@ def find_flight(
         dbg["window"] = [f_lo, f_hi]
         dbg["r_px"] = round(r, 1)
 
+        # WALL CLOCK PER PHASE. Which stage costs the run is not guessable
+        # from the source: the MOG2 pass decodes and segments every frame of
+        # the window while the RANSAC is a few hundred polyfits on at most a
+        # few dozen points, and the debug image writes are pure overhead
+        # that only the panel pays. Timing is a perf_counter read per phase,
+        # so it costs nothing to leave on in production too.
+        _t: dict[str, float] = {}
+        dbg["timing"] = _t
+        _mark = time.perf_counter()
+
+        def _lap(name: str) -> None:
+            nonlocal _mark
+            now = time.perf_counter()
+            _t[name] = round(now - _mark, 3)
+            _mark = now
+            # Kept current so the two early returns below (no detections /
+            # no flight) still report a total rather than a bare phase list.
+            _t["total"] = round(
+                sum(v for k, v in _t.items() if k != "total"), 3,
+            )
+
         # A-C: detections.
         bbox = body_box_from_pose(head_xy, feet_xy, frame_w, frame_h)
         dbg["body_box"] = list(bbox) if bbox else None
@@ -795,6 +817,7 @@ def find_flight(
             input_path, f_lo, f_hi, body_box=bbox,
             debug_dir=debug_dir, debug_prefix=f"{debug_prefix}blob",
         )
+        _lap("detect")
         dbg["detect"] = {
             "reason": det.get("reason"), "stats": det.get("stats"),
             "max_area": det.get("max_area"), "max_side": det.get("max_side"),
@@ -813,6 +836,7 @@ def find_flight(
 
         # D: tracks.
         tracks = build_tracks(det.get("dets") or [], r)
+        _lap("tracks")
         dbg["n_tracks"] = len(tracks)
         dbg["tracks_preview"] = [
             {"n": len(t["points"]), "span_px": t["span_px"],
@@ -827,6 +851,7 @@ def find_flight(
             tracks, int(impact_frame or f_lo), None,
             frame_w=frame_w, frame_h=frame_h, r=r,
         )
+        _lap("flight")
         fit = res.get("fit") or {}
         dbg["flight"] = {
             "reason": res.get("reason"), "tried": res.get("tried"),
@@ -854,6 +879,7 @@ def find_flight(
 
         # The launch FRAME, from where the flight meets the ground.
         lg = launch_from_ground(fit, gy)
+        _lap("launch")
         dbg["launch"] = lg
         if lg.get("ok"):
             out["launch_frame"] = lg["frame"]
@@ -877,6 +903,7 @@ def find_flight(
                 feet_xy=feet_xy, head_xy=head_xy,
                 debug_dir=debug_dir, debug_prefix=f"{debug_prefix}club",
             )
+            _lap("club_arc")
             dbg["club_arc"] = {
                 "frame": int(out["launch_frame"]), "xy": club.get("xy"),
                 "reason": club.get("reason"), "image": club.get("image"),
@@ -900,6 +927,7 @@ def find_flight(
                 input_path, _rf, out["ball"], r, debug_dir,
                 debug_prefix=f"{debug_prefix}rest",
             )
+            _lap("rest_check_image")
 
         # The flight drawing, on the detections canvas.
         if debug_dir is not None:
@@ -917,6 +945,7 @@ def find_flight(
                     scale=det.get("scale") or 1.0,
                 ):
                     dbg["flight_image"] = _nm
+            _lap("draw_flight")
 
         out["ok"] = bool(out["points"]) and out["ball"] is not None
         out["reason"] = (

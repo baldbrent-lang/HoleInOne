@@ -3065,8 +3065,54 @@ function Debug3Modal({ state, onClose }) {
                   <b>{st.count}</b>
                   <div className="tiny muted">{st.counts}</div>
                 </div>
+                {/* Wall clock for the stage, with a bar so the expensive
+                    one is obvious without reading the numbers. */}
+                {st.seconds != null && (
+                  <div style={{ textAlign: "right", minWidth: 86 }}>
+                    <b>{st.seconds}s</b>
+                    <div className="tiny muted">{st.pct}%</div>
+                    <div
+                      style={{
+                        height: 3, borderRadius: 2, marginTop: 2,
+                        background: "var(--line)",
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: "100%", borderRadius: 2,
+                          width: `${Math.min(100, st.pct || 0)}%`,
+                          background:
+                            (st.pct || 0) >= 40
+                              ? "var(--danger, #c0392b)"
+                              : "var(--emerald-700, #16a34a)",
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
+            {rep.timing && (
+              <div className="tiny muted" style={{ marginTop: 6 }}>
+                <b>{rep.timing.total_sec}s total</b>
+                {rep.timing.n_swings > 0 && (
+                  <> · {rep.timing.per_swing_sec}s per swing to analyse
+                    ({rep.timing.n_swings} swing
+                    {rep.timing.n_swings === 1 ? "" : "s"})</>
+                )}
+                {Object.keys(rep.timing.outside_stages || {}).length > 0 && (
+                  <>
+                    {" "}· outside the 7 stages:{" "}
+                    {Object.entries(rep.timing.outside_stages)
+                      .map(([k, v]) => `${k} ${v}s`)
+                      .join(", ")}
+                  </>
+                )}
+                {rep.timing.unattributed_sec > 0.5 && (
+                  <> · {rep.timing.unattributed_sec}s unaccounted</>
+                )}
+              </div>
+            )}
             <div className="tiny muted" style={{ marginTop: 6 }}>
               {rep.frame?.[0]}×{rep.frame?.[1]} @ {rep.fps}fps · ball scale
               r = {rep.r_px}px

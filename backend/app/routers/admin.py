@@ -9214,6 +9214,16 @@ def _trace_segment(
                     "debug3 tracer: %s (replaced rest=%s impact=%s)",
                     _d3.get("reason"), _was[0], _was[1],
                 )
+            # Same per-phase clock the Debug3 panel shows, logged for the
+            # production path — this runs once per swing on every produce,
+            # so it is the number that actually decides how long an
+            # operator waits.
+            _d3t = (_d3.get("debug") or {}).get("timing") or {}
+            if _d3t:
+                log.info(
+                    "debug3 tracer timing: %s",
+                    ", ".join(f"{k} {v}s" for k, v in _d3t.items()),
+                )
             else:
                 log.info("debug3 tracer: no flight (%s) -- falling back",
                          _d3.get("reason"))
@@ -12108,6 +12118,16 @@ def _debug3_run(row, src_path, db, progress=None):
         "frame": [_fw, _fh], "r_px": round(_r, 1),
         "stages": [], "swings": [],
     }
+    # WALL CLOCK. Every phase is timed so the panel can say where the run
+    # went rather than leaving it to be guessed from the source. `_phase`
+    # accumulates across the per-candidate loop; the stage table below
+    # divides the total between the seven reported stages plus the
+    # once-per-upload work that belongs to none of them.
+    _t_run = time.perf_counter()
+    _phase: dict[str, float] = {}
+
+    def _add(name: str, secs: float) -> None:
+        _phase[name] = round(_phase.get(name, 0.0) + float(secs), 3)
 
     if not pose_swing.available():
         return {
@@ -12120,20 +12140,25 @@ def _debug3_run(row, src_path, db, progress=None):
     except Exception:  # noqa: BLE001
         pass
     pose_dbg: dict = {}
+    _t0 = time.perf_counter()
     cands = list(
         pose_swing.detect_swings_from_pose(src_path, fps=fps, debug=pose_dbg)
         or []
     )
+    _add("pose", time.perf_counter() - _t0)
     rep["stages"].append({
         "n": 1, "name": "Pose candidates",
         "detail": "wrist speed + spine bend, the detector produce uses",
         "count": len(cands), "counts": "candidates",
+        "seconds": _phase.get("pose", 0.0),
     })
 
     # Once per upload, not per candidate: it samples the whole video.
     if progress:
         progress("resting-ball departures", 0, len(cands))
+    _t0 = time.perf_counter()
     rest = _rest_ball_departures(src_path, fps, db, row)
+    _add("rest_ball", time.perf_counter() - _t0)
     rep["rest_ball"] = {
         "reason": rest.get("reason"), "roi": rest.get("roi"),
         "departures": rest.get("deps"),
@@ -12168,6 +12193,14 @@ def _debug3_run(row, src_path, db, progress=None):
             debug_prefix=f"d3-{upload_id}-{tok}-{i}-",
         )
         _dbg = _ff.get("debug") or {}
+        # find_flight times its own phases; fold them into the run totals
+        # and keep the per-swing breakdown so a single slow swing is
+        # visible rather than averaged away.
+        _ftime = dict(_dbg.get("timing") or {})
+        for _k, _v in _ftime.items():
+            if _k != "total":
+                _add(_k, _v)
+        entry["timing"] = _ftime
         _ball = _ff.get("ball")
         entry["ball"] = _ball
         entry["ball_source"] = _ff.get("ball_source")
@@ -12222,6 +12255,7 @@ def _debug3_run(row, src_path, db, progress=None):
         # the RANSAC inliers as the tracer points. Written to its own file,
         # so nothing here replaces a produced clip or touches edit_metrics.
         if res.get("ok") and _ball:
+            _t0 = time.perf_counter()
             try:
                 _pts = [
                     {"frame": int(q["frame"]), "found": True,
@@ -12265,6 +12299,11 @@ def _debug3_run(row, src_path, db, progress=None):
             except Exception as exc:  # noqa: BLE001
                 log.warning("debug3 produce failed on %s: %s", upload_id, exc)
                 entry["produce"] = {"ok": False, "error": f"{exc}"}
+            # Render + h264 transcode, whether or not it succeeded — a
+            # failure that took 20s is the interesting kind.
+            _pv = round(time.perf_counter() - _t0, 3)
+            _add("preview", _pv)
+            entry["timing"]["preview"] = _pv
 
         rep["swings"].append(entry)
 
@@ -12284,6 +12323,7 @@ def _debug3_run(row, src_path, db, progress=None):
             db.rollback()
         except Exception:  # noqa: BLE001
             pass
+        _t0 = time.perf_counter()
         try:
             _run_long_upload_job(
                 upload_id=upload_id,
@@ -12304,40 +12344,95 @@ def _debug3_run(row, src_path, db, progress=None):
         except Exception as exc:  # noqa: BLE001
             log.warning("debug3: re-produce failed for %s: %s", upload_id, exc)
             rep["produced"] = {"ok": False, "error": f"{exc}"}
+        _add("produce_real", time.perf_counter() - _t0)
 
     rep["stages"].extend([
         {"n": 2, "name": "Ball at impact",
          "detail": "club-arc vertex on the ground line at the feet",
          "count": sum(1 for s in rep["swings"] if s.get("ball")),
-         "counts": "balls located"},
+         "counts": "balls located",
+         "seconds": _phase.get("club_arc", 0.0)},
         {"n": 3, "name": "MOG2 + component + area filter",
          "detail": "big blobs become a golfer mask; only ball-sized "
                    "off-body blobs survive",
          "count": sum((s.get("detect_stats") or {}).get("kept", 0)
                       for s in rep["swings"]),
-         "counts": "detections kept"},
+         "counts": "detections kept",
+         "seconds": _phase.get("detect", 0.0)},
         {"n": 4, "name": "Nearest-neighbour tracking",
          "detail": "constant-velocity prediction with a gate that widens "
                    "on a missed frame",
          "count": sum(int(s.get("n_tracks") or 0)
                       for s in rep["swings"]),
-         "counts": "tracks built"},
+         "counts": "tracks built",
+         "seconds": _phase.get("tracks", 0.0)},
         {"n": 5, "name": "RANSAC parabola + flight tests",
          "detail": "x linear in t, y quadratic; must rise and must point "
                    "back at the ball",
-         "count": n_flights, "counts": "flights accepted"},
+         "count": n_flights, "counts": "flights accepted",
+         "seconds": _phase.get("flight", 0.0)},
         {"n": 6, "name": "Preview clip",
          "detail": "the same renderer produce uses, fed Debug3's ball, "
                    "launch frame and inliers -- rendered here so the answer "
                    "can be judged before it ships",
-         "count": n_produced, "counts": "previews rendered"},
+         "count": n_produced, "counts": "previews rendered",
+         "seconds": _phase.get("preview", 0.0)},
         {"n": 7, "name": "Produced for real",
          "detail": ((rep.get("produced") or {}).get("detail")
                     or (rep.get("produced") or {}).get("error")
                     or "no flight, so nothing was re-produced"),
          "count": 1 if (rep.get("produced") or {}).get("ok") else 0,
-         "counts": "uploads re-produced"},
+         "counts": "uploads re-produced",
+         "seconds": _phase.get("produce_real", 0.0)},
     ])
+
+    # TIMING SUMMARY. The seven stages do not account for the whole run —
+    # the resting-ball departure scan samples the entire video and belongs
+    # to no stage, and the panel-only debug images (the rest-check frame,
+    # the flight drawing) are overhead produce never pays. Report those
+    # separately and carry an explicit `unattributed` remainder, so the
+    # numbers reconcile against the wall clock instead of quietly missing
+    # whatever is not on the list.
+    _total = round(time.perf_counter() - _t_run, 3)
+    _staged = sum(
+        float(st.get("seconds") or 0.0) for st in rep["stages"]
+    )
+    _overhead = {
+        k: _phase[k] for k in ("rest_ball", "launch", "rest_check_image",
+                               "draw_flight")
+        if _phase.get(k)
+    }
+    rep["timing"] = {
+        "total_sec": _total,
+        "by_stage": {
+            int(st["n"]): round(float(st.get("seconds") or 0.0), 2)
+            for st in rep["stages"]
+        },
+        # Not one of the seven: whole-video scans and debug-image writes.
+        "outside_stages": {k: round(v, 2) for k, v in _overhead.items()},
+        "unattributed_sec": round(
+            max(0.0, _total - _staged - sum(_overhead.values())), 2,
+        ),
+        "n_swings": len(cands),
+        # The per-swing cost of the analysis itself, which is what scales
+        # with how many swings a round puts through the panel.
+        "per_swing_sec": (
+            round((_total - _phase.get("produce_real", 0.0)) / len(cands), 2)
+            if cands else None
+        ),
+    }
+    for st in rep["stages"]:
+        st["seconds"] = round(float(st.get("seconds") or 0.0), 2)
+        st["pct"] = round(100.0 * st["seconds"] / _total, 1) if _total else 0.0
+    log.info(
+        "debug3 timing upload=%s total=%.1fs over %d swing(s): %s | "
+        "outside stages: %s | unattributed %.1fs",
+        upload_id, _total, len(cands),
+        ", ".join(f"{st['n']}.{st['name']} {st['seconds']}s "
+                  f"({st['pct']}%)" for st in rep["stages"]),
+        ", ".join(f"{k} {v}s" for k, v in _overhead.items()) or "none",
+        rep["timing"]["unattributed_sec"],
+    )
     return rep
 
 
