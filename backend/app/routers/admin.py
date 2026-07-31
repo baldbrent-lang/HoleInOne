@@ -3099,51 +3099,6 @@ def _process_long_upload_segments(
     _src_w = float(_src_info.get("width") or 0)
     _src_h = float(_src_info.get("height") or 0)
 
-    def _reusable_clip(_db, swing_idx):
-        """The VideoClip a PREVIOUS produce run created for this swing,
-        so a re-produce UPDATES it rather than inserting a second row.
-
-        Re-produce wrote new files and a brand-new clip row every time
-        and left the old row untouched. The production card renders
-        `produced_clips[0]`; that list is ordered by captured_at alone,
-        and a re-produce of the same source computes the SAME
-        captured_at (base_dt + tee_cut_start) — so old and new tie and
-        the card kept showing whichever row the database happened to
-        return first, which is the older one. That is exactly why
-        re-uploading the same video "worked": a fresh upload has no
-        older row to tie with.
-
-        Updating the row the swing already points at fixes the card and
-        stops duplicates accumulating, and because the id survives so do
-        the clip's participant match, its highlight flag, and any link
-        already shared for it."""
-        if progress_upload_id is None:
-            return None
-        try:
-            _row = _db.get(LongVideoUpload, progress_upload_id)
-            if _row is None:
-                return None
-            for sw in (_row.edit_metrics or {}).get("swings") or []:
-                if not isinstance(sw, dict):
-                    continue
-                if int(sw.get("idx", -1)) != swing_idx:
-                    continue
-                _cid = sw.get("clip_id")
-                if _cid is None:
-                    return None
-                _c = _db.get(VideoClip, int(_cid))
-                # Only ever reuse a clip belonging to THIS upload — a
-                # stale/foreign id must fall through to a fresh insert.
-                if _c is not None and _c.long_upload_id == progress_upload_id:
-                    return _c
-                return None
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "re-produce: could not resolve the prior clip for swing "
-                "%s (%s) — inserting a new one", swing_idx, exc,
-            )
-        return None
-
     def _persist_swing_track(
         swing_idx, tracer_info, tracer_url, cut_start_sec, cut_end_sec=None,
         clip_id=None, seg_dims=None,
@@ -3764,19 +3719,8 @@ def _process_long_upload_segments(
                         ball_verdict=seg.get("ball_verdict"),
                     ),
                 )
-                # Re-produce updates this swing's existing row in place
-                # (see _reusable_clip); only a first run inserts.
-                _c = _reusable_clip(_db, idx)
-                if _c is None:
-                    _c = VideoClip(**_fields)
-                    _db.add(_c)
-                else:
-                    for _k, _v in _fields.items():
-                        setattr(_c, _k, _v)
-                    log.info(
-                        "re-produce: swing %s updating clip %s in place",
-                        idx, _c.id,
-                    )
+                _c = VideoClip(**_fields)
+                _db.add(_c)
                 _db.flush()
                 participant = match_clip(_db, _c)
                 if participant and _c.ball_in_cup:
@@ -3898,18 +3842,8 @@ def _process_long_upload_segments(
                 None, None, ball_verdict=seg.get("ball_verdict"),
             ),
         )
-        # Re-produce updates this swing's existing row in place (see
-        # _reusable_clip); only a first run inserts.
-        clip = _reusable_clip(db, idx)
-        if clip is None:
-            clip = VideoClip(**_fields)
-            db.add(clip)
-        else:
-            for _k, _v in _fields.items():
-                setattr(clip, _k, _v)
-            log.info(
-                "re-produce: swing %s updating clip %s in place", idx, clip.id,
-            )
+        clip = VideoClip(**_fields)
+        db.add(clip)
         db.flush()
 
         participant = match_clip(db, clip)
@@ -4808,15 +4742,11 @@ def list_long_uploads(
         produced_rows = (
             db.query(VideoClip)
             .filter(VideoClip.long_upload_id.in_(upload_ids))
-            # captured_at alone is NOT a total order here: it is derived
-            # from the cut start, so every clip a re-produce made for the
-            # same swing carries the identical timestamp. Without a
-            # tiebreak the card (which renders produced_clips[0]) showed
-            # whichever of the tied rows the database felt like returning
-            # first — in practice the oldest, so a re-produce appeared to
-            # do nothing. New runs update in place rather than duplicate
-            # (see _reusable_clip), but rows that already piled up still
-            # need the newest to win its slot.
+            # captured_at alone is not a total order: it is derived from
+            # the cut start, so two clips cut at the same offset tie. The
+            # id tiebreak just makes the order deterministic — without it
+            # produced_clips[0], which the card renders, is whichever row
+            # the database felt like returning first.
             .order_by(VideoClip.captured_at.asc(), VideoClip.id.desc())
             .all()
         )
@@ -5291,11 +5221,20 @@ def reprocess_long_upload(
     tee_green_delta_sec: float = Form(0.0),
     db: Session = Depends(get_db),
 ):
-    """Re-cut / re-process a previously-uploaded long video without
-    re-uploading. Queues the same per-segment pipeline used by the
-    initial POST /clips/long-upload as a background job; returns
-    immediately with the upload_id and pending status so the frontend
-    can poll /long-uploads."""
+    """Re-produce a previously-uploaded long video without re-uploading.
+
+    Runs THE pipeline — the same `_debug3_run` the Debug3 panel runs,
+    with the diagnostic artefacts turned off. Returns immediately with
+    pending status so the frontend can poll /long-uploads.
+
+    The detection Form fields (`segments`, `starting_hole`,
+    `ai_tracer_model`, `audio_min_peak_ratio`, `motion_ratio`,
+    `combined_pair_window_sec`) are still ACCEPTED so existing callers
+    keep working, but no longer used: swings come from the pose
+    detector, and the flight from Debug3. `tee_green_delta_sec` is the
+    exception — it is a real operator input, so it is persisted for the
+    produce to use.
+    """
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
@@ -5332,31 +5271,39 @@ def reprocess_long_upload(
     row.processing_started_at = None
     row.processing_completed_at = None
     row.last_error = None
+    # An operator-supplied tee→green offset is real information the
+    # cameras couldn't provide — persist it so _d3_green_delta_sec picks
+    # it up (it ranks below the cameras' own clocks, above assuming 0).
+    if tee_green_delta_sec:
+        _em = dict(row.edit_metrics or {})
+        _em["tee_green_delta_sec"] = round(float(tee_green_delta_sec), 4)
+        row.edit_metrics = _em
     db.commit()
 
-    threading.Thread(
-        target=_run_long_upload_job,
-        kwargs={
-            "upload_id": row.id,
-            "seg_list": list(seg_list),
-            "auto_detect_swings": bool(auto_detect_swings),
-            "starting_hole": int(starting_hole or 1),
-            "ai_tracer_model": ai_tracer_model,
-            "audio_min_peak_ratio": float(audio_min_peak_ratio),
-            "motion_ratio": float(motion_ratio),
-            "combined_pair_window_sec": float(combined_pair_window_sec),
-            "tee_green_delta_sec": float(tee_green_delta_sec),
-        },
-        daemon=True,
-        name=f"long-upload-reprocess-{row.id}",
-    ).start()
+    # RE-PRODUCE IS DEBUG3, MINUS THE PANEL. They were two
+    # implementations of one process and drifted the moment they existed
+    # side by side: different swing detectors (pose vs audio+motion),
+    # different clip windows, 35s versus 208s, and 40 AI calls per swing
+    # on this side whose answers Debug3 overwrote anyway. Same function
+    # now; `debug_artifacts=False` skips the film-strips, the whole-video
+    # resting-ball scan and the preview clip — diagnostics nobody is
+    # looking at on a plain Re-Produce. Nothing that decides what ships
+    # differs between the two.
+    #
+    # _debugx_start owns the thread, the DB session and the progress
+    # state, so the existing Debug3 status poll reports this run too.
+    _debugx_start(
+        "debug3", row.id,
+        functools.partial(_debug3_run, debug_artifacts=False),
+    )
 
     return {
         "upload_id": row.id,
         "processing_status": "pending",
         "dual_camera": row.green_filename is not None,
-        "queued_segments": len(seg_list) if seg_list else None,
-        "auto_detect_swings": bool(auto_detect_swings and not seg_list),
+        "engine": "debug3",
+        "queued_segments": None,
+        "auto_detect_swings": True,
     }
 
 
@@ -12582,11 +12529,47 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
     return out
 
 
-def _debug3_run(row, src_path, db, progress=None):
+def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True):
+    """THE production pipeline. Analyse, then build the clip.
+
+    Debug3 and Re-Produce are the same run — this function — because
+    they were two implementations of one process and drifted apart the
+    moment they existed side by side (different swing detectors,
+    different clip windows, 35s versus 208s). `debug_artifacts` is the
+    ONLY difference: the panel wants the film-strips and the preview
+    clip to look at, a plain Re-Produce does not and skips the work.
+    Everything that decides what ships is shared.
+    """
     upload_id = row.id
     from ..services import debug2 as d2
     from ..services import debug3 as d3
     from ..services import pose_swing
+
+    # Diagnostic images only when someone is going to look at them.
+    _art_dir = CLIPS_DIR if debug_artifacts else None
+
+    # The card polls processing_status — drive it from here so a run
+    # shows as in-progress whichever button started it (and cannot stick
+    # on "processing" if the analysis raises).
+    def _set_status(status: str, err: str | None = None) -> None:
+        try:
+            r2 = db.get(LongVideoUpload, upload_id)
+            if r2 is None:
+                return
+            r2.processing_status = status
+            if status == "processing":
+                r2.processing_started_at = _utcnow_naive()
+                r2.last_error = None
+            else:
+                r2.processing_completed_at = _utcnow_naive()
+                r2.last_error = err
+            db.add(r2)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log.warning("d3: could not set status=%s: %s", status, exc)
+
+    _set_status("processing")
 
     # This run's previews replace the last run's — clear them (and
     # anything else that has aged out) before writing more.
@@ -12635,11 +12618,12 @@ def _debug3_run(row, src_path, db, progress=None):
         _phase[name] = round(_phase.get(name, 0.0) + float(secs), 3)
 
     if not pose_swing.available():
-        return {
-            "ok": False,
-            "error": f"pose detector unavailable: "
-                     f"{pose_swing.unavailable_reason()}",
-        }
+        _err = (
+            f"pose detector unavailable: {pose_swing.unavailable_reason()}"
+        )
+        # Terminal, or the card sticks on 'processing' forever.
+        _set_status("failed", _err)
+        return {"ok": False, "error": _err}
     try:
         db.rollback()          # the passes below are slow; don't hold a txn
     except Exception:  # noqa: BLE001
@@ -12662,7 +12646,10 @@ def _debug3_run(row, src_path, db, progress=None):
     if progress:
         progress("resting-ball departures", 0, len(cands))
     _t0 = time.perf_counter()
-    rest = _rest_ball_departures(src_path, fps, db, row)
+    rest = (
+        _rest_ball_departures(src_path, fps, db, row)
+        if debug_artifacts else {}
+    )
     _add("rest_ball", time.perf_counter() - _t0)
     rep["rest_ball"] = {
         "reason": rest.get("reason"), "roi": rest.get("roi"),
@@ -12694,7 +12681,7 @@ def _debug3_run(row, src_path, db, progress=None):
             head_xy=c.get("impact_head_xy"),
             feet_xy=c.get("impact_feet_xy"),
             frame_w=_fw, frame_h=_fh,
-            debug_dir=CLIPS_DIR,
+            debug_dir=_art_dir,
             debug_prefix=f"d3-{upload_id}-{tok}-{i}-",
         )
         _dbg = _ff.get("debug") or {}
@@ -12765,7 +12752,7 @@ def _debug3_run(row, src_path, db, progress=None):
         # the ball it settled on, the launch frame the flight derived, and
         # the RANSAC inliers as the tracer points. Written to its own file,
         # so nothing here replaces a produced clip or touches edit_metrics.
-        if res.get("ok") and _ball:
+        if res.get("ok") and _ball and debug_artifacts:
             _t0 = time.perf_counter()
             try:
                 _pts = [
@@ -12975,6 +12962,18 @@ def _debug3_run(row, src_path, db, progress=None):
         ", ".join(f"{k} {v}s" for k, v in _overhead.items()) or "none",
         rep["timing"]["unattributed_sec"],
     )
+    # Terminal state for the card. A run that analysed but produced
+    # nothing is a FAILURE from the operator's side — the upload still
+    # has no clip — so say so rather than reporting completed.
+    _prod = rep.get("produced") or {}
+    if n_flights and _prod.get("ok"):
+        _set_status("completed")
+    else:
+        _set_status("failed", (
+            _prod.get("error")
+            or (f"{len(cands)} pose candidate(s), no ball flight found"
+                if not n_flights else "produce made no clip")
+        )[:2000])
     return rep
 
 
