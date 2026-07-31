@@ -12183,6 +12183,258 @@ def sweep_d3_previews(current_upload_id: int | None = None) -> int:
     return removed
 
 
+# ── Debug3 fast produce ────────────────────────────────────────────────
+# The clip's shape, in SECONDS. Frames are a rendering detail; every
+# boundary that has to line up with the real world is kept in float
+# seconds so it survives the tee and green cameras running at different
+# rates (49.76fps on the tee here — a frame is 20.1ms, and rounding that
+# to whole frames is a fifth of a frame of drift per conversion).
+D3_PRE_ROLL_SEC = 2.0        # lead-in before the strike
+D3_POST_TRACER_SEC = 1.5     # tee tail after the tracer line stops
+D3_GREEN_SEC = 4.0           # green-side coverage after the cutover
+
+
+def _d3_green_delta_sec(db, row) -> float | None:
+    """green_start − tee_start in seconds, from the cameras' WALL-CLOCK
+    recording starts.
+
+    This is the whole sync story. Both cameras stamp the real-world
+    instant their recording began, so the offset between the two
+    timelines is a datetime subtraction — microsecond resolution, no
+    frame quantisation, and correct even when the two cameras run at
+    different frame rates. A positive delta means green started LATER,
+    so a given real instant sits EARLIER in the green file:
+
+        green_time = tee_time − delta
+
+    Returns None when the upload has no camera event or either
+    timestamp is missing — the caller then ships tee-only rather than
+    guessing an offset."""
+    if not getattr(row, "camera_event_id", None):
+        return None
+    ev = db.get(CameraEvent, row.camera_event_id)
+    if ev is None:
+        return None
+    t_tee, t_green = ev.tee_recording_started_at, ev.green_recording_started_at
+    if t_tee is None or t_green is None:
+        return None
+    return (t_green - t_tee).total_seconds()
+
+
+def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
+    """Build the shipped clip STRAIGHT from Debug3's numbers.
+
+    Stage 7 used to re-run the whole production pipeline
+    (`_run_long_upload_job` with auto-detect), which re-derived from
+    scratch everything stages 1-6 had just measured: a whole-video
+    audio+motion swing detection, the AI anchor walk, the AI launch
+    plot, and a second `find_flight` inside `_trace_segment`. On upload
+    543 that was 208s of a 245s run — and the AI half of it was
+    discarded work, because `_trace_segment` overwrites the anchor's
+    ball, impact frame and launch points with Debug3's own the moment
+    Debug3 finds a flight.
+
+    So this renders the answer Debug3 already has:
+
+        [ t_launch − PRE_ROLL ] ───tracer───▶ [ tracer ends + 1.5s ]  tee
+                                                        │
+                                                        ▼  cut to green
+                                              [ + GREEN_SEC ]        green
+
+    The tee is rendered long enough to carry AUDIO across the whole
+    composite (the green camera has no microphone), but only the
+    pre-cutover portion is shown as video — same contract
+    `splice_impact_clip` already expects."""
+    out = {"ok": False, "clips": [], "error": None}
+    swings = [
+        s for s in (rep.get("swings") or [])
+        if s.get("ball") and s.get("launch_frame") is not None
+        and (s.get("flight") or [])
+    ]
+    if not swings:
+        out["error"] = "no swing with a flight to produce"
+        return out
+
+    fps = float(fps or 30.0)
+    delta = _d3_green_delta_sec(db, row)
+    green_path = None
+    if row.green_filename:
+        storage.ensure_local(CLIPS_DIR, row.green_filename)
+        _gp = CLIPS_DIR / row.green_filename
+        if _gp.exists():
+            green_path = _gp
+    if green_path is not None and delta is None:
+        log.warning(
+            "d3 produce: upload %s has a green file but no wall-clock "
+            "recording starts — shipping tee-only rather than guessing "
+            "the offset", row.id,
+        )
+        green_path = None
+
+    course = db.get(Course, row.course_id) if row.course_id else None
+    # Re-produce REPLACES: drop this upload's prior clips first, same as
+    # the full pipeline does.
+    try:
+        _old = db.query(VideoClip).filter(
+            VideoClip.long_upload_id == row.id,
+        ).all()
+        _hole = next(
+            (int(c.hole_number) for c in _old if c.hole_number), 1,
+        )
+        for _c in _old:
+            db.delete(_c)
+        if _old:
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        _hole = 1
+        log.warning("d3 produce: could not clear prior clips: %s", exc)
+
+    tok = secrets.token_hex(4)
+    for i, sw in enumerate(swings):
+        if progress:
+            progress(f"producing swing {i + 1} of {len(swings)}",
+                     i, len(swings))
+        try:
+            pts = [
+                {"frame": int(p["frame"]), "found": True,
+                 "x": float(p["x"]), "y": float(p["y"])}
+                for p in (sw.get("flight") or [])
+            ]
+            ball = sw["ball"]
+            launch_f = int(sw["launch_frame"])
+
+            # ── the clip's boundaries, in seconds ──────────────────
+            t_launch = launch_f / fps
+            t0 = max(0.0, t_launch - D3_PRE_ROLL_SEC)
+            t_tracer_end = max(p["frame"] for p in pts) / fps
+            t1 = t_tracer_end + D3_POST_TRACER_SEC
+            tee_video_dur = t1 - t0
+            # The tee file must also carry the audio bed under the green
+            # half, so render past the cutover even though that footage
+            # is never shown.
+            t_render_end = t1 + (D3_GREEN_SEC if green_path else 0.0)
+
+            _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
+            _rv = render_tracer_video(
+                src_path, _tee,
+                (float(ball[0]), float(ball[1])),
+                launch_f, pts,
+                write_start=int(round(t0 * fps)),
+                write_end=int(round(t_render_end * fps)),
+                rest_verified=True,
+            )
+            if not _rv.get("ok") or not _tee.exists():
+                raise RuntimeError(
+                    f"tracer render failed: {_rv.get('error')}")
+            transcode_for_web(_tee)
+
+            final = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}.mp4"
+            green_seg = None
+            if green_path is not None:
+                # The real instant at the cutover is t1 on the tee
+                # clock; on the green clock that same instant is
+                # t1 − delta. Seconds throughout — no frame rounding.
+                g0 = t1 - float(delta)
+                if g0 < 0:
+                    log.warning(
+                        "d3 produce: swing %s cutover lands %.3fs before "
+                        "the green recording starts — tee-only", i, -g0,
+                    )
+                else:
+                    green_seg = (
+                        CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-green.mp4"
+                    )
+                    if not cut_segment(
+                        green_path, green_seg, g0, g0 + D3_GREEN_SEC,
+                    ):
+                        log.warning(
+                            "d3 produce: green cut failed for swing %s "
+                            "— tee-only", i,
+                        )
+                        green_seg = None
+
+            if green_seg is not None:
+                if not splice_impact_clip(
+                    _tee, tee_video_dur, green_seg, D3_GREEN_SEC, final,
+                ):
+                    raise RuntimeError("composite splice failed")
+            else:
+                _tee.replace(final)
+
+            # ── clip row + participant ────────────────────────────
+            # Matched BEFORE the overlay so the name plate carries the
+            # player's actual name rather than the placeholder.
+            _url = f"{settings.app_base_url}/uploads/clips/{final.name}"
+            clip = VideoClip(
+                course_id=row.course_id,
+                hole_number=int(_hole),
+                camera_type=row.camera_type,
+                captured_at=(row.base_captured_at + timedelta(seconds=t0)),
+                source_url=_url,
+                tracer_url=_url,
+                long_upload_id=row.id,
+                processing_status=ClipProcessingStatus.received.value,
+            )
+            db.add(clip)
+            db.flush()
+            participant = match_clip(db, clip)
+
+            # ── graphics ──────────────────────────────────────────
+            _yardage = 101
+            if course and course.hole_yardages:
+                try:
+                    _ry = course.hole_yardages.get(str(int(_hole)))
+                    if _ry is not None:
+                        _yardage = int(_ry)
+                except (TypeError, ValueError):
+                    pass
+            apply_intro_overlay_inplace(
+                final,
+                player_name=(
+                    participant.name if participant else "Brent Baldwin"
+                ),
+                course_name=(course.name if course and course.name else ""),
+                hole_number=int(_hole),
+                par=3,
+                yardage=_yardage,
+            )
+
+            # Thumbnail AFTER the overlay so the card's still frame
+            # matches the clip that ships.
+            thumb = extract_thumbnail(final)
+            if thumb:
+                clip.thumbnail_url = (
+                    f"{settings.app_base_url}/uploads/clips/{thumb.name}"
+                )
+            db.commit()
+
+            out["clips"].append({
+                "clip_id": clip.id,
+                "tee_window_sec": [round(t0, 3), round(t1, 3)],
+                "tee_video_dur_sec": round(tee_video_dur, 3),
+                "green_delta_sec": (
+                    round(float(delta), 4) if delta is not None else None
+                ),
+                "green": green_seg is not None,
+                "url": _url,
+            })
+            log.info(
+                "d3 produce: upload=%s swing=%s tee [%.3f, %.3f]s "
+                "(%.3fs video) green=%s delta=%s",
+                row.id, i, t0, t1, tee_video_dur,
+                green_seg is not None,
+                f"{delta:.4f}s" if delta is not None else "n/a",
+            )
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log.warning("d3 produce: swing %s failed: %s", i, exc)
+            out["clips"].append({"error": f"{exc}"})
+
+    out["ok"] = any(c.get("clip_id") for c in out["clips"])
+    return out
+
+
 def _debug3_run(row, src_path, db, progress=None):
     upload_id = row.id
     from ..services import debug2 as d2
@@ -12413,12 +12665,21 @@ def _debug3_run(row, src_path, db, progress=None):
 
         rep["swings"].append(entry)
 
-    # 7. PRODUCE FOR REAL. Stage 6 renders a preview into its own file and
-    # replaces nothing -- that was right when Debug3 was a read-only
-    # diagnostic, and wrong now that it IS the process. Kick the same job
-    # the Produce button runs. Produce calls find_flight, so this regenerates
-    # the shipped clip, the composite and edit_metrics (which is what
-    # click-to-plot reads) from these very numbers.
+    # 7. PRODUCE. Stage 6 renders a preview and replaces nothing -- that
+    # was right when Debug3 was a read-only diagnostic, and wrong now
+    # that it IS the process.
+    #
+    # This used to kick the full production job (auto-detect, whole-video
+    # audio+motion detection, the AI anchor walk, the AI launch plot, and
+    # a second find_flight inside _trace_segment). It re-derived from
+    # scratch everything stages 1-6 had just measured, and _trace_segment
+    # then THREW AWAY the AI's answers -- it overwrites the anchor's
+    # ball, impact frame and launch points with Debug3's the moment
+    # Debug3 has a flight. Measured on upload 543: 208s of a 245s run,
+    # 62s of it AI calls whose results were discarded.
+    #
+    # Now the clip is built straight from the numbers above -- pre-roll,
+    # tracer, tail, cut to green -- by _d3_fast_produce.
     #
     # Synchronous on purpose: we are already on the debug3 background
     # thread, and the status poll keeps the panel honest about it.
@@ -12431,24 +12692,19 @@ def _debug3_run(row, src_path, db, progress=None):
             pass
         _t0 = time.perf_counter()
         try:
-            _run_long_upload_job(
-                upload_id=upload_id,
-                seg_list=[],
-                auto_detect_swings=True,
-                starting_hole=1,
-                ai_tracer_model=None,
-            )
+            _fp = _d3_fast_produce(row, src_path, db, rep, fps, progress)
+            _n_made = sum(1 for c in _fp["clips"] if c.get("clip_id"))
             rep["produced"] = {
-                "ok": True,
+                "ok": bool(_fp["ok"]),
+                "clips": _fp["clips"],
                 "detail": (
-                    "re-produced this upload through the normal pipeline -- "
-                    "the clip on the card and click-to-plot are now built "
-                    "from the numbers above"
-                ),
+                    f"built {_n_made} clip(s) straight from the numbers "
+                    f"above -- pre-roll {D3_PRE_ROLL_SEC}s, tracer, "
+                    f"+{D3_POST_TRACER_SEC}s tail, then the cut to green"
+                ) if _fp["ok"] else (_fp.get("error") or "produce failed"),
             }
-            log.info("debug3: re-produced upload=%s after analysis", upload_id)
         except Exception as exc:  # noqa: BLE001
-            log.warning("debug3: re-produce failed for %s: %s", upload_id, exc)
+            log.warning("debug3: produce failed for %s: %s", upload_id, exc)
             rep["produced"] = {"ok": False, "error": f"{exc}"}
         _add("produce_real", time.perf_counter() - _t0)
         # The produce job ran synchronously on THIS thread, so its
