@@ -4824,6 +4824,20 @@ def list_long_uploads(
             )
         return out
 
+    def _live_produce_stage(upload_id: int) -> dict:
+        """Which Debug3 stage this upload is on, if it is producing right
+        now. Reported only while running — a stale stage left on a
+        finished row reads as stuck, which is the thing this fixes."""
+        st = _debugx_get("produce", upload_id)
+        if not st.get("running"):
+            return {"produce_stage": None, "produce_done": None,
+                    "produce_total": None}
+        return {
+            "produce_stage": st.get("stage"),
+            "produce_done": st.get("done"),
+            "produce_total": st.get("total"),
+        }
+
     # Produce is serialised, so a card can sit at "pending" simply because
     # it is waiting its turn. Say which, rather than looking stuck. Queue
     # order is by upload time, so we can name the exact position.
@@ -4972,6 +4986,9 @@ def list_long_uploads(
                 ),
                 "queue_position": _q_pos.get(r.id),
                 "queue_depth": len(_q_waiting),
+                # Live stage of an in-flight produce, so the greyed card
+                # can name what it is doing.
+                **_live_produce_stage(r.id),
             }
         )
     return out
@@ -11658,7 +11675,7 @@ def _debug2_run(row, src_path, db, progress=None):
     })
 
     if progress:
-        progress("resting-ball departures", 0, len(cands))
+        progress("Scanning for the ball at rest", 0, len(cands))
     rest = _rest_ball_departures(src_path, fps, db, row)
     rep["rest_ball"] = {
         "reason": rest.get("reason"), "roi": rest.get("roi"),
@@ -11668,7 +11685,8 @@ def _debug2_run(row, src_path, db, progress=None):
     n_judged_out = 0
     for i, c in enumerate(cands):
         if progress:
-            progress(f"candidate {i + 1} of {len(cands)}", i, len(cands))
+            progress(f"Swing {i + 1} of {len(cands)}: finding the ball at impact",
+                     i, len(cands))
         peak_t = float(c.get("peak_time_sec") or 0.0)
         imp_f = int(round(peak_t * fps))
         entry: dict = {
@@ -12324,13 +12342,31 @@ def run_produce_job(
             except Exception:  # noqa: BLE001
                 db.rollback()
             return {"ok": False, "error": _err}
-        return _debug3_run(
-            row, src_path, db,
-            debug_artifacts=debug_artifacts,
-            hole_number=hole_number,
-        )
+        # Report the same stages Debug3's panel shows, so an auto-produce
+        # card can say "Finding swing candidates" instead of just going
+        # grey for three minutes. Same store the Debug3 poll reads, under
+        # a "produce" kind — /long-uploads serves it to the card.
+        def _prog(stage: str, done: int = 0, total: int = 0) -> None:
+            _debugx_set("produce", upload_id, stage=stage, done=done,
+                        total=total, running=True)
+
+        _debugx_set("produce", upload_id, stage="Starting", done=0, total=0,
+                    running=True, error=None)
+        try:
+            return _debug3_run(
+                row, src_path, db,
+                progress=_prog,
+                debug_artifacts=debug_artifacts,
+                hole_number=hole_number,
+            )
+        finally:
+            # Clear it whatever happened, or the card keeps showing the
+            # last stage it reached after the run is over.
+            _debugx_set("produce", upload_id, running=False, stage="done")
     except Exception as exc:  # noqa: BLE001
         log.exception("produce job %s crashed: %s", upload_id, exc)
+        _debugx_set("produce", upload_id, running=False, stage="failed",
+                    error=f"{exc}")
         return {"ok": False, "error": f"{exc}"}
     finally:
         db.close()
@@ -12601,7 +12637,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
     tok = secrets.token_hex(4)
     for i, sw in enumerate(swings):
         if progress:
-            progress(f"producing swing {i + 1} of {len(swings)}",
+            progress(f"Building clip {i + 1} of {len(swings)}",
                      i, len(swings))
         try:
             pts = [
@@ -12893,6 +12929,11 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     except Exception:  # noqa: BLE001
         pass
     pose_dbg: dict = {}
+    # Pose is the single longest stage (~26s on upload 501) and it ran
+    # SILENT — the card sat grey with nothing on it until the first
+    # candidate. Say what is happening before it starts, not after.
+    if progress:
+        progress("Finding swing candidates", 0, 0)
     _t0 = time.perf_counter()
     cands = list(
         pose_swing.detect_swings_from_pose(src_path, fps=fps, debug=pose_dbg)
@@ -12908,7 +12949,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
 
     # Once per upload, not per candidate: it samples the whole video.
     if progress:
-        progress("resting-ball departures", 0, len(cands))
+        progress("Scanning for the ball at rest", 0, len(cands))
     _t0 = time.perf_counter()
     rest = (
         _rest_ball_departures(src_path, fps, db, row)
@@ -12924,7 +12965,8 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     n_produced = 0
     for i, c in enumerate(cands):
         if progress:
-            progress(f"candidate {i + 1} of {len(cands)}", i, len(cands))
+            progress(f"Swing {i + 1} of {len(cands)}: finding the ball at impact",
+                     i, len(cands))
         peak_t = float(c.get("peak_time_sec") or 0.0)
         imp_f = int(round(peak_t * fps))
         f_lo = max(0, imp_f - d3.WIN_PRE)
@@ -13089,7 +13131,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     # thread, and the status poll keeps the panel honest about it.
     if n_flights:
         if progress:
-            progress("producing the real clip", len(cands), len(cands))
+            progress("Building the clip", len(cands), len(cands))
         try:
             db.rollback()
         except Exception:  # noqa: BLE001

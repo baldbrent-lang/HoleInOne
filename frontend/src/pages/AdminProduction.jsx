@@ -85,6 +85,114 @@ function uploadState(row, busy) {
   return "queued";
 }
 
+// What a producing card says about itself. Sits on top of the greyed
+// card (outside its opacity, so it stays legible) and names the Debug3
+// stage the backend is actually on — "Finding swing candidates",
+// "Swing 2 of 3: finding the ball at impact", "Building the clip".
+//
+// Three states, in priority order: waiting its turn in the produce
+// queue, running with a named stage, running before the first stage has
+// been reported. Never shown on an idle card.
+function ProduceStatusOverlay({ row, greyed }) {
+  const queued = row.queue_state === "queued";
+  if (!greyed && !queued) return null;
+
+  const stage = row.produce_stage;
+  const total = row.produce_total || 0;
+  const done = row.produce_done || 0;
+  // Only a per-candidate stage carries a meaningful total; the one-off
+  // stages report 0 and get an indeterminate bar rather than a fake 0%.
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+
+  const label = queued
+    ? `Waiting to produce${
+        row.queue_position ? ` · ${row.queue_position} of ${row.queue_depth}` : ""
+      }`
+    : stage && stage !== "done" && stage !== "failed"
+      ? stage
+      : "Producing…";
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 10,
+        left: 12,
+        right: 12,
+        zIndex: 5,
+        pointerEvents: "none",
+        display: "flex",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          maxWidth: "100%",
+          padding: "7px 14px",
+          borderRadius: 999,
+          background: queued
+            ? "rgba(234, 179, 8, 0.95)"
+            : "rgba(17, 24, 39, 0.92)",
+          color: queued ? "#3f2d00" : "#f9fafb",
+          border: "1px solid rgba(255,255,255,0.18)",
+          boxShadow: "0 2px 10px rgba(0,0,0,0.28)",
+          fontSize: 13,
+          fontWeight: 600,
+        }}
+      >
+        {!queued && (
+          <span
+            aria-hidden="true"
+            style={{
+              width: 12,
+              height: 12,
+              flexShrink: 0,
+              borderRadius: "50%",
+              border: "2px solid rgba(255,255,255,0.35)",
+              borderTopColor: "#fff",
+              animation: "gr-spin 0.8s linear infinite",
+            }}
+          />
+        )}
+        <span
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {label}
+        </span>
+        {pct !== null && (
+          <span
+            style={{
+              flexShrink: 0,
+              width: 54,
+              height: 5,
+              borderRadius: 999,
+              background: "rgba(255,255,255,0.25)",
+              overflow: "hidden",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                width: `${pct}%`,
+                height: "100%",
+                background: "#22c55e",
+                transition: "width 0.4s ease",
+              }}
+            />
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MetaRow({ k, v }) {
   // Empty string / null / undefined → blank value (no em-dash). The label
   // stays so the rows in adjacent tiles still line up vertically.
@@ -7750,15 +7858,21 @@ export default function AdminProduction() {
     }
   }
 
+  // Something mid-produce means the stage text on its card is changing;
+  // poll faster so it reads as live rather than as a frozen label.
+  const anyProducing = (rows || []).some(
+    (r) => r.processing_status === "processing" || r.queue_state,
+  );
+
   useEffect(() => {
     if (!adminPassword) return;
     // Poll while anything is actively producing so the badge clears
     // automatically when the background worker finishes. The hook
     // handles the initial page-1 fetch on mount itself; we just need
     // to keep it warm.
-    const id = setInterval(refreshAll, 8000);
+    const id = setInterval(refreshAll, anyProducing ? 3000 : 8000);
     return () => clearInterval(id);
-  }, [adminPassword, refreshAll]);
+  }, [adminPassword, refreshAll, anyProducing]);
 
   async function handleDelete(row) {
     if (!confirm(`Delete upload #${row.id}? This removes the source video(s).`)) return;
@@ -8027,11 +8141,14 @@ export default function AdminProduction() {
         const greyed = state === "processing";
         const busy = busyId === row.id;
         return (
+          // Wrapper exists so the status overlay can sit OUTSIDE the
+          // opacity: a child of the greyed card would be dimmed to 0.6
+          // too, and the whole point is that it stays readable.
+          <div key={row.id} style={{ position: "relative", marginBottom: 12 }}>
           <div
-            key={row.id}
             className="card"
             style={{
-              marginBottom: 12,
+              marginBottom: 0,
               opacity: greyed ? 0.6 : 1,
               position: "relative",
               outline: selectedIds.has(row.id)
@@ -8082,23 +8199,6 @@ export default function AdminProduction() {
               ) : (
                 <span className="small muted">
                   {row.swing_count === "single" ? "One swing" : "Multiple swings"}
-                </span>
-              )}
-              {row.queue_state === "queued" && (
-                <span
-                  className="small"
-                  style={{
-                    padding: "2px 8px",
-                    borderRadius: 999,
-                    background: "rgba(234, 179, 8, 0.14)",
-                    border: "1px solid rgba(234, 179, 8, 0.45)",
-                  }}
-                  title="Produce runs one upload at a time, oldest first."
-                >
-                  Waiting to produce
-                  {row.queue_position
-                    ? ` · ${row.queue_position} of ${row.queue_depth}`
-                    : ""}
                 </span>
               )}
               <span className="small muted">·</span>
@@ -8341,6 +8441,8 @@ export default function AdminProduction() {
                 {row.last_error}
               </div>
             )}
+          </div>
+          <ProduceStatusOverlay row={row} greyed={greyed} />
           </div>
         );
       })}

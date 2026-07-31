@@ -514,6 +514,12 @@ tr:last-child td { border-bottom: none; }
   100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
 
+/* Spinner for the produce-status overlay on a producing card. */
+@keyframes gr-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  @keyframes gr-spin { to { transform: none; } }
+}
+
 /* Trust band: course logos + live counter */
 .trust-band {
   text-align: center;
