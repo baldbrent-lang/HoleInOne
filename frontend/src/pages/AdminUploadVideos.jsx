@@ -35,9 +35,6 @@ export default function AdminUploadVideos() {
   const [datePlayed, setDatePlayed] = useState(todayLocalDate());
   const [teeFile, setTeeFile] = useState(null);
   const [greenFile, setGreenFile] = useState(null);
-  // 'multiple' = full round → auto-produce in the background.
-  // 'single'   = one swing → queue for editing on Production first.
-  const [swingCount, setSwingCount] = useState("multiple");
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
@@ -70,7 +67,6 @@ export default function AdminUploadVideos() {
     fd.append("base_captured_at", baseCapturedAt);
     fd.append("video", teeFile, teeFile.name);
     if (greenFile) fd.append("video_green", greenFile, greenFile.name);
-    fd.append("swing_count", swingCount);
 
     setUploading(true);
     setProgress(0);
@@ -117,11 +113,11 @@ export default function AdminUploadVideos() {
         <h3 style={{ marginBottom: 6 }}>Upload videos</h3>
         <p className="small muted" style={{ marginBottom: 14 }}>
           Drop a tee-angle video (and an optional green-side video) for
-          a round. <b>Multiple swings</b> kicks off processing in the
-          background — produced clips appear on{" "}
-          <Link to="/admin/broadcast-clips">Broadcast</Link> when ready.
-          Pick <b>One swing</b> to queue the video for editing on{" "}
-          <Link to="/admin/production">Production</Link> before producing.
+          a round. Producing starts automatically — however many swings
+          are in the video, you get a clip for each one. Watch progress
+          on <Link to="/admin/production">Production</Link>; finished
+          clips can be sent to{" "}
+          <Link to="/admin/broadcast-clips">Broadcast</Link>.
         </p>
 
         {success && (
@@ -211,54 +207,6 @@ export default function AdminUploadVideos() {
                   {greenFile.name} · {(greenFile.size / (1024 * 1024)).toFixed(1)} MB
                 </div>
               )}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 14 }}>
-            <label className="small" style={{ display: "block", marginBottom: 6 }}>
-              How many swings is this video?
-            </label>
-            <div className="row" style={{ gap: 16, flexWrap: "wrap" }}>
-              <label
-                className="small"
-                style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}
-              >
-                <input
-                  type="radio"
-                  name="swing_count"
-                  value="multiple"
-                  checked={swingCount === "multiple"}
-                  onChange={(e) => setSwingCount(e.target.value)}
-                  disabled={uploading}
-                  style={{ margin: 0 }}
-                />
-                <span>
-                  <b>Multiple swings</b>{" "}
-                  <span className="muted">
-                    — full round, auto-produces in the background.
-                  </span>
-                </span>
-              </label>
-              <label
-                className="small"
-                style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer" }}
-              >
-                <input
-                  type="radio"
-                  name="swing_count"
-                  value="single"
-                  checked={swingCount === "single"}
-                  onChange={(e) => setSwingCount(e.target.value)}
-                  disabled={uploading}
-                  style={{ margin: 0 }}
-                />
-                <span>
-                  <b>One swing</b>{" "}
-                  <span className="muted">
-                    — queues on Production for editing first.
-                  </span>
-                </span>
-              </label>
             </div>
           </div>
 

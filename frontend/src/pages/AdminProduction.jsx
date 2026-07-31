@@ -5,15 +5,17 @@
  * source videos plus probe metadata (duration / frames / fps / size)
  * and the captured timestamp window. Action buttons depend on state:
  *
- *   - swing_count='multiple' AND processing in flight
- *       → everything greyed out, "Production in Progress" badge
+ *   - producing (or waiting its turn in the produce queue)
+ *       → everything greyed out, status overlay naming the stage
  *   - already produced (last_n_succeeded > 0 OR status='completed')
  *       → Edit · Re-Produce · Delete
- *   - swing_count='single' not yet produced
+ *   - uploaded, nothing produced yet
  *       → Edit · Produce · Delete
  *
- * Action handlers are stubs for now — the user will hand over the
- * functional spec next.
+ * Every upload auto-produces on arrival now, so the third state is
+ * mostly a produce that found no swings, or one an operator deleted the
+ * clips from. `swing_count` survives only as the Edit wizard's shape
+ * switch (see isMulti); it is no longer an operator choice.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -8196,11 +8198,7 @@ export default function AdminProduction() {
                   From {row.source.camera_name
                     || `Camera #${row.source.camera_id}`}
                 </span>
-              ) : (
-                <span className="small muted">
-                  {row.swing_count === "single" ? "One swing" : "Multiple swings"}
-                </span>
-              )}
+              ) : null}
               <span className="small muted">·</span>
               <span className="small muted">
                 {row.source?.kind === "camera"

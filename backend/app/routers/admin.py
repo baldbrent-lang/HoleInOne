@@ -4256,17 +4256,19 @@ async def quick_upload_videos(
     """Simple operator-facing upload: save the tee video (plus optional
     green-side video) and create a LongVideoUpload row.
 
-    `swing_count` drives the auto-produce decision:
-      - 'multiple' (default): full round / many swings. The cut /
-        AI-tracer / composite background job kicks off immediately
-        with sane defaults (auto-detect swings, starting hole 1,
-        combined detector at audio×5 / motion×2 thresholds).
-      - 'single': one swing per video. Queue the row for manual
-        editing on /admin/production before producing — no
-        background thread spawns.
+    Every upload auto-produces, whatever is in it. Debug3 finds however
+    many swings the video contains and emits a clip per flight, so there
+    is nothing for the operator to declare.
 
-    Either way, this endpoint returns immediately so the upload UI
-    isn't blocked on the multi-minute processing phase.
+    `swing_count` is still ACCEPTED and still stored, because the Edit
+    wizard reads it to pick its shape — flat `edit_metrics` for 'single',
+    a per-swing `edit_metrics.swings[]` array for 'multiple'. It is no
+    longer sent by the UI and no longer affects whether we produce; a
+    stale cached frontend posting 'single' gets auto-produce like
+    everything else. See the coercion below for why it is forced.
+
+    Returns immediately so the upload UI isn't blocked on the
+    multi-minute processing phase.
     """
     course = db.get(Course, course_id)
     if not course:
@@ -4323,10 +4325,21 @@ async def quick_upload_videos(
         (CLIPS_DIR / green_src_name).write_bytes(green_data)
         green_original_filename = video_green.filename or None
 
-    swing_count_norm = (swing_count or "multiple").strip().lower()
-    if swing_count_norm not in ("single", "multiple"):
-        swing_count_norm = "multiple"
-    auto_process = swing_count_norm == "multiple"
+    # Forced to 'multiple', and NOT just because the UI stopped asking.
+    # The Edit wizard picks its data shape from this field: 'single'
+    # reads a flat edit_metrics, 'multiple' reads edit_metrics.swings[].
+    # Debug3 — which now produces every upload — writes swings[] via
+    # _d3_save_swing whatever the count. So a row stored as 'single'
+    # would produce fine and then open an Edit wizard reading a shape
+    # nothing ever wrote, showing no swing at all. Storing 'multiple'
+    # keeps the produced data and the editor that reads it in agreement.
+    _requested = (swing_count or "multiple").strip().lower()
+    if _requested == "single":
+        log.info(
+            "quick-upload: swing_count='single' from a stale client — "
+            "producing as 'multiple' (the only path there is now)",
+        )
+    swing_count_norm = "multiple"
 
     upload_row = LongVideoUpload(
         course_id=course_id,
@@ -4374,42 +4387,28 @@ async def quick_upload_videos(
         swing_count_norm,
     )
 
-    # 'multiple' swing-count kicks off the cut / AI-tracer / composite
-    # background job immediately. 'single' kicks off the cheap
-    # auto-detect (audio impact + Claude handedness) so the Edit
-    # wizard opens with handedness / address / impact / ball / ROI /
-    # target already populated — no detection round-trip on open.
-    if auto_process:
-        # No pre-screen here: produce's own pose pass IS the non-golf
-        # screen (zero swings detected -> the job auto-deletes), so a
-        # separate mediapipe scan would just duplicate the work.
-        enqueue_produce_job(upload_id=upload_row.id, hole_number=1)
-        message = (
-            "Multiple-swing upload — processing started in the "
-            "background. Produced clips will appear on Broadcast when "
-            "ready."
-        )
-    else:
-        threading.Thread(
-            target=_screen_then_run,
-            args=(
-                upload_row.id, src_name, _run_auto_detect_seed,
-                {"upload_id": upload_row.id},
-            ),
-            daemon=True,
-            name=f"auto-detect-{upload_row.id}",
-        ).start()
-        message = (
-            "Single-swing upload — auto-detecting metrics in the "
-            "background. Open Edit on Production to review."
-        )
+    # EVERY upload auto-produces. There is no longer a one-swing /
+    # multi-swing choice, because the distinction stopped being real:
+    # Debug3 detects however many swings are in the video and emits a
+    # clip per flight, so one swing in gives one clip out on the same
+    # path. Asking the operator to declare it up front only created a
+    # way to get it wrong.
+    #
+    # No pre-screen here: produce's own pose pass IS the non-golf
+    # screen (zero swings detected -> the job auto-deletes), so a
+    # separate mediapipe scan would just duplicate the work.
+    enqueue_produce_job(upload_id=upload_row.id, hole_number=1)
+    message = (
+        "Upload received — producing in the background. Clips appear on "
+        "Production as each swing finishes."
+    )
 
     return {
         "upload_id": upload_row.id,
         "processing_status": upload_row.processing_status,
         "dual_camera": dual_camera,
         "swing_count": swing_count_norm,
-        "auto_processing": auto_process,
+        "auto_processing": True,
         "message": message,
     }
 
