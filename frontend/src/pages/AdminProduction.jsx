@@ -3128,6 +3128,42 @@ function Debug3Modal({ state, onClose }) {
               {rep.frame?.[0]}×{rep.frame?.[1]} @ {rep.fps}fps · ball scale
               r = {rep.r_px}px
             </div>
+            {/* Tee→green sync: say whether the offset was MEASURED from
+                the cameras' clocks or ASSUMED, so a visibly wrong cut
+                points at the offset rather than at the pipeline. */}
+            {(rep.produced?.clips || []).some((c) => c.clip_id) && (
+              <div className="tiny muted" style={{ marginTop: 4 }}>
+                {rep.produced.clips
+                  .filter((c) => c.clip_id)
+                  .map((c, i) => (
+                    <div key={`sync-${i}`}>
+                      swing {i + 1}: tee {c.tee_window_sec?.[0]}–
+                      {c.tee_window_sec?.[1]}s ({c.tee_video_dur_sec}s shown)
+                      {c.green ? (
+                        <>
+                          {" "}· cut to green at Δ{c.green_delta_sec}s{" "}
+                          <b style={{
+                            color: c.green_delta_source === "camera_event"
+                              ? "var(--emerald-700, #16a34a)"
+                              : "var(--danger, #c0392b)",
+                          }}>
+                            {c.green_delta_source === "camera_event"
+                              ? "measured from camera clocks"
+                              : c.green_delta_source === "edit_metrics"
+                                ? "saved offset"
+                                : "ASSUMED 0 — no camera clocks"}
+                          </b>
+                        </>
+                      ) : (
+                        <> · <b>tee-only</b> (no green cut)</>
+                      )}
+                      {c.plot_background === false && (
+                        <> · <b>no click-to-plot background</b></>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
             {rep.produced && (
               <div
                 className="small"

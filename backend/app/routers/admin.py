@@ -12194,31 +12194,116 @@ D3_POST_TRACER_SEC = 1.5     # tee tail after the tracer line stops
 D3_GREEN_SEC = 4.0           # green-side coverage after the cutover
 
 
-def _d3_green_delta_sec(db, row) -> float | None:
-    """green_start − tee_start in seconds, from the cameras' WALL-CLOCK
-    recording starts.
+def _d3_green_delta_sec(db, row) -> tuple[float, str]:
+    """(green_start − tee_start) in seconds, and where it came from.
 
-    This is the whole sync story. Both cameras stamp the real-world
-    instant their recording began, so the offset between the two
-    timelines is a datetime subtraction — microsecond resolution, no
-    frame quantisation, and correct even when the two cameras run at
-    different frame rates. A positive delta means green started LATER,
-    so a given real instant sits EARLIER in the green file:
+    This is the whole sync story. When both cameras stamp the real-world
+    instant their recording began, the offset between the two timelines
+    is a datetime subtraction — microsecond resolution, no frame
+    quantisation, and correct even when the two cameras run at different
+    frame rates. A positive delta means green started LATER, so a given
+    real instant sits EARLIER in the green file:
 
         green_time = tee_time − delta
 
-    Returns None when the upload has no camera event or either
-    timestamp is missing — the caller then ships tee-only rather than
-    guessing an offset."""
-    if not getattr(row, "camera_event_id", None):
+    Sources, best first:
+      * `camera_event`  — the wall clocks. The real answer.
+      * `edit_metrics`  — an offset a previous run or the operator
+                          established for this upload.
+      * `assumed_zero`  — no better information: treat the two files as
+                          having started together, which is exactly what
+                          the rest of the pipeline already defaults to
+                          (`tee_green_delta_sec: float = 0.0`).
+
+    The fallback matters: a manually uploaded pair has no camera event,
+    and refusing to cut without one means dual-camera uploads silently
+    ship tee-only. Returning the source alongside the number lets the
+    caller log it and the panel show whether sync was MEASURED or
+    ASSUMED, so a visibly wrong cut points at the offset rather than at
+    the code."""
+    if getattr(row, "camera_event_id", None):
+        ev = db.get(CameraEvent, row.camera_event_id)
+        if ev is not None:
+            t_tee = ev.tee_recording_started_at
+            t_green = ev.green_recording_started_at
+            if t_tee is not None and t_green is not None:
+                return (t_green - t_tee).total_seconds(), "camera_event"
+    try:
+        _saved = (row.edit_metrics or {}).get("tee_green_delta_sec")
+        if _saved is not None:
+            return float(_saved), "edit_metrics"
+    except (TypeError, ValueError):
+        pass
+    return 0.0, "assumed_zero"
+
+
+def _d3_plot_background(src_path: Path, frame_idx: int, name: str):
+    """Write the frame the click-to-plot editor draws its dots over.
+
+    The editor needs a canvas in the SAME pixel space as the points; the
+    frame at launch is the natural one (it shows the scene rather than
+    an accumulation of it). Returns the filename, or None."""
+    try:
+        import cv2 as _cv
+
+        cap = _cv.VideoCapture(str(src_path))
+        cap.set(_cv.CAP_PROP_POS_FRAMES, max(0, int(frame_idx)))
+        ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None:
+            return None
+        out = CLIPS_DIR / name
+        if not _cv.imwrite(str(out), frame,
+                           [int(_cv.IMWRITE_JPEG_QUALITY), 88]):
+            return None
+        return name
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3 produce: plot background failed: %s", exc)
         return None
-    ev = db.get(CameraEvent, row.camera_event_id)
-    if ev is None:
-        return None
-    t_tee, t_green = ev.tee_recording_started_at, ev.green_recording_started_at
-    if t_tee is None or t_green is None:
-        return None
-    return (t_green - t_tee).total_seconds()
+
+
+def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
+                   delta_sec: float) -> None:
+    """Merge one swing record into the upload's edit_metrics.
+
+    Read-modify-write against a fresh row so a produce that ran for
+    minutes doesn't clobber an operator's concurrent click-to-plot save
+    with a stale copy. An operator-placed ball (ball_manual) is never
+    overwritten — same rule _persist_swing_track follows."""
+    try:
+        r2 = db.get(LongVideoUpload, upload_id)
+        if r2 is None:
+            return
+        em = dict(r2.edit_metrics or {})
+        # Keep the offset that produced this cut, so a later run (or an
+        # operator wondering why the green half is early) can see it.
+        em["tee_green_delta_sec"] = round(float(delta_sec), 4)
+        swings = [s for s in (em.get("swings") or []) if isinstance(s, dict)]
+        prior = next(
+            (s for s in swings if int(s.get("idx", -1)) == idx), None,
+        )
+        merged = dict(prior or {})
+        merged.update(rec)
+        if prior and prior.get("ball_manual"):
+            merged["ball"] = prior.get("ball", rec.get("ball"))
+            merged["ball_manual"] = True
+        swings = [s for s in swings if int(s.get("idx", -1)) != idx]
+        swings.append(merged)
+        swings.sort(key=lambda s: int(s.get("idx", 0)))
+        em["swings"] = swings
+        r2.edit_metrics = em
+        db.add(r2)
+        db.commit()
+        log.info(
+            "d3 produce: saved swing %s for click-to-plot — %d track "
+            "point(s), %d candidate(s), background=%s",
+            idx, len(rec.get("ball_track_frames") or []),
+            len(rec.get("cand_points") or []),
+            bool(rec.get("tracer_raw_motion_url")),
+        )
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        log.warning("d3 produce: could not save swing %s: %s", idx, exc)
 
 
 def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
@@ -12256,20 +12341,33 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
         return out
 
     fps = float(fps or 30.0)
-    delta = _d3_green_delta_sec(db, row)
+    delta, delta_src = _d3_green_delta_sec(db, row)
+    out["green_delta_sec"] = round(delta, 4)
+    out["green_delta_source"] = delta_src
     green_path = None
     if row.green_filename:
         storage.ensure_local(CLIPS_DIR, row.green_filename)
         _gp = CLIPS_DIR / row.green_filename
         if _gp.exists():
             green_path = _gp
-    if green_path is not None and delta is None:
-        log.warning(
-            "d3 produce: upload %s has a green file but no wall-clock "
-            "recording starts — shipping tee-only rather than guessing "
-            "the offset", row.id,
+        else:
+            log.warning(
+                "d3 produce: upload %s names green file %s but it is not "
+                "on disk — tee-only", row.id, row.green_filename,
+            )
+    if green_path is not None:
+        log.info(
+            "d3 produce: upload %s cutting to green, delta=%.4fs (%s)",
+            row.id, delta, delta_src,
         )
-        green_path = None
+
+    # The pixel space the points are in — click-to-plot divides by
+    # this, so it must be the source's own size (find_flight ran on
+    # the source, so none of the cut-scaling in _persist_swing_track
+    # applies here).
+    _si = probe_video_info(src_path) or {}
+    _src_w = int(_si.get("width") or 0) or None
+    _src_h = int(_si.get("height") or 0) or None
 
     course = db.get(Course, row.course_id) if row.course_id else None
     # Re-produce REPLACES: drop this upload's prior clips first, same as
@@ -12409,14 +12507,63 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None) -> dict:
                 )
             db.commit()
 
+            # ── click-to-plot ─────────────────────────────────────
+            # The old pipeline populated edit_metrics through
+            # _persist_swing_track; this path bypasses it, so the editor
+            # opened with a leftover candidate pool, no track, and — the
+            # visible symptom — nothing to draw on. Everything below is
+            # already in SOURCE pixel/frame space: find_flight ran on the
+            # source, not on a cut, so there is no offset to apply and no
+            # rescaling (see _persist_swing_track for why that matters).
+            _bg = _d3_plot_background(
+                src_path, launch_f, f"d3plotbg-{row.id}-{tok}-{i}.jpg",
+            )
+            _sw_rec = {
+                "idx": i,
+                "clip_id": clip.id,
+                "fps": round(fps, 2),
+                "start_frame": int(round(t0 * fps)),
+                "end_frame": int(round(t1 * fps)),
+                "impact_frame": launch_f,
+                "ball": {"x": int(round(float(ball[0]))),
+                         "y": int(round(float(ball[1])))},
+                "tracer_url": _url,
+                "tracer_engine": "debug3",
+                "persisted_at": round(time.time(), 2),
+                "track_frame_width": _src_w,
+                "track_frame_height": _src_h,
+                "track_scaled_from_cut": False,
+                "ball_track_frames": [
+                    {"frame": p["frame"], "found": True,
+                     "x": p["x"], "y": p["y"]} for p in pts
+                ],
+                # The flight points are the primary clickable layer; the
+                # full detection pool is the dense layer behind the zoom.
+                "timed_points": [
+                    {"frame": p["frame"], "x": int(round(p["x"])),
+                     "y": int(round(p["y"]))} for p in pts
+                ],
+                "cand_points": [
+                    {"frame": int(c["frame"]), "x": int(round(float(c["x"]))),
+                     "y": int(round(float(c["y"])))}
+                    for c in (sw.get("candidates") or [])
+                ][:1500],
+            }
+            if _bg:
+                _sw_rec["tracer_raw_motion_url"] = (
+                    f"{settings.app_base_url}/uploads/clips/{_bg}"
+                    f"?v={int((CLIPS_DIR / _bg).stat().st_mtime)}"
+                )
+            _d3_save_swing(db, row.id, i, _sw_rec, delta)
+
             out["clips"].append({
                 "clip_id": clip.id,
                 "tee_window_sec": [round(t0, 3), round(t1, 3)],
                 "tee_video_dur_sec": round(tee_video_dur, 3),
-                "green_delta_sec": (
-                    round(float(delta), 4) if delta is not None else None
-                ),
+                "green_delta_sec": round(float(delta), 4),
+                "green_delta_source": delta_src,
                 "green": green_seg is not None,
+                "plot_background": bool(_bg),
                 "url": _url,
             })
             log.info(
@@ -12593,6 +12740,12 @@ def _debug3_run(row, src_path, db, progress=None):
             "at_impact": _fl.get("at_impact"), "x_degree": _fl.get("x_degree"),
         }
         entry["flight"] = _ff.get("points") or []
+        # The full ball-sized detection pool — click-to-plot's dense
+        # layer. Carried on the entry so _d3_fast_produce can persist it,
+        # then stripped from the report before it goes over the wire
+        # (it is hundreds of points per swing and the panel never reads
+        # it — the editor gets them from edit_metrics instead).
+        entry["candidates"] = _ff.get("candidates") or []
         entry["ball_image_url"] = _clip_url(
             (_dbg.get("club_arc") or {}).get("image"))
         entry["rest_check_frame"] = _dbg.get("rest_check_frame")
@@ -12707,6 +12860,9 @@ def _debug3_run(row, src_path, db, progress=None):
             log.warning("debug3: produce failed for %s: %s", upload_id, exc)
             rep["produced"] = {"ok": False, "error": f"{exc}"}
         _add("produce_real", time.perf_counter() - _t0)
+    # Consumed (or not needed) — keep them out of the panel payload.
+    for _s in rep["swings"]:
+        _s.pop("candidates", None)
         # The produce job ran synchronously on THIS thread, so its
         # thread-local phase clock is still readable — this is stage 7
         # broken down into ffmpeg / AI / detection instead of one
