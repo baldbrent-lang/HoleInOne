@@ -130,15 +130,18 @@ export default function AdminUploadVideos() {
               padding: 12,
             }}
           >
-            <b>Upload #{success.upload_id}{" "}
-              {success.auto_processing ? "started" : "queued"}.</b>{" "}
+            {/* Always Production: that is where the produce actually
+                happens and where the stage overlay reports it. Broadcast
+                only ever shows a clip after someone sends it there, so
+                pointing at it right after upload lands on an empty page.
+                (This used to branch on auto_processing, which is now
+                always true — so the branch was dead as well as wrong.) */}
+            <b>Upload #{success.upload_id} started.</b>{" "}
             <span className="small muted">{success.message}</span>
             <div style={{ marginTop: 8 }}>
-              <Link to={success.auto_processing ? "/admin/broadcast-clips" : "/admin/production"}>
+              <Link to="/admin/production">
                 <button className="small" style={{ width: "auto" }}>
-                  {success.auto_processing
-                    ? "Go to Broadcast →"
-                    : "Go to Production →"}
+                  Go to Production →
                 </button>
               </Link>
             </div>
