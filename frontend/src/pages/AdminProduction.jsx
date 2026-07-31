@@ -3111,6 +3111,17 @@ function Debug3Modal({ state, onClose }) {
                 {rep.timing.unattributed_sec > 0.5 && (
                   <> · {rep.timing.unattributed_sec}s unaccounted</>
                 )}
+                {/* Stage 7 itemised — it is normally the bulk of the run,
+                    and one opaque number is the wrong shape for the wait
+                    an operator actually sits through. */}
+                {Object.keys(rep.timing.produce_breakdown || {}).length > 0 && (
+                  <div style={{ marginTop: 3 }}>
+                    <b>stage 7 breakdown:</b>{" "}
+                    {Object.entries(rep.timing.produce_breakdown)
+                      .map(([k, v]) => `${k} ${v}s`)
+                      .join(" · ")}
+                  </div>
+                )}
               </div>
             )}
             <div className="tiny muted" style={{ marginTop: 6 }}>

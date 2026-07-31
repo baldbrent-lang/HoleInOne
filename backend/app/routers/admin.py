@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -7,6 +8,7 @@ import os
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -130,6 +132,76 @@ from ..services.video import (
     transcode_for_web,
 )
 from ..services.intro_overlay import apply_intro_overlay_inplace
+
+# ── produce phase clock ────────────────────────────────────────────────
+# Stage 7 of the Debug3 panel — the real produce run — was 82.5% of a
+# 240s report and a single opaque block, which is the wrong shape for the
+# one number that decides how long an operator waits at the course. This
+# breaks it down.
+#
+# THREAD-LOCAL on purpose. A produce job owns its thread (stage 7 runs
+# synchronously on the Debug3 worker; /reprocess spawns its own), so each
+# run accumulates into its own bucket with no locking and no chance of
+# two concurrent uploads polluting each other's numbers.
+_produce_clock = threading.local()
+
+
+def _pt_add(name: str, secs: float) -> None:
+    """Add `secs` to this thread's `name` bucket."""
+    buckets = getattr(_produce_clock, "phases", None)
+    if buckets is None:
+        buckets = _produce_clock.phases = {}
+    buckets[name] = round(buckets.get(name, 0.0) + float(secs), 3)
+
+
+@contextmanager
+def _pt(name: str):
+    """Time a block into this thread's produce clock."""
+    _t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        _pt_add(name, time.perf_counter() - _t0)
+
+
+def _pt_reset() -> None:
+    _produce_clock.phases = {}
+
+
+def _pt_snapshot() -> dict:
+    return dict(getattr(_produce_clock, "phases", None) or {})
+
+
+def _timed(fn, name: str):
+    """Wrap a helper so EVERY call site is timed, not the handful we
+    remember to annotate. The video helpers are called from a dozen
+    places across the produce path (and from inside _trace_segment);
+    rebinding the imported name here catches all of them at once."""
+
+    @functools.wraps(fn)
+    def _wrapped(*args, **kwargs):
+        with _pt(name):
+            return fn(*args, **kwargs)
+
+    return _wrapped
+
+
+# Rebind the video helpers to timed versions. Everything below this line
+# in the module — including the produce loop and _trace_segment — picks
+# up the wrapper, because it resolves these names at call time.
+cut_segment = _timed(cut_segment, "ffmpeg_cut")
+compress_for_email = _timed(compress_for_email, "ffmpeg_compress")
+transcode_for_web = _timed(transcode_for_web, "ffmpeg_transcode")
+make_vertical = _timed(make_vertical, "ffmpeg_vertical")
+make_vertical_pan = _timed(make_vertical_pan, "ffmpeg_vertical")
+extract_thumbnail = _timed(extract_thumbnail, "ffmpeg_thumbnail")
+splice_impact_clip = _timed(splice_impact_clip, "ffmpeg_composite")
+concat_two_clips = _timed(concat_two_clips, "ffmpeg_composite")
+apply_intro_overlay_inplace = _timed(
+    apply_intro_overlay_inplace, "ffmpeg_overlay",
+)
+render_tracer_video = _timed(render_tracer_video, "render_tracer")
+detect_swings_combined = _timed(detect_swings_combined, "detect_swings")
 
 router = APIRouter(
     prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)]
@@ -1634,6 +1706,11 @@ def _run_long_upload_job(
     # artifact spam). Product images (raw motion heat, MOG2 overlay,
     # click-to-plot dots) stay.
     _dbg_dir = CLIPS_DIR if debug_artifacts else None
+    # Start this run's phase clock (thread-local — see _pt_add). Every
+    # ffmpeg helper and AI call below accumulates into it; the totals are
+    # logged at the end and read by the Debug3 panel for its stage 7.
+    _pt_reset()
+    _job_t0 = time.perf_counter()
     db = SessionLocal()
     try:
         row = db.get(LongVideoUpload, upload_id)
@@ -2077,34 +2154,36 @@ def _run_long_upload_job(
                                     int(round(float(_af_t) * tee_fps))
                                     if _af_t is not None else None
                                 )
-                                _anchor_rec = verify_rest_and_impact_ai(
-                                    src_path,
-                                    (float(_bf["x"]), float(_bf["y"])),
-                                    _pk_f, tee_fps,
-                                    start_frame=_start_f,
-                                    end_frame=_end_f,
-                                    debug_dir=_dbg_dir,
-                                    debug_prefix=(
-                                        f"anchorai-prod-{upload_id}-"
-                                        f"{secrets.token_hex(3)}"
-                                    ),
-                                    window_sec=1.5,
-                                )
-                                if _anchor_rec.get("api_error") or not (
-                                    _anchor_rec.get("available")
-                                ):
-                                    _ai_fail = _anchor_rec.get("reason")
-                                    _anchor_rec = verify_rest_and_impact(
+                                with _pt("anchor_ai"):
+                                    _anchor_rec = verify_rest_and_impact_ai(
                                         src_path,
                                         (float(_bf["x"]), float(_bf["y"])),
                                         _pk_f, tee_fps,
+                                        start_frame=_start_f,
+                                        end_frame=_end_f,
                                         debug_dir=_dbg_dir,
                                         debug_prefix=(
-                                            f"anchorchk-prod-{upload_id}-"
+                                            f"anchorai-prod-{upload_id}-"
                                             f"{secrets.token_hex(3)}"
                                         ),
                                         window_sec=1.5,
                                     )
+                                if _anchor_rec.get("api_error") or not (
+                                    _anchor_rec.get("available")
+                                ):
+                                    _ai_fail = _anchor_rec.get("reason")
+                                    with _pt("anchor_pixel"):
+                                        _anchor_rec = verify_rest_and_impact(
+                                            src_path,
+                                            (float(_bf["x"]), float(_bf["y"])),
+                                            _pk_f, tee_fps,
+                                            debug_dir=_dbg_dir,
+                                            debug_prefix=(
+                                                f"anchorchk-prod-{upload_id}-"
+                                                f"{secrets.token_hex(3)}"
+                                            ),
+                                            window_sec=1.5,
+                                        )
                                     # Debug must SHOW that the AI check
                                     # bailed and why — a silent pixel
                                     # fallback looks like the AI answer.
@@ -2127,17 +2206,18 @@ def _run_long_upload_job(
                                             plot_launch_frames_ai,
                                         )
 
-                                        _alp = plot_launch_frames_ai(
-                                            src_path,
-                                            tuple(_anchor_rec["rest_xy"]),
-                                            int(_anchor_rec["impact_frame"]),
-                                            tee_fps,
-                                            debug_dir=_dbg_dir,
-                                            debug_prefix=(
-                                                f"ailaunch-{upload_id}-"
-                                                f"{secrets.token_hex(3)}"
-                                            ),
-                                        )
+                                        with _pt("launch_plot_ai"):
+                                            _alp = plot_launch_frames_ai(
+                                                src_path,
+                                                tuple(_anchor_rec["rest_xy"]),
+                                                int(_anchor_rec["impact_frame"]),
+                                                tee_fps,
+                                                debug_dir=_dbg_dir,
+                                                debug_prefix=(
+                                                    f"ailaunch-{upload_id}-"
+                                                    f"{secrets.token_hex(3)}"
+                                                ),
+                                            )
                                         _ai_pts = list(
                                             _alp.get("points") or [],
                                         )
@@ -2174,18 +2254,19 @@ def _run_long_upload_job(
                                             track_launch_from_rest,
                                         )
 
-                                        _lt = track_launch_from_rest(
-                                            src_path,
-                                            tuple(_anchor_rec["rest_xy"]),
-                                            int(_anchor_rec["impact_frame"]),
-                                            tee_fps,
-                                            debug_dir=_dbg_dir,
-                                            debug_prefix=(
-                                                f"launchtrk-{upload_id}-"
-                                                f"{secrets.token_hex(3)}"
-                                            ),
-                                            seed_points=_ai_pts or None,
-                                        )
+                                        with _pt("launch_track_pixel"):
+                                            _lt = track_launch_from_rest(
+                                                src_path,
+                                                tuple(_anchor_rec["rest_xy"]),
+                                                int(_anchor_rec["impact_frame"]),
+                                                tee_fps,
+                                                debug_dir=_dbg_dir,
+                                                debug_prefix=(
+                                                    f"launchtrk-{upload_id}-"
+                                                    f"{secrets.token_hex(3)}"
+                                                ),
+                                                seed_points=_ai_pts or None,
+                                            )
                                         _merged_lp = {
                                             int(p["frame"]): {
                                                 "frame": int(p["frame"]),
@@ -2332,18 +2413,19 @@ def _run_long_upload_job(
                                         _box[0] + _box[2] / 2.0,
                                         _box[1] + _box[3] / 2.0,
                                     )
-                                    _alp = plot_launch_frames_ai(
-                                        src_path,
-                                        (float(_plot_from[0]),
-                                         float(_plot_from[1])),
-                                        _pk_f, tee_fps,
-                                        first_rect=_box,
-                                        debug_dir=_dbg_dir,
-                                        debug_prefix=(
-                                            f"ailaunch-assumed-{upload_id}-"
-                                            f"{_tok}"
-                                        ),
-                                    )
+                                    with _pt("launch_plot_ai"):
+                                        _alp = plot_launch_frames_ai(
+                                            src_path,
+                                            (float(_plot_from[0]),
+                                             float(_plot_from[1])),
+                                            _pk_f, tee_fps,
+                                            first_rect=_box,
+                                            debug_dir=_dbg_dir,
+                                            debug_prefix=(
+                                                f"ailaunch-assumed-{upload_id}-"
+                                                f"{_tok}"
+                                            ),
+                                        )
                                     _ai_pts = [
                                         {"frame": int(pt["frame"]),
                                          "x": float(pt["x"]),
@@ -2414,16 +2496,17 @@ def _run_long_upload_job(
                                         _box[1] + _box[3] * 0.75,
                                     ]
                                     try:
-                                        _lt_early = track_launch_from_rest(
-                                            src_path,
-                                            (float(_tr_from[0]), float(_tr_from[1])),
-                                            _pk_f, tee_fps,
-                                            debug_dir=_dbg_dir,
-                                            debug_prefix=(
-                                                f"launchearly-{upload_id}-{_tok}"
-                                            ),
-                                            max_seconds=6.5 / max(1.0, tee_fps),
-                                        )
+                                        with _pt("launch_track_pixel"):
+                                            _lt_early = track_launch_from_rest(
+                                                src_path,
+                                                (float(_tr_from[0]), float(_tr_from[1])),
+                                                _pk_f, tee_fps,
+                                                debug_dir=_dbg_dir,
+                                                debug_prefix=(
+                                                    f"launchearly-{upload_id}-{_tok}"
+                                                ),
+                                                max_seconds=6.5 / max(1.0, tee_fps),
+                                            )
                                         _anchor_rec["early_n"] = _lt_early.get("n_found")
                                         _anchor_rec["early_reason"] = _lt_early.get("reason")
                                         _anchor_rec["early_image"] = _lt_early.get("image")
@@ -2463,18 +2546,19 @@ def _run_long_upload_job(
                                         # Continuation: the tracker picks up after the
                                         # last point either detector found.
                                         try:
-                                            _lt = track_launch_from_rest(
-                                                src_path,
-                                                (float(_found_rest[0]),
-                                                 float(_found_rest[1])),
-                                                _pk_f, tee_fps,
-                                                debug_dir=_dbg_dir,
-                                                debug_prefix=(
-                                                    f"launchtrk-assumed-"
-                                                    f"{upload_id}-{_tok}"
-                                                ),
-                                                seed_points=_all_early,
-                                            )
+                                            with _pt("launch_track_pixel"):
+                                                _lt = track_launch_from_rest(
+                                                    src_path,
+                                                    (float(_found_rest[0]),
+                                                     float(_found_rest[1])),
+                                                    _pk_f, tee_fps,
+                                                    debug_dir=_dbg_dir,
+                                                    debug_prefix=(
+                                                        f"launchtrk-assumed-"
+                                                        f"{upload_id}-{_tok}"
+                                                    ),
+                                                    seed_points=_all_early,
+                                                )
                                             _merged_lp = {
                                                 int(q["frame"]): q for q in _ai_pts
                                             }
@@ -2774,6 +2858,28 @@ def _run_long_upload_job(
             _commit_retry(db, _mark_failed, "mark failed")
     finally:
         db.close()
+        # Where the produce run went. Logged on EVERY produce (not just
+        # Debug3 runs) because this is the wait an operator actually
+        # sits through at the course. `other` is whatever the wrapped
+        # helpers and AI calls don't cover — if it dominates, the next
+        # thing to instrument is inside it, not a guess.
+        _phases = _pt_snapshot()
+        _job_total = round(time.perf_counter() - _job_t0, 2)
+        _phases["other"] = round(
+            max(0.0, _job_total - sum(_phases.values())), 3,
+        )
+        _pct = (lambda v: 100.0 * v / _job_total) if _job_total > 0 else (
+            lambda v: 0.0
+        )
+        log.info(
+            "produce timing upload=%s total=%.1fs: %s",
+            upload_id, _job_total,
+            ", ".join(
+                f"{k} {v}s ({_pct(v):.0f}%)"
+                for k, v in sorted(_phases.items(), key=lambda kv: -kv[1])
+                if v > 0
+            ) or "nothing measured",
+        )
 
 
 def _build_tracer_diagnostics(
@@ -12345,6 +12451,11 @@ def _debug3_run(row, src_path, db, progress=None):
             log.warning("debug3: re-produce failed for %s: %s", upload_id, exc)
             rep["produced"] = {"ok": False, "error": f"{exc}"}
         _add("produce_real", time.perf_counter() - _t0)
+        # The produce job ran synchronously on THIS thread, so its
+        # thread-local phase clock is still readable — this is stage 7
+        # broken down into ffmpeg / AI / detection instead of one
+        # 198-second block.
+        rep["produce_breakdown"] = _pt_snapshot()
 
     rep["stages"].extend([
         {"n": 2, "name": "Ball at impact",
@@ -12393,6 +12504,21 @@ def _debug3_run(row, src_path, db, progress=None):
     # separately and carry an explicit `unattributed` remainder, so the
     # numbers reconcile against the wall clock instead of quietly missing
     # whatever is not on the list.
+    # Stage 7 itemised, with its own remainder so the parts reconcile
+    # against the 'Produced for real' figure rather than trailing off.
+    _pb_raw = rep.pop("produce_breakdown", None) or {}
+    _produce_breakdown = {
+        k: round(v, 2)
+        for k, v in sorted(_pb_raw.items(), key=lambda kv: -kv[1]) if v > 0
+    }
+    if _produce_breakdown:
+        _pb_other = round(
+            max(0.0, _phase.get("produce_real", 0.0)
+                - sum(_pb_raw.values())), 2,
+        )
+        if _pb_other > 0:
+            _produce_breakdown["other"] = _pb_other
+
     _total = round(time.perf_counter() - _t_run, 3)
     _staged = sum(
         float(st.get("seconds") or 0.0) for st in rep["stages"]
@@ -12414,6 +12540,10 @@ def _debug3_run(row, src_path, db, progress=None):
             max(0.0, _total - _staged - sum(_overhead.values())), 2,
         ),
         "n_swings": len(cands),
+        # Stage 7, itemised. `other` is the produce job's unmeasured
+        # remainder — DB work, pose on the cuts, Debug3's own re-run
+        # inside _trace_segment, and anything else not wrapped.
+        "produce_breakdown": _produce_breakdown,
         # The per-swing cost of the analysis itself, which is what scales
         # with how many swings a round puts through the panel.
         "per_swing_sec": (
