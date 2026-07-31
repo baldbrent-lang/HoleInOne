@@ -9142,6 +9142,13 @@ def _trace_segment(
                 }
                 if _bgn:
                     _info3["raw_motion_image"] = _bgn
+                # The clickable candidate layer. _persist_swing_track maps
+                # these into edit_metrics.cand_points, which is what the
+                # editor draws in amber and what the operator clicks to add
+                # a point. Without it the modal is read-only.
+                _cand3 = _d3.get("candidates") or []
+                if _cand3:
+                    _info3["candidates"] = _cand3
                 _u3 = (
                     f"{settings.app_base_url}/uploads/clips/{_o.name}"
                     f"?v={int(_o.stat().st_mtime)}"

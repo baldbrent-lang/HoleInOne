@@ -841,6 +841,16 @@ def find_flight(
             {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"])}
             for q in (fit.get("inliers") or [])
         ]
+        # EVERY ball-sized detection, not just the ones the fit kept. These
+        # are what click-to-plot offers as clickable candidates -- without
+        # them the editor can show the saved track but the operator cannot
+        # add anything, because there is nothing to click. This pool is
+        # already filtered to off-body, off-busy, ball-sized blobs, so it is
+        # a better set of candidates than the MOG2 layer's used to be.
+        out["candidates"] = [
+            {"frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"])}
+            for d in (det.get("dets") or [])
+        ]
 
         # The launch FRAME, from where the flight meets the ground.
         lg = launch_from_ground(fit, gy)
