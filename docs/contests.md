@@ -16,7 +16,7 @@ be built.
 | Game | Cadence | Scope | Prize currency | Needs |
 |---|---|---|---|---|
 | Hole-in-One | anytime | per course + network | cash (insured) | nothing new |
-| Closest to the Pin | daily | **per hole** | free round | green-camera calibration |
+| Closest to the Pin | daily | **per course** | free round | green-camera calibration |
 | Shot of the Week | weekly | network-wide | cash | nothing new |
 | Monthly Draw | monthly | network-wide | cash | round-counting per player |
 
@@ -27,27 +27,48 @@ of work each.
 
 ## 1. Closest to the Pin
 
-### Why per hole, not combined
+### Why per course, not network-wide — and why not per hole either
 
-This is the decision that matters most and it is easy to get wrong.
+**Per course.** One contest, one prize, per course per day. A course with
+several camera'd par 3s runs ONE contest across them: your best shot at
+any of them counts.
 
-A 101-yard par 3 into a bowl green and a 185-yard par 3 over water
-produce completely different distributions. On a combined leaderboard the
-winner is decided by *which course they happened to play*, not by how
-well they struck it — and the golfers at the harder course work that out
-within a week and stop entering.
+**Not network-wide**, because players cannot choose their course. Someone
+who plays Maridoe only ever plays Maridoe's par 3. If that hole is harder
+than another course's, they simply never win and there is nothing they
+can do about it — the prize is decided by which course they happen to
+play rather than by how they struck it. The golfers at the harder course
+work that out within a week and stop entering.
 
-There is also a measurement argument. Closest-to-the-pin needs a distance
-from the hole, and unless every camera is calibrated to the same scale on
-the same green, those numbers are not on a common axis. Per hole, each
-camera only has to be internally consistent, which is a far weaker
-requirement and one that degrades gracefully.
+There is a measurement argument too. Distances from cameras calibrated
+independently are not on a common axis. Per course, each camera only has
+to be internally consistent, which is a far weaker requirement.
 
-And commercially: a pro shop will happily fund a prize for *their*
-members on *their* hole. A network-wide closest-to-the-pin is entirely
-your prize to pay for and means less to the player who wins it.
+And commercially: a pro shop will fund a prize for *their* members on
+*their* hole. A network-wide contest is entirely GolfReelz's to pay for
+and means less to the player who wins it.
 
-**A course with two camera'd par 3s runs two separate contests.**
+**Not per hole either**, and this is worth spelling out because the
+cross-course argument does NOT extend down a level. It rests on unequal
+*opportunity* — and within a single course everyone plays every camera'd
+hole in the same round. If hole 3 is short and easy and hole 14 is long
+and brutal, every player gets the same crack at hole 3. The easy hole
+dominating the leaderboard is not unfairness; it is just where the good
+scores live.
+
+Per hole also multiplies the cost by the number of camera'd holes — at 30
+payouts a month per contest, that is the difference between a manageable
+budget and an impossible one — and "today's closest to the pin at
+Maridoe" is a far better story than four separate boards nobody follows.
+
+With one camera'd hole per course, the two are identical anyway.
+
+**The one condition that would break it:** per course is fair only while
+everyone plays all the camera'd holes. Cameras on hole 3 and hole 14, and
+a player who walks the front nine only, gets one hole where a full-round
+player gets two. Not a problem to solve now — the fix is simply that you
+compete on the holes you played, which is what "best shot at any camera'd
+hole" already means.
 
 ### How the measurement works
 
@@ -116,7 +137,8 @@ That number drives two rules rather than being a footnote:
 
 ### Rules to publish
 
-- One entry per player per day per hole; best shot counts.
+- One entry per player per day per course; your best shot at any
+  camera'd hole on that course counts.
 - Resets at **midnight in the course's local timezone**, not UTC. Getting
   this wrong puts a 7pm shot on tomorrow's board.
 - The ball must come to rest on the green, in view of the camera.
