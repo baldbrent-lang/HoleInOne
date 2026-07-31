@@ -526,6 +526,14 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}/debug3/status`, {
       adminPassword: key,
     }),
+
+  // Every swing the last run considered, kept or dropped, each with a
+  // raw cut you can watch. Cuts are made on demand server-side, so the
+  // first call on an upload is a little slower than later ones.
+  swingAudit: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/swing-audit`, {
+      adminPassword: key,
+    }),
   emailStatus: (key) =>
     request("/api/admin/email-status", { adminPassword: key }),
   emailSendTemplates: (key, to) =>

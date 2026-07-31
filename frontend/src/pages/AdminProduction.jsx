@@ -2980,6 +2980,143 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
  * composite: per-frame MOG2, drop the golfer, keep ball-sized blobs, link
  * them over time, fit a parabola. Read-only, so nothing to save.
  */
+/**
+ * Swing audit — every candidate the last run considered, with the raw
+ * source around each one.
+ *
+ * The question this exists to answer is "I hit four and got one — where
+ * did the other three go?", which was previously only answerable by
+ * scrubbing the whole upload by hand. Producing never consumes the
+ * source (clips are cut FROM it), so a dropped swing is always still
+ * there to watch. Read-only: opening this changes nothing.
+ */
+function SwingAuditModal({ state, onClose }) {
+  const d = state.data;
+  const swings = d?.swings || [];
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Swing audit for upload ${state.uploadId}`}
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000, padding: 16,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="card"
+        style={{
+          maxWidth: "min(1100px, 96vw)", width: "100%",
+          maxHeight: "92vh", overflow: "auto", margin: 0,
+        }}
+      >
+        <div className="row" style={{
+          alignItems: "center", justifyContent: "space-between",
+          marginBottom: 8,
+        }}>
+          <b>🎞 Swings considered — upload #{state.uploadId}</b>
+          <button className="ghost small" onClick={onClose}
+            style={{ width: "auto" }}>Close ✕</button>
+        </div>
+
+        {state.loading && (
+          <div className="small muted">
+            Cutting the raw windows… the first open on an upload is the
+            slow one; after that they are re-used.
+          </div>
+        )}
+        {state.error && (
+          <div className="err-text small">{state.error}</div>
+        )}
+
+        {d && (
+          <>
+            <div className="small" style={{ marginBottom: 8 }}>
+              <b>{d.n_considered}</b> considered ·{" "}
+              <b style={{ color: "var(--emerald-700)" }}>{d.n_kept}</b> produced ·{" "}
+              <b style={{ color: "var(--danger, #c0392b)" }}>{d.n_dropped}</b> dropped
+              {d.tee_duration_sec != null && (
+                <span className="muted">
+                  {" "}· source {Math.round(d.tee_duration_sec)}s
+                </span>
+              )}
+            </div>
+            {!d.source_available && (
+              <div className="err-text small" style={{ marginBottom: 8 }}>
+                The raw source is not on disk, so no windows could be cut.
+              </div>
+            )}
+            {d.n_considered === 0 && (
+              <div className="small muted">
+                No per-swing record on this upload — it was produced before
+                the audit existed. Re-Produce it and the record is written.
+              </div>
+            )}
+
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+              gap: 12,
+            }}>
+              {swings.map((s, i) => (
+                <div key={i} className="card" style={{
+                  margin: 0, padding: 8,
+                  borderLeft: `4px solid ${s.kept
+                    ? "var(--emerald-700, #16a34a)"
+                    : "var(--danger, #c0392b)"}`,
+                }}>
+                  <div className="small" style={{ marginBottom: 4 }}>
+                    <b>{s.kept ? "✅ produced" : "❌ dropped"}</b>
+                    <span className="muted"> · at {s.t}s</span>
+                    {s.clip_id && (
+                      <span className="muted"> · clip #{s.clip_id}</span>
+                    )}
+                  </div>
+                  {s.video_url ? (
+                    <video
+                      src={s.video_url}
+                      controls
+                      preload="metadata"
+                      style={{ width: "100%", borderRadius: 4,
+                               background: "#000" }}
+                    />
+                  ) : (
+                    <div className="tiny muted">no window available</div>
+                  )}
+                  <div className="tiny muted" style={{ marginTop: 4 }}>
+                    {s.window_sec && (
+                      <>window {s.window_sec[0]}–{s.window_sec[1]}s · </>
+                    )}
+                    detected by {s.source}
+                  </div>
+                  {!s.kept && s.reason && (
+                    <div className="tiny" style={{
+                      marginTop: 4, color: "var(--danger, #c0392b)",
+                    }}>
+                      {s.reason}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="tiny muted" style={{ marginTop: 10 }}>
+              Cuts are stream-copied, so the seek snaps to the nearest
+              keyframe — the window is padded either side to allow for it.
+              The raw upload is never consumed by producing, so a dropped
+              swing can always be recovered: fix the filter that dropped
+              it and Re-Produce.
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Debug3Modal({ state, onClose }) {
   if (!state) return null;
   const rep = state.report;
@@ -7451,6 +7588,9 @@ export default function AdminProduction() {
   // Debug3 report — same deal: images on disk, no swing data touched.
   const [d3, setD3] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
+  // Swing audit — every candidate the last run considered, with a raw
+  // cut of each. Read-only: it never touches clips or edit_metrics.
+  const [swingAudit, setSwingAudit] = useState(null);
 
   function pollDebug(uploadId) {
     const tick = async () => {
@@ -7526,6 +7666,23 @@ export default function AdminProduction() {
         running: false, uploadId: row.id, report: null, error: e.message,
       });
       setBusyId((cur) => (cur === row.id ? null : cur));
+    }
+  }
+
+  // Swings that were considered and didn't ship. The raw source is never
+  // consumed by producing, so every dropped swing is still watchable —
+  // this just cuts a window around each one and says why it went.
+  async function handleSwingAudit(row) {
+    setSwingAudit({ uploadId: row.id, loading: true, data: null, error: null });
+    try {
+      const data = await api.swingAudit(adminPassword, row.id);
+      setSwingAudit({
+        uploadId: row.id, loading: false, data, error: null,
+      });
+    } catch (e) {
+      setSwingAudit({
+        uploadId: row.id, loading: false, data: null, error: e.message,
+      });
     }
   }
 
@@ -8288,6 +8445,14 @@ export default function AdminProduction() {
                     🧿 Debug3
                   </button>
                 )}
+                <button
+                  className="small ghost"
+                  onClick={() => handleSwingAudit(row)}
+                  disabled={busy}
+                  title="Every swing the last run considered — including the ones that produced no clip — with the raw video around each and the filter that dropped it. Read-only."
+                >
+                  🎞 Swings
+                </button>
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
@@ -8380,6 +8545,12 @@ export default function AdminProduction() {
 
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
       {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
+      {swingAudit && (
+        <SwingAuditModal
+          state={swingAudit}
+          onClose={() => setSwingAudit(null)}
+        />
+      )}
     </div>
   );
 }
