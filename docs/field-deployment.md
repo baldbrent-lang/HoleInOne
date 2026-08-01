@@ -10,6 +10,11 @@ social sharing. This doc covers the **camera and infrastructure side**
 — what hardware to buy, how to mount it, and what software still
 needs to be built to feed the backend.
 
+Planning-level. The power sections below assume solar plus an Anker
+power station; for the **battery-only** build — 12V LiFePO4, DC-DC
+converter at the camera, step-by-step wiring — see
+[`battery-power-wiring.md`](./battery-power-wiring.md).
+
 ---
 
 ## Architecture overview

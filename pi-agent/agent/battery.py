@@ -9,7 +9,7 @@ Best-effort by design: no sensor, no smbus2 package, or a wiring fault
 just means read() returns None and heartbeats go out without battery
 fields — never crashes the capture loop.
 
-Wiring (see docs/field-deployment.md):
+Wiring (see docs/battery-power-wiring.md for the full build):
     INA226 VCC  -> Pi 3.3V (pin 1)
     INA226 GND  -> Pi GND  (pin 6)
     INA226 SDA  -> Pi SDA  (pin 3, GPIO2)
