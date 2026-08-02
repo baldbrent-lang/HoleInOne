@@ -11154,12 +11154,23 @@ def hio_decide(event_id: int, payload: HIOReviewAction, db: Session = Depends(ge
 _CAMERA_ROLES = ("tee", "green")
 
 
-def _camera_to_dict(c: Camera, last_event: CameraEvent | None = None) -> dict:
+def _camera_to_dict(
+    c: Camera,
+    last_event: CameraEvent | None = None,
+    course_name: str | None = None,
+) -> dict:
     """Shape a Camera row for the admin UI. Includes the auth_token
-    because operators need it to provision the Pi's SD card."""
+    because operators need it to provision the Pi's SD card.
+
+    `course_name` is passed in rather than looked up so list_cameras can
+    batch the query. It matters: without it the card had no way to show
+    where a camera actually is, and operators fell back to reading the
+    free-text `name` — which goes stale the moment a camera is moved.
+    """
     return {
         "id": c.id,
         "course_id": c.course_id,
+        "course_name": course_name,
         "assigned_hole": c.assigned_hole,
         "assigned_role": c.assigned_role,
         "paired_with_camera_id": c.paired_with_camera_id,
@@ -11184,12 +11195,27 @@ def _camera_to_dict(c: Camera, last_event: CameraEvent | None = None) -> dict:
     }
 
 
+def _course_name_for(db, cam: Camera) -> str | None:
+    """Single-camera course name, for the endpoints that return one row.
+    Without this the card blanks its course the moment you create, pair
+    or edit a camera — until the next full list refresh."""
+    c = db.get(Course, cam.course_id) if cam.course_id else None
+    return c.name if c else None
+
+
 @router.get("/cameras")
 def list_cameras(db: Session = Depends(get_db)):
     """Every registered camera, newest first. Includes the
     most recent CameraEvent's status / timestamp for at-a-glance
     health visibility."""
     cams = db.query(Camera).order_by(Camera.created_at.desc()).all()
+    # One query for every course rather than one per camera.
+    course_names = {
+        cid: nm
+        for cid, nm in db.query(Course.id, Course.name)
+        .filter(Course.id.in_({c.course_id for c in cams}))
+        .all()
+    } if cams else {}
     out: list[dict] = []
     for c in cams:
         last_evt = (
@@ -11201,7 +11227,7 @@ def list_cameras(db: Session = Depends(get_db)):
             .order_by(CameraEvent.triggered_at.desc())
             .first()
         )
-        out.append(_camera_to_dict(c, last_evt))
+        out.append(_camera_to_dict(c, last_evt, course_names.get(c.course_id)))
     return out
 
 
@@ -11364,7 +11390,7 @@ def create_camera(
     )
     db.commit()
     db.refresh(cam)
-    return _camera_to_dict(cam)
+    return _camera_to_dict(cam, None, _course_name_for(db, cam))
 
 
 @router.post("/cameras/{camera_id}/pair")
@@ -11399,7 +11425,10 @@ def pair_camera(
         )
     )
     db.commit()
-    return {"ok": True, "cameras": [_camera_to_dict(cam), _camera_to_dict(partner)]}
+    return {"ok": True, "cameras": [
+        _camera_to_dict(cam, None, _course_name_for(db, cam)),
+        _camera_to_dict(partner, None, _course_name_for(db, partner)),
+    ]}
 
 
 @router.post("/cameras/{camera_id}/unpair")
@@ -11543,7 +11572,7 @@ def update_camera(
         )
     db.commit()
     db.refresh(cam)
-    result = _camera_to_dict(cam)
+    result = _camera_to_dict(cam, None, _course_name_for(db, cam))
     result["auto_unpaired"] = auto_unpaired
     return result
 

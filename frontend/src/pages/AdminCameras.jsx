@@ -341,7 +341,7 @@ export default function AdminCameras() {
   const [busy, setBusy] = useState({}); // {camera_id: true}
   const [revealedToken, setRevealedToken] = useState({}); // {camera_id: true}
   const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
-  const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "" });
+  const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "", name: "" });
 
   // Live-watch state: one camera at a time. We poll /live-frame via
   // fetch (rather than letting <img> do it) because the admin endpoint
@@ -561,6 +561,7 @@ export default function AdminCameras() {
       courseId: String(cam.course_id),
       hole: String(cam.assigned_hole),
       role: cam.assigned_role,
+      name: cam.name || "",
     });
     setMovingCam(cam.id);
   }
@@ -582,6 +583,7 @@ export default function AdminCameras() {
         courseId,
         assignedHole: hole,
         assignedRole: moveDraft.role,
+        name: moveDraft.name,
       });
       if (updated && updated.auto_unpaired) {
         window.alert(
@@ -796,10 +798,17 @@ export default function AdminCameras() {
                       {cam.battery.low && <> · LOW</>}
                     </span>
                   )}{" "}
-                  <span className="muted">
-                    · hole {cam.assigned_hole}
-                    {cam.name && <> · {cam.name}</>}
+                  {/* Course FIRST, and always — it is the camera's real
+                      placement. `name` is free text and goes stale the
+                      moment a camera moves, so it renders after, dimmer,
+                      and is never a substitute for the course. */}
+                  <span style={{ fontWeight: 600 }}>
+                    {" · "}{cam.course_name || `course ${cam.course_id}`}
+                    {" · hole "}{cam.assigned_hole}
                   </span>
+                  {cam.name && (
+                    <span className="tiny muted"> · “{cam.name}”</span>
+                  )}
                   <div className="tiny muted" style={{ marginTop: 2 }}>
                     last seen: {tsRel(cam.last_seen_at)}
                     {cam.last_event_at && <> · last event: {tsRel(cam.last_event_at)} ({cam.last_event_status})</>}
@@ -895,9 +904,9 @@ export default function AdminCameras() {
                   <button
                     type="button" className="secondary small"
                     onClick={() => openMove(cam)} disabled={isBusy}
-                    title="Move this camera to a different course / hole / role"
+                    title="Rename, or move to a different course / hole / role"
                   >
-                    Move
+                    Edit
                   </button>
                   <button
                     type="button" className="secondary small"
@@ -976,13 +985,23 @@ export default function AdminCameras() {
                   style={{ margin: "10px 0 0", padding: 10, background: "var(--surface-alt)" }}
                 >
                   <div className="small" style={{ marginBottom: 6 }}>
-                    <b>Move camera #{cam.id}</b>{" "}
+                    <b>Edit camera #{cam.id}</b>{" "}
                     <span className="tiny muted">
                       · changing course / hole / role will auto-unpair if the
                       existing partner no longer fits
                     </span>
                   </div>
                   <div className="row" style={{ gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+                    <div className="field" style={{ flex: 2, minWidth: 180 }}>
+                      <label className="small">Name</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Tee cam #1"
+                        value={moveDraft.name}
+                        onChange={(e) => setMoveDraft((d) => ({ ...d, name: e.target.value }))}
+                        disabled={isBusy}
+                      />
+                    </div>
                     <div className="field" style={{ flex: 2, minWidth: 180 }}>
                       <label className="small">Course</label>
                       <select
@@ -1021,7 +1040,7 @@ export default function AdminCameras() {
                         onClick={() => submitMove(cam)}
                         disabled={isBusy}
                       >
-                        {isBusy ? "Saving…" : "Apply move"}
+                        {isBusy ? "Saving…" : "Apply"}
                       </button>
                       <button
                         type="button" className="ghost"
