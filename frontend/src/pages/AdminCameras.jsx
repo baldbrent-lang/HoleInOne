@@ -48,13 +48,16 @@ const EVENT_STATES = {
       "didn't complete — usually a weak uplink dropping a large file. " +
       "Check the Pi: journalctl -u golfreelz-agent -n 100",
   },
+  // NB: the backend sets this status when EITHER half is missing, not
+  // just when the green is (cameras.py: `elif has_green:` also lands
+  // here). So the copy has to be chosen from which file is actually
+  // absent — see stuckMessage() — or it tells you the opposite of what
+  // happened, which it did on first ship.
   tee_uploaded: {
-    label: "Tee only",
+    label: "Partial",
     tone: "warn",
-    ok: "Tee clip in. Waiting on the green clip.",
-    stuck:
-      "Green clip never arrived. The tee-only fallback should have produced " +
-      "from the tee alone after 3 min — if it hasn't, that sweeper isn't running.",
+    ok: "One clip in. Waiting on the other half.",
+    stuck: "Only one of the two clips arrived.",
   },
   paired_uploaded: {
     label: "Both clips in",
@@ -80,6 +83,36 @@ const TONE_STYLE = {
   warn: { bg: "rgba(234,179,8,0.16)", br: "rgba(234,179,8,0.55)" },
   bad: { bg: "rgba(239,68,68,0.14)", br: "rgba(239,68,68,0.5)" },
 };
+
+/** The stuck copy, chosen from WHICH clip is missing rather than from the
+ *  status alone. A 'tee_uploaded' event with no tee file is a different —
+ *  and worse — problem than one with no green file: the tee-only fallback
+ *  filters on `tee_clip_filename.isnot(None)`, so a green-only event is
+ *  never swept, never failed, and sits forever. */
+function stuckMessage(ev) {
+  const meta = EVENT_STATES[ev.status];
+  if (ev.status !== "tee_uploaded") return meta?.stuck || "";
+  const haveTee = !!ev.tee_clip_filename;
+  const haveGreen = !!ev.green_clip_filename;
+  if (!haveTee && haveGreen) {
+    return (
+      "The TEE clip never arrived — only the green half uploaded. This event " +
+      "can never produce: the tracer needs the tee view, and the tee-only " +
+      "fallback skips events with no tee file, so nothing will sweep it. " +
+      "The tee Pi is triggering and staying online but failing to upload. " +
+      "Check it: vcgencmd get_throttled (0x0 = healthy power) and " +
+      "journalctl -u golfreelz-agent -n 200"
+    );
+  }
+  if (haveTee && !haveGreen) {
+    return (
+      "The green clip never arrived. The tee-only fallback should have " +
+      "produced from the tee alone after 3 min — if it hasn't, that sweeper " +
+      "isn't running."
+    );
+  }
+  return "Neither clip arrived.";
+}
 
 function ageSeconds(iso) {
   if (!iso) return null;
@@ -249,7 +282,7 @@ function CameraEventsPanel({ adminPassword }) {
               )}
             </div>
 
-            {(isStuck ? meta.stuck : meta.ok) && (
+            {(isStuck ? stuckMessage(ev) : meta.ok) && (
               <div
                 className="small"
                 style={{
@@ -257,7 +290,7 @@ function CameraEventsPanel({ adminPassword }) {
                   background: isStuck ? "rgba(239,68,68,0.08)" : "rgba(127,127,127,0.08)",
                 }}
               >
-                {isStuck ? meta.stuck : meta.ok}
+                {isStuck ? stuckMessage(ev) : meta.ok}
               </div>
             )}
 
