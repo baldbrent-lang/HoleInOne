@@ -152,6 +152,66 @@ calibration screen does not exist and is the blocking piece** — nothing
 else here can be tested without it. It is a small admin page: pick a
 camera, grab a still, click four points, save the homography.
 
+### Spin-off: finish the tracer where the ball actually landed
+
+**Not a contest — a tracer improvement that falls out of the same
+calibration, and worth building for its own sake.**
+
+Both cameras look at the same plane (the green surface), and two views of
+a plane are related by a homography. So once each camera is calibrated to
+the green's world frame, a ball found by the GREEN camera maps into the
+TEE camera's image:
+
+```
+ball pixel (green cam) -> H_green^-1 -> world point -> H_tee -> pixel (tee cam)
+```
+
+Compose those into one 3x3 and it is a direct green-pixel -> tee-pixel
+map.
+
+**No shared visible features are needed.** The two cameras see the green
+from opposite ends and share almost nothing, but each can be calibrated
+independently against the *same* world frame — and the yardage book is
+that frame. Front pin 179, middle 205, back 226, 47 yards front-to-back,
+34–36 wide, 16–18 across the front. Both cameras can see the green's
+outline, and those points have known positions.
+
+**Why it is worth more than polish.** The most common tracer failure is
+losing the ball against sky: the trace simply stops mid-air. A known
+landing point turns blind extrapolation into a constrained fit — fit the
+detected arc, then solve the remainder to terminate at the mapped pixel.
+A shot that loses the ball halfway still gets a complete and *correct*
+trace.
+
+Four things to get right:
+
+- **Landing vs rest.** The ball touches down, then bounces and rolls,
+  sometimes 20+ yards on a firm green. The parabola should end at the
+  LANDING point; closest-to-the-pin needs the REST point. Both are
+  detectable in the same clip — fast blob arriving vs blob that stops for
+  ~1s — but they are different answers and we want both.
+- **Association.** Which resting ball belongs to which shot? Wall-clock
+  sync already exists (`tee_recording_started_at` /
+  `green_recording_started_at`); flight time on a 179–226 yard par 3 is
+  roughly 5–7s, so search a window after impact. Multiple balls on the
+  green at once is the hard case, same as for the contest.
+- **Detection reuse.** `detect_swings_from_ball` already hunts the
+  resting-ball signature at the tee. Pointed at the green it is largely
+  the same code.
+- **Tee-cam resolution is the real limit.** The tee camera is wide-angle
+  by design — it must see the tee box and the launch — so at ~200 yards
+  the whole green may be 50–100 px across in that frame. Expect **1–3
+  yards per pixel** at the green end. Enough to end a tracer on the right
+  part of the green, and to tell a front pin from a back pin (47 yards is
+  15–25 px). NOT enough to draw a precise dot and claim inches. The
+  accurate measurement lives on the green camera; do not over-report at
+  the tee end.
+
+Sequencing: steps 1–3 of the calibration work (screen, resting-ball
+detection, distance to pin) ship closest-to-the-pin on their own with no
+tracer changes. This is step 4, and it is nearly free once the screen
+exists.
+
 ---
 
 ## 2. Hole-in-One
@@ -407,6 +467,16 @@ Roughly cheapest-and-most-valuable first:
 4. **Closest to the Pin.** Blocked on the green-camera calibration
    screen, which should be built first and tested on a real shot before
    any of the contest logic is written.
+5. **Tracer endpoint from the green camera** (see the spin-off under
+   Closest to the Pin). Not a contest, but it rides on the same
+   calibration and fixes the tracer's most common failure — losing the
+   ball against sky and stopping mid-air. Cheap once the screen exists.
+
+**Prerequisite for 4 and 5, before any of this:** the tee camera has to
+reliably trigger and upload. As of the Snee Farm install it triggers and
+stays online but its clips never arrive — see
+[`camera-triage.md`](./camera-triage.md). No amount of green-side
+cleverness matters until there are tee clips to work with.
 
 ---
 
