@@ -335,6 +335,11 @@ what corrupts SD cards. Two mitigations, both cheap:
 
 ## Troubleshooting
 
+For a camera that is **online and triggering but whose clip never
+arrives**, follow [`camera-triage.md`](./camera-triage.md) — it starts
+with `vcgencmd get_throttled`, which rules power in or out in two
+minutes.
+
 | Symptom | Check |
 |---|---|
 | No 5V, no lights | Fuse seated? Blown? XT60 fully mated? |
