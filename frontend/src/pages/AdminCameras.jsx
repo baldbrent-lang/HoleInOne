@@ -28,6 +28,274 @@ function tsRel(iso) {
   return `${Math.round(sec / 86400)}d ago`;
 }
 
+// Seconds after which an event that hasn't reached a terminal state is
+// treated as stuck. The tee-only fallback fires at 180s, so 300 gives it
+// a chance to work before we call anything wrong.
+const STUCK_AFTER_SEC = 300;
+
+// What each status means, and — the part that matters when you're
+// standing on a course wondering why no clips appeared — what it means
+// when an event SITS there. A camera event that never reaches 'processed'
+// produces nothing, silently, and the Production page shows no row at all
+// because no upload was ever created.
+const EVENT_STATES = {
+  triggered: {
+    label: "Triggered",
+    tone: "warn",
+    ok: "Pi fired a trigger. Waiting for it to upload a clip.",
+    stuck:
+      "No clip ever arrived. The Pi triggered and recorded, but the upload " +
+      "didn't complete — usually a weak uplink dropping a large file. " +
+      "Check the Pi: journalctl -u golfreelz-agent -n 100",
+  },
+  tee_uploaded: {
+    label: "Tee only",
+    tone: "warn",
+    ok: "Tee clip in. Waiting on the green clip.",
+    stuck:
+      "Green clip never arrived. The tee-only fallback should have produced " +
+      "from the tee alone after 3 min — if it hasn't, that sweeper isn't running.",
+  },
+  paired_uploaded: {
+    label: "Both clips in",
+    tone: "info",
+    ok: "Both clips uploaded. Producing.",
+    stuck:
+      "Produce never picked this up. The queue may be stalled behind a hung " +
+      "job — check Production for a card frozen on one stage.",
+  },
+  processed: {
+    label: "Processed",
+    tone: "ok",
+    ok:
+      "Produce ran. NOTE: 'processed' does not mean a clip was made — a " +
+      "capture with no detectable swing also lands here. Check Production.",
+  },
+  failed: { label: "Failed", tone: "bad", ok: "See the error below." },
+};
+
+const TONE_STYLE = {
+  ok: { bg: "rgba(34,197,94,0.14)", br: "rgba(34,197,94,0.5)" },
+  info: { bg: "rgba(56,132,255,0.14)", br: "rgba(56,132,255,0.5)" },
+  warn: { bg: "rgba(234,179,8,0.16)", br: "rgba(234,179,8,0.55)" },
+  bad: { bg: "rgba(239,68,68,0.14)", br: "rgba(239,68,68,0.5)" },
+};
+
+function ageSeconds(iso) {
+  if (!iso) return null;
+  const utcIso = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+  return Math.round((Date.now() - new Date(utcIso).getTime()) / 1000);
+}
+
+/** One clip's arrival state. This is the single most useful thing on the
+ *  page: it separates "the Pi never sent it" from "it arrived and produce
+ *  did nothing with it". */
+function ClipChip({ label, filename, sizeMb, durationSec, missing, url }) {
+  const arrived = !!filename;
+  const tone = !arrived ? "bad" : missing ? "warn" : "ok";
+  const s = TONE_STYLE[tone];
+  const detail = !arrived
+    ? "never arrived"
+    : missing
+      ? "uploaded, file gone"
+      : [
+          sizeMb != null ? `${sizeMb} MB` : null,
+          durationSec != null ? `${Number(durationSec).toFixed(1)}s` : null,
+        ].filter(Boolean).join(" · ") || "arrived";
+  const body = (
+    <span
+      className="small"
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        padding: "3px 10px", borderRadius: 999,
+        background: s.bg, border: `1px solid ${s.br}`,
+      }}
+    >
+      <b>{label}</b>
+      <span className="muted">{arrived ? "✓" : "✗"} {detail}</span>
+    </span>
+  );
+  return url ? (
+    <a href={url} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
+      {body}
+    </a>
+  ) : body;
+}
+
+function CameraEventsPanel({ adminPassword }) {
+  const [events, setEvents] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+  const [onlyProblems, setOnlyProblems] = useState(false);
+
+  useEffect(() => {
+    if (!adminPassword) return undefined;
+    let cancelled = false;
+    async function load() {
+      try {
+        const rows = await api.listCameraEvents(adminPassword, 50, 0);
+        if (!cancelled) { setEvents(rows || []); setErr(null); }
+      } catch (e) {
+        if (!cancelled) setErr(e.message || "could not load camera events");
+      }
+    }
+    load();
+    const id = setInterval(load, 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [adminPassword]);
+
+  async function act(fn, ev, confirmMsg) {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    setBusyId(ev.id);
+    try {
+      await fn(adminPassword, ev.id);
+      const rows = await api.listCameraEvents(adminPassword, 50, 0);
+      setEvents(rows || []);
+    } catch (e) {
+      setErr(e.message || "action failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  const shown = (events || []).filter((ev) => {
+    if (!onlyProblems) return true;
+    const age = ageSeconds(ev.triggered_at) ?? 0;
+    const terminal = ev.status === "processed" || ev.status === "failed";
+    return ev.status === "failed" || (!terminal && age > STUCK_AFTER_SEC);
+  });
+
+  return (
+    <div style={{ marginTop: 28 }}>
+      <div className="row" style={{ alignItems: "center", gap: 12, marginBottom: 6 }}>
+        <h3 style={{ margin: 0 }}>Camera events</h3>
+        <span className="small muted">
+          Every trigger the Pis sent, and how far it got.
+        </span>
+        <label className="small" style={{ marginLeft: "auto", cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={onlyProblems}
+            onChange={(e) => setOnlyProblems(e.target.checked)}
+            style={{ marginRight: 6 }}
+          />
+          Only stuck / failed
+        </label>
+      </div>
+
+      <p className="small muted" style={{ marginTop: 0 }}>
+        An event has to reach <b>Processed</b> before anything appears on{" "}
+        <Link to="/admin/production">Production</Link>. If clips aren&apos;t
+        showing up there, the status here tells you which stage stopped.
+      </p>
+
+      {err && <div className="card err-text small">{err}</div>}
+      {events === null && <div className="card muted small">Loading…</div>}
+      {events !== null && shown.length === 0 && (
+        <div className="card muted center small" style={{ padding: 24 }}>
+          {onlyProblems
+            ? "No stuck or failed events."
+            : "No camera events yet — no Pi has sent a trigger."}
+        </div>
+      )}
+
+      {shown.map((ev) => {
+        const age = ageSeconds(ev.triggered_at);
+        const terminal = ev.status === "processed" || ev.status === "failed";
+        const isStuck = !terminal && (age ?? 0) > STUCK_AFTER_SEC;
+        const meta = EVENT_STATES[ev.status] || {
+          label: ev.status || "unknown", tone: "info", ok: "",
+        };
+        const s = TONE_STYLE[isStuck ? "bad" : meta.tone];
+        const busy = busyId === ev.id;
+        return (
+          <div key={ev.id} className="card" style={{ marginBottom: 10 }}>
+            <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <b>#{ev.id}</b>
+              <span
+                className="small"
+                style={{
+                  padding: "3px 10px", borderRadius: 999,
+                  background: s.bg, border: `1px solid ${s.br}`, fontWeight: 600,
+                }}
+              >
+                {meta.label}{isStuck ? " · STUCK" : ""}
+              </span>
+              <span className="small muted">
+                {ev.course_name || `course ${ev.course_id}`}
+                {ev.hole_number != null ? ` · hole ${ev.hole_number}` : ""}
+              </span>
+              <span className="small muted">· {tsRel(ev.triggered_at)}</span>
+              <span className="small muted" style={{ marginLeft: "auto" }}>
+                {ev.tee_camera_name || `cam ${ev.tee_camera_id}`}
+                {ev.dual_camera
+                  ? ` + ${ev.green_camera_name || `cam ${ev.green_camera_id}`}`
+                  : " (tee only)"}
+              </span>
+            </div>
+
+            <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              <ClipChip
+                label="TEE" filename={ev.tee_clip_filename} sizeMb={ev.tee_size_mb}
+                durationSec={ev.tee_duration_sec} missing={ev.tee_missing}
+                url={ev.tee_url}
+              />
+              {ev.dual_camera && (
+                <ClipChip
+                  label="GREEN" filename={ev.green_clip_filename}
+                  sizeMb={ev.green_size_mb} durationSec={ev.green_duration_sec}
+                  missing={ev.green_missing} url={ev.green_url}
+                />
+              )}
+            </div>
+
+            {(isStuck ? meta.stuck : meta.ok) && (
+              <div
+                className="small"
+                style={{
+                  marginTop: 8, padding: "8px 10px", borderRadius: 8,
+                  background: isStuck ? "rgba(239,68,68,0.08)" : "rgba(127,127,127,0.08)",
+                }}
+              >
+                {isStuck ? meta.stuck : meta.ok}
+              </div>
+            )}
+
+            {ev.last_error && (
+              <div className="err-text small" style={{ marginTop: 8 }}>
+                {ev.last_error}
+              </div>
+            )}
+
+            <div className="row" style={{ gap: 8, marginTop: 10 }}>
+              <button
+                className="small"
+                disabled={busy || !ev.tee_clip_filename}
+                onClick={() => act(api.reprocessCameraEvent, ev)}
+                title={ev.tee_clip_filename
+                  ? "Re-run production from the raw clips"
+                  : "No tee clip was ever uploaded"}
+              >
+                {busy ? "Working…" : "Re-process"}
+              </button>
+              <button
+                className="small danger"
+                disabled={busy}
+                onClick={() => act(
+                  api.deleteCameraEvent, ev,
+                  `Delete camera event #${ev.id}? This removes the raw clips.`,
+                )}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function AdminCameras() {
   const adminPassword =
     localStorage.getItem(ADMIN_PW_STORAGE) ||
@@ -736,6 +1004,8 @@ export default function AdminCameras() {
           );
         })}
       </div>
+
+      <CameraEventsPanel adminPassword={adminPassword} />
     </div>
   );
 }
