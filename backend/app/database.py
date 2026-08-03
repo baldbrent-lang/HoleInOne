@@ -31,6 +31,17 @@ engine_kwargs: dict = {
 }
 if not db_url.startswith("sqlite"):
     engine_kwargs["pool_recycle"] = 300  # seconds
+    # SQLAlchemy defaults to 5 + 10 overflow. That is thin for this app:
+    # produce holds a session for minutes, and the camera path used to
+    # hold one while WAITING for produce, so a handful of queued events
+    # drained the pool and every request 500d — heartbeat and
+    # poll-trigger included, which reads on a Pi as "the backend is
+    # down". The waiting is fixed at the call site; this is headroom so
+    # the next long-running job degrades instead of taking the site out.
+    engine_kwargs["pool_size"] = 10
+    engine_kwargs["max_overflow"] = 20
+    # Fail fast rather than piling up 30s-blocked workers when it IS dry.
+    engine_kwargs["pool_timeout"] = 10
 
 engine = create_engine(db_url, **engine_kwargs)
 # expire_on_commit=False: after a commit, ORM objects keep their loaded

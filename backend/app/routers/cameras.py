@@ -771,23 +771,37 @@ def _process_camera_event_job(event_id: int) -> None:
             # other upload, but this thread blocks until its turn is
             # done so the CameraEvent's terminal status is stamped from
             # the actual outcome rather than from "we started it".
-            enqueue_produce_job(
-                upload_id=lvu.id,
-                hole_number=int(event.hole_number),
-                wait=True,
-            )
+            # Read what we need, then RELEASE THE POOLED CONNECTION
+            # before blocking. The produce queue serialises jobs, so
+            # this wait grows with queue depth — the Nth camera event
+            # waits N produce durations. Holding a session across it
+            # exhausts the pool (SQLAlchemy defaults to 5 + 10
+            # overflow), and once it is dry EVERY endpoint 500s:
+            # heartbeat, poll-trigger, upload-event, the admin UI. A
+            # camera politely waiting its turn took the whole backend
+            # down, which is how it presented in the field.
+            _lvu_id = lvu.id
+            _hole = int(event.hole_number)
+            db.close()
+            try:
+                enqueue_produce_job(
+                    upload_id=_lvu_id, hole_number=_hole, wait=True,
+                )
+            finally:
+                db = SessionLocal()
         except Exception as exc:
             log.exception(
-                "cameras: event %s produce job crashed: %s", event.id, exc,
+                "cameras: event %s produce job crashed: %s", event_id, exc,
             )
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                pass
+            db = SessionLocal()
 
-        # Re-fetch both rows post-job. The long-upload worker uses its
-        # own session, so anything still in our identity map is stale;
-        # expire_all forces the next attribute access to round-trip the
-        # DB and see the worker's commits.
-        db.expire_all()
+        # Fresh session, so no stale identity map to expire.
         event = db.get(CameraEvent, event_id)
-        lvu = db.get(LongVideoUpload, lvu.id)
+        lvu = db.get(LongVideoUpload, _lvu_id)
         if event is None or lvu is None:
             return
 
