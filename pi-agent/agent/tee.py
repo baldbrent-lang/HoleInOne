@@ -43,16 +43,38 @@ log = logging.getLogger("golfreelz_agent.tee")
 FORCE_TRIGGER_PATH = Path("/tmp/golfreelz-trigger")
 
 
+_last_trigger_mtime = 0.0
+
+
 def _take_force_trigger() -> bool:
-    """True once per touch. Deletes the file so a forgotten sentinel
-    can't put the camera into a permanent trigger loop."""
+    """True once per `touch`, keyed on MTIME rather than on deleting the
+    file.
+
+    Deleting it does not work: the operator touches it as `pi`, the agent
+    runs as its own service user, and /tmp is sticky — so only the owner
+    may unlink. The first version unlinked, caught the PermissionError,
+    logged, and left the file in place: the condition stayed true, so it
+    re-fired and re-logged every loop, several times a second, forever.
+
+    Watching mtime is ownership-proof. Each touch bumps it, we fire once,
+    and a file we cannot remove is simply ignored until it is touched
+    again. Deletion is still attempted, but only as tidying.
+    """
+    global _last_trigger_mtime
     try:
-        if FORCE_TRIGGER_PATH.exists():
-            FORCE_TRIGGER_PATH.unlink(missing_ok=True)
-            return True
-    except OSError as exc:  # unreadable /tmp, permissions, races
-        log.warning("force-trigger check failed: %s", exc)
-    return False
+        mtime = FORCE_TRIGGER_PATH.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False        # unreadable /tmp — stay silent, never spam
+    if mtime <= _last_trigger_mtime:
+        return False
+    _last_trigger_mtime = mtime
+    try:
+        FORCE_TRIGGER_PATH.unlink()
+    except OSError:
+        pass                # not ours to delete; mtime already guards us
+    return True
 FIRMWARE = "tee-0.1.0"
 
 try:
@@ -360,11 +382,46 @@ class TeeAgent:
         frames get dropped — that starvation was the source of the
         recorded-clip stutter when detection ran inline."""
         prev = None
+        # Watchdog. A wedged V4L2 pipeline (libcamerify losing its buffer
+        # queue on open — 'select() timeout' every 10s) returns failure
+        # FOREVER, and this loop used to spin on it silently until
+        # someone SSHed in. The camera itself is fine: rpicam-still
+        # captures normally while the agent sees nothing. So don't
+        # diagnose the cause here, just refuse to sit in the broken
+        # state — release and reopen until frames come back.
+        stall_after = float(self.cam_cfg.get("stall_reopen_seconds", 15.0))
+        last_good = time.time()
+        reopens = 0
         while not self.stopping.is_set():
             ok, frame = cap.read()
             if not ok or frame is None:
+                if time.time() - last_good > stall_after:
+                    reopens += 1
+                    log.error(
+                        "camera delivered no frames for %.0fs — reopening "
+                        "(attempt %d)", stall_after, reopens,
+                    )
+                    try:
+                        cap.release()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    time.sleep(1.0)
+                    try:
+                        cap = open_camera(self.cam_cfg)
+                        self.cap = cap          # run()'s finally releases this one
+                        log.info("camera reopened after stall")
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("camera reopen failed: %s", exc)
+                    # Restart the clock either way, so a failed reopen
+                    # retries on the next interval instead of hammering.
+                    last_good = time.time()
+                    prev = None
                 time.sleep(0.02)
                 continue
+            if reopens:
+                log.info("camera recovered after %d reopen(s)", reopens)
+                reopens = 0
+            last_good = time.time()
             # Camera-side delivery stats. Recorded independently of the
             # writer so the timing log can say whether a stall was the
             # CAMERA not delivering frames (thermal/driver) or OUR
