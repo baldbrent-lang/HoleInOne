@@ -309,14 +309,42 @@ def heartbeat(
     }
 
 
+# Operator-requested captures, camera_id -> seconds. Set by the admin
+# Capture button, consumed by the tee Pi's next watch-status poll.
+# In-memory on purpose: a request that doesn't reach a camera within a
+# poll interval is stale and should evaporate, not queue up.
+_CAPTURE_LOCK = threading.Lock()
+_CAPTURE_REQUESTS: dict[int, int] = {}
+
+
+def request_capture(camera_id: int, seconds: int) -> None:
+    """Queue a one-shot capture for a camera. Called from the admin
+    router; delivered on the camera's next watch-status poll."""
+    with _CAPTURE_LOCK:
+        _CAPTURE_REQUESTS[camera_id] = int(seconds)
+
+
 @router.get("/{token}/watch-status")
 def watch_status(token: str, db: Session = Depends(get_db)):
-    """Pi polls this. If watching=true, Pi should push live frames."""
+    """Pi polls this. If watching=true, Pi should push live frames.
+
+    Also the delivery channel for an operator-requested capture. The tee
+    Pi already polls this every few seconds for the live view, so riding
+    along here means no new endpoint on the device and no extra traffic.
+    `capture_seconds` is CONSUMED on read — one poll, one capture.
+    """
     cam = _get_camera_by_token(token, db)
     with _LIVE_LOCK:
         last = _WATCHERS.get(cam.id)
         watching = bool(last and _utcnow_naive() - last < WATCH_TTL)
-    return {"watching": watching}
+    with _CAPTURE_LOCK:
+        capture_seconds = _CAPTURE_REQUESTS.pop(cam.id, None)
+    if capture_seconds:
+        log.info(
+            "cameras: delivering capture request to camera %s (%ss)",
+            cam.id, capture_seconds,
+        )
+    return {"watching": watching, "capture_seconds": capture_seconds}
 
 
 @router.post("/{token}/live-frame")

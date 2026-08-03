@@ -325,6 +325,14 @@ export const api = {
     }),
 
   // ---- Cameras (always-on capture devices) ----
+  // On-demand capture. Fires the same path a real trigger does, so the
+  // clip lands on Production like any other. Tee cameras only — the
+  // paired green records because its tee tells it to.
+  captureCamera: (key, cameraId, seconds = 30) =>
+    request(`/api/admin/cameras/${cameraId}/capture?seconds=${seconds}`, {
+      method: "POST",
+      adminPassword: key,
+    }),
   listCameras: (key) => request(`/api/admin/cameras`, { adminPassword: key }),
   createCamera: (key, { courseId, assignedHole, assignedRole, name }) => {
     const fd = new FormData();

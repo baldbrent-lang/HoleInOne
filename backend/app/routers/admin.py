@@ -11323,6 +11323,59 @@ def start_watch_camera(camera_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+@router.post("/cameras/{camera_id}/capture")
+def capture_camera(
+    camera_id: int, seconds: int = 30, db: Session = Depends(get_db),
+):
+    """Record `seconds` of footage on demand, without waiting for a
+    golfer to walk into the tee box.
+
+    Deliberately fires the SAME path a real trigger does: the tee posts
+    /event-trigger, which wakes its paired green through poll-trigger,
+    both upload, and _process_camera_event_job queues it for produce. So
+    a Capture lands on /admin/production as an ordinary card and
+    exercises the whole pipeline — a parallel "test" path would prove
+    nothing about the real one.
+
+    The request is delivered on the camera's next watch-status poll (a
+    few seconds), so this returns immediately rather than blocking.
+    """
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if not cam.enabled:
+        raise HTTPException(409, "camera is disabled")
+    # Only a tee camera can start an event — the green half records
+    # because its partner told it to. Asking a green to capture alone
+    # would produce a clip with no tee footage, which cannot be produced.
+    if (cam.assigned_role or "").lower() != "tee":
+        raise HTTPException(
+            409,
+            "capture must be started from the TEE camera; its paired "
+            "green records automatically",
+        )
+    seconds = max(5, min(120, int(seconds)))
+    from .cameras import request_capture
+
+    request_capture(camera_id, seconds)
+    db.add(AuditLog(
+        actor="admin", action="capture_camera",
+        target=f"camera:{camera_id}", detail=f"seconds={seconds}",
+    ))
+    db.commit()
+    return {
+        "ok": True,
+        "camera_id": camera_id,
+        "seconds": seconds,
+        "paired_green_camera_id": cam.paired_with_camera_id,
+        "note": (
+            "Queued. The camera picks this up on its next status poll "
+            "(a few seconds), records, uploads, and the clip appears on "
+            "Production."
+        ),
+    }
+
+
 @router.delete("/cameras/{camera_id}/watch")
 def stop_watch_camera(camera_id: int):
     """Admin closed the live view. Clear watcher + cached frame."""

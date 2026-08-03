@@ -290,6 +290,10 @@ class TeeAgent:
         self.client = BackendClient(cfg["backend_url"], cfg["auth_token"])
         self.roi = cfg["tee_box_roi"]
         self.cam_cfg = cfg.get("camera", {})
+        # Operator-requested capture, seconds, set from the
+        # live-stream poll thread and consumed by the main loop.
+        self._pending_capture: float | None = None
+        self._capture_lock = threading.Lock()
         self.det_cfg = cfg.get("detection", {})
         # Lenient confidence used ONLY to keep an in-progress recording
         # alive. A golfer bent over the ball reads at lower confidence than
@@ -373,6 +377,20 @@ class TeeAgent:
             "for production accuracy).",
         )
         return MotionFallbackDetector(detect_width=det_width)
+
+    def _request_capture(self, seconds: float) -> None:
+        """Operator pressed Capture. Records `seconds` regardless of
+        whether anyone is in the ROI, then follows the ordinary trigger
+        path — so the clip reaches Production exactly like a real swing
+        would. Called from the live-stream poll thread."""
+        with self._capture_lock:
+            self._pending_capture = float(seconds)
+
+    def _take_pending_capture(self) -> float | None:
+        """Consume a pending operator capture, if any."""
+        with self._capture_lock:
+            secs, self._pending_capture = self._pending_capture, None
+        return secs
 
     def _capture_loop(self, cap) -> None:
         """Dedicated capture thread — the ONLY place cap.read() runs.
@@ -506,7 +524,9 @@ class TeeAgent:
         )
         hb.start()
 
-        streamer = LiveStreamer(self.client)
+        streamer = LiveStreamer(
+            self.client, on_capture_request=self._request_capture,
+        )
         streamer.start()
         self.streamer = streamer
 
@@ -549,7 +569,10 @@ class TeeAgent:
                 # without anyone walking into frame:
                 #     touch /tmp/golfreelz-trigger
                 # Consumed on sight, so it fires exactly once.
-                forced = _take_force_trigger()
+                # Operator-requested Capture (admin Cameras page) carries
+                # an explicit duration; the SSH sentinel does not.
+                pending_secs = self._take_pending_capture()
+                forced = _take_force_trigger() or pending_secs is not None
 
                 if not forced:
                     if in_roi:
@@ -568,8 +591,10 @@ class TeeAgent:
                 if forced or dwell_met:
                     session_id = str(uuid.uuid4())
                     log.info(
-                        "trigger: session=%s%s",
-                        session_id, " (MANUAL)" if forced else "",
+                        "trigger: session=%s%s", session_id,
+                        (" (CAPTURE %.0fs)" % pending_secs)
+                        if pending_secs is not None
+                        else (" (MANUAL)" if forced else ""),
                     )
                     try:
                         self.client.event_trigger(session_id)
@@ -578,7 +603,7 @@ class TeeAgent:
                     else:
                         self._record_and_upload(
                             detector, no_person_timeout, det_period,
-                            fps, session_id,
+                            fps, session_id, fixed_seconds=pending_secs,
                         )
                         self.buffer.clear()
                     person_first_seen = None
@@ -596,7 +621,7 @@ class TeeAgent:
 
     def _record_and_upload(
         self, detector, no_person_timeout: float, det_period: float,
-        fps: float, session_id: str,
+        fps: float, session_id: str, fixed_seconds: float | None = None,
     ) -> None:
         """Persist the pre-roll buffer + keep recording until no person
         is seen for `no_person_timeout` seconds (capped by
@@ -693,6 +718,18 @@ class TeeAgent:
             for ts, f in new_frames:
                 clip_writer.submit(ts, f)
                 last_written_ts = ts
+            if fixed_seconds is not None:
+                # Operator Capture: record exactly this long. The
+                # person-presence stop below is skipped entirely — there
+                # is nobody in frame, and stopping on that would give a
+                # clip a few seconds long instead of the requested one.
+                if now - recording_start >= fixed_seconds:
+                    log.info(
+                        "capture complete (%.1fs requested)", fixed_seconds,
+                    )
+                    break
+                time.sleep(0.02)
+                continue
             if now - recording_start > self.max_clip_seconds:
                 log.warning("max_clip_seconds hit; stopping")
                 break

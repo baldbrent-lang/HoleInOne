@@ -48,8 +48,16 @@ class LiveStreamer:
         jpeg_quality: int = 65,
         idle_poll_seconds: float = 1.0,
         watched_poll_seconds: float = 5.0,
+        on_capture_request=None,
     ) -> None:
         self.client = client
+        # Called with (seconds) when the backend asks for an on-demand
+        # capture. Delivered on the watch-status poll this thread already
+        # makes, so the operator's Capture button needs no new endpoint
+        # on the device and no extra polling. Tee cameras pass a handler;
+        # green ignores it, because a green records only when its paired
+        # tee tells it to.
+        self.on_capture_request = on_capture_request
         self.frame_interval = 1.0 / max(1, fps)
         self.jpeg_quality = max(20, min(95, jpeg_quality))
         self.idle_poll = idle_poll_seconds
@@ -110,10 +118,19 @@ class LiveStreamer:
         try:
             r = self.client.session.get(self._watch_status_url(), timeout=5)
             r.raise_for_status()
-            new_state = bool(r.json().get("watching"))
+            payload = r.json()
+            new_state = bool(payload.get("watching"))
             if new_state != self._watching:
                 log.info("live-stream %s", "started" if new_state else "stopped")
             self._watching = new_state
+            # Consumed server-side on read, so it arrives exactly once.
+            secs = payload.get("capture_seconds")
+            if secs and self.on_capture_request:
+                log.info("capture requested by operator: %ss", secs)
+                try:
+                    self.on_capture_request(float(secs))
+                except Exception as exc:  # noqa: BLE001
+                    log.error("capture request handler failed: %s", exc)
         except Exception as e:
             log.debug("watch-status poll failed: %s", e)
             if self._watching:

@@ -491,6 +491,28 @@ export default function AdminCameras() {
     }
   }
 
+  async function captureNow(cam) {
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    setError(null);
+    try {
+      const r = await api.captureCamera(adminPassword, cam.id, 30);
+      window.alert(
+        `Capture queued for camera #${cam.id}.\n\n` +
+        `It records 30s the next time it polls (a few seconds), its ` +
+        `paired green records alongside it, and the clip goes through ` +
+        `the produce queue.\n\nWatch for it on Production.` +
+        (r?.paired_green_camera_id
+          ? ""
+          : "\n\nNOTE: this camera has no paired green, so the clip " +
+            "will be tee-only."),
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
   async function pairWith(cam, partnerId) {
     setBusy((b) => ({ ...b, [cam.id]: true }));
     try {
@@ -899,6 +921,16 @@ export default function AdminCameras() {
                       {cam.triggering_enabled === false
                         ? "Resume triggering"
                         : "Pause triggering"}
+                    </button>
+                  )}
+                  {cam.assigned_role === "tee" && (
+                    <button
+                      type="button" className="small"
+                      onClick={() => captureNow(cam)}
+                      disabled={isBusy || !cam.enabled}
+                      title="Record 30s now on this camera and its paired green, and send it through produce"
+                    >
+                      Capture
                     </button>
                   )}
                   <button
