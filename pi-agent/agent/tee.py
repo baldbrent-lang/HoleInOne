@@ -34,6 +34,25 @@ from .common import (
 from .livestream import LiveStreamer
 
 log = logging.getLogger("golfreelz_agent.tee")
+
+# Touch this file to force one capture without a person in the ROI:
+#     touch /tmp/golfreelz-trigger
+# Exists so the record + upload path can be exercised over SSH from
+# anywhere — the alternative is someone standing in front of the camera,
+# which is a site visit every time you want to test an upload fix.
+FORCE_TRIGGER_PATH = Path("/tmp/golfreelz-trigger")
+
+
+def _take_force_trigger() -> bool:
+    """True once per touch. Deletes the file so a forgotten sentinel
+    can't put the camera into a permanent trigger loop."""
+    try:
+        if FORCE_TRIGGER_PATH.exists():
+            FORCE_TRIGGER_PATH.unlink(missing_ok=True)
+            return True
+    except OSError as exc:  # unreadable /tmp, permissions, races
+        log.warning("force-trigger check failed: %s", exc)
+    return False
 FIRMWARE = "tee-0.1.0"
 
 try:
@@ -469,30 +488,42 @@ class TeeAgent:
                 now = time.time()
                 centroid = detector.detect(frame)
                 in_roi = centroid is not None and _in_roi(centroid, self.roi)
-                if in_roi:
-                    if person_first_seen is None:
-                        person_first_seen = now
-                        log.info("person entered ROI at %s", centroid)
-                    elif now - person_first_seen >= dwell_seconds:
-                        session_id = str(uuid.uuid4())
-                        log.info("trigger: session=%s", session_id)
-                        try:
-                            self.client.event_trigger(session_id)
-                        except Exception as exc:
-                            log.error(
-                                "event_trigger failed (%s) — skipping", exc,
-                            )
-                            person_first_seen = None
-                        else:
-                            self._record_and_upload(
-                                detector, no_person_timeout, det_period,
-                                fps, session_id,
-                            )
-                            person_first_seen = None
-                            self.buffer.clear()
-                else:
-                    if person_first_seen is not None:
-                        log.debug("person left ROI before dwell threshold")
+                # Manual trigger, for testing the record+upload path
+                # without anyone walking into frame:
+                #     touch /tmp/golfreelz-trigger
+                # Consumed on sight, so it fires exactly once.
+                forced = _take_force_trigger()
+
+                if not forced:
+                    if in_roi:
+                        if person_first_seen is None:
+                            person_first_seen = now
+                            log.info("person entered ROI at %s", centroid)
+                    else:
+                        if person_first_seen is not None:
+                            log.debug("person left ROI before dwell threshold")
+                        person_first_seen = None
+
+                dwell_met = (
+                    person_first_seen is not None
+                    and now - person_first_seen >= dwell_seconds
+                )
+                if forced or dwell_met:
+                    session_id = str(uuid.uuid4())
+                    log.info(
+                        "trigger: session=%s%s",
+                        session_id, " (MANUAL)" if forced else "",
+                    )
+                    try:
+                        self.client.event_trigger(session_id)
+                    except Exception as exc:
+                        log.error("event_trigger failed (%s) — skipping", exc)
+                    else:
+                        self._record_and_upload(
+                            detector, no_person_timeout, det_period,
+                            fps, session_id,
+                        )
+                        self.buffer.clear()
                     person_first_seen = None
                 time.sleep(det_period)
         finally:
