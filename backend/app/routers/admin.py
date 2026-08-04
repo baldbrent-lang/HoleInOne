@@ -13063,6 +13063,29 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
     return out
 
 
+def _judge_is_confident(confidence) -> bool:
+    """Is the swing judge SURE? Only a sure 'no' is allowed to drop a clip.
+
+    The judge answers with "high" | "medium" | "low". A medium or low "not
+    a swing" is the judge saying the picture is ambiguous, and an
+    ambiguous picture is not grounds for throwing away a golfer's shot —
+    the cost of keeping a bad candidate is a clip nobody watches, and the
+    cost of dropping a good one is a shot that never existed.
+
+    Anything unrecognised reads as NOT confident. A judge that returns a
+    confidence we cannot parse is exactly the case where we should not be
+    acting on its answer. (A numeric confidence is accepted too, in case
+    the prompt ever changes shape under us — 0.8 and up counts as high.)
+    """
+    if isinstance(confidence, bool):
+        return False
+    if isinstance(confidence, (int, float)):
+        return float(confidence) >= 0.8
+    if isinstance(confidence, str):
+        return confidence.strip().lower() == "high"
+    return False
+
+
 def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
                 hole_number=None):
     """THE production pipeline. Analyse, then build the clip.
@@ -13288,14 +13311,18 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         # stage 2 just found (the wrist, which this used before the two
         # stages swapped, wanders with the swing; the ball does not).
         #
-        # This is deliberately narrow: only a CONFIDENT AI "not a swing"
-        # drops the candidate. The club-fan heuristic (the no-key
-        # fallback) is recorded and shown but never vetoes, because on a
-        # live course a false negative loses a real shot and the
-        # heuristic is the shakier of the two.
+        # Deliberately narrow, twice over. Only the AI can veto — the
+        # club-fan heuristic (the no-key fallback) is recorded and shown
+        # but never drops anything — and only a HIGH-confidence "not a
+        # swing" counts. Medium and low are the judge saying the picture
+        # is ambiguous, and an ambiguous picture is not grounds for
+        # throwing away a golfer's shot. Asymmetric on purpose: a bad
+        # candidate kept costs a clip nobody watches; a real one dropped
+        # costs a shot that never existed.
         _t0 = time.perf_counter()
         _heat: dict = {}
         _ai_seen = False
+        _ai_sure = False
         if settings.swing_heat_check_enabled:
             try:
                 from ..services.tracer import swing_heat_check
@@ -13326,6 +13353,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
                     elif _j.get("is_swing") is False:
                         _heat["verdict"] = "no_swing"
                         _ai_seen = True
+                        _ai_sure = _judge_is_confident(_j.get("confidence"))
             except Exception as _exc:  # noqa: BLE001
                 log.warning("debug3 heat judge failed: %s", _exc)
                 _heat = {"reason": f"failed: {_exc}"}
@@ -13346,15 +13374,32 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             "decided_by": ("ai" if _ai_seen
                            else ("heuristic" if _heat.get("available")
                                  else "nothing")),
+            # Whether this verdict was allowed to act. A 'not a swing' the
+            # judge is not sure about is recorded and then ignored, and
+            # that has to be legible or the panel looks like the judge was
+            # overruled at random.
+            "confident": _ai_sure,
         }
         entry["heat_image_url"] = _clip_url(
             _heat.get("image") or _heat.get("image_clean"))
-        if _ai_seen and _heat.get("verdict") == "no_swing":
+        _no_swing = _ai_seen and _heat.get("verdict") == "no_swing"
+        if _no_swing and not _ai_sure:
+            # Recorded, not acted on. Keeping a bad candidate costs a clip
+            # nobody watches; dropping a good one costs a shot.
+            entry["judge_unsure"] = True
+            log.info(
+                "debug3: upload=%s judge said 'not a swing' at %s "
+                "confidence for candidate %s @ %.1fs — KEPT (%s)",
+                upload_id, _heat.get("ai_confidence"), i, peak_t,
+                _heat.get("ai_reason"),
+            )
+        elif _no_swing:
             entry["dropped_by_judge"] = True
             entry["ok"] = False
             n_judged_out += 1
             log.info(
-                "debug3: upload=%s AI judge dropped candidate %s @ %.1fs (%s)",
+                "debug3: upload=%s AI judge dropped candidate %s @ %.1fs "
+                "with high confidence (%s)",
                 upload_id, i, peak_t, _heat.get("ai_reason"),
             )
             rep["swings"].append(entry)
@@ -13560,8 +13605,9 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
          "seconds": _phase.get("club_arc", 0.0)},
         {"n": 3, "name": "AI judge on the club fan",
          "detail": "motion-heat composite around that ball, judged on the "
-                   "club's angular sweep -- a confident 'not a swing' drops "
-                   "the candidate before any tracking runs",
+                   "club's angular sweep -- only a HIGH-confidence 'not a "
+                   "swing' drops the candidate, and it does so before any "
+                   "tracking runs",
          "count": len(cands) - n_judged_out, "counts": "candidates kept",
          "seconds": _phase.get("judge", 0.0)},
         {"n": 4, "name": "MOG2 + component + area filter",

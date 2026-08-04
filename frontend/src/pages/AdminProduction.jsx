@@ -3341,7 +3341,7 @@ function Debug3Modal({ state, onClose }) {
                 sw.dropped_by_judge ? "warn" : sw.flight?.length ? "ok" : "warn"
               }`}>
                 {sw.dropped_by_judge
-                  ? "dropped — not a swing"
+                  ? "dropped — not a swing (high confidence)"
                   : sw.flight?.length
                     ? `${sw.flight.length} tracer points`
                     : "no flight"}
@@ -3384,7 +3384,8 @@ function Debug3Modal({ state, onClose }) {
                   decided by {sw.judge.decided_by}
                 </span>
                 {sw.judge.ai_confidence != null && (
-                  <span className="pill" style={{ marginLeft: 6 }}>
+                  <span className={`pill ${sw.judge.confident ? "" : "warn"}`}
+                    style={{ marginLeft: 6 }}>
                     confidence {sw.judge.ai_confidence}
                   </span>
                 )}
@@ -3397,9 +3398,17 @@ function Debug3Modal({ state, onClose }) {
                     {sw.judge.n_angles} angles
                   </div>
                 )}
+                {sw.judge_unsure && (
+                  <div className="tiny" style={{ color: "#b7791f" }}>
+                    Kept anyway — the judge said "not a swing" but only at{" "}
+                    {sw.judge.ai_confidence} confidence. Only a HIGH-confidence
+                    rejection drops a candidate; an ambiguous picture is not
+                    grounds for throwing away a shot.
+                  </div>
+                )}
                 {sw.judge.decided_by === "heuristic" && (
                   <div className="tiny muted">
-                    Only a confident AI verdict drops a candidate — the
+                    Only a high-confidence AI verdict drops a candidate — the
                     heuristic is recorded but never vetoes.
                   </div>
                 )}
