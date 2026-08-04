@@ -3316,16 +3316,66 @@ function Debug3Modal({ state, onClose }) {
             style={{ marginTop: 14, background: "var(--surface-2)" }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
               <b>Candidate {sw.idx + 1} · {sw.peak_time_sec}s</b>
-              <span className={`pill ${sw.flight?.length ? "ok" : "warn"}`}>
-                {sw.flight?.length
-                  ? `${sw.flight.length} tracer points`
-                  : "no flight"}
+              <span className={`pill ${
+                sw.dropped_by_judge ? "warn" : sw.flight?.length ? "ok" : "warn"
+              }`}>
+                {sw.dropped_by_judge
+                  ? "dropped — not a swing"
+                  : sw.flight?.length
+                    ? `${sw.flight.length} tracer points`
+                    : "no flight"}
               </span>
             </div>
             <div className="tiny muted" style={{ marginTop: 2 }}>
               impact frame {sw.impact_frame} · window f{sw.window?.[0]}–
               f{sw.window?.[1]}
             </div>
+
+            {sw.judge && (
+              <div className="small" style={{ marginTop: 10 }}>
+                <b>Stage 2 — AI judge (club fan):</b>{" "}
+                {sw.judge.ai_judge === true
+                  ? "swing"
+                  : sw.judge.ai_judge === false
+                    ? "NOT a swing"
+                    : sw.judge.verdict === "club_swing"
+                      ? "swing (club-fan heuristic)"
+                      : sw.judge.verdict === "no_swing"
+                        ? "no swing (club-fan heuristic — advisory only)"
+                        : "no verdict"}
+                <span className="pill" style={{ marginLeft: 6 }}>
+                  decided by {sw.judge.decided_by}
+                </span>
+                {sw.judge.ai_confidence != null && (
+                  <span className="pill" style={{ marginLeft: 6 }}>
+                    confidence {sw.judge.ai_confidence}
+                  </span>
+                )}
+                <div className="tiny muted">
+                  {sw.judge.ai_reason || sw.judge.reason}
+                </div>
+                {sw.judge.fan != null && (
+                  <div className="tiny muted">
+                    fan {sw.judge.fan}° over {sw.judge.n_rays} rays /{" "}
+                    {sw.judge.n_angles} angles
+                  </div>
+                )}
+                {sw.judge.decided_by === "heuristic" && (
+                  <div className="tiny muted">
+                    Only a confident AI verdict drops a candidate — the
+                    heuristic is recorded but never vetoes.
+                  </div>
+                )}
+              </div>
+            )}
+            <Img url={sw.heat_image_url}
+              cap="Stage 2 — the motion-heat composite the judge was shown. The club's sweep through impact is the fan; a practice swing, a bag drop or someone bending to tee up do not draw one." />
+            {sw.dropped_by_judge && (
+              <div className="tiny muted" style={{ marginTop: 6 }}>
+                Tracking, the flight fit and produce were all skipped for
+                this candidate.
+              </div>
+            )}
 
             <div className="small" style={{ marginTop: 10 }}>
               <b>Ball at impact:</b>{" "}
@@ -3347,7 +3397,20 @@ function Debug3Modal({ state, onClose }) {
               )}
             </div>
             <Img url={sw.ball_image_url}
-              cap="Stage 2 — club arc in the ground band at the feet; green is the vertex" />
+              cap="Stage 3 — club arc in the ground band at the feet; green is the vertex" />
+            {sw.ball_hint_image_url && (
+              <>
+                <div className="tiny muted" style={{ marginTop: 6 }}>
+                  <b>Aim-gate hint:</b>{" "}
+                  {sw.ball_hint
+                    ? `(${sw.ball_hint[0]}, ${sw.ball_hint[1]}) — the aim gate is armed`
+                    : "not found — the aim gate is DISARMED for this swing"}
+                  <div>{sw.ball_hint_reason}</div>
+                </div>
+                <Img url={sw.ball_hint_image_url}
+                  cap="Where it looked for the ball at rest, at the pose impact frame. Red = the search window (ground band, ball side only), yellow = the ground line at the feet, orange = the motion it found there. Drawn whether or not a ball was found." />
+              </>
+            )}
 
             <div className="small" style={{ marginTop: 10 }}>
               <b>Detections:</b> {sw.detect_reason}

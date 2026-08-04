@@ -874,10 +874,15 @@ def find_flight(
         _pre = club_bottom_ball(
             input_path, int(impact_frame or f_lo), fps,
             feet_xy=feet_xy, head_xy=head_xy, ball_side=ball_side,
+            debug_dir=debug_dir, debug_prefix=f"{debug_prefix}hint",
         ) if feet_xy else {}
         _ball_hint = _pre.get("xy") if _pre.get("ok") else None
         dbg["ball_hint"] = _ball_hint
         dbg["ball_hint_reason"] = _pre.get("reason")
+        # The picture goes up whether or not the hint landed: when this
+        # comes back empty the aim gate is disarmed, and the only way to
+        # see WHY is to look at where it searched.
+        dbg["ball_hint_image"] = _pre.get("image")
         _lap("club_arc")
         res = pick_flight(
             tracks, int(impact_frame or f_lo), _ball_hint,

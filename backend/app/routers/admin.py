@@ -12788,7 +12788,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                      hole_number=None) -> dict:
     """Build the shipped clip STRAIGHT from Debug3's numbers.
 
-    Stage 7 used to re-run the whole production pipeline
+    Stage 8 used to re-run the whole production pipeline
     (`_run_long_upload_job` with auto-detect), which re-derived from
     scratch everything stages 1-6 had just measured: a whole-video
     audio+motion swing detection, the AI anchor walk, the AI launch
@@ -13162,7 +13162,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     # WALL CLOCK. Every phase is timed so the panel can say where the run
     # went rather than leaving it to be guessed from the source. `_phase`
     # accumulates across the per-candidate loop; the stage table below
-    # divides the total between the seven reported stages plus the
+    # divides the total between the eight reported stages plus the
     # once-per-upload work that belongs to none of them.
     _t_run = time.perf_counter()
     _phase: dict[str, float] = {}
@@ -13216,6 +13216,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
 
     n_flights = 0
     n_produced = 0
+    n_judged_out = 0
     for i, c in enumerate(cands):
         if progress:
             progress(f"Swing {i + 1} of {len(cands)}: finding the ball at impact",
@@ -13228,6 +13229,83 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             "idx": i, "peak_time_sec": round(peak_t, 2),
             "impact_frame": imp_f, "window": [f_lo, f_hi],
         }
+
+        # STAGE 2: IS IT A SWING AT ALL? Pose fires on wrist speed and
+        # spine bend, which a practice swing, a bag drop or someone
+        # bending to tee up all produce. The club's fan — the wedge of
+        # angles its head sweeps through around impact — is what
+        # separates them, and that is what the judge is shown: a motion
+        # heat composite over the impact window, no ball, no context.
+        #
+        # This is deliberately narrow: only a CONFIDENT AI "not a swing"
+        # drops the candidate. The club-fan heuristic (the no-key
+        # fallback) is recorded and shown but never vetoes, because on a
+        # live course a false negative loses a real shot and the
+        # heuristic is the shakier of the two.
+        _t0 = time.perf_counter()
+        _heat: dict = {}
+        _ai_seen = False
+        if settings.swing_heat_check_enabled:
+            try:
+                from ..services.tracer import swing_heat_check
+
+                # The composite is the judge's INPUT, not just a debug
+                # picture, so it is written even when artifacts are off —
+                # otherwise turning artifacts off would silently turn the
+                # judge off with it.
+                _heat_dir = _art_dir or CLIPS_DIR
+                _heat = swing_heat_check(
+                    src_path, peak_t, fps,
+                    ball_hint=c.get("impact_wrist_xy"),
+                    debug_dir=_heat_dir,
+                    debug_prefix=f"d3heat-{upload_id}-{tok}-{i}",
+                ) or {}
+                if _heat.get("image_clean") and os.environ.get(
+                    "ANTHROPIC_API_KEY",
+                ):
+                    _j = judge_swing_heat_image(
+                        _heat_dir / _heat["image_clean"],
+                    )
+                    _heat["ai_judge"] = _j.get("is_swing")
+                    _heat["ai_reason"] = _j.get("reason")
+                    _heat["ai_confidence"] = _j.get("confidence")
+                    if _j.get("is_swing") is True:
+                        _heat["verdict"] = "club_swing"
+                        _ai_seen = True
+                    elif _j.get("is_swing") is False:
+                        _heat["verdict"] = "no_swing"
+                        _ai_seen = True
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("debug3 heat judge failed: %s", _exc)
+                _heat = {"reason": f"failed: {_exc}"}
+        else:
+            _heat = {"reason": "swing_heat_check_enabled is off"}
+        _add("judge", time.perf_counter() - _t0)
+        entry["judge"] = {
+            "verdict": _heat.get("verdict"),
+            "ai_judge": _heat.get("ai_judge"),
+            "ai_reason": _heat.get("ai_reason"),
+            "ai_confidence": _heat.get("ai_confidence"),
+            "fan": _heat.get("fan"),
+            "n_rays": _heat.get("n_rays"),
+            "n_angles": _heat.get("n_angles"),
+            "reason": _heat.get("reason"),
+            "decided_by": ("ai" if _ai_seen
+                           else ("heuristic" if _heat.get("available")
+                                 else "nothing")),
+        }
+        entry["heat_image_url"] = _clip_url(
+            _heat.get("image") or _heat.get("image_clean"))
+        if _ai_seen and _heat.get("verdict") == "no_swing":
+            entry["dropped_by_judge"] = True
+            entry["ok"] = False
+            n_judged_out += 1
+            log.info(
+                "debug3: upload=%s AI judge dropped candidate %s @ %.1fs (%s)",
+                upload_id, i, peak_t, _heat.get("ai_reason"),
+            )
+            rep["swings"].append(entry)
+            continue
 
         # ONE PIPELINE. This endpoint does not re-implement the stages -- it
         # calls the same function produce calls and asks it to show its work.
@@ -13294,6 +13372,13 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry["candidates"] = _ff.get("candidates") or []
         entry["ball_image_url"] = _clip_url(
             (_dbg.get("club_arc") or {}).get("image"))
+        # The aim-gate pre-pass, which runs BEFORE the flight is picked and
+        # decides whether the gate is armed at all. Shown whether or not it
+        # found the ball — a miss here is the reason a silly track survives,
+        # and the search window is the only thing that explains a miss.
+        entry["ball_hint"] = _dbg.get("ball_hint")
+        entry["ball_hint_reason"] = _dbg.get("ball_hint_reason")
+        entry["ball_hint_image_url"] = _clip_url(_dbg.get("ball_hint_image"))
         entry["rest_check_frame"] = _dbg.get("rest_check_frame")
         entry["rest_check_image_url"] = _clip_url(_dbg.get("rest_check_image"))
         entry["flight_image_url"] = _clip_url(_dbg.get("flight_image"))
@@ -13413,43 +13498,49 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     for _s in rep["swings"]:
         _s.pop("candidates", None)
         # The produce job ran synchronously on THIS thread, so its
-        # thread-local phase clock is still readable — this is stage 7
+        # thread-local phase clock is still readable — this is stage 8
         # broken down into ffmpeg / AI / detection instead of one
         # 198-second block.
         rep["produce_breakdown"] = _pt_snapshot()
 
     rep["stages"].extend([
-        {"n": 2, "name": "Ball at impact",
+        {"n": 2, "name": "AI judge on the club fan",
+         "detail": "motion-heat composite over the impact window, judged "
+                   "on the club's angular sweep -- a confident 'not a "
+                   "swing' drops the candidate before any tracking runs",
+         "count": len(cands) - n_judged_out, "counts": "candidates kept",
+         "seconds": _phase.get("judge", 0.0)},
+        {"n": 3, "name": "Ball at impact",
          "detail": "club-arc vertex on the ground line at the feet",
          "count": sum(1 for s in rep["swings"] if s.get("ball")),
          "counts": "balls located",
          "seconds": _phase.get("club_arc", 0.0)},
-        {"n": 3, "name": "MOG2 + component + area filter",
+        {"n": 4, "name": "MOG2 + component + area filter",
          "detail": "big blobs become a golfer mask; only ball-sized "
                    "off-body blobs survive",
          "count": sum((s.get("detect_stats") or {}).get("kept", 0)
                       for s in rep["swings"]),
          "counts": "detections kept",
          "seconds": _phase.get("detect", 0.0)},
-        {"n": 4, "name": "Nearest-neighbour tracking",
+        {"n": 5, "name": "Nearest-neighbour tracking",
          "detail": "constant-velocity prediction with a gate that widens "
                    "on a missed frame",
          "count": sum(int(s.get("n_tracks") or 0)
                       for s in rep["swings"]),
          "counts": "tracks built",
          "seconds": _phase.get("tracks", 0.0)},
-        {"n": 5, "name": "RANSAC parabola + flight tests",
+        {"n": 6, "name": "RANSAC parabola + flight tests",
          "detail": "x linear in t, y quadratic; must rise and must point "
                    "back at the ball",
          "count": n_flights, "counts": "flights accepted",
          "seconds": _phase.get("flight", 0.0)},
-        {"n": 6, "name": "Preview clip",
+        {"n": 7, "name": "Preview clip",
          "detail": "the same renderer produce uses, fed Debug3's ball, "
                    "launch frame and inliers -- rendered here so the answer "
                    "can be judged before it ships",
          "count": n_produced, "counts": "previews rendered",
          "seconds": _phase.get("preview", 0.0)},
-        {"n": 7, "name": "Produced for real",
+        {"n": 8, "name": "Produced for real",
          "detail": ((rep.get("produced") or {}).get("detail")
                     or (rep.get("produced") or {}).get("error")
                     or "no flight, so nothing was re-produced"),
@@ -13458,14 +13549,14 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
          "seconds": _phase.get("produce_real", 0.0)},
     ])
 
-    # TIMING SUMMARY. The seven stages do not account for the whole run —
+    # TIMING SUMMARY. The eight stages do not account for the whole run —
     # the resting-ball departure scan samples the entire video and belongs
     # to no stage, and the panel-only debug images (the rest-check frame,
     # the flight drawing) are overhead produce never pays. Report those
     # separately and carry an explicit `unattributed` remainder, so the
     # numbers reconcile against the wall clock instead of quietly missing
     # whatever is not on the list.
-    # Stage 7 itemised, with its own remainder so the parts reconcile
+    # Stage 8 itemised, with its own remainder so the parts reconcile
     # against the 'Produced for real' figure rather than trailing off.
     _pb_raw = rep.pop("produce_breakdown", None) or {}
     _produce_breakdown = {

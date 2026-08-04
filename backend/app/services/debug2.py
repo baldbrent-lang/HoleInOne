@@ -207,8 +207,52 @@ def club_bottom_ball(
 
         ys, xs = np.nonzero(mask)
         out["arc_px"] = int(xs.size)
+
+        def _render(bx=None, by=None) -> None:
+            """Draw the search window whether or not we found anything.
+
+            When this stage fails, WHERE it was looking is the whole
+            diagnosis — a window over the shoes, a window off the ball,
+            a window with no motion in it all look identical from the
+            reason string alone. So the picture is drawn on the failure
+            paths too, with the ball marker simply absent."""
+            if debug_dir is None or base is None:
+                return
+            img = base.copy()
+            if mask is not None and np.any(mask > 0):
+                img[mask > 0] = (0.35 * img[mask > 0] + 0.65
+                                 * np.array([255, 120, 0])).astype(np.uint8)
+            # Show the constraint, not just the answer — when the ball lands
+            # somewhere silly the window is usually why.
+            if win is not None:
+                cv2.rectangle(img, (win[0], win[1]), (win[2], win[3]),
+                              (60, 60, 235), 2)
+            if ground_y is not None:
+                cv2.line(img, (0, ground_y), (w, ground_y),
+                         (200, 200, 60), 1, cv2.LINE_AA)
+                cv2.drawMarker(img, (int(feet_xy[0]), ground_y),
+                               (200, 200, 60), cv2.MARKER_TILTED_CROSS, 18, 2)
+            if bx is not None and by is not None:
+                cv2.circle(img, (int(bx), int(by)), max(10, int(0.02 * h)),
+                           (0, 255, 0), 3, cv2.LINE_AA)
+                tail = (f"green = ball ({int(bx)},{int(by)}), "
+                        f"{out.get('offset_body')} body-heights "
+                        f"{out.get('side')} of the feet")
+            else:
+                tail = f"NO BALL: {out.get('reason')}"
+            _label(
+                img,
+                f"f{f0}-{f1}, {int(xs.size)}px of club arc. red = "
+                f"ground-band window, yellow = ground line at feet. {tail}",
+            )
+            name = f"{debug_prefix}.jpg"
+            cv2.imwrite(str(Path(debug_dir) / name), img,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 86])
+            out["image"] = name
+
         if xs.size < 30:
             out["reason"] = f"club arc too faint ({xs.size}px)"
+            _render()
             return out
 
         if ground_y is not None:
@@ -228,6 +272,7 @@ def club_bottom_ball(
                     f"all the ground-band motion is at the feet "
                     f"({int(keep.sum())}px clear of them) — no club arc"
                 )
+                _render()
                 return out
             sx, sy = xs[keep], ys[keep]
             # The vertex of the arc. The club's path through impact is a
@@ -251,6 +296,7 @@ def club_bottom_ball(
                     f"arc bottom is {off:.2f} body-heights to the "
                     f"{out['side']} of the feet — too far to be the ball"
                 )
+                _render(bx, by)
                 return out
             out["ok"] = True
             out["xy"] = [bx, by]
@@ -273,33 +319,7 @@ def club_bottom_ball(
                 f"wrist box, less reliable)"
             )
 
-        if debug_dir is not None:
-            img = base.copy()
-            img[mask > 0] = (0.35 * img[mask > 0] + 0.65
-                             * np.array([255, 120, 0])).astype(np.uint8)
-            # Show the constraint, not just the answer — when the ball lands
-            # somewhere silly the window is usually why.
-            if win is not None:
-                cv2.rectangle(img, (win[0], win[1]), (win[2], win[3]),
-                              (60, 60, 235), 2)
-            if ground_y is not None:
-                cv2.line(img, (0, ground_y), (w, ground_y),
-                         (200, 200, 60), 1, cv2.LINE_AA)
-                cv2.drawMarker(img, (int(feet_xy[0]), ground_y),
-                               (200, 200, 60), cv2.MARKER_TILTED_CROSS, 18, 2)
-            cv2.circle(img, (bx, by), max(10, int(0.02 * h)),
-                       (0, 255, 0), 3, cv2.LINE_AA)
-            _label(
-                img,
-                f"f{f0}-{f1}, {xs.size}px of club arc. red = ground-band "
-                f"window, yellow = ground line at feet, green = ball "
-                f"({bx},{by}), {out.get('offset_body')} body-heights "
-                f"{out.get('side')} of the feet",
-            )
-            name = f"{debug_prefix}.jpg"
-            cv2.imwrite(str(Path(debug_dir) / name), img,
-                        [int(cv2.IMWRITE_JPEG_QUALITY), 86])
-            out["image"] = name
+        _render(bx, by)
         return out
     except Exception as exc:  # noqa: BLE001
         log.warning("debug2 club_bottom_ball failed: %s", exc)
