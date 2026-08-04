@@ -95,6 +95,54 @@ function uploadState(row, busy) {
 // Three states, in priority order: waiting its turn in the produce
 // queue, running with a named stage, running before the first stage has
 // been reported. Never shown on an idle card.
+/* The wrist-speed trace stage 1 works from. A count of zero candidates
+   cannot tell you whether pose never saw the golfer, whether the hands
+   never moved fast enough, or whether the spine-bend gate rejected a
+   real swing — and those need three different fixes. The shape can.
+   Bars are per-sample wrist speed; the dashed line is the threshold;
+   markers under the axis are the bursts, green if they became a
+   candidate and amber if they were rejected. */
+function PoseTrace({ series, threshold, bursts, durationSec }) {
+  const W = 720, H = 90, pad = 4;
+  const n = series.length;
+  if (!n) return null;
+  const max = Math.max(threshold || 0, ...series) || 1;
+  const y = (v) => H - pad - (v / max) * (H - 2 * pad);
+  const x = (i) => pad + (i / Math.max(1, n - 1)) * (W - 2 * pad);
+  const dur = durationSec || n;
+  const pts = series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+  return (
+    <div style={{ marginTop: 6, overflowX: "auto" }}>
+      <svg width={W} height={H + 16} style={{ maxWidth: "100%" }}
+        role="img" aria-label="wrist speed over the clip">
+        <polyline points={pts.join(" ")} fill="none"
+          stroke="var(--emerald-700, #1a9d55)" strokeWidth="1" />
+        {threshold != null && (
+          <line x1={pad} x2={W - pad} y1={y(threshold)} y2={y(threshold)}
+            stroke="#b7791f" strokeDasharray="4 3" strokeWidth="1" />
+        )}
+        {bursts.map((b, i) => {
+          const px = pad + (Math.min(1, (b.t || 0) / Math.max(1e-6, dur)))
+            * (W - 2 * pad);
+          return (
+            <g key={i}>
+              <line x1={px} x2={px} y1={pad} y2={H - pad} strokeWidth="1"
+                stroke={b.status === "swing" ? "#1a9d55" : "#b7791f"}
+                strokeOpacity="0.45" />
+              <circle cx={px} cy={H + 6} r="3"
+                fill={b.status === "swing" ? "#1a9d55" : "#b7791f"} />
+            </g>
+          );
+        })}
+      </svg>
+      <div className="muted">
+        wrist speed across the clip · dashed = burst threshold · dots =
+        bursts (green kept, amber rejected)
+      </div>
+    </div>
+  );
+}
+
 function ProduceStatusOverlay({ row, greyed }) {
   const queued = row.queue_state === "queued";
   if (!greyed && !queued) return null;
@@ -3296,6 +3344,57 @@ function Debug3Modal({ state, onClose }) {
                 <div className="muted">
                   {rep.produced.detail || rep.produced.error}
                 </div>
+              </div>
+            )}
+            {rep.pose_debug && (
+              <div className="tiny" style={{ marginTop: 6 }}>
+                <b>Stage 1 working (pose):</b>{" "}
+                <span className="muted">
+                  {rep.pose_debug.n_pose_frames ?? "?"} frame(s) with a
+                  person of {rep.pose_debug.n_samples ?? "?"} sampled
+                  {rep.pose_debug.coverage != null
+                    && ` (${Math.round(rep.pose_debug.coverage * 100)}% coverage)`}
+                  {" · "}wrist-speed median {rep.pose_debug.median?.toFixed?.(4)},
+                  threshold {rep.pose_debug.threshold?.toFixed?.(4)}
+                  {" · "}{rep.pose_debug.n_raw_bursts ?? 0} raw burst(s),
+                  {" "}{rep.pose_debug.n_bend_rejected ?? 0} rejected as upright
+                  {" · "}spine-bend gate{" "}
+                  {rep.pose_debug.back_bend_min_deg}–
+                  {rep.pose_debug.back_bend_max_deg}°
+                </span>
+                {rep.pose_debug.reason && (
+                  <div style={{ color: "#c0392b" }}>
+                    {rep.pose_debug.reason}
+                  </div>
+                )}
+                {(rep.bursts || []).length > 0 ? (
+                  <div style={{ marginTop: 4 }}>
+                    <span className="muted">every burst it saw:</span>{" "}
+                    {rep.bursts.map((b, i) => (
+                      <span key={i} style={{
+                        display: "inline-block", marginRight: 8,
+                        color: b.status === "swing" ? "#1a9d55" : "#b7791f",
+                      }}>
+                        {b.t}s ×{b.ratio}
+                        {b.bend != null && ` ${b.bend}°`} [{b.status}]
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ color: "#b7791f", marginTop: 4 }}>
+                    No wrist-speed burst even reached the gates — nothing in
+                    this clip moved the hands fast enough relative to the
+                    clip's own median.
+                  </div>
+                )}
+                {(rep.pose_series || []).length > 4 && (
+                  <PoseTrace
+                    series={rep.pose_series}
+                    threshold={rep.pose_debug.threshold}
+                    bursts={rep.bursts || []}
+                    durationSec={rep.pose_debug.duration_sec}
+                  />
+                )}
               </div>
             )}
             <div className="tiny" style={{ marginTop: 4 }}>

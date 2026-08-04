@@ -13229,9 +13229,52 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         or []
     )
     _add("pose", time.perf_counter() - _t0)
+    # STAGE 1'S WORKING. Zero candidates is the least informative number
+    # in the panel: it cannot distinguish "pose never saw the golfer" from
+    # "it saw the swing and the spine-bend gate rejected it" from "the
+    # wrist speed never rose above the noise floor". All three are one
+    # config change apart and they need completely different fixes.
+    rep["pose_debug"] = {
+        k: pose_dbg.get(k)
+        for k in ("reason", "available", "n_pose_frames", "n_samples",
+                  "coverage", "n_bridged", "duration_sec", "median",
+                  "threshold", "n_raw_bursts", "n_bend_rejected",
+                  "back_bend_min_deg", "back_bend_max_deg",
+                  "strong_ratio", "ratio_min", "ratio_max", "reached_eof")
+    }
+    # The wrist-speed trace itself, so a swing that never crossed the
+    # threshold is visible as a shape rather than inferred from a count.
+    rep["pose_series"] = [
+        round(float(v), 4) for v in (pose_dbg.get("series") or [])
+    ][:2000]
+    # Every burst the detector saw and what happened to it, including the
+    # ones that never became candidates.
+    rep["bursts"] = list(pose_dbg.get("bursts_detail") or [])
+    _pd = rep["pose_debug"]
+    _why = []
+    if _pd.get("available") is False:
+        _why.append(_pd.get("reason") or "pose unavailable")
+    elif not cands:
+        if not _pd.get("n_pose_frames"):
+            _why.append("pose never found a person in this clip")
+        elif not _pd.get("n_raw_bursts"):
+            _why.append(
+                f"no wrist-speed burst cleared the threshold "
+                f"({_pd.get('threshold')} vs a median of {_pd.get('median')})"
+            )
+        elif _pd.get("n_bend_rejected"):
+            _why.append(
+                f"{_pd['n_bend_rejected']} burst(s) rejected as upright — "
+                f"the spine-bend gate wants "
+                f"{_pd.get('back_bend_min_deg')}-{_pd.get('back_bend_max_deg')}"
+                f" degrees"
+            )
+        else:
+            _why.append("bursts were found but none passed the gates")
     rep["stages"].append({
         "n": 1, "name": "Pose candidates",
-        "detail": "wrist speed + spine bend, the detector produce uses",
+        "detail": ("wrist speed + spine bend, the detector produce uses"
+                   + (" -- " + "; ".join(_why) if _why else "")),
         "count": len(cands), "counts": "candidates",
         "seconds": _phase.get("pose", 0.0),
     })
