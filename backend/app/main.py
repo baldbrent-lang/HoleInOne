@@ -207,6 +207,10 @@ def _migrate() -> None:
             statements.append(
                 "UPDATE cameras SET triggering_enabled = TRUE WHERE triggering_enabled IS NULL"
             )
+        if "green_homography" not in cam_cols:
+            statements.append(
+                "ALTER TABLE cameras ADD COLUMN green_homography JSON"
+            )
 
     # Generic backstop: add ANY column defined on a model but missing from
     # its existing table. The explicit ALTERs above cover special cases

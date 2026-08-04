@@ -155,6 +155,274 @@ function ClipChip({ label, filename, sizeMb, durationSec, missing, url }) {
   ) : body;
 }
 
+// ---------------------------------------------------------------------
+// Green-camera calibration
+// ---------------------------------------------------------------------
+// Pixels are not yards, and the scale changes across the frame: a ball
+// 30 ft from the pin but further from the camera covers fewer pixels
+// than one 30 ft away and near. So there is no "pixels per foot" that is
+// right anywhere except at a single distance. Four marked points define
+// a homography onto the plane of the green, which is right everywhere.
+//
+// This screen is the blocking piece for closest-to-the-pin AND for
+// finishing the tee-side tracer where the ball actually landed.
+
+const DEFAULT_MARKS = [
+  { label: "Front edge — centre", hint: "nearest point of the putting surface" },
+  { label: "Back edge — centre", hint: "furthest point of the putting surface" },
+  { label: "Left extreme", hint: "widest point on the left" },
+  { label: "Right extreme", hint: "widest point on the right" },
+];
+
+function GreenCalibrationModal({ adminPassword, cam, onClose }) {
+  const [frameUrl, setFrameUrl] = useState(null);
+  const [marks, setMarks] = useState([]);     // {x,y,X,Y,label}
+  const [pinIdx, setPinIdx] = useState(null); // index of the pin mark
+  const [err, setErr] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState(null);
+  const [existing, setExisting] = useState(null);
+  const [probe, setProbe] = useState(null);
+  const imgRef = useRef(null);
+
+  // Grab a still. The live-frame path renews the watch TTL, so opening
+  // this screen is enough to make the Pi start pushing frames.
+  useEffect(() => {
+    let cancelled = false;
+    let url = null;
+    async function grab() {
+      try {
+        // Marking the camera watched is what makes the Pi start pushing
+        // frames; the first poll usually 404s until one lands, so retry
+        // briefly rather than declaring the camera dead.
+        await api.startWatchingCamera(adminPassword, cam.id);
+        const src = api.cameraLiveFrameUrl(cam.id);
+        let blob = null;
+        for (let i = 0; i < 12 && !cancelled && !blob; i++) {
+          const res = await fetch(src, {
+            headers: { "X-Admin-Password": adminPassword },
+            cache: "no-store",
+          });
+          if (res.status === 200) blob = await res.blob();
+          else await new Promise((r) => setTimeout(r, 1000));
+        }
+        if (cancelled) return;
+        if (!blob) throw new Error("no frame");
+        url = URL.createObjectURL(blob);
+        setFrameUrl(url);
+      } catch (e) {
+        if (!cancelled) setErr(
+          "Could not get a frame from this camera. It has to be online and " +
+          "delivering video — check it on the Cameras page first.",
+        );
+      }
+    }
+    grab();
+    api.getGreenCalibration(adminPassword, cam.id)
+      .then((r) => !cancelled && setExisting(r?.calibration || null))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+      api.stopWatchingCamera(adminPassword, cam.id).catch(() => {});
+    };
+  }, [adminPassword, cam.id]);
+
+  // Click position in NATIVE image pixels, not displayed pixels — the
+  // homography is fitted in the camera's own coordinate space, so a
+  // browser-scaled click would bake the scale factor into the matrix.
+  function addMark(e) {
+    const img = imgRef.current;
+    if (!img) return;
+    const r = img.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width) * img.naturalWidth;
+    const y = ((e.clientY - r.top) / r.height) * img.naturalHeight;
+    const preset = DEFAULT_MARKS[marks.length];
+    setMarks((m) => [...m, {
+      x: Math.round(x), y: Math.round(y), X: "", Y: "",
+      label: preset ? preset.label : `Point ${m.length + 1}`,
+    }]);
+    setResult(null);
+  }
+
+  function setField(i, key, v) {
+    setMarks((m) => m.map((k, j) => (j === i ? { ...k, [key]: v } : k)));
+  }
+
+  const usable = marks.filter(
+    (m) => m.X !== "" && m.Y !== "" && Number.isFinite(+m.X) && Number.isFinite(+m.Y),
+  );
+  const canSave = usable.length >= 4 && usable.length === marks.length;
+
+  async function save() {
+    setSaving(true); setErr(null); setResult(null);
+    try {
+      const pin = pinIdx != null && marks[pinIdx]
+        ? { image: [marks[pinIdx].x, marks[pinIdx].y],
+            world: [+marks[pinIdx].X, +marks[pinIdx].Y] }
+        : null;
+      const r = await api.calibrateGreenCamera(adminPassword, cam.id, {
+        imagePoints: marks.map((m) => [m.x, m.y]),
+        worldPoints: marks.map((m) => [+m.X, +m.Y]),
+        pin,
+      });
+      setResult(r);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Verification: click anywhere and see where the saved calibration
+  // thinks it is. Pace it out and you know whether to trust it.
+  async function probeAt(e) {
+    const img = imgRef.current;
+    if (!img) return;
+    const r = img.getBoundingClientRect();
+    const x = Math.round(((e.clientX - r.left) / r.width) * img.naturalWidth);
+    const y = Math.round(((e.clientY - r.top) / r.height) * img.naturalHeight);
+    try {
+      setProbe(await api.measureGreenPoint(adminPassword, cam.id, x, y));
+    } catch (e2) {
+      setProbe({ error: e2.message });
+    }
+  }
+
+  const calibrated = !!(existing || result);
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+        zIndex: 200, overflow: "auto", padding: 20,
+      }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="card" style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <div className="row" style={{ alignItems: "center", gap: 10 }}>
+          <b>Calibrate green camera #{cam.id}</b>
+          <span className="small muted">
+            {cam.course_name} · hole {cam.assigned_hole}
+          </span>
+          <button className="small ghost" style={{ marginLeft: "auto" }}
+                  onClick={onClose}>Close</button>
+        </div>
+
+        <p className="small muted">
+          Click <b>4 or more</b> points you can also locate on the yardage
+          book, then type where each one is in <b>feet</b>. X runs across
+          the green, Y from front to back. Origin is yours to pick — the
+          front-left of the putting surface is a reasonable one.
+          {" "}Mark the <b>pin</b> too and distances read out directly.
+        </p>
+
+        {err && <div className="card err-text small">{err}</div>}
+
+        {!frameUrl && <div className="card muted small">Getting a frame…</div>}
+        {frameUrl && (
+          <div style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
+            <img
+              ref={imgRef} src={frameUrl} alt="green camera still"
+              onClick={calibrated && marks.length === 0 ? probeAt : addMark}
+              style={{ maxWidth: "100%", cursor: "crosshair", display: "block" }}
+            />
+            {marks.map((m, i) => (
+              <span key={i} style={{
+                position: "absolute", left: `${(m.x / (imgRef.current?.naturalWidth || 1)) * 100}%`,
+                top: `${(m.y / (imgRef.current?.naturalHeight || 1)) * 100}%`,
+                transform: "translate(-50%,-50%)",
+                width: 20, height: 20, borderRadius: "50%",
+                background: i === pinIdx ? "rgba(239,68,68,0.85)" : "rgba(34,197,94,0.85)",
+                color: "#fff", fontSize: 12, fontWeight: 700,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                border: "2px solid #fff", pointerEvents: "none",
+              }}>{i + 1}</span>
+            ))}
+          </div>
+        )}
+
+        {calibrated && marks.length === 0 && (
+          <div className="small" style={{ marginTop: 8 }}>
+            <b>Already calibrated.</b>{" "}
+            {existing?.rms_error_ft != null
+              ? `Fit residual ${existing.rms_error_ft} ft.`
+              : "Fitted from 4 points (exact fit — no self-check available)."}
+            {" "}Click the image to check a spot, or start clicking to re-do it.
+            {probe && (
+              <div className="card" style={{ marginTop: 6, padding: 8 }}>
+                {probe.error ? <span className="err-text">{probe.error}</span> : (
+                  <>x {probe.x_ft} ft · y {probe.y_ft} ft
+                  {probe.distance_from_pin_display
+                    ? ` · ${probe.distance_from_pin_display} from the pin` : ""}</>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {marks.length > 0 && (
+          <table className="small" style={{ width: "100%", marginTop: 12 }}>
+            <thead><tr>
+              <th>#</th><th>What you clicked</th><th>px</th>
+              <th>X ft</th><th>Y ft</th><th>Pin</th>
+            </tr></thead>
+            <tbody>
+              {marks.map((m, i) => (
+                <tr key={i}>
+                  <td>{i + 1}</td>
+                  <td>
+                    <input value={m.label}
+                           onChange={(e) => setField(i, "label", e.target.value)}
+                           style={{ width: "100%" }} />
+                    {DEFAULT_MARKS[i] && (
+                      <div className="tiny muted">{DEFAULT_MARKS[i].hint}</div>
+                    )}
+                  </td>
+                  <td className="muted">{m.x},{m.y}</td>
+                  <td><input type="number" value={m.X} style={{ width: 80 }}
+                             onChange={(e) => setField(i, "X", e.target.value)} /></td>
+                  <td><input type="number" value={m.Y} style={{ width: 80 }}
+                             onChange={(e) => setField(i, "Y", e.target.value)} /></td>
+                  <td>
+                    <input type="radio" name="pin" checked={pinIdx === i}
+                           onChange={() => setPinIdx(i)} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div className="row" style={{ gap: 8, marginTop: 12, alignItems: "center" }}>
+          <button onClick={save} disabled={!canSave || saving}>
+            {saving ? "Saving…" : `Save calibration (${marks.length} points)`}
+          </button>
+          <button className="ghost small" onClick={() => { setMarks([]); setPinIdx(null); setResult(null); }}>
+            Clear points
+          </button>
+          {marks.length > 0 && marks.length < 4 && (
+            <span className="small muted">Need at least 4.</span>
+          )}
+          {marks.length === 4 && (
+            <span className="small muted">
+              A 5th point would let this measure its own accuracy.
+            </span>
+          )}
+        </div>
+
+        {result && (
+          <div className="card" style={{ marginTop: 10,
+               background: "rgba(34,197,94,0.08)" }}>
+            <b>Saved.</b>{" "}
+            <span className="small">{result.accuracy_note}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CameraEventsPanel({ adminPassword }) {
   const [events, setEvents] = useState(null);
   const [err, setErr] = useState(null);
@@ -340,6 +608,7 @@ export default function AdminCameras() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState({}); // {camera_id: true}
   const [revealedToken, setRevealedToken] = useState({}); // {camera_id: true}
+  const [calibratingCam, setCalibratingCam] = useState(null);
   const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
   const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "", name: "" });
 
@@ -912,6 +1181,15 @@ export default function AdminCameras() {
                   >
                     {cam.enabled ? "Disable" : "Enable"}
                   </button>
+                  {cam.assigned_role === "green" && (
+                    <button
+                      type="button" className="secondary small"
+                      onClick={() => setCalibratingCam(cam)}
+                      title="Map this camera's pixels onto the green in feet — needed for closest-to-the-pin and for finishing the tracer at the landing spot"
+                    >
+                      {cam.green_homography ? "Calibration ✓" : "Calibrate"}
+                    </button>
+                  )}
                   {cam.assigned_role === "tee" && (
                     <button
                       type="button" className="secondary small"
@@ -921,6 +1199,15 @@ export default function AdminCameras() {
                       {cam.triggering_enabled === false
                         ? "Resume triggering"
                         : "Pause triggering"}
+                    </button>
+                  )}
+                  {cam.assigned_role === "green" && (
+                    <button
+                      type="button" className="secondary small"
+                      onClick={() => setCalibratingCam(cam)}
+                      title="Map this camera's pixels onto the green in feet — needed for closest-to-the-pin and for finishing the tracer at the landing spot"
+                    >
+                      {cam.green_homography ? "Calibration ✓" : "Calibrate"}
                     </button>
                   )}
                   {cam.assigned_role === "tee" && (
@@ -1088,6 +1375,14 @@ export default function AdminCameras() {
           );
         })}
       </div>
+
+      {calibratingCam && (
+        <GreenCalibrationModal
+          adminPassword={adminPassword}
+          cam={calibratingCam}
+          onClose={() => { setCalibratingCam(null); load(); }}
+        />
+      )}
 
       <CameraEventsPanel adminPassword={adminPassword} />
     </div>

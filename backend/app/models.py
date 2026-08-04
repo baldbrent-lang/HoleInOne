@@ -319,6 +319,22 @@ class Camera(Base):
     # the bounding box the tee-side person detector treats as "on the
     # tee". Green cameras leave this null.
     tee_box_roi: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # GREEN cameras only. Maps this camera's image pixels onto the plane
+    # of the green, in feet, so a ball's resting pixel becomes a real
+    # position — which is what closest-to-the-pin measures and what lets
+    # the tee-side tracer finish where the ball actually landed.
+    #
+    #   {"image_points": [[x,y] x4],     # clicked in a still
+    #    "world_points": [[X,Y] x4],     # feet; X across, Y toward back
+    #    "homography":   [[..],[..],[..]],   # 3x3, image -> world
+    #    "pin":  {"image": [x,y], "world": [X,Y]} | null,
+    #    "rms_error_ft": float,          # fit residual, shown to the operator
+    #    "calibrated_at": iso}
+    #
+    # Null until an operator runs the calibration screen. Pixels are not
+    # yards and the scale changes across the frame, so nothing downstream
+    # may guess a conversion without this.
+    green_homography: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     # Last time the camera POSTed anything (heartbeat, event, upload).
     # Backend's offline alert watches this.
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

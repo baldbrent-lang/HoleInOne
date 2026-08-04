@@ -333,6 +333,21 @@ export const api = {
       method: "POST",
       adminPassword: key,
     }),
+  // ---- Green-camera calibration (image px -> feet on the green) ----
+  getGreenCalibration: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}/calibration`, { adminPassword: key }),
+  calibrateGreenCamera: (key, cameraId, { imagePoints, worldPoints, pin }) =>
+    request(`/api/admin/cameras/${cameraId}/calibrate`, {
+      method: "POST",
+      adminPassword: key,
+      body: { image_points: imagePoints, world_points: worldPoints, pin: pin || null },
+    }),
+  measureGreenPoint: (key, cameraId, x, y) =>
+    request(`/api/admin/cameras/${cameraId}/measure`, {
+      method: "POST",
+      adminPassword: key,
+      body: { x, y },
+    }),
   listCameras: (key) => request(`/api/admin/cameras`, { adminPassword: key }),
   createCamera: (key, { courseId, assignedHole, assignedRole, name }) => {
     const fd = new FormData();

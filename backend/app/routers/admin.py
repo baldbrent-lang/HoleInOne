@@ -11376,6 +11376,120 @@ def capture_camera(
     }
 
 
+@router.post("/cameras/{camera_id}/calibrate")
+def calibrate_green_camera(
+    camera_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Save a green camera's image -> green-plane mapping.
+
+    Body: {"image_points": [[x,y], ...], "world_points": [[X,Y], ...],
+           "pin": {"image": [x,y], "world": [X,Y]} | null}
+
+    World coords are FEET on the plane of the green: X across, Y toward
+    the back. The operator picks the origin; marking the pin makes
+    distances readable without moving it.
+
+    Blocking piece for closest-to-the-pin AND for finishing the tee-side
+    tracer at the real landing spot — see docs/contests.md.
+    """
+    from ..services import green_calibration as gc
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if (cam.assigned_role or "").lower() != "green":
+        raise HTTPException(
+            409, "calibration applies to GREEN cameras — it maps the green's "
+                 "surface, which a tee camera cannot see well enough to measure",
+        )
+    try:
+        H, rms, rms_meaningful = gc.compute_homography(
+            payload.get("image_points"), payload.get("world_points"),
+        )
+    except gc.CalibrationError as exc:
+        raise HTTPException(400, str(exc))
+
+    if rms_meaningful and rms > gc.MAX_RMS_FT:
+        raise HTTPException(
+            400,
+            f"fit is off by {rms} ft on your own marked points (limit "
+            f"{gc.MAX_RMS_FT} ft). Check the measurements or re-click — a "
+            f"bad mapping is worse than none, because it answers "
+            f"confidently and wrongly.",
+        )
+
+    pin = payload.get("pin") or None
+    cam.green_homography = {
+        "image_points": payload.get("image_points"),
+        "world_points": payload.get("world_points"),
+        "homography": H,
+        "pin": pin,
+        "rms_error_ft": rms if rms_meaningful else None,
+        "n_points": len(payload.get("image_points") or []),
+        "calibrated_at": _utcnow_naive().isoformat(),
+    }
+    db.add(AuditLog(
+        actor="admin", action="calibrate_green_camera",
+        target=f"camera:{camera_id}",
+        detail=f"points={cam.green_homography['n_points']} rms={rms}",
+    ))
+    db.commit()
+    return {
+        "ok": True,
+        "rms_error_ft": rms if rms_meaningful else None,
+        "n_points": cam.green_homography["n_points"],
+        # Four points fit exactly, so the residual proves nothing. Say so
+        # rather than letting a 0.00 read as "perfect".
+        "accuracy_note": (
+            f"Fit residual {rms} ft across {cam.green_homography['n_points']} "
+            f"points." if rms_meaningful else
+            "Exact fit — 4 points always fit perfectly, so this cannot "
+            "measure its own accuracy. Add a 5th marked point to get a real "
+            "error estimate, or verify by clicking a ball you can pace out."
+        ),
+    }
+
+
+@router.get("/cameras/{camera_id}/calibration")
+def get_green_calibration(camera_id: int, db: Session = Depends(get_db)):
+    """Stored calibration, or nulls if the camera has never been done."""
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    return {"camera_id": camera_id, "calibration": cam.green_homography}
+
+
+@router.post("/cameras/{camera_id}/measure")
+def measure_green_point(
+    camera_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Where on the green is pixel (x, y)? The verification tool: click a
+    ball you can pace out and check the answer before trusting the
+    calibration with a contest."""
+    from ..services import green_calibration as gc
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    if not cam.green_homography:
+        raise HTTPException(409, "camera is not calibrated")
+    try:
+        x, y = float(payload["x"]), float(payload["y"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "body must be {\"x\": px, \"y\": px}")
+    pos = gc.image_to_green(cam.green_homography, x, y)
+    if pos is None:
+        raise HTTPException(
+            422, "that pixel doesn't land on the green's plane (the horizon "
+                 "maps to infinity) — click on the putting surface",
+        )
+    return pos
+
+
 @router.delete("/cameras/{camera_id}/watch")
 def stop_watch_camera(camera_id: int):
     """Admin closed the live view. Clear watcher + cached frame."""
