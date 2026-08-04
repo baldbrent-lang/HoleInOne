@@ -3464,29 +3464,56 @@ function Debug3Modal({ state, onClose }) {
             <Img url={sw.dets_image_url}
               cap="Stage 3 — every kept detection over the window, blue early to red late" />
 
+            <Img url={sw.tracks_image_url}
+              cap="Stage 4 — the track candidates: which detections the tracker decided belong to the same object. Numbers and colours match the table below; hollow ring = first frame of a track, filled dot = last." />
+
             <div className="small" style={{ marginTop: 10 }}>
               <b>Tracks:</b> {sw.n_tracks} built
               {(sw.tracks_preview || []).length > 0 && (
-                <table className="tiny" style={{ width: "100%", marginTop: 4 }}>
-                  <thead>
-                    <tr>
-                      <th align="left">points</th>
-                      <th align="left">frames</th>
-                      <th align="right">span</th>
-                      <th align="right">rise</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sw.tracks_preview.map((t, k) => (
-                      <tr key={k}>
-                        <td>{t.n}</td>
-                        <td>f{t.frames?.[0]}–{t.frames?.[1]}</td>
-                        <td align="right">{t.span_px}px</td>
-                        <td align="right">{t.rise_px}px</td>
+                <>
+                  {sw.n_tracks > sw.tracks_preview.length && (
+                    <span className="tiny muted" style={{ marginLeft: 6 }}>
+                      — the {sw.tracks_preview.length} longest are drawn and
+                      listed
+                    </span>
+                  )}
+                  <table className="tiny" style={{ width: "100%", marginTop: 4 }}>
+                    <thead>
+                      <tr>
+                        <th align="left">#</th>
+                        <th align="left">points</th>
+                        <th align="left">frames</th>
+                        <th align="right">span</th>
+                        <th align="right">rise</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {sw.tracks_preview.map((t, k) => (
+                        <tr key={k}
+                          style={t.winner
+                            ? { background: "var(--surface-3, rgba(0,0,0,.05))" }
+                            : undefined}>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            <span style={{
+                              display: "inline-block", width: 10, height: 10,
+                              borderRadius: 2, marginRight: 6,
+                              background: t.color || "#888",
+                              verticalAlign: "middle",
+                            }} />
+                            {t.idx ?? k + 1}
+                            {t.winner && (
+                              <b title="the fit chose this track"> ← flight</b>
+                            )}
+                          </td>
+                          <td>{t.n}</td>
+                          <td>f{t.frames?.[0]}–{t.frames?.[1]}</td>
+                          <td align="right">{t.span_px}px</td>
+                          <td align="right">{t.rise_px}px</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
               )}
             </div>
 

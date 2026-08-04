@@ -855,12 +855,32 @@ def find_flight(
         tracks = build_tracks(det.get("dets") or [], r)
         _lap("tracks")
         dbg["n_tracks"] = len(tracks)
+        # The preview covers exactly the tracks that get drawn, and each
+        # row carries the colour of its line — a table whose rows cannot
+        # be matched to the picture is just numbers.
         dbg["tracks_preview"] = [
-            {"n": len(t["points"]), "span_px": t["span_px"],
+            {"idx": _i + 1,
+             "color": TRACK_COLORS[_i % len(TRACK_COLORS)],
+             "n": len(t["points"]), "span_px": t["span_px"],
              "rise_px": t["rise_px"],
              "frames": [t["points"][0]["frame"], t["points"][-1]["frame"]]}
-            for t in tracks[:6]
+            for _i, t in enumerate(tracks[:TRACKS_DRAWN])
         ]
+        if debug_dir is not None:
+            _canvas = (det.get("images") or {}).get("dets")
+            if _canvas and (Path(debug_dir) / _canvas).exists():
+                _tn = f"{debug_prefix}tracks.jpg"
+                if draw_tracks(
+                    Path(debug_dir) / _canvas, Path(debug_dir) / _tn,
+                    tracks,
+                    f"TRACK CANDIDATES: the {min(len(tracks), TRACKS_DRAWN)} "
+                    f"longest of {len(tracks)} built. Numbers and colours "
+                    f"match the table. Hollow ring = first frame of the "
+                    f"track, filled dot = last.",
+                    scale=det.get("scale") or 1.0,
+                ):
+                    dbg["tracks_image"] = _tn
+            _lap("draw_tracks")
 
         # E: the flight.
         gy = float(feet_xy[1]) if feet_xy and len(feet_xy) == 2 else None
@@ -897,6 +917,17 @@ def find_flight(
             frame_w=frame_w, frame_h=frame_h, r=r,
         )
         _lap("flight")
+        # Which coloured line the fit actually chose. Identified by its
+        # points, not by index, because pick_flight ranks its own way and
+        # an index would silently point at the wrong row the day that
+        # changes.
+        _win = {(p["frame"], p["x"], p["y"])
+                for p in ((res.get("flight") or {}).get("track") or {})
+                .get("points", [])}
+        if _win:
+            for _row, _tr in zip(dbg["tracks_preview"], tracks):
+                _row["winner"] = ({(p["frame"], p["x"], p["y"])
+                                   for p in _tr["points"]} == _win)
         fit = res.get("fit") or {}
         dbg["flight"] = {
             "reason": res.get("reason"), "tried": res.get("tried"),
@@ -1603,6 +1634,89 @@ def pick_flight(
     return out
 
 
+# ONE palette, drawn by the backend and printed by the panel. The table
+# below the picture is useless unless its swatch is the same colour as
+# the line, so both read this list — hex here, converted to BGR at the
+# point of drawing, rather than two lists that agree until one is edited.
+# Chosen to stay apart from each other and from the frame: nothing in
+# the fairway-green band, and nothing close enough to the orange body
+# box or the blue/amber detection dots to be mistaken for them.
+TRACK_COLORS = [
+    "#e6194b", "#f58231", "#ffe119", "#bfef45", "#42d4f4", "#4363d8",
+    "#911eb4", "#f032e6", "#fabed4", "#9a6324", "#800000", "#000075",
+]
+# How many tracks get a line and a table row. All 79 drawn at once is a
+# ball of wool; the fit only ever considers the longest few anyway, and
+# the caption says how many were left out.
+TRACKS_DRAWN = 12
+
+
+def _track_bgr(i: int) -> tuple:
+    """Palette entry i as an OpenCV BGR tuple."""
+    hx = TRACK_COLORS[i % len(TRACK_COLORS)].lstrip("#")
+    r, g, b = (int(hx[j:j + 2], 16) for j in (0, 2, 4))
+    return (b, g, r)
+
+
+def draw_tracks(
+    canvas_path: Path,
+    out_path: Path,
+    tracks: list,
+    caption: str,
+    scale: float = 1.0,
+    limit: int = TRACKS_DRAWN,
+) -> bool:
+    """Draw the track candidates as thin coloured polylines, numbered.
+
+    The detections image answers "what did we see"; this answers "what did
+    we think went with what", which is the question the tracks table is
+    really about. Without it the table is a list of numbers with no way to
+    tell which row is the arc through the sky and which is a branch moving
+    in the wind.
+
+    Same scale contract as draw_flight: detections are full-res, the
+    canvas is the downscaled working frame.
+    """
+    if not HAS_CV:
+        return False
+    try:
+        img = cv2.imread(str(canvas_path))
+        if img is None:
+            return False
+        sc = float(scale) or 1.0
+
+        def _p(px, py):
+            return int(round(float(px) * sc)), int(round(float(py) * sc))
+
+        for i, tr in enumerate(tracks[:limit]):
+            col = _track_bgr(i)
+            pts = tr.get("points") or []
+            for a, b in zip(pts, pts[1:]):
+                cv2.line(img, _p(a["x"], a["y"]), _p(b["x"], b["y"]),
+                         col, 2, cv2.LINE_AA)
+            if not pts:
+                continue
+            # Endpoints marked differently so the direction of travel is
+            # readable: hollow ring where the track starts, filled dot
+            # where it ends.
+            cv2.circle(img, _p(pts[0]["x"], pts[0]["y"]), 5, col, 2,
+                       cv2.LINE_AA)
+            cv2.circle(img, _p(pts[-1]["x"], pts[-1]["y"]), 4, col, -1,
+                       cv2.LINE_AA)
+            _tx, _ty = _p(pts[0]["x"], pts[0]["y"])
+            # Black underlay so the number survives a light background.
+            for _c, _t in ((( 0, 0, 0), 3), (col, 1)):
+                cv2.putText(img, str(i + 1), (_tx + 7, _ty - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, _c, _t,
+                            cv2.LINE_AA)
+        _label(img, caption)
+        cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3 draw_tracks failed: %s", exc)
+        return False
+
+
 def draw_flight(
     canvas_path: Path,
     out_path: Path,
@@ -1678,6 +1792,7 @@ def draw_flight(
 __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
-    "build_tracks", "find_flight", "detect_ball_blobs", "draw_flight", "pick_flight",
+    "build_tracks", "find_flight", "detect_ball_blobs", "draw_flight",
+    "draw_tracks", "TRACK_COLORS", "TRACKS_DRAWN", "pick_flight",
     "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",
 ]

@@ -13455,6 +13455,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry["dets_image_url"] = _clip_url((_d.get("images") or {}).get("dets"))
         entry["n_tracks"] = _dbg.get("n_tracks")
         entry["tracks_preview"] = _dbg.get("tracks_preview")
+        entry["tracks_image_url"] = _clip_url(_dbg.get("tracks_image"))
         _fl = _dbg.get("flight") or {}
         entry["flight_reason"] = _fl.get("reason")
         entry["tried"] = _fl.get("tried")
@@ -13672,7 +13673,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     )
     _overhead = {
         k: _phase[k] for k in ("rest_ball", "launch", "rest_check_image",
-                               "draw_flight")
+                               "draw_tracks", "draw_flight")
         if _phase.get(k)
     }
     rep["timing"] = {
