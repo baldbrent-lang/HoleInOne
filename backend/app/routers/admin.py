@@ -13467,6 +13467,9 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry["fit"] = {
             "n_inliers": _fl.get("n_inliers"), "rms_px": _fl.get("rms_px"),
             "at_impact": _fl.get("at_impact"), "x_degree": _fl.get("x_degree"),
+            # Was missing, so the panel rendered "aims px from the ball"
+            # with a hole where the number should be.
+            "aim_px": _fl.get("aim_px"), "aim_basis": _fl.get("aim_basis"),
         }
         entry["flight"] = _ff.get("points") or []
         # find_flight's OWN verdict. Without this the panel could show a
@@ -13476,6 +13479,8 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry["find_flight_reason"] = _ff.get("reason")
         entry["find_flight_failed"] = bool(_ff.get("failed"))
         entry["images_error"] = _dbg.get("images_error")
+        entry["find_flight_traceback"] = _dbg.get("traceback")
+        entry["images_traceback"] = _dbg.get("images_traceback")
         if (_fl.get("n_inliers") or 0) and not _ff.get("ok"):
             n_accepted_but_lost += 1
         # The full ball-sized detection pool — click-to-plot's dense

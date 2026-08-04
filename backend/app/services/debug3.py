@@ -1040,6 +1040,7 @@ def find_flight(
             "n_inliers": fit.get("n_inliers"), "rms_px": fit.get("rms_px"),
             "at_impact": fit.get("at_impact"),
             "x_degree": fit.get("x_degree"),
+            "aim_px": fit.get("aim_px"), "aim_basis": fit.get("aim_basis"),
         }
         if not res.get("ok"):
             out["reason"] = res.get("reason")
@@ -1157,6 +1158,14 @@ def find_flight(
                 exc, exc_info=True,
             )
             dbg["images_error"] = f"{type(exc).__name__}: {exc}"
+            try:
+                import traceback as _tb
+
+                dbg["images_traceback"] = "".join(
+                    _tb.format_exception(type(exc), exc, exc.__traceback__),
+                )[-2000:]
+            except Exception:  # noqa: BLE001
+                pass
         return out
     except Exception as exc:  # noqa: BLE001
         # exc_info, because "failed: cannot convert float NaN to integer"
@@ -1164,6 +1173,21 @@ def find_flight(
         log.warning("debug3 find_flight failed: %s", exc, exc_info=True)
         out["reason"] = f"failed: {type(exc).__name__}: {exc}"
         out["failed"] = True
+        # THE TRACEBACK, ON THE REPORT. The message alone sent us hunting
+        # through the source for an operator that turned out not to be
+        # there: "unsupported operand type(s) for +: 'int' and 'list'"
+        # was chased through three wrong candidates because nothing said
+        # WHICH line. The operator is looking at the panel, not at the
+        # server's journal, so the answer belongs on the panel.
+        try:
+            import traceback as _tb
+
+            out["traceback"] = "".join(
+                _tb.format_exception(type(exc), exc, exc.__traceback__),
+            )[-2000:]
+            dbg["traceback"] = out["traceback"]
+        except Exception:  # noqa: BLE001
+            pass
         return out
 
 

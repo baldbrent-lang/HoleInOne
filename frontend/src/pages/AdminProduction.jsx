@@ -3579,12 +3579,30 @@ function Debug3Modal({ state, onClose }) {
                   <div>
                     Nothing was produced for this swing as a result.
                   </div>
+                  {sw.find_flight_traceback && (
+                    <details style={{ marginTop: 4 }}>
+                      <summary>where it threw</summary>
+                      <pre style={{
+                        whiteSpace: "pre-wrap", overflowX: "auto",
+                        fontSize: 11, margin: 0,
+                      }}>{sw.find_flight_traceback}</pre>
+                    </details>
+                  )}
                 </div>
               )}
               {sw.images_error && (
                 <div className="tiny" style={{ color: "#b7791f", marginTop: 4 }}>
                   Panel images failed ({sw.images_error}) — the flight itself
                   is unaffected.
+                  {sw.images_traceback && (
+                    <details style={{ marginTop: 4 }}>
+                      <summary>where it threw</summary>
+                      <pre style={{
+                        whiteSpace: "pre-wrap", overflowX: "auto",
+                        fontSize: 11, margin: 0,
+                      }}>{sw.images_traceback}</pre>
+                    </details>
+                  )}
                 </div>
               )}
               {sw.fit && (
