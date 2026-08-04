@@ -310,7 +310,15 @@ class TeeAgent:
         # only ever hit if the detector misclassifies something (eg a
         # parked cart) as a person for an extended period. 10 min is
         # long enough for a foursome on a slow tee box.
-        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 600))
+        # CLIP LENGTH IS UPLOAD SIZE. A tee clip runs at ~1500 kbps after
+        # compression, so 30s is about 5.5 MB and 143s is 27 MB — and on
+        # the link at Snee Farm (measured: 164 KB/s down one minute, 0 the
+        # next, 270ms RTT) nothing above about 10 MB completes inside the
+        # 180s write timeout. This is not a safety cap any more; it is how
+        # long a clip is. A group standing on the tee produces a series of
+        # 30s clips that each arrive, instead of one 3-minute clip that
+        # never does — and one swing per clip is what produce wants anyway.
+        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 30))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
         # Compress each clip to H.264 at this bitrate (kbps) before upload.
         # Makes clips play in any browser (mp4v won't play in desktop
@@ -607,12 +615,23 @@ class TeeAgent:
                     except Exception as exc:
                         log.error("event_trigger failed (%s) — skipping", exc)
                     else:
-                        self._record_and_upload(
+                        _why = self._record_and_upload(
                             detector, no_person_timeout, det_period,
                             fps, session_id, fixed_seconds=pending_secs,
                         )
-                        self.buffer.clear()
-                    person_first_seen = None
+                        if _why == "length_cap":
+                            # A SPLIT, not an ending. Keep the ring buffer
+                            # so the next clip opens with its full pre-roll
+                            # and OVERLAPS this one — otherwise a swing
+                            # that happens to land on the boundary is cut
+                            # in half and neither clip can be produced.
+                            # The golfer is still in the ROI, so re-arm the
+                            # dwell from now and the next clip starts in
+                            # about two seconds.
+                            person_first_seen = now
+                        else:
+                            self.buffer.clear()
+                            person_first_seen = None
                 time.sleep(det_period)
         finally:
             self.stopping.set()
@@ -628,7 +647,7 @@ class TeeAgent:
     def _record_and_upload(
         self, detector, no_person_timeout: float, det_period: float,
         fps: float, session_id: str, fixed_seconds: float | None = None,
-    ) -> None:
+    ) -> str:
         """Persist the pre-roll buffer + keep recording until no person
         is seen for `no_person_timeout` seconds (capped by
         `max_clip_seconds`), then upload. Frames come from the shared
@@ -638,7 +657,7 @@ class TeeAgent:
         snapshot = self.buffer.snapshot()
         if not snapshot:
             log.warning("buffer empty at trigger; skipping session=%s", session_id)
-            return
+            return "no_buffer"
         height, width = snapshot[0][1].shape[:2]
 
         # Wall-clock time of the first frame in the clip (the start of
@@ -690,7 +709,7 @@ class TeeAgent:
         clip_writer = ClipWriter(clip_path, write_fps, (width, height))
         if not clip_writer.ok:
             log.error("VideoWriter failed to open for %s", clip_path)
-            return
+            return "writer_failed"
 
         # Kick off parallel audio capture. The WAV runs alongside the
         # video write and gets ffmpeg-muxed into the MP4 at release(),
@@ -716,6 +735,9 @@ class TeeAgent:
         recording_start = time.time()
         last_person_seen = recording_start
         next_det = recording_start + det_period
+        # Why this clip ended decides whether the NEXT one keeps its
+        # pre-roll — see the caller.
+        stop_reason = "stopping"
 
         while not self.stopping.is_set():
             now = time.time()
@@ -733,11 +755,22 @@ class TeeAgent:
                     log.info(
                         "capture complete (%.1fs requested)", fixed_seconds,
                     )
+                    stop_reason = "fixed"
                     break
                 time.sleep(0.02)
                 continue
             if now - recording_start > self.max_clip_seconds:
-                log.warning("max_clip_seconds hit; stopping")
+                # NOT an error any more. This is the normal way a clip
+                # ends when a group is on the tee: cut here, upload a
+                # file small enough to survive the link, and re-trigger
+                # for the next stretch. The golfer is still in frame, so
+                # the next clip starts within a couple of seconds.
+                log.info(
+                    "clip length cap (%.0fs) reached — splitting here and "
+                    "starting a new clip; the golfer is still in the ROI",
+                    self.max_clip_seconds,
+                )
+                stop_reason = "length_cap"
                 break
             # Stop-detection on the latest frame, at the detection
             # cadence — off the capture path, so it can't drop frames.
@@ -760,6 +793,7 @@ class TeeAgent:
                         "no person for %.1fs; stopping (recorded %.1fs)",
                         no_person_timeout, now - recording_start,
                     )
+                    stop_reason = "no_person"
                     break
             time.sleep(0.02)
         clip_writer.close()
@@ -851,3 +885,4 @@ class TeeAgent:
         self.uploader.enqueue(
             session_id, clip_path, first_frame_ts, real_fps=real_fps,
         )
+        return stop_reason

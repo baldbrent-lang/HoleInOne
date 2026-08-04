@@ -48,7 +48,12 @@ class GreenAgent:
         # Runaway-safety cap — recording normally ends on the tee's
         # /event-stop signal, this only kicks in if the signal never
         # arrives. 10 min handles a slow foursome.
-        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 600))
+        # A BACKSTOP, not the clip length — the green stops when the tee
+        # signals it. Kept above the tee's own cap so the tee's stop is
+        # always what ends a normal clip, with enough headroom that a
+        # slow stop-poll doesn't truncate the green half; if the signal
+        # never arrives, this bounds the damage.
+        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 45))
         # How often to ask the backend whether the tee has signalled
         # end-of-session. 1 s keeps the green's clip within ~1 s of
         # the tee's clip without spamming the endpoint.

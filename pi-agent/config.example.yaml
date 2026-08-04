@@ -91,12 +91,26 @@ detection:
 # this buffer first so the address frame and backswing are captured.
 buffer_seconds: 5
 
-# Runaway-safety cap on a single session's clip length. A session
-# normally ends when the tee box has been empty for
-# detection.no_person_timeout_seconds; this cap is only hit if the
-# stop signal never arrives (tee crash, network split, detector
-# misclassification). 600 s = 10 min covers a slow foursome.
-max_clip_seconds: 600
+# HOW LONG A CLIP IS. Not a runaway guard any more — on the tee this is
+# hit routinely, and that is the point.
+#
+# A session used to run until the tee box emptied, which on a par-3 with
+# a group waiting meant 143 s, 175 s, 215 s clips. At ~1500 kbps that is
+# 27-40 MB, and a course uplink cannot move that inside the 180 s upload
+# write timeout, so none of them ever arrived. 30 s is ~5.5 MB, which
+# does. A waiting group now yields a series of 30 s clips that each make
+# it, instead of one long one that does not — and one swing per clip is
+# what the tracer wants anyway.
+#
+# The split keeps the pre-roll buffer, so consecutive clips OVERLAP by
+# buffer_seconds and a swing landing on a boundary is still complete in
+# one of them. Raise it if your uplink is good; lower it if 30 s clips
+# still fail to upload.
+#
+# GREEN side: leave this ABOVE the tee's value. The green stops when the
+# tee signals it, so its cap is only a backstop for a lost signal.
+# Code defaults if unset: tee 30, green 45.
+max_clip_seconds: 30
 
 # Green-side only: how often to ask the backend whether the tee has
 # signalled end-of-session. Lower = green stops closer to the tee but
@@ -113,6 +127,12 @@ stop_poll_interval_seconds: 1.0
 # upload_scale_height (e.g. 720); leave unset to keep capture res.
 upload_bitrate_kbps: 2500
 # upload_scale_height: 720
+
+# Clips whose upload fails are kept here (under work_dir/pending) and
+# retried whenever the uploader is idle, instead of being deleted. These
+# bound it so a long outage cannot fill the SD card — oldest out first.
+# upload_spool_max_mb: 2048
+# upload_spool_max_age_hours: 24
 
 # ---------------------------------------------------------------------
 # Audio (both sides)
