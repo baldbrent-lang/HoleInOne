@@ -858,25 +858,32 @@ def find_flight(
         # The preview covers exactly the tracks that get drawn, and each
         # row carries the colour of its line — a table whose rows cannot
         # be matched to the picture is just numbers.
+        _sel = select_preview_tracks(tracks)
+        _shown = [tracks[_i] for _i, _ in _sel]
         dbg["tracks_preview"] = [
-            {"idx": _i + 1,
-             "color": TRACK_COLORS[_i % len(TRACK_COLORS)],
-             "n": len(t["points"]), "span_px": t["span_px"],
-             "rise_px": t["rise_px"],
-             "frames": [t["points"][0]["frame"], t["points"][-1]["frame"]]}
-            for _i, t in enumerate(tracks[:TRACKS_DRAWN])
+            {"idx": _k + 1,
+             "color": TRACK_COLORS[_k % len(TRACK_COLORS)],
+             "why": _why,
+             "n": len(tracks[_i]["points"]),
+             "span_px": tracks[_i]["span_px"],
+             "rise_px": tracks[_i]["rise_px"],
+             "frames": [tracks[_i]["points"][0]["frame"],
+                        tracks[_i]["points"][-1]["frame"]]}
+            for _k, (_i, _why) in enumerate(_sel)
         ]
         if debug_dir is not None:
             _canvas = (det.get("images") or {}).get("dets")
             if _canvas and (Path(debug_dir) / _canvas).exists():
                 _tn = f"{debug_prefix}tracks.jpg"
+                _nr = sum(1 for _, _w in _sel if "rises" in _w)
                 if draw_tracks(
                     Path(debug_dir) / _canvas, Path(debug_dir) / _tn,
-                    tracks,
-                    f"TRACK CANDIDATES: the {min(len(tracks), TRACKS_DRAWN)} "
-                    f"longest of {len(tracks)} built. Numbers and colours "
-                    f"match the table. Hollow ring = first frame of the "
-                    f"track, filled dot = last.",
+                    _shown,
+                    f"TRACK CANDIDATES: {len(_sel)} of {len(tracks)} built "
+                    f"-- the longest, plus the {_nr} that RISE most (a "
+                    f"branch in the wind outlasts a struck ball, so length "
+                    f"alone hides the shot). Numbers and colours match the "
+                    f"table. Hollow ring = first frame, filled dot = last.",
                     scale=det.get("scale") or 1.0,
                 ):
                     dbg["tracks_image"] = _tn
@@ -925,9 +932,13 @@ def find_flight(
                 for p in ((res.get("flight") or {}).get("track") or {})
                 .get("points", [])}
         if _win:
-            for _row, _tr in zip(dbg["tracks_preview"], tracks):
+            for _row, (_i, _) in zip(dbg["tracks_preview"], _sel):
                 _row["winner"] = ({(p["frame"], p["x"], p["y"])
-                                   for p in _tr["points"]} == _win)
+                                   for p in tracks[_i]["points"]} == _win)
+            # If the fit chose a track that did not make the shortlist,
+            # say so rather than showing a table with no winner in it.
+            dbg["winner_not_shown"] = not any(
+                _r.get("winner") for _r in dbg["tracks_preview"])
         fit = res.get("fit") or {}
         dbg["flight"] = {
             "reason": res.get("reason"), "tried": res.get("tried"),
@@ -1646,9 +1657,52 @@ TRACK_COLORS = [
     "#911eb4", "#f032e6", "#fabed4", "#9a6324", "#800000", "#000075",
 ]
 # How many tracks get a line and a table row. All 79 drawn at once is a
-# ball of wool; the fit only ever considers the longest few anyway, and
-# the caption says how many were left out.
+# ball of wool, and the caption says how many were left out.
 TRACKS_DRAWN = 12
+
+
+def select_preview_tracks(tracks: list, limit: int = TRACKS_DRAWN) -> list:
+    """Which tracks get a line and a table row.
+
+    Longest-first alone answers the wrong question. Over a 105-frame
+    window a branch swaying in the wind is in view the whole time and
+    banks 19 points, while a struck ball crosses the frame in a dozen —
+    so ranking by duration ranks the trees above the shot, and on a rainy
+    day at Snee Farm it pushed the actual flight off a 12-row list.
+
+    So half the slots go to the longest tracks and half to the tallest
+    RISING ones. Rise is the one shape only a struck ball makes: shimmer
+    oscillates, walkers travel sideways, nothing else in frame goes UP
+    and keeps going. A track cannot be the ball and be invisible here.
+
+    Returns [(index_into_tracks, why)], ordered longest-first for display.
+    """
+    n = len(tracks or [])
+    if n == 0:
+        return []
+    by_len = sorted(range(n), key=lambda i: -len(tracks[i]["points"]))
+    by_rise = [i for i in sorted(range(n), key=lambda i: -tracks[i]["rise_px"])
+               if tracks[i]["rise_px"] > 0]
+    n_rise = min(limit // 2, len(by_rise))
+    # Rising tracks are claimed FIRST — they are the ones that go missing.
+    picked: dict[int, set] = {}
+    for i in by_rise[:n_rise]:
+        picked.setdefault(i, set()).add("rises")
+    for i in by_len:
+        if len(picked) >= limit:
+            break
+        picked.setdefault(i, set()).add("longest")
+    # ...and anything that qualified both ways says so.
+    for i in by_len[:limit]:
+        if i in picked:
+            picked[i].add("longest")
+    for i in by_rise[:n_rise]:
+        picked[i].add("rises")
+    out = []
+    for i in sorted(picked, key=lambda j: -len(tracks[j]["points"])):
+        why = picked[i]
+        out.append((i, "longest + rises" if len(why) > 1 else next(iter(why))))
+    return out
 
 
 def _track_bgr(i: int) -> tuple:
@@ -1664,7 +1718,6 @@ def draw_tracks(
     tracks: list,
     caption: str,
     scale: float = 1.0,
-    limit: int = TRACKS_DRAWN,
 ) -> bool:
     """Draw the track candidates as thin coloured polylines, numbered.
 
@@ -1673,6 +1726,10 @@ def draw_tracks(
     really about. Without it the table is a list of numbers with no way to
     tell which row is the arc through the sky and which is a branch moving
     in the wind.
+
+    `tracks` is the ALREADY-SELECTED subset (see select_preview_tracks) —
+    this draws what it is given, in order, so the table cannot disagree
+    with the picture about which track is number 4.
 
     Same scale contract as draw_flight: detections are full-res, the
     canvas is the downscaled working frame.
@@ -1688,7 +1745,7 @@ def draw_tracks(
         def _p(px, py):
             return int(round(float(px) * sc)), int(round(float(py) * sc))
 
-        for i, tr in enumerate(tracks[:limit]):
+        for i, tr in enumerate(tracks):
             col = _track_bgr(i)
             pts = tr.get("points") or []
             for a, b in zip(pts, pts[1:]):
@@ -1793,6 +1850,7 @@ __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "find_flight", "detect_ball_blobs", "draw_flight",
-    "draw_tracks", "TRACK_COLORS", "TRACKS_DRAWN", "pick_flight",
+    "draw_tracks", "select_preview_tracks", "TRACK_COLORS", "TRACKS_DRAWN",
+    "pick_flight",
     "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",
 ]

@@ -13456,6 +13456,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry["n_tracks"] = _dbg.get("n_tracks")
         entry["tracks_preview"] = _dbg.get("tracks_preview")
         entry["tracks_image_url"] = _clip_url(_dbg.get("tracks_image"))
+        entry["winner_not_shown"] = _dbg.get("winner_not_shown")
         _fl = _dbg.get("flight") or {}
         entry["flight_reason"] = _fl.get("reason")
         entry["tried"] = _fl.get("tried")

@@ -3473,9 +3473,16 @@ function Debug3Modal({ state, onClose }) {
                 <>
                   {sw.n_tracks > sw.tracks_preview.length && (
                     <span className="tiny muted" style={{ marginLeft: 6 }}>
-                      — the {sw.tracks_preview.length} longest are drawn and
-                      listed
+                      — {sw.tracks_preview.length} drawn: the longest, plus
+                      the ones that rise most. A branch in the wind outlasts
+                      a struck ball, so length alone hides the shot.
                     </span>
+                  )}
+                  {sw.winner_not_shown && (
+                    <div className="tiny" style={{ color: "#b7791f" }}>
+                      The fit chose a track that is not in this list — see
+                      "every track that was tested" below.
+                    </div>
                   )}
                   <table className="tiny" style={{ width: "100%", marginTop: 4 }}>
                     <thead>
@@ -3485,6 +3492,7 @@ function Debug3Modal({ state, onClose }) {
                         <th align="left">frames</th>
                         <th align="right">span</th>
                         <th align="right">rise</th>
+                        <th align="left">shown because</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3509,6 +3517,7 @@ function Debug3Modal({ state, onClose }) {
                           <td>f{t.frames?.[0]}–{t.frames?.[1]}</td>
                           <td align="right">{t.span_px}px</td>
                           <td align="right">{t.rise_px}px</td>
+                          <td className="muted">{t.why}</td>
                         </tr>
                       ))}
                     </tbody>
