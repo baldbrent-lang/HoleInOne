@@ -148,6 +148,14 @@ def annotate_frame(
         return False
 
 
+# How many consecutive full-frame misses before the tiled bootstrap
+# starts sweeping, and how often it sweeps once it has. A sweep is one
+# pose call per tile, so it is the expensive path — bounded to "only
+# while we have found nobody at all, and only every Nth sample".
+_BOOTSTRAP_AFTER = 6
+_BOOTSTRAP_EVERY = 3
+
+
 def detect_swings_from_pose(
     input_path,
     fps: float | None = None,
@@ -269,6 +277,34 @@ def detect_swings_from_pose(
         crop = None            # (x0, y0, x1, y1) px, or None = full frame
         crop_misses = 0
         n_crop = 0
+        # BOOTSTRAP. The crop above is the distance fix, but it only ever
+        # engages ONCE THE GOLFER HAS ALREADY BEEN FOUND on the full
+        # frame — and at course distance that first find is exactly what
+        # fails. MediaPipe wants a prominent subject; a golfer occupying
+        # 2% of a 1280x720 frame is not one, so pose returns nothing, the
+        # crop never starts, and the run ends "pose found in only 0
+        # frame(s)" with the golfer plainly visible in the clip.
+        #
+        # So when the full frame has come up empty for a while, sweep a
+        # grid of overlapping tiles until one of them finds a person, and
+        # hand that to the normal crop tracking. Only until the first
+        # hit, and only every few samples, so the cost is bounded.
+        misses_full = 0
+        n_boot_scans = 0
+        boot_hit_at = None
+
+        def _tiles():
+            """Overlapping thirds across, halves down. A golfer standing
+            anywhere lands whole inside at least one of them."""
+            tw, th = int(vid_w * 0.45), int(vid_h * 0.55)
+            out = []
+            for fy in (0.0, 0.45):
+                for fx in (0.0, 0.275, 0.55):
+                    x0 = int(fx * vid_w)
+                    y0 = int(fy * vid_h)
+                    out.append((x0, y0, min(vid_w, x0 + tw),
+                                min(vid_h, y0 + th)))
+            return [t for t in out if t[2] - t[0] > 64 and t[3] - t[1] > 64]
 
         class _P:
             __slots__ = ("x", "y", "visibility")
@@ -350,10 +386,42 @@ def detect_swings_from_pose(
                         for pp in lm.landmark
                     ]
                     crop_misses = 0
+                    misses_full = 0
                 else:
                     crop_misses += 1
+                    misses_full += 1
                     if crop_misses >= 2:
                         crop = None
+            # Nothing on the full frame for a while: sweep the tiles.
+            if (pts is None and boot_hit_at is None
+                    and misses_full >= _BOOTSTRAP_AFTER
+                    and misses_full % _BOOTSTRAP_EVERY == 0):
+                n_boot_scans += 1
+                for tx0, ty0, tx1, ty1 in _tiles():
+                    with _pose_lock:
+                        tres = pose.process(cv2.cvtColor(
+                            frame[ty0:ty1, tx0:tx1], cv2.COLOR_BGR2RGB))
+                    tlm = getattr(tres, "pose_landmarks", None)
+                    if tlm is None:
+                        continue
+                    _tw = float(tx1 - tx0)
+                    _th = float(ty1 - ty0)
+                    _cand = [
+                        _P((tx0 + pp.x * _tw) / vid_w,
+                           (ty0 + pp.y * _th) / vid_h,
+                           getattr(pp, "visibility", 0.0))
+                        for pp in tlm.landmark
+                    ]
+                    # Only accept a tile hit that looks like a whole
+                    # person; a hand or a tree branch scores landmarks too.
+                    _vis = sum(1 for i in _KEY_LMS
+                               if _cand[i].visibility >= 0.3)
+                    if _vis < 6:
+                        continue
+                    pts = _cand
+                    boot_hit_at = round(idx / src_fps, 2)
+                    misses_full = 0
+                    break
             if pts is None:
                 wrist.append(None)
                 feet.append(None)
@@ -393,8 +461,15 @@ def detect_swings_from_pose(
 
     if n_pose < 4:
         if debug is not None:
-            debug["reason"] = f"pose found in only {n_pose} frame(s)"
+            debug["reason"] = (
+                f"pose found in only {n_pose} frame(s)"
+                + (f" — the tiled bootstrap swept {n_boot_scans} time(s) "
+                   f"and never found a whole person either, so the golfer "
+                   f"is likely too small or too occluded for the model"
+                   if n_boot_scans else "")
+            )
             debug["n_pose_frames"] = int(n_pose)
+            debug["n_bootstrap_scans"] = int(n_boot_scans)
             debug["reached_eof"] = reached_eof
         return []
 
@@ -643,6 +718,8 @@ def detect_swings_from_pose(
             "coverage": round(n_pose / len(times), 2) if times else 0.0,
             "n_bridged": int(n_bridged),
             "n_crop_frames": int(n_crop),
+            "n_bootstrap_scans": int(n_boot_scans),
+            "bootstrap_found_at": boot_hit_at,
             "median": float(median),
             "threshold": float(threshold),
             "n_raw_bursts": len(bursts),

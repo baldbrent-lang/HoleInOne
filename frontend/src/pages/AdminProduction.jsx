@@ -3361,6 +3361,14 @@ function Debug3Modal({ state, onClose }) {
                   {" · "}spine-bend gate{" "}
                   {rep.pose_debug.back_bend_min_deg}–
                   {rep.pose_debug.back_bend_max_deg}°
+                  {rep.pose_debug.n_crop_frames != null
+                    && ` · ${rep.pose_debug.n_crop_frames} frame(s) via the person crop`}
+                  {rep.pose_debug.n_bootstrap_scans
+                    ? ` · tiled bootstrap swept ${rep.pose_debug.n_bootstrap_scans}x`
+                      + (rep.pose_debug.bootstrap_found_at != null
+                         ? `, found the golfer at ${rep.pose_debug.bootstrap_found_at}s`
+                         : ", never found a whole person")
+                    : ""}
                 </span>
                 {rep.pose_debug.reason && (
                   <div style={{ color: "#c0392b" }}>

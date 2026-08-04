@@ -13240,7 +13240,8 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
                   "coverage", "n_bridged", "duration_sec", "median",
                   "threshold", "n_raw_bursts", "n_bend_rejected",
                   "back_bend_min_deg", "back_bend_max_deg",
-                  "strong_ratio", "ratio_min", "ratio_max", "reached_eof")
+                  "strong_ratio", "ratio_min", "ratio_max", "reached_eof",
+                  "n_crop_frames", "n_bootstrap_scans", "bootstrap_found_at")
     }
     # The wrist-speed trace itself, so a swing that never crossed the
     # threshold is visible as a shape rather than inferred from a count.
