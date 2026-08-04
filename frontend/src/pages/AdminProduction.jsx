@@ -3298,6 +3298,27 @@ function Debug3Modal({ state, onClose }) {
                 </div>
               </div>
             )}
+            <div className="tiny" style={{ marginTop: 4 }}>
+              <b>Ball side:</b>{" "}
+              {rep.ball_side ? (
+                <span className="pill ok">{rep.ball_side} of the golfer</span>
+              ) : (
+                <span className="pill warn">
+                  not set — searching BOTH sides
+                </span>
+              )}
+              <span className="muted" style={{ marginLeft: 6 }}>
+                {rep.ball_side_reason}
+              </span>
+              {!rep.ball_side && (
+                <div className="muted">
+                  A two-sided search puts the golfer's own shoes in the same
+                  vote as the ball. Set the ball side on the tee camera
+                  (/admin/cameras → Edit) and the wrong half of the search
+                  disappears entirely.
+                </div>
+              )}
+            </div>
             {rep.rest_ball && (
               <div className="tiny muted" style={{ marginTop: 4 }}>
                 <b>Resting ball:</b> {rep.rest_ball.reason}

@@ -13084,6 +13084,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     # camera and the tee box do not move — a per-swing guess would be
     # strictly worse. None means search both sides, as before.
     _ball_side = None
+    _ball_side_why = "this upload has no camera event, so no camera to ask"
     try:
         _ev = (
             db.query(CameraEvent)
@@ -13094,8 +13095,15 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         if _ev is not None and _ev.tee_camera_id:
             _cam = db.get(Camera, _ev.tee_camera_id)
             _ball_side = getattr(_cam, "ball_side", None) if _cam else None
+            _ball_side_why = (
+                f"from tee camera {getattr(_cam, 'name', None) or _cam.id}"
+                if _ball_side else
+                f"tee camera {getattr(_cam, 'name', None) or (_cam and _cam.id)}"
+                f" has no ball side set — set it on /admin/cameras"
+            ) if _cam else "the event names a tee camera that no longer exists"
     except Exception as exc:  # noqa: BLE001
         log.debug("could not resolve ball_side for upload %s: %s", upload_id, exc)
+        _ball_side_why = f"lookup failed: {exc}"
     from ..services import pose_swing
 
     # Diagnostic images only when someone is going to look at them.
@@ -13157,6 +13165,11 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     rep: dict = {
         "ok": True, "upload_id": upload_id, "fps": round(fps, 2),
         "frame": [_fw, _fh], "r_px": round(_r, 1),
+        # Surfaced because it changes the ball search from ONE square in
+        # front of the golfer to TWO mirrored ones, and a symmetric search
+        # is how a shoe wins. Unset is easy to miss in a picture and
+        # impossible to miss here.
+        "ball_side": _ball_side, "ball_side_reason": _ball_side_why,
         "stages": [], "swings": [],
     }
     # WALL CLOCK. Every phase is timed so the panel can say where the run

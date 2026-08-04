@@ -58,6 +58,23 @@ WIN_POST = 100
 
 # ── stage 2: the ball, from the bottom of the club's heat arc ──────────
 
+# WHERE THE BALL IS, IN BODY-HEIGHTS FROM THE FEET. A golfer at address
+# is a rigid piece of geometry: the ball sits about a club-head-and-a-bit
+# out from the instep and roughly level with the feet, and body height is
+# the only scale in frame that survives the camera being moved.
+#
+# These describe a SQUARE in front of the golfer, not a long flat band
+# across the whole frame. The band was the bug: 0.20 body-heights tall
+# and nearly two body-heights wide, it swept in the far treeline, the
+# tee markers and — through the near edge — the shoes. A square that
+# holds only the patch of grass the ball can actually be on has nothing
+# else in it to lose the vote to.
+BALL_NEAR_BODY = 0.22    # near edge, clear of the shoe and its shadow
+BALL_FAR_BODY = 0.85     # far edge; past this it is not this golfer's ball
+BALL_UP_BODY = 0.38      # above the ground line (further away reads higher)
+BALL_DOWN_BODY = 0.12    # below it — the ball is never far below the feet
+
+
 def _side_gap(body: float) -> float:
     """How far clear of the feet the ball search starts, in pixels.
 
@@ -67,7 +84,29 @@ def _side_gap(body: float) -> float:
     window reaches them. Scaled by body height so it holds at any
     camera distance.
     """
-    return max(8.0, 0.14 * float(body))
+    return max(8.0, BALL_NEAR_BODY * float(body))
+
+
+def _ball_windows(fx: int, fy: int, body: float, w: int, h: int,
+                  ball_side: str | None) -> list:
+    """The rectangle(s) to search, as (x_lo, y_lo, x_hi, y_hi).
+
+    One square when the side is known. When it is NOT known, two mirrored
+    squares rather than one wide band spanning them — the gap in the
+    middle is the whole point, because that gap is where the feet are.
+    """
+    gap = _side_gap(body)
+    y_lo = max(0, int(fy - BALL_UP_BODY * body))
+    y_hi = min(h, int(fy + BALL_DOWN_BODY * body))
+    right = (max(0, int(fx + gap)), y_lo,
+             min(w, int(fx + BALL_FAR_BODY * body)), y_hi)
+    left = (max(0, int(fx - BALL_FAR_BODY * body)), y_lo,
+            min(w, int(fx - gap)), y_hi)
+    if ball_side == "right":
+        return [right]
+    if ball_side == "left":
+        return [left]
+    return [left, right]
 
 
 def club_bottom_ball(
@@ -92,11 +131,13 @@ def club_bottom_ball(
 
     Where the search happens matters as much as what it looks for. The ball
     sits ON THE GROUND, IN FRONT OF THE GOLFER — so when pose gives us the
-    feet (feet_xy) and the head (head_xy, for scale) we search a band
-    straddling the ground line at the feet, on the ball side only. That
-    excludes the two things that used to win the vote: the golfer's torso
-    and arms (above the band) and the shoes and shadow (at the feet, on the
-    wrong side of the minimum offset).
+    feet (feet_xy) and the head (head_xy, for scale) we search a SQUARE of
+    grass in front of the golfer, sized in body-heights and starting clear
+    of the instep. That excludes the two things that used to win the vote:
+    the golfer's torso and arms (above the square) and the shoes and their
+    shadow (inside the near gap). A long flat band across the frame, which
+    is what this used to be, put the far treeline and the tee markers in
+    the same vote as the ball.
 
     Without feet_xy it falls back to the old wrist-centred box, which is
     much weaker — the reason string says which was used.
@@ -151,7 +192,7 @@ def club_bottom_ball(
         # Where to look. Anchored on the ground line at the feet when pose
         # gave them to us, because that is what "the base of where the club
         # hits the ground" actually means.
-        win = None            # (x_lo, y_lo, x_hi, y_hi) for the debug draw
+        wins: list = []       # (x_lo, y_lo, x_hi, y_hi) each, for the draw
         ground_y = None
         body = 0.0
         if feet_xy and len(feet_xy) == 2:
@@ -161,37 +202,17 @@ def club_bottom_ball(
             if body < 40.0:
                 body = 0.45 * h          # nothing better to scale by
             ground_y = fy
-            # A band straddling the ground line. The club head at impact and
-            # the ball centre are both within a fraction of a body height of
-            # the ground; the torso, arms and club shaft are not.
-            #
-            # Asymmetric downward: the ball sits ON the ground the golfer is
-            # standing on, so in image terms it is level with the feet or
-            # ABOVE them (further from the camera reads higher in frame).
-            # It is never below. The old +0.06 band reached down into the
-            # shoes and shadow for no gain.
-            y_lo = max(0, int(fy - 0.18 * body))
-            y_hi = min(h, int(fy + 0.02 * body))
-            # The ball is never more than about a body height to the side.
-            # With ball_side known — it is a property of the INSTALLATION,
-            # not the swing, since the camera and the tee box don't move —
-            # search only that side and start clear of the feet. Symmetric
-            # search is what let a white shoe 0.06 body-heights from the
-            # feet win the vote over a ball at 0.4.
-            gap = _side_gap(body)
-            if ball_side == "right":
-                x_lo = max(0, int(fx + gap))
-                x_hi = min(w, int(fx + 1.1 * body))
-            elif ball_side == "left":
-                x_lo = max(0, int(fx - 1.1 * body))
-                x_hi = min(w, int(fx - gap))
-            else:
-                x_lo = max(0, int(fx - 1.0 * body))
-                x_hi = min(w, int(fx + 1.0 * body))
+            # A SQUARE of grass in front of the golfer — see the constants
+            # above. With ball_side known (a property of the INSTALLATION,
+            # not the swing: the camera and the tee box don't move) it is
+            # one square; without it, two mirrored squares with the feet
+            # in the gap between them, which is still far better than the
+            # single wide band that used to span both.
+            wins = _ball_windows(fx, fy, body, w, h, ball_side)
             box = np.zeros_like(mask)
-            box[y_lo:y_hi, x_lo:x_hi] = 255
+            for _x0, _y0, _x1, _y1 in wins:
+                box[_y0:_y1, _x0:_x1] = 255
             mask = cv2.bitwise_and(mask, box)
-            win = (x_lo, y_lo, x_hi, y_hi)
         elif hint_xy and len(hint_xy) == 2:
             # Legacy fallback: a symmetric box around the wrist. Keeps the
             # stage working when pose has no feet, but it cannot tell which
@@ -203,7 +224,7 @@ def club_bottom_ball(
             box = np.zeros_like(mask)
             box[ry_lo:ry_hi, max(0, hx - rx):min(w, hx + rx)] = 255
             mask = cv2.bitwise_and(mask, box)
-            win = (max(0, hx - rx), ry_lo, min(w, hx + rx), ry_hi)
+            wins = [(max(0, hx - rx), ry_lo, min(w, hx + rx), ry_hi)]
 
         ys, xs = np.nonzero(mask)
         out["arc_px"] = int(xs.size)
@@ -224,14 +245,19 @@ def club_bottom_ball(
                                  * np.array([255, 120, 0])).astype(np.uint8)
             # Show the constraint, not just the answer — when the ball lands
             # somewhere silly the window is usually why.
-            if win is not None:
-                cv2.rectangle(img, (win[0], win[1]), (win[2], win[3]),
+            for _r in wins:
+                cv2.rectangle(img, (_r[0], _r[1]), (_r[2], _r[3]),
                               (60, 60, 235), 2)
             if ground_y is not None:
-                cv2.line(img, (0, ground_y), (w, ground_y),
-                         (200, 200, 60), 1, cv2.LINE_AA)
+                # Only across the windows, not the whole frame — drawn edge
+                # to edge it read as a horizon and invited the question of
+                # what it was. It is the y of the pose feet, nothing more.
+                _gx0 = min(r[0] for r in wins) if wins else 0
+                _gx1 = max(r[2] for r in wins) if wins else w
+                cv2.line(img, (_gx0, ground_y), (_gx1, ground_y),
+                         (0, 255, 255), 1, cv2.LINE_AA)
                 cv2.drawMarker(img, (int(feet_xy[0]), ground_y),
-                               (200, 200, 60), cv2.MARKER_TILTED_CROSS, 18, 2)
+                               (0, 255, 255), cv2.MARKER_TILTED_CROSS, 18, 2)
             if bx is not None and by is not None:
                 cv2.circle(img, (int(bx), int(by)), max(10, int(0.02 * h)),
                            (0, 255, 0), 3, cv2.LINE_AA)
@@ -240,10 +266,15 @@ def club_bottom_ball(
                         f"{out.get('side')} of the feet")
             else:
                 tail = f"NO BALL: {out.get('reason')}"
+            _side_label = (
+                f"{ball_side} of the golfer" if ball_side in ("left", "right")
+                else "BOTH sides -- this camera has no ball_side set"
+            ) if ground_y is not None else "wrist box, no pose feet"
             _label(
                 img,
                 f"f{f0}-{f1}, {int(xs.size)}px of club arc. red = "
-                f"ground-band window, yellow = ground line at feet. {tail}",
+                f"search square(s) ({_side_label}), yellow = ground line "
+                f"at the feet (pose), orange = motion found inside. {tail}",
             )
             name = f"{debug_prefix}.jpg"
             cv2.imwrite(str(Path(debug_dir) / name), img,
@@ -269,7 +300,7 @@ def club_bottom_ball(
             keep = np.abs(xs - fx) >= min_off
             if int(keep.sum()) < 12:
                 out["reason"] = (
-                    f"all the ground-band motion is at the feet "
+                    f"all the motion in the square is at the feet "
                     f"({int(keep.sum())}px clear of them) — no club arc"
                 )
                 _render()
@@ -288,10 +319,11 @@ def club_bottom_ball(
             off = abs(bx - fx) / max(1.0, body)
             out["side"] = "right" if bx >= fx else "left"
             out["offset_body"] = round(off, 2)
-            if off > 0.9:
-                # A club arc bottoming out a whole body-height from the feet
-                # is not a golf swing's low point; say so instead of
-                # returning a confident wrong number.
+            if off > BALL_FAR_BODY:
+                # A club arc bottoming out past the far edge of the search
+                # square is not a golf swing's low point; say so instead of
+                # returning a confident wrong number. (The window already
+                # caps this, so it is a backstop against the two drifting.)
                 out["reason"] = (
                     f"arc bottom is {off:.2f} body-heights to the "
                     f"{out['side']} of the feet — too far to be the ball"
