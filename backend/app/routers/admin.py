@@ -13230,12 +13230,50 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             "impact_frame": imp_f, "window": [f_lo, f_hi],
         }
 
-        # STAGE 2: IS IT A SWING AT ALL? Pose fires on wrist speed and
+        # STAGE 2: WHERE IS THE BALL AT REST? The club-arc pass, at the
+        # pose impact frame. It runs FIRST because two later stages want
+        # its answer: the judge composites the heat around it (a fan
+        # centred on the ball is a swing; the same fan centred on a bag
+        # is not), and the flight picker needs it to arm the aim gate.
+        # Measured once here and handed to both — find_flight takes it as
+        # `rest_ball` rather than repeating the pass.
+        _t0 = time.perf_counter()
+        _rest_xy = None
+        _pre: dict = {}
+        if c.get("impact_feet_xy"):
+            from ..services.debug2 import club_bottom_ball
+
+            try:
+                _pre = club_bottom_ball(
+                    src_path, imp_f, fps,
+                    feet_xy=c.get("impact_feet_xy"),
+                    head_xy=c.get("impact_head_xy"),
+                    ball_side=_ball_side,
+                    debug_dir=_art_dir,
+                    debug_prefix=f"d3-{upload_id}-{tok}-{i}-hint",
+                ) or {}
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("debug3 rest-ball pass failed: %s", _exc)
+                _pre = {"reason": f"failed: {_exc}"}
+            _rest_xy = _pre.get("xy") if _pre.get("ok") else None
+        else:
+            _pre = {"reason": "pose gave no feet — nothing to anchor on"}
+        _add("club_arc", time.perf_counter() - _t0)
+        # Reported here, not after the flight, so a candidate the judge
+        # drops still shows where the ball was looked for — that picture
+        # is drawn whether or not it was found.
+        entry["ball_hint"] = _rest_xy
+        entry["ball_hint_reason"] = _pre.get("reason")
+        entry["ball_hint_image_url"] = _clip_url(_pre.get("image"))
+
+        # STAGE 3: IS IT A SWING AT ALL? Pose fires on wrist speed and
         # spine bend, which a practice swing, a bag drop or someone
         # bending to tee up all produce. The club's fan — the wedge of
         # angles its head sweeps through around impact — is what
         # separates them, and that is what the judge is shown: a motion
-        # heat composite over the impact window, no ball, no context.
+        # heat composite over the impact window, centred on the ball
+        # stage 2 just found (the wrist, which this used before the two
+        # stages swapped, wanders with the swing; the ball does not).
         #
         # This is deliberately narrow: only a CONFIDENT AI "not a swing"
         # drops the candidate. The club-fan heuristic (the no-key
@@ -13256,7 +13294,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
                 _heat_dir = _art_dir or CLIPS_DIR
                 _heat = swing_heat_check(
                     src_path, peak_t, fps,
-                    ball_hint=c.get("impact_wrist_xy"),
+                    ball_hint=_rest_xy or c.get("impact_wrist_xy"),
                     debug_dir=_heat_dir,
                     debug_prefix=f"d3heat-{upload_id}-{tok}-{i}",
                 ) or {}
@@ -13290,6 +13328,8 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             "n_rays": _heat.get("n_rays"),
             "n_angles": _heat.get("n_angles"),
             "reason": _heat.get("reason"),
+            "centred_on": ("the ball at rest" if _rest_xy
+                           else "the wrist at impact (stage 2 found no ball)"),
             "decided_by": ("ai" if _ai_seen
                            else ("heuristic" if _heat.get("available")
                                  else "nothing")),
@@ -13318,6 +13358,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             head_xy=c.get("impact_head_xy"),
             feet_xy=c.get("impact_feet_xy"),
             frame_w=_fw, frame_h=_fh, ball_side=_ball_side,
+            rest_ball=_pre,
             debug_dir=_art_dir,
             debug_prefix=f"d3-{upload_id}-{tok}-{i}-",
         )
@@ -13372,13 +13413,6 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry["candidates"] = _ff.get("candidates") or []
         entry["ball_image_url"] = _clip_url(
             (_dbg.get("club_arc") or {}).get("image"))
-        # The aim-gate pre-pass, which runs BEFORE the flight is picked and
-        # decides whether the gate is armed at all. Shown whether or not it
-        # found the ball — a miss here is the reason a silly track survives,
-        # and the search window is the only thing that explains a miss.
-        entry["ball_hint"] = _dbg.get("ball_hint")
-        entry["ball_hint_reason"] = _dbg.get("ball_hint_reason")
-        entry["ball_hint_image_url"] = _clip_url(_dbg.get("ball_hint_image"))
         entry["rest_check_frame"] = _dbg.get("rest_check_frame")
         entry["rest_check_image_url"] = _clip_url(_dbg.get("rest_check_image"))
         entry["flight_image_url"] = _clip_url(_dbg.get("flight_image"))
@@ -13504,17 +13538,19 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         rep["produce_breakdown"] = _pt_snapshot()
 
     rep["stages"].extend([
-        {"n": 2, "name": "AI judge on the club fan",
-         "detail": "motion-heat composite over the impact window, judged "
-                   "on the club's angular sweep -- a confident 'not a "
-                   "swing' drops the candidate before any tracking runs",
-         "count": len(cands) - n_judged_out, "counts": "candidates kept",
-         "seconds": _phase.get("judge", 0.0)},
-        {"n": 3, "name": "Ball at impact",
-         "detail": "club-arc vertex on the ground line at the feet",
-         "count": sum(1 for s in rep["swings"] if s.get("ball")),
+        {"n": 2, "name": "Ball at impact",
+         "detail": "club-arc vertex on the ground line at the feet -- "
+                   "measured first because stage 3 centres the judge's "
+                   "composite on it and stage 6 needs it to arm the aim gate",
+         "count": sum(1 for s in rep["swings"] if s.get("ball_hint")),
          "counts": "balls located",
          "seconds": _phase.get("club_arc", 0.0)},
+        {"n": 3, "name": "AI judge on the club fan",
+         "detail": "motion-heat composite around that ball, judged on the "
+                   "club's angular sweep -- a confident 'not a swing' drops "
+                   "the candidate before any tracking runs",
+         "count": len(cands) - n_judged_out, "counts": "candidates kept",
+         "seconds": _phase.get("judge", 0.0)},
         {"n": 4, "name": "MOG2 + component + area filter",
          "detail": "big blobs become a golfer mask; only ball-sized "
                    "off-body blobs survive",

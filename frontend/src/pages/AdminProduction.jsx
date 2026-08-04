@@ -3331,9 +3331,25 @@ function Debug3Modal({ state, onClose }) {
               f{sw.window?.[1]}
             </div>
 
+
+            <div className="small" style={{ marginTop: 10 }}>
+              <b>Stage 2 — ball at rest:</b>{" "}
+              {sw.ball_hint
+                ? `(${sw.ball_hint[0]}, ${sw.ball_hint[1]})`
+                : "not found"}
+              <div className="tiny muted">{sw.ball_hint_reason}</div>
+              <div className="tiny muted">
+                {sw.ball_hint
+                  ? "The judge centres on it and the aim gate is armed."
+                  : "The judge falls back to the wrist and the aim gate is DISARMED for this candidate."}
+              </div>
+            </div>
+            <Img url={sw.ball_hint_image_url}
+              cap="Stage 2 — where it looked for the ball at rest, at the pose impact frame. Red = the search window (ground band, ball side only), yellow = the ground line at the feet, orange = the motion it found there. Drawn whether or not a ball was found." />
+
             {sw.judge && (
               <div className="small" style={{ marginTop: 10 }}>
-                <b>Stage 2 — AI judge (club fan):</b>{" "}
+                <b>Stage 3 — AI judge (club fan):</b>{" "}
                 {sw.judge.ai_judge === true
                   ? "swing"
                   : sw.judge.ai_judge === false
@@ -3369,7 +3385,7 @@ function Debug3Modal({ state, onClose }) {
               </div>
             )}
             <Img url={sw.heat_image_url}
-              cap="Stage 2 — the motion-heat composite the judge was shown. The club's sweep through impact is the fan; a practice swing, a bag drop or someone bending to tee up do not draw one." />
+              cap="Stage 3 — the motion-heat composite the judge was shown. The club's sweep through impact is the fan; a practice swing, a bag drop or someone bending to tee up do not draw one." />
             {sw.dropped_by_judge && (
               <div className="tiny muted" style={{ marginTop: 6 }}>
                 Tracking, the flight fit and produce were all skipped for
@@ -3397,20 +3413,7 @@ function Debug3Modal({ state, onClose }) {
               )}
             </div>
             <Img url={sw.ball_image_url}
-              cap="Stage 3 — club arc in the ground band at the feet; green is the vertex" />
-            {sw.ball_hint_image_url && (
-              <>
-                <div className="tiny muted" style={{ marginTop: 6 }}>
-                  <b>Aim-gate hint:</b>{" "}
-                  {sw.ball_hint
-                    ? `(${sw.ball_hint[0]}, ${sw.ball_hint[1]}) — the aim gate is armed`
-                    : "not found — the aim gate is DISARMED for this swing"}
-                  <div>{sw.ball_hint_reason}</div>
-                </div>
-                <Img url={sw.ball_hint_image_url}
-                  cap="Where it looked for the ball at rest, at the pose impact frame. Red = the search window (ground band, ball side only), yellow = the ground line at the feet, orange = the motion it found there. Drawn whether or not a ball was found." />
-              </>
-            )}
+              cap="Stage 2 (refined) — club arc re-measured at the flight's launch frame; green is the vertex" />
 
             <div className="small" style={{ marginTop: 10 }}>
               <b>Detections:</b> {sw.detect_reason}
