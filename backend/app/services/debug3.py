@@ -705,6 +705,9 @@ def ransac_parabola(
         out["reason"] = f"no 3-point fit held {3} points within {tol:.0f}px"
         return out
     _key, inl, cx, cy, _rms = best
+    # Keep the seed model. The refit below can come out WORSE than the
+    # model it replaces, and we need something to fall back to.
+    _seed_inl, _seed_cx, _seed_cy = inl, cx, cy
     # Refit on the inliers — the 3 seed points chose the model, they should
     # not define it.
     try:
@@ -715,8 +718,20 @@ def ransac_parabola(
         pass
     dist = np.hypot(x - np.polyval(cx, t), y - np.polyval(cy, t))
     inl = dist <= tol
+    # A refit that holds nothing is not an improvement. Left unguarded,
+    # dist[inl] is empty, np.mean warns "Mean of empty slice" and returns
+    # nan, and nan is not JSON-serialisable — which 500s the debug3
+    # status endpoint AFTER produce has already succeeded. Fall back to
+    # the seed model, which by construction held at least 3 points.
+    if int(inl.sum()) < 3:
+        inl, cx, cy = _seed_inl, _seed_cx, _seed_cy
+        dist = np.hypot(x - np.polyval(cx, t), y - np.polyval(cy, t))
     out["n_inliers"] = int(inl.sum())
-    out["rms_px"] = round(float(np.sqrt(float(np.mean(dist[inl] ** 2)))), 2)
+    _in_dist = dist[inl]
+    out["rms_px"] = (
+        round(float(np.sqrt(float(np.mean(_in_dist ** 2)))), 2)
+        if _in_dist.size else None
+    )
     out["inliers"] = [points[i] for i in range(len(points)) if inl[i]]
     out["outliers"] = [points[i] for i in range(len(points)) if not inl[i]]
     ix = float(np.polyval(cx, float(impact_frame)))

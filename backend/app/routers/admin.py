@@ -11787,7 +11787,8 @@ def debug2_start(upload_id: int):
 
 @router.get("/long-uploads/{upload_id}/debug2/status")
 def debug2_status(upload_id: int):
-    return _debugx_get("debug2", upload_id)
+    # Same nan guard as debug3 — same numpy-built report, same failure.
+    return _json_safe(_debugx_get("debug2", upload_id))
 
 
 def _debug2_run(row, src_path, db, progress=None):
@@ -12341,9 +12342,33 @@ def debug3(upload_id: int):
     return _debugx_start("debug3", upload_id, _debug3_run)
 
 
+def _json_safe(obj):
+    """Replace non-finite floats with None, recursively.
+
+    The debug reports are built from numpy: means, divisions, polyfits.
+    Any one of those can produce nan or inf on a degenerate input, and
+    json.dumps refuses them — so a single bad number 500s the whole
+    status response AFTER produce has already run and written its clips.
+    The operator then sees "500: Internal Server Error" for a job that
+    actually succeeded, which sends them looking in the wrong place.
+
+    Individual nan sources are worth fixing where they are found (see the
+    RANSAC refit guard in debug3.pick_flight), but the boundary should
+    not be able to fail on the next one.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 @router.get("/long-uploads/{upload_id}/debug3/status")
 def debug3_status(upload_id: int):
-    return _debugx_get("debug3", upload_id)
+    return _json_safe(_debugx_get("debug3", upload_id))
+
 
 
 # ── produce queue ──────────────────────────────────────────────────────
