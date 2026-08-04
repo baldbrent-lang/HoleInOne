@@ -12664,7 +12664,12 @@ def sweep_d3_previews(current_upload_id: int | None = None) -> int:
 # to whole frames is a fifth of a frame of drift per conversion).
 D3_PRE_ROLL_SEC = 2.0        # lead-in before the strike
 D3_POST_TRACER_SEC = 1.5     # tee tail after the tracer line stops
-D3_GREEN_SEC = 4.0           # green-side coverage after the cutover
+# Green-side coverage after the cutover. 6s rather than 4: at 4 the ball
+# had barely settled before the clip ended, and the landing is the payoff
+# — the tee half is the swing, the green half is the result. One constant
+# drives all three consumers (the audio bed rendered under the green
+# half, the green cut itself, and the splice), so they cannot drift.
+D3_GREEN_SEC = 6.0
 
 
 def _d3_green_delta_sec(db, row) -> tuple[float, str]:
