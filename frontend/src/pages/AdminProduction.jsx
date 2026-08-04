@@ -3567,6 +3567,26 @@ function Debug3Modal({ state, onClose }) {
 
             <div className="small" style={{ marginTop: 10 }}>
               <b>Flight:</b> {sw.flight_reason}
+              {sw.find_flight_ok === false && (
+                <div className="tiny" style={{ color: "#c0392b", marginTop: 4 }}>
+                  <b>
+                    {sw.find_flight_failed
+                      ? "The flight stage threw an error"
+                      : "A track was accepted but the stage produced nothing usable"}
+                    :
+                  </b>{" "}
+                  {sw.find_flight_reason || "no reason recorded"}
+                  <div>
+                    Nothing was produced for this swing as a result.
+                  </div>
+                </div>
+              )}
+              {sw.images_error && (
+                <div className="tiny" style={{ color: "#b7791f", marginTop: 4 }}>
+                  Panel images failed ({sw.images_error}) — the flight itself
+                  is unaffected.
+                </div>
+              )}
               {sw.fit && (
                 <div className="tiny muted">
                   {sw.fit.n_inliers} inliers · rms {sw.fit.rms_px}px · aims{" "}

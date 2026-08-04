@@ -13253,6 +13253,10 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     n_flights = 0
     n_produced = 0
     n_judged_out = 0
+    # A flight the tests ACCEPTED but that did not survive to a usable
+    # answer. Counted separately so stage 6 can never again read zero
+    # while the table underneath it says "accepted".
+    n_accepted_but_lost = 0
     for i, c in enumerate(cands):
         if progress:
             progress(f"Swing {i + 1} of {len(cands)}: finding the ball at impact",
@@ -13465,6 +13469,15 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             "at_impact": _fl.get("at_impact"), "x_degree": _fl.get("x_degree"),
         }
         entry["flight"] = _ff.get("points") or []
+        # find_flight's OWN verdict. Without this the panel could show a
+        # track marked "accepted, score 15.89" beside a stage reading
+        # "0 flights accepted" and offer no way to reconcile them.
+        entry["find_flight_ok"] = bool(_ff.get("ok"))
+        entry["find_flight_reason"] = _ff.get("reason")
+        entry["find_flight_failed"] = bool(_ff.get("failed"))
+        entry["images_error"] = _dbg.get("images_error")
+        if (_fl.get("n_inliers") or 0) and not _ff.get("ok"):
+            n_accepted_but_lost += 1
         # The full ball-sized detection pool — click-to-plot's dense
         # layer. Carried on the entry so _d3_fast_produce can persist it,
         # then stripped from the report before it goes over the wire
@@ -13628,8 +13641,12 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
          "seconds": _phase.get("tracks", 0.0)},
         {"n": 6, "name": "RANSAC parabola + flight tests",
          "detail": "x linear in t, y quadratic; must rise and must point "
-                   "back at the ball",
-         "count": n_flights, "counts": "flights accepted",
+                   "back at the ball"
+                   + (f" -- WARNING: {n_accepted_but_lost} track(s) passed "
+                      f"the tests but produced no usable ball or points; "
+                      f"see the swing's flight reason"
+                      if n_accepted_but_lost else ""),
+         "count": n_flights, "counts": "flights usable",
          "seconds": _phase.get("flight", 0.0)},
         {"n": 7, "name": "Preview clip",
          "detail": "the same renderer produce uses, fed Debug3's ball, "

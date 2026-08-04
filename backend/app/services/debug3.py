@@ -1101,44 +1101,69 @@ def find_flight(
                 out["ball"] = club["xy"]
                 out["ball_source"] = "club arc at the flight's launch frame"
 
-        # A frame from before the strike with the answer ringed on it.
-        if debug_dir is not None and out["ball"]:
-            _rf = max(0, int(out["launch_frame"]) - 5)
-            dbg["rest_check_frame"] = _rf
-            dbg["rest_check_image"] = rest_check_image(
-                input_path, _rf, out["ball"], r, debug_dir,
-                debug_prefix=f"{debug_prefix}rest",
-            )
-            _lap("rest_check_image")
-
-        # The flight drawing, on the detections canvas.
-        if debug_dir is not None:
-            _canvas = (det.get("images") or {}).get("dets")
-            if _canvas and (Path(debug_dir) / _canvas).exists():
-                _nm = f"{debug_prefix}flight.jpg"
-                if draw_flight(
-                    Path(debug_dir) / _canvas, Path(debug_dir) / _nm,
-                    out["ball"], tracks,
-                    (res.get("flight") or {}).get("track"), fit,
-                    f"BALL: {out['ball_source']} {out['ball']} at f"
-                    f"{out['launch_frame']}. {fit.get('n_inliers')} inliers, "
-                    f"rms {fit.get('rms_px')}px. green=inliers red x=outliers "
-                    f"cyan=fit magenta=impact grey=rejected",
-                    scale=det.get("scale") or 1.0,
-                ):
-                    dbg["flight_image"] = _nm
-            _lap("draw_flight")
-
+        # THE ANSWER IS COMPLETE HERE. Everything below this line draws
+        # pictures for the panel, and NONE of it may change the verdict.
+        #
+        # It used to sit inside the one big try, above the line that sets
+        # `ok` — so a JPEG that failed to write, or an int() on a NaN in
+        # a caption, turned an accepted flight into "no flight" and the
+        # clip was never produced. The panel then showed a track marked
+        # "accepted, score 15.89" next to a stage reading "0 flights
+        # accepted", with nothing to say why.
         out["ok"] = bool(out["points"]) and out["ball"] is not None
         out["reason"] = (
             f"{len(out['points'])} tracer point(s), ball {out['ball']} "
             f"({out['ball_source']}), launch f{out['launch_frame']} "
             f"({fit.get('n_inliers')} inliers at {fit.get('rms_px')}px rms)"
         )
+        if not out["ok"]:
+            out["reason"] = (
+                f"the fit was accepted but there is nothing to render: "
+                f"{len(out['points'])} tracer point(s), ball {out['ball']}"
+            )
+        try:
+            # A frame from before the strike with the answer ringed on it.
+            if debug_dir is not None and out["ball"]:
+                _rf = max(0, int(out["launch_frame"]) - 5)
+                dbg["rest_check_frame"] = _rf
+                dbg["rest_check_image"] = rest_check_image(
+                    input_path, _rf, out["ball"], r, debug_dir,
+                    debug_prefix=f"{debug_prefix}rest",
+                )
+                _lap("rest_check_image")
+
+            # The flight drawing, on the detections canvas.
+            if debug_dir is not None:
+                _canvas = (det.get("images") or {}).get("dets")
+                if _canvas and (Path(debug_dir) / _canvas).exists():
+                    _nm = f"{debug_prefix}flight.jpg"
+                    if draw_flight(
+                        Path(debug_dir) / _canvas, Path(debug_dir) / _nm,
+                        out["ball"], tracks,
+                        (res.get("flight") or {}).get("track"), fit,
+                        f"BALL: {out['ball_source']} {out['ball']} at f"
+                        f"{out['launch_frame']}. {fit.get('n_inliers')} "
+                        f"inliers, rms {fit.get('rms_px')}px. green=inliers "
+                        f"red x=outliers cyan=fit magenta=impact "
+                        f"grey=rejected",
+                        scale=det.get("scale") or 1.0,
+                    ):
+                        dbg["flight_image"] = _nm
+                _lap("draw_flight")
+        except Exception as exc:  # noqa: BLE001
+            # Say so loudly, but keep the flight.
+            log.warning(
+                "debug3 panel images failed (the flight is unaffected): %s",
+                exc, exc_info=True,
+            )
+            dbg["images_error"] = f"{type(exc).__name__}: {exc}"
         return out
     except Exception as exc:  # noqa: BLE001
-        log.warning("debug3 find_flight failed: %s", exc)
-        out["reason"] = f"failed: {exc}"
+        # exc_info, because "failed: cannot convert float NaN to integer"
+        # names the symptom and not one line of the code that raised it.
+        log.warning("debug3 find_flight failed: %s", exc, exc_info=True)
+        out["reason"] = f"failed: {type(exc).__name__}: {exc}"
+        out["failed"] = True
         return out
 
 
@@ -1226,16 +1251,27 @@ def launch_from_ground(fit: dict, ground_y: float | None) -> dict:
         out["reason"] = "no ground line (pose gave no feet)"
         return out
     a, b, c0 = (float(v) for v in co["y"])
+    # A non-finite coefficient makes every comparison below False — nan is
+    # not < 0 — so disc, the roots and the frame all come out nan, and
+    # int(round(nan)) raises ValueError. That exception surfaced as the
+    # whole flight stage failing, with the panel reporting "no flight" for
+    # a track it had just marked accepted. Refuse up front instead.
+    if not all(math.isfinite(v) for v in (a, b, c0, float(ground_y))):
+        out["reason"] = "the fit has non-finite coefficients"
+        return out
     if abs(a) < 1e-9:
         out["reason"] = "the fit is a straight line, it never meets the ground"
         return out
     disc = b * b - 4.0 * a * (c0 - float(ground_y))
-    if disc < 0.0:
+    if not math.isfinite(disc) or disc < 0.0:
         out["reason"] = "the flight never reaches the ground line"
         return out
     t_lo = (-b - math.sqrt(disc)) / (2.0 * a)
     t_hi = (-b + math.sqrt(disc)) / (2.0 * a)
     t = min(t_lo, t_hi)
+    if not math.isfinite(t):
+        out["reason"] = "the ground crossing is not a finite frame number"
+        return out
     x = float(np.polyval(co["x"], t)) if HAS_CV else None
     if x is None:
         out["reason"] = "numpy unavailable"
