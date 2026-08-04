@@ -147,8 +147,21 @@ upload_bitrate_kbps: 2500
 #   patient_timeout a spool retry. The worker is idle by definition here,
 #                   so a long wait costs nothing at all.
 # upload_fresh_timeout: 120
-# upload_idle_timeout: 300
-# upload_patient_timeout: 900
+# upload_idle_timeout: 240
+# upload_patient_timeout: 300
+
+# BACK OFF WHEN UPLOADS ARE FAILING. Measured at Snee Farm: with both
+# agents retrying back-to-back the uplink managed 4.8 KB/s; with them
+# stopped, 162 KB/s -- same link, same minute, 35x. The retries were
+# starving the transfers they existed to complete, and it could not
+# recover on its own because nothing ever let the link go idle.
+#
+# After a failure the uploader goes quiet for backoff_base seconds,
+# doubling each consecutive failure up to backoff_max, and attempts
+# NOTHING during that window -- clips recorded meanwhile are compressed
+# and spooled without a try. One success clears it.
+# upload_backoff_base: 20
+# upload_backoff_max: 600
 
 # ---------------------------------------------------------------------
 # Audio (both sides)

@@ -138,7 +138,9 @@ class GreenAgent:
                 self.cfg.get("upload_spool_max_age_hours", 24)),
             fresh_timeout=int(self.cfg.get("upload_fresh_timeout", 120)),
             idle_timeout=int(self.cfg.get("upload_idle_timeout", 300)),
-            patient_timeout=int(self.cfg.get("upload_patient_timeout", 900)),
+            patient_timeout=int(self.cfg.get("upload_patient_timeout", 300)),
+            backoff_base=float(self.cfg.get("upload_backoff_base", 20)),
+            backoff_max=float(self.cfg.get("upload_backoff_max", 600)),
         )
         self.uploader.start()
 

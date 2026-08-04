@@ -417,8 +417,10 @@ class BackgroundUploader(threading.Thread):
         spool_max_mb: int = 2048,
         spool_max_age_hours: float = 24.0,
         fresh_timeout: int = 120,
-        idle_timeout: int = 300,
-        patient_timeout: int = 900,
+        idle_timeout: int = 240,
+        patient_timeout: int = 300,
+        backoff_base: float = 20.0,
+        backoff_max: float = 600.0,
     ):
         super().__init__(daemon=True, name="uploader")
         self.client = client
@@ -439,6 +441,21 @@ class BackgroundUploader(threading.Thread):
         self.fresh_timeout = int(fresh_timeout)
         self.idle_timeout = int(idle_timeout)
         self.patient_timeout = int(patient_timeout)
+        # BACK OFF WHEN THE LINK IS FAILING. Measured at Snee Farm: with
+        # both agents retrying back-to-back the uplink delivered 4.8 KB/s;
+        # with them stopped, 162 KB/s. Same link, same minute, 35x. The
+        # retries were starving the very transfers they existed to
+        # complete — congestion collapse, and it cannot recover on its own
+        # because nothing ever lets the link go idle.
+        #
+        # So after a failure the uploader waits, doubling each time, and
+        # during that wait it does not attempt ANYTHING — a fresh clip is
+        # spooled without a try. That is what creates the idle window. One
+        # success resets it.
+        self.backoff_base = float(backoff_base)
+        self.backoff_max = float(backoff_max)
+        self._fails = 0
+        self._quiet_until = 0.0
         if self.spool_dir is not None:
             try:
                 self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -539,6 +556,30 @@ class BackgroundUploader(threading.Thread):
 
     # ---- worker -----------------------------------------------------
 
+    def _note_result(self, ok: bool) -> None:
+        """Widen or clear the quiet window after an attempt."""
+        if ok:
+            if self._fails:
+                log.info("uploader: link is back — backoff cleared after "
+                         "%d failure(s)", self._fails)
+            self._fails = 0
+            self._quiet_until = 0.0
+            return
+        self._fails += 1
+        wait = min(self.backoff_max,
+                   self.backoff_base * (2 ** (self._fails - 1)))
+        self._quiet_until = time.time() + wait
+        log.warning(
+            "uploader: %d consecutive failure(s) — going quiet for %.0fs so "
+            "the link can actually drain. Clips recorded meanwhile are "
+            "spooled without an attempt.",
+            self._fails, wait,
+        )
+
+    def _in_backoff(self) -> float:
+        """Seconds left of the quiet window, 0 if we may transmit."""
+        return max(0.0, self._quiet_until - time.time())
+
     def _send(self, session_id: str, clip_path: Path, ts: Optional[float],
               real_fps: Optional[float], compress: bool, retries: int,
               timeout: int) -> bool:
@@ -574,7 +615,8 @@ class BackgroundUploader(threading.Thread):
                 # Idle: nothing fresh waiting, so spend the time on the
                 # backlog instead. One clip per pass, so a fresh capture
                 # never queues behind a long retry run.
-                if time.time() >= self._next_spool_sweep:
+                if (time.time() >= self._next_spool_sweep
+                        and self._in_backoff() <= 0):
                     self._next_spool_sweep = time.time() + 60.0
                     self._prune_spool()
                     self._retry_one_spooled()
@@ -595,6 +637,31 @@ class BackgroundUploader(threading.Thread):
             # spool will retry it. The patient attempt happens on the
             # spool sweep below, where the worker is idle and a ten-minute
             # wait costs nothing.
+            _quiet = self._in_backoff()
+            if _quiet > 0:
+                # THE POINT OF THE BACKOFF. Attempting here is what kept
+                # the link permanently busy; spool it and stay off the
+                # wire. Compress first, so the retry has nothing left to
+                # do but send.
+                if self.compress_kbps > 0:
+                    compress_for_upload(
+                        clip_path, target_kbps=self.compress_kbps,
+                        scale_height=(int(self.scale_height)
+                                      if self.scale_height else None),
+                        force_input_fps=real_fps,
+                    )
+                log.info(
+                    "uploader: %.0fs of backoff left — spooling %s without "
+                    "an attempt so the link stays idle",
+                    _quiet, clip_path.name,
+                )
+                self._spool(session_id, clip_path, ts, tries=0)
+                try:
+                    clip_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                self._q.task_done()
+                continue
             _depth = self._q.qsize()
             _tries = 1 if _depth >= 2 else (2 if _depth else 3)
             _to = self.fresh_timeout if _depth else self.idle_timeout
@@ -604,6 +671,7 @@ class BackgroundUploader(threading.Thread):
                          _depth, _tries, _to)
             ok = self._send(session_id, clip_path, ts, real_fps,
                             compress=True, retries=_tries, timeout=_to)
+            self._note_result(ok)
             if not ok:
                 self._spool(session_id, clip_path, ts, tries=_tries)
             try:
@@ -629,6 +697,7 @@ class BackgroundUploader(threading.Thread):
             compress=not meta.get("compressed"), retries=1,
             timeout=self.patient_timeout,
         )
+        self._note_result(ok)
         if ok:
             path.unlink(missing_ok=True)
             path.with_suffix(".json").unlink(missing_ok=True)
