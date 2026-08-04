@@ -583,6 +583,7 @@ class TeeAgent:
             fresh_timeout=int(self.cfg.get("upload_fresh_timeout", 60)),
             idle_timeout=int(self.cfg.get("upload_idle_timeout", 90)),
             patient_timeout=int(self.cfg.get("upload_patient_timeout", 120)),
+            settle_seconds=float(self.cfg.get("upload_settle_seconds", 120)),
             backoff_base=float(self.cfg.get("upload_backoff_base", 20)),
             backoff_max=float(self.cfg.get("upload_backoff_max", 600)),
         )
@@ -777,6 +778,7 @@ class TeeAgent:
         clip_writer = ClipWriter(clip_path, write_fps, (width, height))
         if not clip_writer.ok:
             log.error("VideoWriter failed to open for %s", clip_path)
+            self.uploader.capture_ended()
             return "writer_failed"
 
         # Kick off parallel audio capture. The WAV runs alongside the
@@ -786,6 +788,8 @@ class TeeAgent:
         # carries on with silent video.
         audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
         audio_recorder.start(session_id)
+        # Tell the uploader to get off the wire: one thing at a time.
+        self.uploader.capture_started()
 
         # Hand the pre-roll to the encoder thread, then keep feeding it
         # newly-captured frames. Submitting is a queue put — the drain
@@ -958,6 +962,7 @@ class TeeAgent:
         # Hand off to the background uploader (compress + send + cleanup)
         # and return to detection AT ONCE, so a slow cellular upload can't
         # make us miss the next group arriving at the tee.
+        self.uploader.capture_ended()
         self.uploader.enqueue(
             session_id, clip_path, first_frame_ts, real_fps=real_fps,
         )

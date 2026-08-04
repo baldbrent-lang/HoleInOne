@@ -178,6 +178,18 @@ upload_bitrate_kbps: 2500
 # upload_backoff_base: 20
 # upload_backoff_max: 600
 
+# ONE THING AT A TIME. Observed on the course: a single golfer coming
+# through with nothing else happening uploaded fine, while the same Pi
+# triggering, recording, compressing and uploading at once could not
+# move a 3.1 MB clip needing 212 kbps — on a link that had just measured
+# 1300 kbps idle.
+#
+# So the uploader stands completely down while a capture is running, and
+# for this many seconds after it ends. Clips recorded meanwhile are
+# compressed and spooled, not sent, and go up in the next quiet stretch.
+# Raise it if the Pi still struggles; lower it if clips sit too long.
+# upload_settle_seconds: 120
+
 # ---------------------------------------------------------------------
 # Audio (both sides)
 # ---------------------------------------------------------------------

@@ -447,6 +447,7 @@ class BackgroundUploader(threading.Thread):
         patient_timeout: int = 120,
         backoff_base: float = 20.0,
         backoff_max: float = 600.0,
+        settle_seconds: float = 120.0,
     ):
         super().__init__(daemon=True, name="uploader")
         self.client = client
@@ -490,6 +491,16 @@ class BackgroundUploader(threading.Thread):
         # it on repeated failure, recover it slowly on sustained success.
         self._kbps_now = int(compress_kbps)
         self._wins = 0
+        # DO ONE THING AT A TIME. Observed on the course: a single golfer
+        # coming through with nothing else happening uploaded fine; the
+        # same Pi triggering, recording, compressing and uploading at once
+        # could not move 3.1 MB needing 212 kbps, on a link that had just
+        # measured 1300. So the uploader now stands down entirely while a
+        # capture is running, and for a settle period after it ends. Clips
+        # recorded in the meantime are compressed and spooled, not sent.
+        self._capture_active = False
+        self._last_capture_end = 0.0
+        self.settle_seconds = float(settle_seconds)
         if self.spool_dir is not None:
             try:
                 self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -592,6 +603,24 @@ class BackgroundUploader(threading.Thread):
         return None
 
     # ---- worker -----------------------------------------------------
+
+    def capture_started(self) -> None:
+        """The camera is recording. Get off the wire."""
+        self._capture_active = True
+
+    def capture_ended(self) -> None:
+        """Recording finished; start the settle clock."""
+        self._capture_active = False
+        self._last_capture_end = time.time()
+
+    def _settling(self) -> float:
+        """Seconds until it is polite to transmit again. 0 = go ahead."""
+        if self._capture_active:
+            return self.settle_seconds
+        if not self._last_capture_end:
+            return 0.0
+        return max(0.0,
+                   (self._last_capture_end + self.settle_seconds) - time.time())
 
     def _note_result(self, ok: bool, held_seconds: float = 0.0) -> None:
         """Widen or clear the quiet window after an attempt.
@@ -701,7 +730,7 @@ class BackgroundUploader(threading.Thread):
             # spool will retry it. The patient attempt happens on the
             # spool sweep below, where the worker is idle and a ten-minute
             # wait costs nothing.
-            _quiet = self._in_backoff()
+            _quiet = max(self._in_backoff(), self._settling())
             if _quiet > 0:
                 # THE POINT OF THE BACKOFF. Attempting here is what kept
                 # the link permanently busy; spool it and stay off the
@@ -715,9 +744,12 @@ class BackgroundUploader(threading.Thread):
                         force_input_fps=real_fps,
                     )
                 log.info(
-                    "uploader: %.0fs of backoff left — spooling %s without "
-                    "an attempt so the link stays idle",
-                    _quiet, clip_path.name,
+                    "uploader: %s — spooling %s without an attempt so the "
+                    "link stays idle (%.0fs)",
+                    ("a capture is running" if self._capture_active
+                     else "settling after a capture" if self._settling() > 0
+                     else "backing off"),
+                    clip_path.name, _quiet,
                 )
                 self._spool(session_id, clip_path, ts, tries=0)
                 try:
@@ -758,7 +790,9 @@ class BackgroundUploader(threading.Thread):
         The backlog is finished swings; it cannot be starved by the next
         one.
         """
-        if time.time() < self._next_spool_sweep or self._in_backoff() > 0:
+        if (time.time() < self._next_spool_sweep
+                or self._in_backoff() > 0
+                or self._settling() > 0):
             return
         self._prune_spool()
         # DRAIN, DON'T TRICKLE. One clip per 60s was sized for a link
@@ -770,6 +804,7 @@ class BackgroundUploader(threading.Thread):
         _n = 0
         while (not self._stop.is_set()
                and self._in_backoff() <= 0
+               and self._settling() <= 0
                and _n < _budget):
             if not self._retry_one_spooled():
                 break

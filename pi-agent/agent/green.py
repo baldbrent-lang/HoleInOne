@@ -139,6 +139,7 @@ class GreenAgent:
             fresh_timeout=int(self.cfg.get("upload_fresh_timeout", 60)),
             idle_timeout=int(self.cfg.get("upload_idle_timeout", 90)),
             patient_timeout=int(self.cfg.get("upload_patient_timeout", 120)),
+            settle_seconds=float(self.cfg.get("upload_settle_seconds", 120)),
             backoff_base=float(self.cfg.get("upload_backoff_base", 20)),
             backoff_max=float(self.cfg.get("upload_backoff_max", 600)),
         )
@@ -225,6 +226,8 @@ class GreenAgent:
         # Best-effort — see tee.py for the error-handling shape.
         audio_recorder = build_audio_recorder(self.cfg, self.work_dir)
         audio_recorder.start(session_id)
+        # One thing at a time — see BackgroundUploader.capture_started.
+        self.uploader.capture_started()
 
         # Hand the pre-roll to the encoder thread. Encoding runs off
         # this loop (see ClipWriter) so a hitch can't stall the drain
@@ -325,4 +328,5 @@ class GreenAgent:
         # we're back listening for the next trigger immediately. The
         # worker does the (slow, cellular) compress + upload + cleanup off
         # the capture path, so we never miss the start of the next event.
+        self.uploader.capture_ended()
         self.uploader.enqueue(session_id, clip_path, first_frame_ts, real_fps=real_fps)
