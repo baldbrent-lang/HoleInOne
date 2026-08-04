@@ -817,10 +817,27 @@ class TeeAgent:
                 )
 
         size = clip_path.stat().st_size if clip_path.exists() else 0
+        _dur = time.time() - recording_start
         log.info(
-            "recorded %s: %d frames, %.1f MB",
-            clip_path.name, n_frames_written, size / (1024 * 1024),
+            "recorded %s: %d frames, %.0fs, %.1f MB",
+            clip_path.name, n_frames_written, _dur, size / (1024 * 1024),
         )
+        # LENGTH IS WHAT DRIVES SIZE, and length here is however long a
+        # person stood in the ROI — on a tee box a waiting group can hold
+        # it open for minutes. A clip this long will not clear a weak
+        # uplink inside the upload timeout however well it compresses, so
+        # say so at the moment it is created rather than leaving it to be
+        # inferred from an upload that quietly failed five times.
+        if _dur > 60.0:
+            log.warning(
+                "recorded %.0fs of tee video — that is %.0fx a swing and "
+                "will be ~%.0f MB after compression at %d kbps. Expect the "
+                "upload to struggle: it needs ~%.0f kbps sustained.",
+                _dur, _dur / 12.0,
+                self.upload_bitrate_kbps * _dur / 8 / 1024,
+                self.upload_bitrate_kbps,
+                self.upload_bitrate_kbps * _dur / 180.0,
+            )
 
         # Hand off to the background uploader (compress + send + cleanup)
         # and return to detection AT ONCE, so a slow cellular upload can't

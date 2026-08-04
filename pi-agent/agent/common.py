@@ -275,6 +275,24 @@ class BackendClient:
         video_path: Path,
         recording_started_at: float | None = None,
     ) -> dict:
+        # SIZE AND THROUGHPUT, MEASURED. When a clip never arrives the
+        # only thing in the log is "network error", and the admin card
+        # guesses "usually a weak uplink". Guessing is what this is for:
+        # a 64 MB clip needs 2.9 Mbps sustained to finish inside the 180s
+        # timeout, and whether the link can do that is a number, not an
+        # opinion. Logged before the attempt so it survives a hang.
+        try:
+            _bytes = video_path.stat().st_size
+        except OSError:
+            _bytes = 0
+        _mb = _bytes / (1024 * 1024)
+        _need = (_bytes * 8 / 1024) / 180.0 if _bytes else 0.0
+        log.info(
+            "upload: %s is %.1f MB — needs ~%.0f kbps sustained to finish "
+            "inside the %ds timeout",
+            video_path.name, _mb, _need, 180,
+        )
+        _t0 = time.time()
         data = {"session_id": session_id}
         # Wall-clock epoch of this clip's first frame. The backend uses
         # the tee/green delta to align the dual-camera cut by real time.
@@ -289,13 +307,32 @@ class BackendClient:
         def _make_files():
             return {"video": (video_path.name, open(video_path, "rb"), "video/mp4")}
 
-        return self._retry(
-            "POST", "/upload-event",
-            data=data,
-            make_files=_make_files,
-            timeout=180,
-            retries=5,
+        try:
+            out = self._retry(
+                "POST", "/upload-event",
+                data=data,
+                make_files=_make_files,
+                timeout=180,
+                retries=5,
+            )
+        except Exception:
+            _el = max(0.001, time.time() - _t0)
+            # The link's ACTUAL rate, from the work it did manage. This is
+            # the number that says whether the answer is a shorter clip, a
+            # lower bitrate, or a longer timeout.
+            log.error(
+                "upload FAILED: %s, %.1f MB, gave up after %.0fs across 5 "
+                "attempts (~%.0f kbps if the last attempt ran the whole "
+                "180s) — the clip is too big for this link",
+                video_path.name, _mb, _el, (_bytes * 8 / 1024) / 180.0,
+            )
+            raise
+        _el = max(0.001, time.time() - _t0)
+        log.info(
+            "upload OK: %s, %.1f MB in %.1fs (~%.0f kbps)",
+            video_path.name, _mb, _el, (_bytes * 8 / 1024) / _el,
         )
+        return out
 
 
 # ---------------------------------------------------------------------
