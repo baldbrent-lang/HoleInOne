@@ -550,6 +550,9 @@ class TeeAgent:
             spool_max_mb=int(self.cfg.get("upload_spool_max_mb", 2048)),
             spool_max_age_hours=float(
                 self.cfg.get("upload_spool_max_age_hours", 24)),
+            fresh_timeout=int(self.cfg.get("upload_fresh_timeout", 120)),
+            idle_timeout=int(self.cfg.get("upload_idle_timeout", 300)),
+            patient_timeout=int(self.cfg.get("upload_patient_timeout", 900)),
         )
         self.uploader.start()
 
@@ -857,10 +860,18 @@ class TeeAgent:
                 )
 
         size = clip_path.stat().st_size if clip_path.exists() else 0
-        _dur = time.time() - recording_start
+        # The CLIP's length, not the wall clock to this line. Measuring
+        # wall clock here included the encoder drain in clip_writer.close()
+        # — 40s on a busy Pi — and reported a 35s clip as 59s, which made
+        # the 30s cap look broken when it was working exactly right.
+        # Frames written at the write rate IS the clip's playback length.
+        _dur = (n_frames_written / write_fps) if write_fps else 0.0
+        _wall = time.time() - recording_start
         log.info(
-            "recorded %s: %d frames, %.0fs, %.1f MB",
+            "recorded %s: %d frames, %.1fs of video, %.1f MB "
+            "(%.0fs wall clock incl. encoder drain)",
             clip_path.name, n_frames_written, _dur, size / (1024 * 1024),
+            _wall,
         )
         # LENGTH IS WHAT DRIVES SIZE, and length here is however long a
         # person stood in the ROI — on a tee box a waiting group can hold

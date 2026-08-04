@@ -134,6 +134,22 @@ upload_bitrate_kbps: 2500
 # upload_spool_max_mb: 2048
 # upload_spool_max_age_hours: 24
 
+# HOW LONG ONE UPLOAD ATTEMPT MAY TAKE, in seconds. A course link can sit
+# dead for minutes and then run at full speed; a 6.3 MB clip needing only
+# 289 kbps sustained still died, because every attempt happened to sit in
+# a dead window for its whole duration. A longer attempt is simply still
+# in progress when the link returns.
+#
+# Patience costs the queue, though, so it is spent where it is free:
+#   fresh_timeout   a new clip with others waiting behind it. Short —
+#                   if it misses, it is spooled and nothing is lost.
+#   idle_timeout    a new clip with nothing behind it.
+#   patient_timeout a spool retry. The worker is idle by definition here,
+#                   so a long wait costs nothing at all.
+# upload_fresh_timeout: 120
+# upload_idle_timeout: 300
+# upload_patient_timeout: 900
+
 # ---------------------------------------------------------------------
 # Audio (both sides)
 # ---------------------------------------------------------------------

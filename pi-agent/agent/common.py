@@ -276,6 +276,7 @@ class BackendClient:
         video_path: Path,
         recording_started_at: float | None = None,
         retries: int = 5,
+        timeout: int = 180,
     ) -> dict:
         # SIZE AND THROUGHPUT, MEASURED. When a clip never arrives the
         # only thing in the log is "network error", and the admin card
@@ -288,11 +289,11 @@ class BackendClient:
         except OSError:
             _bytes = 0
         _mb = _bytes / (1024 * 1024)
-        _need = (_bytes * 8 / 1024) / 180.0 if _bytes else 0.0
+        _need = (_bytes * 8 / 1024) / float(timeout) if _bytes else 0.0
         log.info(
             "upload: %s is %.1f MB — needs ~%.0f kbps sustained to finish "
             "inside the %ds timeout",
-            video_path.name, _mb, _need, 180,
+            video_path.name, _mb, _need, int(timeout),
         )
         _t0 = time.time()
         data = {"session_id": session_id}
@@ -314,7 +315,7 @@ class BackendClient:
                 "POST", "/upload-event",
                 data=data,
                 make_files=_make_files,
-                timeout=180,
+                timeout=int(timeout),
                 retries=int(retries),
             )
         except Exception:
@@ -324,10 +325,10 @@ class BackendClient:
             # lower bitrate, or a longer timeout.
             log.error(
                 "upload FAILED: %s, %.1f MB, gave up after %.0fs across "
-                "%d attempt(s) — this link cannot move it inside the 180s "
-                "write timeout (it would need ~%.0f kbps sustained)",
-                video_path.name, _mb, _el, int(retries),
-                (_bytes * 8 / 1024) / 180.0,
+                "%d attempt(s) of %ds — this link could not move it (it "
+                "would need ~%.0f kbps sustained)",
+                video_path.name, _mb, _el, int(retries), int(timeout),
+                (_bytes * 8 / 1024) / float(timeout),
             )
             raise
         _el = max(0.001, time.time() - _t0)
@@ -415,6 +416,9 @@ class BackgroundUploader(threading.Thread):
         spool_dir: Optional[Path] = None,
         spool_max_mb: int = 2048,
         spool_max_age_hours: float = 24.0,
+        fresh_timeout: int = 120,
+        idle_timeout: int = 300,
+        patient_timeout: int = 900,
     ):
         super().__init__(daemon=True, name="uploader")
         self.client = client
@@ -431,6 +435,10 @@ class BackgroundUploader(threading.Thread):
         self.spool_max_bytes = int(spool_max_mb) * 1024 * 1024
         self.spool_max_age = float(spool_max_age_hours) * 3600.0
         self._next_spool_sweep = 0.0
+        # Fresh clip with others waiting / fresh clip alone / spool retry.
+        self.fresh_timeout = int(fresh_timeout)
+        self.idle_timeout = int(idle_timeout)
+        self.patient_timeout = int(patient_timeout)
         if self.spool_dir is not None:
             try:
                 self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -532,7 +540,8 @@ class BackgroundUploader(threading.Thread):
     # ---- worker -----------------------------------------------------
 
     def _send(self, session_id: str, clip_path: Path, ts: Optional[float],
-              real_fps: Optional[float], compress: bool, retries: int) -> bool:
+              real_fps: Optional[float], compress: bool, retries: int,
+              timeout: int) -> bool:
         try:
             if compress and self.compress_kbps > 0:
                 compress_for_upload(
@@ -545,7 +554,7 @@ class BackgroundUploader(threading.Thread):
                 )
             result = self.client.upload_event(
                 session_id, clip_path, recording_started_at=ts,
-                retries=retries,
+                retries=retries, timeout=timeout,
             )
             log.info(
                 "uploaded: event=%s status=%s ready=%s",
@@ -574,13 +583,27 @@ class BackgroundUploader(threading.Thread):
             # per clip. With eight queued that is over two hours, and the
             # 3 MB clips that WOULD have made it die behind a 40 MB one
             # that never will. When clips are waiting, try once and spool.
+            # TIMEOUT IS PATIENCE, and how much we can afford depends on
+            # what is waiting. This link alternates between ~1300 kbps and
+            # nothing at all: a 6.3 MB clip needed only 289 kbps sustained
+            # and still died, because every one of its five attempts sat
+            # in a dead window for the full 180s. A longer attempt would
+            # simply have been in progress when the link came back.
+            #
+            # But patience costs the queue. So: a fresh clip gets a short
+            # attempt and is spooled if it misses — nothing is lost, the
+            # spool will retry it. The patient attempt happens on the
+            # spool sweep below, where the worker is idle and a ten-minute
+            # wait costs nothing.
             _depth = self._q.qsize()
-            _tries = 1 if _depth >= 2 else (2 if _depth else 5)
+            _tries = 1 if _depth >= 2 else (2 if _depth else 3)
+            _to = self.fresh_timeout if _depth else self.idle_timeout
             if _depth:
                 log.info("uploader: %d clip(s) behind this one — %d attempt(s) "
-                         "then spool, so they are not blocked", _depth, _tries)
+                         "of %ds then spool, so they are not blocked",
+                         _depth, _tries, _to)
             ok = self._send(session_id, clip_path, ts, real_fps,
-                            compress=True, retries=_tries)
+                            compress=True, retries=_tries, timeout=_to)
             if not ok:
                 self._spool(session_id, clip_path, ts, tries=_tries)
             try:
@@ -597,10 +620,14 @@ class BackgroundUploader(threading.Thread):
         tries = int(meta.get("tries") or 0)
         log.info("uploader: retrying spooled %s (%d previous attempt(s))",
                  path.name, tries)
+        # Nothing is waiting on this — the queue is empty, which is why
+        # we are here. So give it the long, patient attempt that a fresh
+        # clip cannot afford.
         ok = self._send(
             meta.get("session_id") or path.stem, path,
             meta.get("recording_started_at"), None,
             compress=not meta.get("compressed"), retries=1,
+            timeout=self.patient_timeout,
         )
         if ok:
             path.unlink(missing_ok=True)
