@@ -29,6 +29,10 @@ log = logging.getLogger("golfreelz_agent.common")
 # monopolise the worker, not to pace the link (the backoff does that).
 SPOOL_DRAIN_MAX = 20
 
+# ...and a smaller share when fresh clips are waiting, so the backlog
+# and the live stream of new clips both make progress.
+SPOOL_DRAIN_BUSY = 2
+
 
 # ---------------------------------------------------------------------
 # Config
@@ -617,33 +621,7 @@ class BackgroundUploader(threading.Thread):
             try:
                 session_id, clip_path, ts, real_fps = self._q.get(timeout=0.5)
             except queue.Empty:
-                # Idle: nothing fresh waiting, so spend the time on the
-                # backlog instead. One clip per pass, so a fresh capture
-                # never queues behind a long retry run.
-                if (time.time() >= self._next_spool_sweep
-                        and self._in_backoff() <= 0):
-                    self._prune_spool()
-                    # DRAIN, DON'T TRICKLE. One clip per 60s was sized for
-                    # a link that seemed to need minutes per clip. It does
-                    # 6.3 MB in 9.5s, so a backlog built during an outage
-                    # would have taken 14 minutes to clear at one a minute
-                    # — and new clips arrive faster than that, so it grew
-                    # instead. Keep going while it works; stop the moment
-                    # it does not, or when a fresh clip needs the worker.
-                    _n = 0
-                    while (not self._stop.is_set()
-                           and self._q.empty()
-                           and self._in_backoff() <= 0
-                           and _n < SPOOL_DRAIN_MAX):
-                        if not self._retry_one_spooled():
-                            break
-                        _n += 1
-                    if _n:
-                        log.info("uploader: drained %d spooled clip(s) this "
-                                 "pass", _n)
-                    # Straight back round while there is a backlog moving;
-                    # the slow cadence is for an empty, quiet spool.
-                    self._next_spool_sweep = time.time() + (5.0 if _n else 60.0)
+                self._maybe_sweep_spool()
                 continue
             # HEAD-OF-LINE. Five attempts x a 180s timeout is 15 minutes
             # per clip. With eight queued that is over two hours, and the
@@ -703,6 +681,42 @@ class BackgroundUploader(threading.Thread):
             except Exception:
                 pass
             self._q.task_done()
+            # The backlog gets a turn after EVERY fresh clip, not only
+            # when the queue happens to run empty.
+            self._maybe_sweep_spool()
+
+    def _maybe_sweep_spool(self) -> None:
+        """Give the spool a turn, whether or not fresh clips are waiting.
+
+        This lived only in the queue-empty branch, and a tee with a loose
+        ROI records continuously — so the queue was never empty and the
+        spool NEVER drained. 18 clips sat there while the count refused
+        to move, and the reason was that the sweep could not get a turn.
+        The backlog is finished swings; it cannot be starved by the next
+        one.
+        """
+        if time.time() < self._next_spool_sweep or self._in_backoff() > 0:
+            return
+        self._prune_spool()
+        # DRAIN, DON'T TRICKLE. One clip per 60s was sized for a link
+        # that seemed to need minutes per clip; it does 6.3 MB in 9.5s.
+        # Keep going while it works, stop the moment it does not — and
+        # take a smaller share when fresh clips are waiting, so neither
+        # the backlog nor the live stream starves the other.
+        _budget = SPOOL_DRAIN_MAX if self._q.empty() else SPOOL_DRAIN_BUSY
+        _n = 0
+        while (not self._stop.is_set()
+               and self._in_backoff() <= 0
+               and _n < _budget):
+            if not self._retry_one_spooled():
+                break
+            _n += 1
+        if _n:
+            log.info("uploader: drained %d spooled clip(s) this pass "
+                     "(%d fresh waiting)", _n, self._q.qsize())
+        # Straight back round while a backlog is moving; the slow cadence
+        # is for an empty, quiet spool.
+        self._next_spool_sweep = time.time() + (5.0 if _n else 60.0)
 
     def _retry_one_spooled(self) -> bool:
         """Send one spooled clip. True only if it actually went up."""
