@@ -139,7 +139,13 @@ class GreenAgent:
             fresh_timeout=int(self.cfg.get("upload_fresh_timeout", 60)),
             idle_timeout=int(self.cfg.get("upload_idle_timeout", 90)),
             patient_timeout=int(self.cfg.get("upload_patient_timeout", 120)),
-            settle_seconds=float(self.cfg.get("upload_settle_seconds", 120)),
+            # DELIBERATELY LONGER THAN THE TEE'S. Both Pis record the same
+            # event and stop within a second of each other, so an equal
+            # settle would have them wake into the SAME window and upload
+            # simultaneously — turning a fix for contention into a
+            # metronome for it. The tee goes first because its clip is
+            # the one the tracer needs.
+            settle_seconds=float(self.cfg.get("upload_settle_seconds", 240)),
             backoff_base=float(self.cfg.get("upload_backoff_base", 20)),
             backoff_max=float(self.cfg.get("upload_backoff_max", 600)),
         )

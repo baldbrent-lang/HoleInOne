@@ -188,6 +188,12 @@ upload_bitrate_kbps: 2500
 # for this many seconds after it ends. Clips recorded meanwhile are
 # compressed and spooled, not sent, and go up in the next quiet stretch.
 # Raise it if the Pi still struggles; lower it if clips sit too long.
+#
+# GREEN: leave this LONGER than the tee's. Both Pis record the same event
+# and stop within a second of each other, so an equal settle wakes them
+# into the same window and they upload simultaneously — a fix for
+# contention turned into a metronome for it. Code defaults: tee 120,
+# green 240, so the tee's clip (the one the tracer needs) goes first.
 # upload_settle_seconds: 120
 
 # ---------------------------------------------------------------------
