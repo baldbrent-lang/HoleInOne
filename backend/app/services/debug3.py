@@ -118,6 +118,29 @@ MAX_TRACKS_TESTED = 120
 # formed tracks. Wide here, tight once a velocity exists.
 ACQUIRE_GATE_R = 12.0
 
+# ...but the `* df` in that gate is capped here. A track with one point
+# has no velocity, so a missed frame widens its gate with nothing to aim
+# it — at df=4 that reached 622px at 1080p, which is a third of the frame,
+# and the tracker duly built 3-point "tracks" spanning 900px out of
+# unrelated noise. On the rainy swing at Snee Farm those junk tracks had
+# the biggest rises in the whole run and crowded the real flight out of
+# the shortlist. Acquisition over one or two frames is a ball that was
+# briefly missed; over four it is a guess.
+ACQUIRE_MAX_DF = 2
+
+# A real flight is SEEN on most of the frames it crosses. Junk built from
+# long-range links is not: every one of the frame-spanning tracks above
+# had a point on barely a third of its frames. This is reported, not
+# enforced — in bad light a real ball can be missed for a few frames, and
+# a threshold that quietly deleted the shot would be the same class of
+# bug as the gate that invented it.
+def track_density(points: list) -> float:
+    """Points per frame spanned, 1.0 = detected on every frame."""
+    if not points:
+        return 0.0
+    span = int(points[-1]["frame"]) - int(points[0]["frame"]) + 1
+    return round(len(points) / max(1, span), 2)
+
 # Extra gate slack proportional to speed. A prediction's error grows with
 # how fast the thing is moving, so a fixed radius is either too tight for
 # the ball or too loose for everything else.
@@ -558,8 +581,10 @@ def build_tracks(
             px = last["x"] + tr["vx"] * df
             py = last["y"] + tr["vy"] * df
             if len(tr["pts"]) < 2:
-                # No velocity yet: acquisition, not tracking.
-                gate = ACQUIRE_GATE_R * r * df
+                # No velocity yet: acquisition, not tracking. Capped in df
+                # — see ACQUIRE_MAX_DF; an uncapped one reaches a third of
+                # the frame and links noise to noise.
+                gate = ACQUIRE_GATE_R * r * min(df, ACQUIRE_MAX_DF)
             else:
                 speed = math.hypot(tr["vx"], tr["vy"])
                 gate = (1.5 + 0.9 * df) * r + GATE_SPEED_FRAC * speed * df
@@ -860,13 +885,22 @@ def find_flight(
         # be matched to the picture is just numbers.
         _sel = select_preview_tracks(tracks)
         _shown = [tracks[_i] for _i, _ in _sel]
+        # `idx` is the track's position in the FULL list — the same number
+        # the tested-tracks table below uses. Numbering the shortlist 1..12
+        # instead would give the same track two different names in two
+        # tables on the same page, which is worse than no number.
         dbg["tracks_preview"] = [
-            {"idx": _k + 1,
+            {"idx": _i + 1,
              "color": TRACK_COLORS[_k % len(TRACK_COLORS)],
              "why": _why,
              "n": len(tracks[_i]["points"]),
              "span_px": tracks[_i]["span_px"],
              "rise_px": tracks[_i]["rise_px"],
+             "density": track_density(tracks[_i]["points"]),
+             "from": [int(tracks[_i]["points"][0]["x"]),
+                      int(tracks[_i]["points"][0]["y"])],
+             "to": [int(tracks[_i]["points"][-1]["x"]),
+                    int(tracks[_i]["points"][-1]["y"])],
              "frames": [tracks[_i]["points"][0]["frame"],
                         tracks[_i]["points"][-1]["frame"]]}
             for _k, (_i, _why) in enumerate(_sel)
@@ -885,6 +919,7 @@ def find_flight(
                     f"alone hides the shot). Numbers and colours match the "
                     f"table. Hollow ring = first frame, filled dot = last.",
                     scale=det.get("scale") or 1.0,
+                    labels=[_i + 1 for _i, _ in _sel],
                 ):
                     dbg["tracks_image"] = _tn
             _lap("draw_tracks")
@@ -1447,9 +1482,19 @@ def pick_flight(
             f"{len(tracks)} tracks built, testing the {MAX_TRACKS_TESTED} "
             f"longest"
         )
-    for tr in tracks[:MAX_TRACKS_TESTED]:
+    for _ti, tr in enumerate(tracks[:MAX_TRACKS_TESTED]):
         fit = ransac_parabola(tr["points"], impact_frame, ball_xy, r=r)
+        _p0, _p1 = tr["points"][0], tr["points"][-1]
         rec = {
+            # WHICH track this row is. Without an id and endpoints, a
+            # 79-row table cannot be matched to anything on the picture --
+            # the operator circles a trail on screen and has no way to
+            # find its row, which is exactly what happened.
+            "idx": _ti + 1,
+            "frames": [int(_p0["frame"]), int(_p1["frame"])],
+            "from": [int(_p0["x"]), int(_p0["y"])],
+            "to": [int(_p1["x"]), int(_p1["y"])],
+            "density": track_density(tr["points"]),
             "n_points": len(tr["points"]),
             "span_px": tr["span_px"], "rise_px": tr["rise_px"],
             "n_inliers": fit.get("n_inliers"), "rms_px": fit.get("rms_px"),
@@ -1681,8 +1726,20 @@ def select_preview_tracks(tracks: list, limit: int = TRACKS_DRAWN) -> list:
     if n == 0:
         return []
     by_len = sorted(range(n), key=lambda i: -len(tracks[i]["points"]))
-    by_rise = [i for i in sorted(range(n), key=lambda i: -tracks[i]["rise_px"])
-               if tracks[i]["rise_px"] > 0]
+    # Rising, and SEEN on most of its frames. Rise alone is not enough:
+    # the biggest risers in the Snee Farm run were 3-point tracks spanning
+    # 900px, built by linking noise to noise across a third of the frame,
+    # and they took every rise slot. A struck ball is detected on most of
+    # the frames it crosses (0.72 there); those had 0.33. Sparse risers
+    # are still eligible, just last — a real ball in bad light can drop
+    # frames, and a hard cut-off would be the same class of mistake as
+    # the gate that invented the junk.
+    _rise = [i for i in range(n) if tracks[i]["rise_px"] > 0]
+    by_rise = sorted(
+        _rise,
+        key=lambda i: (track_density(tracks[i]["points"]) < 0.5,
+                       -tracks[i]["rise_px"]),
+    )
     n_rise = min(limit // 2, len(by_rise))
     # Rising tracks are claimed FIRST — they are the ones that go missing.
     picked: dict[int, set] = {}
@@ -1718,6 +1775,7 @@ def draw_tracks(
     tracks: list,
     caption: str,
     scale: float = 1.0,
+    labels: list | None = None,
 ) -> bool:
     """Draw the track candidates as thin coloured polylines, numbered.
 
@@ -1729,7 +1787,9 @@ def draw_tracks(
 
     `tracks` is the ALREADY-SELECTED subset (see select_preview_tracks) —
     this draws what it is given, in order, so the table cannot disagree
-    with the picture about which track is number 4.
+    with the picture about which track is number 4. `labels` carries each
+    one's number in the FULL list, so the number on the line is the same
+    number the tested-tracks table uses.
 
     Same scale contract as draw_flight: detections are full-res, the
     canvas is the downscaled working frame.
@@ -1760,10 +1820,11 @@ def draw_tracks(
                        cv2.LINE_AA)
             cv2.circle(img, _p(pts[-1]["x"], pts[-1]["y"]), 4, col, -1,
                        cv2.LINE_AA)
+            _lbl = str(labels[i]) if labels and i < len(labels) else str(i + 1)
             _tx, _ty = _p(pts[0]["x"], pts[0]["y"])
             # Black underlay so the number survives a light background.
             for _c, _t in ((( 0, 0, 0), 3), (col, 1)):
-                cv2.putText(img, str(i + 1), (_tx + 7, _ty - 6),
+                cv2.putText(img, _lbl, (_tx + 7, _ty - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, _c, _t,
                             cv2.LINE_AA)
         _label(img, caption)

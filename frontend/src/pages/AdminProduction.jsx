@@ -3492,6 +3492,8 @@ function Debug3Modal({ state, onClose }) {
                         <th align="left">frames</th>
                         <th align="right">span</th>
                         <th align="right">rise</th>
+                        <th align="right" title="points per frame spanned — 1.0 means it was seen on every frame. Junk built from long-range links sits near 0.3.">seen</th>
+                        <th align="left">from → to</th>
                         <th align="left">shown because</th>
                       </tr>
                     </thead>
@@ -3517,6 +3519,15 @@ function Debug3Modal({ state, onClose }) {
                           <td>f{t.frames?.[0]}–{t.frames?.[1]}</td>
                           <td align="right">{t.span_px}px</td>
                           <td align="right">{t.rise_px}px</td>
+                          <td align="right"
+                            style={t.density != null && t.density < 0.5
+                              ? { color: "#b7791f" } : undefined}>
+                            {t.density ?? "–"}
+                          </td>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                            {t.from ? `${t.from[0]},${t.from[1]}` : "–"} →{" "}
+                            {t.to ? `${t.to[0]},${t.to[1]}` : "–"}
+                          </td>
                           <td className="muted">{t.why}</td>
                         </tr>
                       ))}
@@ -3559,6 +3570,10 @@ function Debug3Modal({ state, onClose }) {
                             rather than silent. */}
                         <th align="right" title="the old score: 2×inliers + capped span − rms/10">was</th>
                         <th align="left">verdict</th>
+                        <th align="left" title="the same number drawn on the tracks picture">#</th>
+                        <th align="left">frames</th>
+                        <th align="left" title="first and last detection — use this to find the track you can see on screen">from → to</th>
+                        <th align="right" title="points per frame spanned">seen</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3593,6 +3608,19 @@ function Debug3Modal({ state, onClose }) {
                           <td align="right"><b>{t.score ?? "–"}</b></td>
                           <td align="right" className="muted">{t.score_legacy ?? "–"}</td>
                           <td>{t.verdict}</td>
+                          <td>{t.idx ?? "–"}</td>
+                          <td style={{ whiteSpace: "nowrap" }}>
+                            {t.frames ? `f${t.frames[0]}–${t.frames[1]}` : "–"}
+                          </td>
+                          <td className="muted" style={{ whiteSpace: "nowrap" }}>
+                            {t.from ? `${t.from[0]},${t.from[1]}` : "–"} →{" "}
+                            {t.to ? `${t.to[0]},${t.to[1]}` : "–"}
+                          </td>
+                          <td align="right"
+                            style={t.density != null && t.density < 0.5
+                              ? { color: "#b7791f" } : undefined}>
+                            {t.density ?? "–"}
+                          </td>
                         </tr>
                         );
                       })}
