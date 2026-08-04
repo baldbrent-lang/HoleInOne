@@ -46,6 +46,30 @@ FORCE_TRIGGER_PATH = Path("/tmp/golfreelz-trigger")
 _last_trigger_mtime = 0.0
 
 
+def prime_force_trigger() -> None:
+    """Adopt any EXISTING sentinel's mtime as the baseline, at startup.
+
+    `_last_trigger_mtime` starts at 0, so a leftover file fired a
+    recording the instant the agent came up — and the file is usually
+    leftover, because the operator touches it as `pi` while the agent
+    runs as its own user and /tmp is sticky, so the unlink after firing
+    silently fails. Every service restart therefore recorded and queued
+    a spurious clip. Restarts are frequent during an update; this was
+    quietly adding to the backlog we were trying to drain.
+
+    Only a touch made AFTER startup should fire.
+    """
+    global _last_trigger_mtime
+    try:
+        _last_trigger_mtime = FORCE_TRIGGER_PATH.stat().st_mtime
+        log.info(
+            "force-trigger sentinel already exists — adopting it as the "
+            "baseline; touch it again to fire a capture",
+        )
+    except OSError:
+        _last_trigger_mtime = 0.0
+
+
 def _take_force_trigger() -> bool:
     """True once per `touch`, keyed on MTIME rather than on deleting the
     file.
@@ -567,6 +591,7 @@ class TeeAgent:
         capture_thread.start()
 
         person_first_seen: Optional[float] = None
+        prime_force_trigger()
         log.info(
             "tee agent running: roi=%s buffer=%.1fs dwell=%.1fs",
             self.roi, self.buffer_seconds, dwell_seconds,

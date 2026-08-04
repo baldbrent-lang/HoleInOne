@@ -739,13 +739,35 @@ class BackgroundUploader(threading.Thread):
         return False
 
     def stop(self, drain_timeout: float = 0.0) -> None:
-        """Signal shutdown. Optionally wait up to drain_timeout for any
-        queued uploads to finish before returning."""
+        """Signal shutdown, then SPOOL whatever is still queued.
+
+        The queue lives in memory. A restart used to drop it on the
+        floor: the tee's last shutdown logged "6 clip(s) queued" and
+        those six files were left in work_dir with nothing referencing
+        them ever again. Six swings, gone to a service restart, on the
+        same day the spool was added specifically so a failure could not
+        cost footage. Draining to the spool makes the restart survivable.
+        """
         if drain_timeout > 0:
             deadline = time.time() + drain_timeout
             while not self._q.empty() and time.time() < deadline:
                 time.sleep(0.2)
         self._stop.set()
+        n = 0
+        while True:
+            try:
+                session_id, clip_path, ts, _fps = self._q.get_nowait()
+            except queue.Empty:
+                break
+            if self._spool(session_id, clip_path, ts, tries=0):
+                n += 1
+            try:
+                clip_path.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+        if n:
+            log.info("uploader: spooled %d clip(s) that were still queued at "
+                     "shutdown — they will go up on the next start", n)
 
 
 class ClipWriter:
