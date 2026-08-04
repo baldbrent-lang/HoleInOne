@@ -11177,6 +11177,7 @@ def _camera_to_dict(
         "auth_token": c.auth_token,
         "name": c.name,
         "tee_box_roi": c.tee_box_roi,
+        "ball_side": c.ball_side,
         "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
         "firmware_version": c.firmware_version,
         "battery": _battery_status(
@@ -11651,6 +11652,7 @@ def update_camera(
     course_id: int | None = Form(None),
     assigned_hole: int | None = Form(None),
     assigned_role: str | None = Form(None),
+    ball_side: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Patch a camera's display name / enabled flag / tee-box ROI /
@@ -11674,6 +11676,14 @@ def update_camera(
         cam.triggering_enabled = bool(triggering_enabled)
     if note is not None:
         cam.note = note.strip() or None
+    if ball_side is not None:
+        _bs = (ball_side or "").strip().lower()
+        if _bs in ("", "none", "auto"):
+            cam.ball_side = None
+        elif _bs in ("left", "right"):
+            cam.ball_side = _bs
+        else:
+            raise HTTPException(400, "ball_side must be left, right or auto")
     if tee_box_roi is not None and tee_box_roi.strip():
         try:
             roi = json.loads(tee_box_roi)
@@ -13063,6 +13073,24 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     upload_id = row.id
     from ..services import debug2 as d2
     from ..services import debug3 as d3
+
+    # Which side of the golfer's feet the ball sits on, from the TEE
+    # camera that captured this. Set once per installation, because the
+    # camera and the tee box do not move — a per-swing guess would be
+    # strictly worse. None means search both sides, as before.
+    _ball_side = None
+    try:
+        _ev = (
+            db.query(CameraEvent)
+            .filter(CameraEvent.id == row.camera_event_id)
+            .first()
+            if getattr(row, "camera_event_id", None) else None
+        )
+        if _ev is not None and _ev.tee_camera_id:
+            _cam = db.get(Camera, _ev.tee_camera_id)
+            _ball_side = getattr(_cam, "ball_side", None) if _cam else None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("could not resolve ball_side for upload %s: %s", upload_id, exc)
     from ..services import pose_swing
 
     # Diagnostic images only when someone is going to look at them.
@@ -13206,7 +13234,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             src_path, fps, impact_frame=imp_f,
             head_xy=c.get("impact_head_xy"),
             feet_xy=c.get("impact_feet_xy"),
-            frame_w=_fw, frame_h=_fh,
+            frame_w=_fw, frame_h=_fh, ball_side=_ball_side,
             debug_dir=_art_dir,
             debug_prefix=f"d3-{upload_id}-{tok}-{i}-",
         )

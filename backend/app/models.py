@@ -335,6 +335,15 @@ class Camera(Base):
     # yards and the scale changes across the frame, so nothing downstream
     # may guess a conversion without this.
     green_homography: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # TEE cameras only. Which side of the golfer's feet the ball sits on,
+    # in the camera's own view: 'left' | 'right' | None.
+    #
+    # A property of the INSTALLATION, not the swing — the camera is bolted
+    # to a tree and golfers address the ball in the same place every time,
+    # so this is set once rather than inferred per shot. It narrows the
+    # club-arc search to the side the ball is actually on, which is what
+    # stops a white shoe winning the vote.
+    ball_side: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     # Last time the camera POSTed anything (heartbeat, event, upload).
     # Backend's offline alert watches this.
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

@@ -761,6 +761,7 @@ def find_flight(
     feet_xy=None,
     frame_w: int | None = None,
     frame_h: int | None = None,
+    ball_side: str | None = None,
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -862,8 +863,24 @@ def find_flight(
 
         # E: the flight.
         gy = float(feet_xy[1]) if feet_xy and len(feet_xy) == 2 else None
+        # The ball, BEFORE picking the flight, so the aim gate is armed.
+        # This used to pass None, which made the aim / self-evident /
+        # baseline gates dead code — and that is how a fit whose
+        # back-extrapolated impact landed at (4828, -238) on a 1280x720
+        # frame was accepted as a ball flight. The club arc knows where
+        # the ball is; the flight picker just never got told.
+        from .debug2 import club_bottom_ball
+
+        _pre = club_bottom_ball(
+            input_path, int(impact_frame or f_lo), fps,
+            feet_xy=feet_xy, head_xy=head_xy, ball_side=ball_side,
+        ) if feet_xy else {}
+        _ball_hint = _pre.get("xy") if _pre.get("ok") else None
+        dbg["ball_hint"] = _ball_hint
+        dbg["ball_hint_reason"] = _pre.get("reason")
+        _lap("club_arc")
         res = pick_flight(
-            tracks, int(impact_frame or f_lo), None,
+            tracks, int(impact_frame or f_lo), _ball_hint,
             frame_w=frame_w, frame_h=frame_h, r=r,
         )
         _lap("flight")
@@ -915,7 +932,7 @@ def find_flight(
 
             club = club_bottom_ball(
                 input_path, int(out["launch_frame"]), fps,
-                feet_xy=feet_xy, head_xy=head_xy,
+                feet_xy=feet_xy, head_xy=head_xy, ball_side=ball_side,
                 debug_dir=debug_dir, debug_prefix=f"{debug_prefix}club",
             )
             _lap("club_arc")

@@ -211,6 +211,10 @@ def _migrate() -> None:
             statements.append(
                 "ALTER TABLE cameras ADD COLUMN green_homography JSON"
             )
+        if "ball_side" not in cam_cols:
+            statements.append(
+                "ALTER TABLE cameras ADD COLUMN ball_side VARCHAR(10)"
+            )
 
     # Generic backstop: add ANY column defined on a model but missing from
     # its existing table. The explicit ALTERs above cover special cases

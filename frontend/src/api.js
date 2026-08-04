@@ -397,6 +397,8 @@ export const api = {
       fd.append("assigned_hole", String(patch.assignedHole));
     if (patch.assignedRole !== undefined)
       fd.append("assigned_role", patch.assignedRole);
+    if (patch.ballSide !== undefined)
+      fd.append("ball_side", patch.ballSide || "auto");
     return request(`/api/admin/cameras/${cameraId}/update`, {
       method: "POST",
       adminPassword: key,

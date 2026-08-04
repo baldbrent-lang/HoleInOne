@@ -610,7 +610,7 @@ export default function AdminCameras() {
   const [revealedToken, setRevealedToken] = useState({}); // {camera_id: true}
   const [calibratingCam, setCalibratingCam] = useState(null);
   const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
-  const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "", name: "" });
+  const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "", name: "", ballSide: "" });
 
   // Live-watch state: one camera at a time. We poll /live-frame via
   // fetch (rather than letting <img> do it) because the admin endpoint
@@ -853,6 +853,7 @@ export default function AdminCameras() {
       hole: String(cam.assigned_hole),
       role: cam.assigned_role,
       name: cam.name || "",
+      ballSide: cam.ball_side || "",
     });
     setMovingCam(cam.id);
   }
@@ -875,6 +876,7 @@ export default function AdminCameras() {
         assignedHole: hole,
         assignedRole: moveDraft.role,
         name: moveDraft.name,
+        ballSide: moveDraft.ballSide,
       });
       if (updated && updated.auto_unpaired) {
         window.alert(
@@ -1342,6 +1344,21 @@ export default function AdminCameras() {
                         disabled={isBusy}
                       />
                     </div>
+                    {moveDraft.role === "tee" && (
+                      <div className="field" style={{ flex: 1, minWidth: 150 }}>
+                        <label className="small">Ball side</label>
+                        <select
+                          value={moveDraft.ballSide}
+                          onChange={(e) => setMoveDraft((d) => ({ ...d, ballSide: e.target.value }))}
+                          disabled={isBusy}
+                          title="Which side of the golfer's feet the ball sits on, in this camera's view. Fixed per installation — it stops a white shoe being picked as the ball."
+                        >
+                          <option value="">auto (both sides)</option>
+                          <option value="left">left of the feet</option>
+                          <option value="right">right of the feet</option>
+                        </select>
+                      </div>
+                    )}
                     <div className="field" style={{ flex: 1, minWidth: 100 }}>
                       <label className="small">Role</label>
                       <select

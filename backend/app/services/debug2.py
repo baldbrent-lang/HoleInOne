@@ -58,6 +58,18 @@ WIN_POST = 100
 
 # ── stage 2: the ball, from the bottom of the club's heat arc ──────────
 
+def _side_gap(body: float) -> float:
+    """How far clear of the feet the ball search starts, in pixels.
+
+    The ball at address is about a club-head plus a little from the
+    instep — comfortably further out than any part of the shoe or its
+    shadow, which are the two things that beat a real ball when the
+    window reaches them. Scaled by body height so it holds at any
+    camera distance.
+    """
+    return max(8.0, 0.14 * float(body))
+
+
 def club_bottom_ball(
     input_path: Path,
     impact_frame: int,
@@ -65,6 +77,7 @@ def club_bottom_ball(
     hint_xy=None,
     feet_xy=None,
     head_xy=None,
+    ball_side=None,
     debug_dir: Path | None = None,
     debug_prefix: str = "d2club",
 ) -> dict:
@@ -151,11 +164,30 @@ def club_bottom_ball(
             # A band straddling the ground line. The club head at impact and
             # the ball centre are both within a fraction of a body height of
             # the ground; the torso, arms and club shaft are not.
-            y_lo = max(0, int(fy - 0.16 * body))
-            y_hi = min(h, int(fy + 0.06 * body))
+            #
+            # Asymmetric downward: the ball sits ON the ground the golfer is
+            # standing on, so in image terms it is level with the feet or
+            # ABOVE them (further from the camera reads higher in frame).
+            # It is never below. The old +0.06 band reached down into the
+            # shoes and shadow for no gain.
+            y_lo = max(0, int(fy - 0.18 * body))
+            y_hi = min(h, int(fy + 0.02 * body))
             # The ball is never more than about a body height to the side.
-            x_lo = max(0, int(fx - 1.0 * body))
-            x_hi = min(w, int(fx + 1.0 * body))
+            # With ball_side known — it is a property of the INSTALLATION,
+            # not the swing, since the camera and the tee box don't move —
+            # search only that side and start clear of the feet. Symmetric
+            # search is what let a white shoe 0.06 body-heights from the
+            # feet win the vote over a ball at 0.4.
+            gap = _side_gap(body)
+            if ball_side == "right":
+                x_lo = max(0, int(fx + gap))
+                x_hi = min(w, int(fx + 1.1 * body))
+            elif ball_side == "left":
+                x_lo = max(0, int(fx - 1.1 * body))
+                x_hi = min(w, int(fx - gap))
+            else:
+                x_lo = max(0, int(fx - 1.0 * body))
+                x_hi = min(w, int(fx + 1.0 * body))
             box = np.zeros_like(mask)
             box[y_lo:y_hi, x_lo:x_hi] = 255
             mask = cv2.bitwise_and(mask, box)
@@ -185,7 +217,11 @@ def club_bottom_ball(
             # moves with them, and both are far bigger blobs than a club
             # head — left in, they win the median and drag the answer onto
             # the golfer. Two-sided: we are not assuming a side here.
-            min_off = max(4.0, 0.05 * body)
+            # 0.05 was far too tight: a shoe 0.06 body-heights out cleared
+            # it and won the median. The ball at address sits roughly a
+            # club-head-and-a-bit from the instep, which is a good deal
+            # further than any part of the foot.
+            min_off = _side_gap(body)
             keep = np.abs(xs - fx) >= min_off
             if int(keep.sum()) < 12:
                 out["reason"] = (
