@@ -966,6 +966,18 @@ def find_flight(
         _win = {(p["frame"], p["x"], p["y"])
                 for p in ((res.get("flight") or {}).get("track") or {})
                 .get("points", [])}
+        # Each drawn track's VERDICT, joined back onto its row. The answer
+        # to "why wasn't the one I can see picked?" was sitting in a
+        # 71-row collapsed table keyed by a number you had to go and find.
+        # It belongs next to the line you are looking at.
+        _by_idx = {t.get("idx"): t for t in (res.get("tried") or [])}
+        for _row in dbg["tracks_preview"]:
+            _t = _by_idx.get(_row["idx"]) or {}
+            _row["verdict"] = _t.get("verdict")
+            _row["n_inliers"] = _t.get("n_inliers")
+            _row["rms_px"] = _t.get("rms_px")
+            _row["aim_px"] = _t.get("aim_px")
+            _row["score"] = _t.get("score")
         if _win:
             for _row, (_i, _) in zip(dbg["tracks_preview"], _sel):
                 _row["winner"] = ({(p["frame"], p["x"], p["y"])

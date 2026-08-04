@@ -3494,7 +3494,9 @@ function Debug3Modal({ state, onClose }) {
                         <th align="right">rise</th>
                         <th align="right" title="points per frame spanned — 1.0 means it was seen on every frame. Junk built from long-range links sits near 0.3.">seen</th>
                         <th align="left">from → to</th>
+                        <th align="right" title="inliers / rms / how far its back-projection lands from the ball">fit</th>
                         <th align="left">shown because</th>
+                        <th align="left">verdict</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3528,7 +3530,22 @@ function Debug3Modal({ state, onClose }) {
                             {t.from ? `${t.from[0]},${t.from[1]}` : "–"} →{" "}
                             {t.to ? `${t.to[0]},${t.to[1]}` : "–"}
                           </td>
+                          <td align="right" className="muted"
+                            style={{ whiteSpace: "nowrap" }}>
+                            {t.n_inliers != null
+                              ? `${t.n_inliers}/${t.n} · ${t.rms_px ?? "–"}px`
+                              : "–"}
+                            {t.aim_px != null && (
+                              <> · aims {Math.round(t.aim_px)}px</>
+                            )}
+                          </td>
                           <td className="muted">{t.why}</td>
+                          <td style={String(t.verdict || "").startsWith("accepted")
+                            ? { color: "var(--emerald-700)" }
+                            : { color: "#b7791f" }}>
+                            {t.verdict || "–"}
+                            {t.score != null && <> · score {t.score}</>}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
