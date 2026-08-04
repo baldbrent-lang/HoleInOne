@@ -885,19 +885,19 @@ def find_flight(
         # few dozen points, and the debug image writes are pure overhead
         # that only the panel pays. Timing is a perf_counter read per phase,
         # so it costs nothing to leave on in production too.
-        _t: dict[str, float] = {}
-        dbg["timing"] = _t
+        _laps: dict[str, float] = {}
+        dbg["timing"] = _laps
         _mark = time.perf_counter()
 
         def _lap(name: str) -> None:
             nonlocal _mark
             now = time.perf_counter()
-            _t[name] = round(now - _mark, 3)
+            _laps[name] = round(now - _mark, 3)
             _mark = now
             # Kept current so the two early returns below (no detections /
             # no flight) still report a total rather than a bare phase list.
-            _t["total"] = round(
-                sum(v for k, v in _t.items() if k != "total"), 3,
+            _laps["total"] = round(
+                sum(v for k, v in _laps.items() if k != "total"), 3,
             )
 
         # A-C: detections.
@@ -1020,12 +1020,19 @@ def find_flight(
         # It belongs next to the line you are looking at.
         _by_idx = {t.get("idx"): t for t in (res.get("tried") or [])}
         for _row in dbg["tracks_preview"]:
-            _t = _by_idx.get(_row["idx"]) or {}
-            _row["verdict"] = _t.get("verdict")
-            _row["n_inliers"] = _t.get("n_inliers")
-            _row["rms_px"] = _t.get("rms_px")
-            _row["aim_px"] = _t.get("aim_px")
-            _row["score"] = _t.get("score")
+            # NOT `_t` — that name is the timing dict this function's
+            # `_lap` closure writes into. Rebinding it here pointed _lap
+            # at a tested-track record instead, whose "frames" value is a
+            # list, so the next _lap summed a list into a float and threw
+            # `unsupported operand type(s) for +: 'int' and 'list'` --
+            # which surfaced as the whole flight stage failing and a
+            # produced clip never being built.
+            _rec = _by_idx.get(_row["idx"]) or {}
+            _row["verdict"] = _rec.get("verdict")
+            _row["n_inliers"] = _rec.get("n_inliers")
+            _row["rms_px"] = _rec.get("rms_px")
+            _row["aim_px"] = _rec.get("aim_px")
+            _row["score"] = _rec.get("score")
         if _win:
             for _row, (_i, _) in zip(dbg["tracks_preview"], _sel):
                 _row["winner"] = ({(p["frame"], p["x"], p["y"])
