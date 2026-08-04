@@ -33,6 +33,13 @@ SPOOL_DRAIN_MAX = 20
 # and the live stream of new clips both make progress.
 SPOOL_DRAIN_BUSY = 2
 
+# A clip that keeps failing is usually just too big for what the link is
+# giving today. After this many attempts, re-encode it smaller and try
+# again — halving each time, down to a floor. A 720p clip at 400 kbps is
+# not what we want, but it is a clip; 6.5 MB that never arrives is not.
+SHRINK_AFTER_TRIES = 3
+SHRINK_FLOOR_KBPS = 400
+
 
 # ---------------------------------------------------------------------
 # Config
@@ -504,6 +511,9 @@ class BackgroundUploader(threading.Thread):
                 "session_id": session_id,
                 "recording_started_at": ts,
                 "tries": int(tries),
+                # What it is currently encoded at, so repeated failures
+                # can step it down instead of retrying the same bytes.
+                "kbps": int(self.compress_kbps or 0),
                 # Already compressed — re-encoding it on every retry would
                 # cost the Pi an ffmpeg pass and degrade it each time.
                 "compressed": True,
@@ -741,6 +751,31 @@ class BackgroundUploader(threading.Thread):
             return False
         path, meta = nxt
         tries = int(meta.get("tries") or 0)
+        # SHRINK RATHER THAN GIVE UP. The tee's view (golfer, trees, rain)
+        # sits at its full bitrate, so a 35s clip is 6.5 MB; the green's
+        # static view undershoots to about 1 MB and sails through on the
+        # same link in the same minute. Size is what separates them, so
+        # when a clip has failed repeatedly, take the size away.
+        _kbps = int(meta.get("kbps") or self.compress_kbps or 0)
+        if (tries >= SHRINK_AFTER_TRIES and _kbps > SHRINK_FLOOR_KBPS
+                and path.exists()):
+            _new = max(SHRINK_FLOOR_KBPS, _kbps // 2)
+            _was = path.stat().st_size / (1024 * 1024)
+            if compress_for_upload(path, target_kbps=_new):
+                meta["kbps"] = _new
+                meta["tries"] = 0        # a different clip; a fresh budget
+                tries = 0
+                try:
+                    path.with_suffix(".json").write_text(json.dumps(meta))
+                except Exception:  # noqa: BLE001
+                    pass
+                log.warning(
+                    "uploader: %s failed %d times at %d kbps (%.1f MB) — "
+                    "re-encoded at %d kbps (%.1f MB). Lower quality beats a "
+                    "clip that never arrives.",
+                    path.name, SHRINK_AFTER_TRIES, _kbps, _was, _new,
+                    path.stat().st_size / (1024 * 1024),
+                )
         log.info("uploader: retrying spooled %s (%d previous attempt(s))",
                  path.name, tries)
         # Nothing is waiting on this — the queue is empty, which is why
