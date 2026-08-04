@@ -40,6 +40,11 @@ SPOOL_DRAIN_BUSY = 2
 SHRINK_AFTER_TRIES = 3
 SHRINK_FLOOR_KBPS = 400
 
+# Clean uploads in a row before the encode bitrate steps back up toward
+# the configured ceiling. Slow on the way up, fast on the way down: a
+# brief good patch should not undo an adaptation the link earned.
+KBPS_RECOVER_AFTER = 10
+
 
 # ---------------------------------------------------------------------
 # Config
@@ -477,6 +482,14 @@ class BackgroundUploader(threading.Thread):
         self.backoff_max = float(backoff_max)
         self._fails = 0
         self._quiet_until = 0.0
+        # ADAPTIVE BITRATE. compress_kbps is the ceiling we would like;
+        # this is what the link has shown it will actually take. Shrinking
+        # spooled clips after the fact only mops up — while the tee keeps
+        # ENCODING at 1500 kbps, it keeps manufacturing 6 MB files the
+        # link cannot move, faster than the spool can rescue them. Lower
+        # it on repeated failure, recover it slowly on sustained success.
+        self._kbps_now = int(compress_kbps)
+        self._wins = 0
         if self.spool_dir is not None:
             try:
                 self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -513,7 +526,7 @@ class BackgroundUploader(threading.Thread):
                 "tries": int(tries),
                 # What it is currently encoded at, so repeated failures
                 # can step it down instead of retrying the same bytes.
-                "kbps": int(self.compress_kbps or 0),
+                "kbps": int(self._kbps_now or 0),
                 # Already compressed — re-encoding it on every retry would
                 # cost the Pi an ffmpeg pass and degrade it each time.
                 "compressed": True,
@@ -595,7 +608,20 @@ class BackgroundUploader(threading.Thread):
                          "%d failure(s)", self._fails)
             self._fails = 0
             self._quiet_until = 0.0
+            # Earn quality back slowly. Ten clean uploads in a row is the
+            # link telling us it has room; step up rather than jump, so a
+            # brief good patch does not undo the adaptation.
+            self._wins += 1
+            if (self._wins >= KBPS_RECOVER_AFTER
+                    and self._kbps_now < self.compress_kbps):
+                self._wins = 0
+                _up = min(self.compress_kbps, int(self._kbps_now * 1.5))
+                log.info("uploader: %d clean upload(s) — raising the encode "
+                         "bitrate %d -> %d kbps", KBPS_RECOVER_AFTER,
+                         self._kbps_now, _up)
+                self._kbps_now = _up
             return
+        self._wins = 0
         self._fails += 1
         wait = min(
             self.backoff_max,
@@ -609,6 +635,17 @@ class BackgroundUploader(threading.Thread):
             "recorded meanwhile are spooled without an attempt.",
             self._fails, held_seconds, wait,
         )
+        # ...and stop MAKING clips this link cannot carry.
+        if (self._fails >= SHRINK_AFTER_TRIES
+                and self._kbps_now > SHRINK_FLOOR_KBPS):
+            _new = max(SHRINK_FLOOR_KBPS, self._kbps_now // 2)
+            log.warning(
+                "uploader: %d failures in a row — dropping the encode "
+                "bitrate %d -> %d kbps so new clips are small enough to "
+                "get through. It recovers after %d clean uploads.",
+                self._fails, self._kbps_now, _new, KBPS_RECOVER_AFTER,
+            )
+            self._kbps_now = _new
 
     def _in_backoff(self) -> float:
         """Seconds left of the quiet window, 0 if we may transmit."""
@@ -618,10 +655,10 @@ class BackgroundUploader(threading.Thread):
               real_fps: Optional[float], compress: bool, retries: int,
               timeout: int) -> bool:
         try:
-            if compress and self.compress_kbps > 0:
+            if compress and self._kbps_now > 0:
                 compress_for_upload(
                     clip_path,
-                    target_kbps=self.compress_kbps,
+                    target_kbps=self._kbps_now,
                     scale_height=(
                         int(self.scale_height) if self.scale_height else None
                     ),
@@ -670,9 +707,9 @@ class BackgroundUploader(threading.Thread):
                 # the link permanently busy; spool it and stay off the
                 # wire. Compress first, so the retry has nothing left to
                 # do but send.
-                if self.compress_kbps > 0:
+                if self._kbps_now > 0:
                     compress_for_upload(
-                        clip_path, target_kbps=self.compress_kbps,
+                        clip_path, target_kbps=self._kbps_now,
                         scale_height=(int(self.scale_height)
                                       if self.scale_height else None),
                         force_input_fps=real_fps,
@@ -756,7 +793,7 @@ class BackgroundUploader(threading.Thread):
         # static view undershoots to about 1 MB and sails through on the
         # same link in the same minute. Size is what separates them, so
         # when a clip has failed repeatedly, take the size away.
-        _kbps = int(meta.get("kbps") or self.compress_kbps or 0)
+        _kbps = int(meta.get("kbps") or self._kbps_now or 0)
         if (tries >= SHRINK_AFTER_TRIES and _kbps > SHRINK_FLOOR_KBPS
                 and path.exists()):
             _new = max(SHRINK_FLOOR_KBPS, _kbps // 2)
@@ -794,12 +831,16 @@ class BackgroundUploader(threading.Thread):
             path.with_suffix(".json").unlink(missing_ok=True)
             log.info("uploader: spooled %s finally went up", path.name)
             return True
-        # Still down. Touch it so the queue rotates rather than hammering
-        # the same clip every minute while newer ones never get a turn.
+        # DO NOT ROTATE. Touching the file to move on to the next clip
+        # assumed failures were clip-specific. They are not: every clip is
+        # ~6 MB and the link is taking none of them, so rotating just
+        # tries the same impossible thing on thirty different files — and
+        # no single clip ever reaches the 3 tries that trigger the shrink.
+        # Staying on the oldest until it goes up (or shrinks small enough
+        # to) is what actually makes progress.
         try:
             meta["tries"] = tries + 1
             path.with_suffix(".json").write_text(json.dumps(meta))
-            os.utime(path, None)
         except Exception:  # noqa: BLE001
             pass
         return False
