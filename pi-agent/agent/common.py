@@ -425,9 +425,14 @@ class BackgroundUploader(threading.Thread):
         spool_dir: Optional[Path] = None,
         spool_max_mb: int = 2048,
         spool_max_age_hours: float = 24.0,
-        fresh_timeout: int = 120,
-        idle_timeout: int = 240,
-        patient_timeout: int = 300,
+        # A 6.5 MB clip goes in ~10s on a clear link. These are the point
+        # at which we stop believing the link is merely busy and start
+        # believing it is congested — generous multiples of 10s, not the
+        # minutes they used to be. A long attempt is not patience, it is
+        # occupation.
+        fresh_timeout: int = 60,
+        idle_timeout: int = 90,
+        patient_timeout: int = 120,
         backoff_base: float = 20.0,
         backoff_max: float = 600.0,
     ):
@@ -565,8 +570,15 @@ class BackgroundUploader(threading.Thread):
 
     # ---- worker -----------------------------------------------------
 
-    def _note_result(self, ok: bool) -> None:
-        """Widen or clear the quiet window after an attempt."""
+    def _note_result(self, ok: bool, held_seconds: float = 0.0) -> None:
+        """Widen or clear the quiet window after an attempt.
+
+        `held_seconds` is how long the failed attempt occupied the wire,
+        and the quiet window is at least that long. A flat 20s after an
+        attempt that burned 316 seconds is a 94% duty cycle — the same
+        congestion loop the backoff exists to break, just slower. Silence
+        has to be proportional to the noise that preceded it.
+        """
         if ok:
             if self._fails:
                 log.info("uploader: link is back — backoff cleared after "
@@ -575,14 +587,17 @@ class BackgroundUploader(threading.Thread):
             self._quiet_until = 0.0
             return
         self._fails += 1
-        wait = min(self.backoff_max,
-                   self.backoff_base * (2 ** (self._fails - 1)))
+        wait = min(
+            self.backoff_max,
+            max(self.backoff_base * (2 ** (self._fails - 1)),
+                float(held_seconds)),
+        )
         self._quiet_until = time.time() + wait
         log.warning(
-            "uploader: %d consecutive failure(s) — going quiet for %.0fs so "
-            "the link can actually drain. Clips recorded meanwhile are "
-            "spooled without an attempt.",
-            self._fails, wait,
+            "uploader: %d consecutive failure(s), last one held the link "
+            "%.0fs — going quiet for %.0fs so it can actually drain. Clips "
+            "recorded meanwhile are spooled without an attempt.",
+            self._fails, held_seconds, wait,
         )
 
     def _in_backoff(self) -> float:
@@ -671,9 +686,10 @@ class BackgroundUploader(threading.Thread):
                 log.info("uploader: %d clip(s) behind this one — %d attempt(s) "
                          "of %ds then spool, so they are not blocked",
                          _depth, _tries, _to)
+            _t_send = time.time()
             ok = self._send(session_id, clip_path, ts, real_fps,
                             compress=True, retries=_tries, timeout=_to)
-            self._note_result(ok)
+            self._note_result(ok, time.time() - _t_send)
             if not ok:
                 self._spool(session_id, clip_path, ts, tries=_tries)
             try:
@@ -730,13 +746,14 @@ class BackgroundUploader(threading.Thread):
         # Nothing is waiting on this — the queue is empty, which is why
         # we are here. So give it the long, patient attempt that a fresh
         # clip cannot afford.
+        _t_send = time.time()
         ok = self._send(
             meta.get("session_id") or path.stem, path,
             meta.get("recording_started_at"), None,
             compress=not meta.get("compressed"), retries=1,
             timeout=self.patient_timeout,
         )
-        self._note_result(ok)
+        self._note_result(ok, time.time() - _t_send)
         if ok:
             path.unlink(missing_ok=True)
             path.with_suffix(".json").unlink(missing_ok=True)
