@@ -24,6 +24,11 @@ import yaml
 
 log = logging.getLogger("golfreelz_agent.common")
 
+# How many spooled clips one sweep may send before letting the loop
+# breathe. A bound, not a budget: it exists so a 300-clip spool cannot
+# monopolise the worker, not to pace the link (the backoff does that).
+SPOOL_DRAIN_MAX = 20
+
 
 # ---------------------------------------------------------------------
 # Config
@@ -617,9 +622,28 @@ class BackgroundUploader(threading.Thread):
                 # never queues behind a long retry run.
                 if (time.time() >= self._next_spool_sweep
                         and self._in_backoff() <= 0):
-                    self._next_spool_sweep = time.time() + 60.0
                     self._prune_spool()
-                    self._retry_one_spooled()
+                    # DRAIN, DON'T TRICKLE. One clip per 60s was sized for
+                    # a link that seemed to need minutes per clip. It does
+                    # 6.3 MB in 9.5s, so a backlog built during an outage
+                    # would have taken 14 minutes to clear at one a minute
+                    # — and new clips arrive faster than that, so it grew
+                    # instead. Keep going while it works; stop the moment
+                    # it does not, or when a fresh clip needs the worker.
+                    _n = 0
+                    while (not self._stop.is_set()
+                           and self._q.empty()
+                           and self._in_backoff() <= 0
+                           and _n < SPOOL_DRAIN_MAX):
+                        if not self._retry_one_spooled():
+                            break
+                        _n += 1
+                    if _n:
+                        log.info("uploader: drained %d spooled clip(s) this "
+                                 "pass", _n)
+                    # Straight back round while there is a backlog moving;
+                    # the slow cadence is for an empty, quiet spool.
+                    self._next_spool_sweep = time.time() + (5.0 if _n else 60.0)
                 continue
             # HEAD-OF-LINE. Five attempts x a 180s timeout is 15 minutes
             # per clip. With eight queued that is over two hours, and the
@@ -680,10 +704,11 @@ class BackgroundUploader(threading.Thread):
                 pass
             self._q.task_done()
 
-    def _retry_one_spooled(self) -> None:
+    def _retry_one_spooled(self) -> bool:
+        """Send one spooled clip. True only if it actually went up."""
         nxt = self._next_spooled()
         if not nxt:
-            return
+            return False
         path, meta = nxt
         tries = int(meta.get("tries") or 0)
         log.info("uploader: retrying spooled %s (%d previous attempt(s))",
@@ -702,7 +727,7 @@ class BackgroundUploader(threading.Thread):
             path.unlink(missing_ok=True)
             path.with_suffix(".json").unlink(missing_ok=True)
             log.info("uploader: spooled %s finally went up", path.name)
-            return
+            return True
         # Still down. Touch it so the queue rotates rather than hammering
         # the same clip every minute while newer ones never get a turn.
         try:
@@ -711,6 +736,7 @@ class BackgroundUploader(threading.Thread):
             os.utime(path, None)
         except Exception:  # noqa: BLE001
             pass
+        return False
 
     def stop(self, drain_timeout: float = 0.0) -> None:
         """Signal shutdown. Optionally wait up to drain_timeout for any
