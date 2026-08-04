@@ -4,6 +4,7 @@ heartbeat thread. Imported by both the tee and green role runners.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -274,6 +275,7 @@ class BackendClient:
         session_id: str,
         video_path: Path,
         recording_started_at: float | None = None,
+        retries: int = 5,
     ) -> dict:
         # SIZE AND THROUGHPUT, MEASURED. When a clip never arrives the
         # only thing in the log is "network error", and the admin card
@@ -313,7 +315,7 @@ class BackendClient:
                 data=data,
                 make_files=_make_files,
                 timeout=180,
-                retries=5,
+                retries=int(retries),
             )
         except Exception:
             _el = max(0.001, time.time() - _t0)
@@ -321,10 +323,11 @@ class BackendClient:
             # the number that says whether the answer is a shorter clip, a
             # lower bitrate, or a longer timeout.
             log.error(
-                "upload FAILED: %s, %.1f MB, gave up after %.0fs across 5 "
-                "attempts (~%.0f kbps if the last attempt ran the whole "
-                "180s) — the clip is too big for this link",
-                video_path.name, _mb, _el, (_bytes * 8 / 1024) / 180.0,
+                "upload FAILED: %s, %.1f MB, gave up after %.0fs across "
+                "%d attempt(s) — this link cannot move it inside the 180s "
+                "write timeout (it would need ~%.0f kbps sustained)",
+                video_path.name, _mb, _el, int(retries),
+                (_bytes * 8 / 1024) / 180.0,
             )
             raise
         _el = max(0.001, time.time() - _t0)
@@ -409,6 +412,9 @@ class BackgroundUploader(threading.Thread):
         *,
         compress_kbps: int = 0,
         scale_height: Optional[int] = None,
+        spool_dir: Optional[Path] = None,
+        spool_max_mb: int = 2048,
+        spool_max_age_hours: float = 24.0,
     ):
         super().__init__(daemon=True, name="uploader")
         self.client = client
@@ -416,6 +422,22 @@ class BackgroundUploader(threading.Thread):
         self.scale_height = scale_height
         self._q: "queue.Queue" = queue.Queue()
         self._stop = threading.Event()
+        # THE SPOOL. A clip whose upload fails used to be deleted in a
+        # `finally`, so five swings of footage were destroyed on a link
+        # that was merely down for twenty minutes. Failures now go here,
+        # already compressed, and are retried when the queue is idle.
+        # Bounded by size and age so a week offline cannot fill the card.
+        self.spool_dir = Path(spool_dir) if spool_dir else None
+        self.spool_max_bytes = int(spool_max_mb) * 1024 * 1024
+        self.spool_max_age = float(spool_max_age_hours) * 3600.0
+        self._next_spool_sweep = 0.0
+        if self.spool_dir is not None:
+            try:
+                self.spool_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                log.warning("uploader: no spool dir (%s) — failures will be "
+                            "dropped as before", exc)
+                self.spool_dir = None
 
     def enqueue(self, session_id: str, clip_path: Path,
                 recording_started_at: Optional[float],
@@ -429,38 +451,170 @@ class BackgroundUploader(threading.Thread):
         if depth > 1:
             log.info("uploader: %d clip(s) queued", depth)
 
+    # ---- spool ------------------------------------------------------
+
+    def _spool(self, session_id: str, clip_path: Path,
+               ts: Optional[float], tries: int) -> bool:
+        """Park a failed clip for a later attempt. True if it was kept."""
+        if self.spool_dir is None or not clip_path.exists():
+            return False
+        try:
+            dest = self.spool_dir / clip_path.name
+            clip_path.replace(dest)
+            dest.with_suffix(".json").write_text(json.dumps({
+                "session_id": session_id,
+                "recording_started_at": ts,
+                "tries": int(tries),
+                # Already compressed — re-encoding it on every retry would
+                # cost the Pi an ffmpeg pass and degrade it each time.
+                "compressed": True,
+            }))
+            log.warning(
+                "uploader: kept %s (%.1f MB) for a later attempt — %d clip(s) "
+                "now waiting on the link",
+                dest.name, dest.stat().st_size / (1024 * 1024),
+                len(list(self.spool_dir.glob("*.mp4"))),
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("uploader: could not spool %s: %s", clip_path.name, exc)
+            return False
+
+    def _prune_spool(self) -> None:
+        """Keep the spool inside its size and age bounds, oldest out first."""
+        if self.spool_dir is None:
+            return
+        try:
+            clips = sorted(self.spool_dir.glob("*.mp4"),
+                           key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return
+        now = time.time()
+        total = 0
+        keep: list = []
+        for p in reversed(clips):          # newest first
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if (now - st.st_mtime) > self.spool_max_age:
+                continue
+            if total + st.st_size > self.spool_max_bytes:
+                continue
+            total += st.st_size
+            keep.append(p)
+        for p in clips:
+            if p in keep:
+                continue
+            log.warning("uploader: dropping spooled %s (spool full or stale)",
+                        p.name)
+            p.unlink(missing_ok=True)
+            p.with_suffix(".json").unlink(missing_ok=True)
+
+    def _next_spooled(self):
+        """The oldest clip waiting on the link, or None."""
+        if self.spool_dir is None:
+            return None
+        try:
+            clips = sorted(self.spool_dir.glob("*.mp4"),
+                           key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return None
+        for p in clips:
+            side = p.with_suffix(".json")
+            try:
+                meta = json.loads(side.read_text()) if side.exists() else {}
+            except Exception:  # noqa: BLE001
+                meta = {}
+            return p, meta
+        return None
+
+    # ---- worker -----------------------------------------------------
+
+    def _send(self, session_id: str, clip_path: Path, ts: Optional[float],
+              real_fps: Optional[float], compress: bool, retries: int) -> bool:
+        try:
+            if compress and self.compress_kbps > 0:
+                compress_for_upload(
+                    clip_path,
+                    target_kbps=self.compress_kbps,
+                    scale_height=(
+                        int(self.scale_height) if self.scale_height else None
+                    ),
+                    force_input_fps=real_fps,
+                )
+            result = self.client.upload_event(
+                session_id, clip_path, recording_started_at=ts,
+                retries=retries,
+            )
+            log.info(
+                "uploaded: event=%s status=%s ready=%s",
+                result.get("event_id"), result.get("status"),
+                result.get("ready_to_process"),
+            )
+            return True
+        except Exception as exc:  # pragma: no cover
+            log.error("background upload failed for %s: %s", session_id, exc)
+            return False
+
     def run(self) -> None:
         while not self._stop.is_set():
             try:
                 session_id, clip_path, ts, real_fps = self._q.get(timeout=0.5)
             except queue.Empty:
+                # Idle: nothing fresh waiting, so spend the time on the
+                # backlog instead. One clip per pass, so a fresh capture
+                # never queues behind a long retry run.
+                if time.time() >= self._next_spool_sweep:
+                    self._next_spool_sweep = time.time() + 60.0
+                    self._prune_spool()
+                    self._retry_one_spooled()
                 continue
+            # HEAD-OF-LINE. Five attempts x a 180s timeout is 15 minutes
+            # per clip. With eight queued that is over two hours, and the
+            # 3 MB clips that WOULD have made it die behind a 40 MB one
+            # that never will. When clips are waiting, try once and spool.
+            _depth = self._q.qsize()
+            _tries = 1 if _depth >= 2 else (2 if _depth else 5)
+            if _depth:
+                log.info("uploader: %d clip(s) behind this one — %d attempt(s) "
+                         "then spool, so they are not blocked", _depth, _tries)
+            ok = self._send(session_id, clip_path, ts, real_fps,
+                            compress=True, retries=_tries)
+            if not ok:
+                self._spool(session_id, clip_path, ts, tries=_tries)
             try:
-                if self.compress_kbps > 0:
-                    compress_for_upload(
-                        clip_path,
-                        target_kbps=self.compress_kbps,
-                        scale_height=(
-                            int(self.scale_height) if self.scale_height else None
-                        ),
-                        force_input_fps=real_fps,
-                    )
-                result = self.client.upload_event(
-                    session_id, clip_path, recording_started_at=ts,
-                )
-                log.info(
-                    "uploaded: event=%s status=%s ready=%s",
-                    result.get("event_id"), result.get("status"),
-                    result.get("ready_to_process"),
-                )
-            except Exception as exc:  # pragma: no cover
-                log.error("background upload failed for %s: %s", session_id, exc)
-            finally:
-                try:
-                    clip_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                self._q.task_done()
+                clip_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._q.task_done()
+
+    def _retry_one_spooled(self) -> None:
+        nxt = self._next_spooled()
+        if not nxt:
+            return
+        path, meta = nxt
+        tries = int(meta.get("tries") or 0)
+        log.info("uploader: retrying spooled %s (%d previous attempt(s))",
+                 path.name, tries)
+        ok = self._send(
+            meta.get("session_id") or path.stem, path,
+            meta.get("recording_started_at"), None,
+            compress=not meta.get("compressed"), retries=1,
+        )
+        if ok:
+            path.unlink(missing_ok=True)
+            path.with_suffix(".json").unlink(missing_ok=True)
+            log.info("uploader: spooled %s finally went up", path.name)
+            return
+        # Still down. Touch it so the queue rotates rather than hammering
+        # the same clip every minute while newer ones never get a turn.
+        try:
+            meta["tries"] = tries + 1
+            path.with_suffix(".json").write_text(json.dumps(meta))
+            os.utime(path, None)
+        except Exception:  # noqa: BLE001
+            pass
 
     def stop(self, drain_timeout: float = 0.0) -> None:
         """Signal shutdown. Optionally wait up to drain_timeout for any

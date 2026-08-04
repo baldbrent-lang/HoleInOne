@@ -125,6 +125,12 @@ class GreenAgent:
             self.client,
             compress_kbps=self.upload_bitrate_kbps,
             scale_height=self.upload_scale_height,
+            # Under work_dir on purpose: the spool move must stay on one
+            # filesystem or the rename fails across devices.
+            spool_dir=self.work_dir / "pending",
+            spool_max_mb=int(self.cfg.get("upload_spool_max_mb", 2048)),
+            spool_max_age_hours=float(
+                self.cfg.get("upload_spool_max_age_hours", 24)),
         )
         self.uploader.start()
 
