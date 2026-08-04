@@ -343,6 +343,10 @@ class TeeAgent:
         # 30s clips that each arrive, instead of one 3-minute clip that
         # never does — and one swing per clip is what produce wants anyway.
         self.max_clip_seconds = float(cfg.get("max_clip_seconds", 30))
+        # How many 30s clips in an unbroken row before we decide the ROI
+        # is holding on somebody who is not going to swing, and pause.
+        self.max_splits = int(cfg.get("max_consecutive_splits", 4))
+        self.split_cooldown = float(cfg.get("split_cooldown_seconds", 90))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
         # Compress each clip to H.264 at this bitrate (kbps) before upload.
         # Makes clips play in any browser (mp4v won't play in desktop
@@ -536,6 +540,8 @@ class TeeAgent:
         # the capture rate, so this is purely how often we re-check for
         # a person — independent of the recorded frame rate.
         det_period = 1.0 / max(0.5, det_fps)
+        _splits = 0                 # consecutive length-cap splits
+        _cooldown_until = 0.0       # automatic triggers paused until this
         dwell_seconds = float(self.det_cfg.get("trigger_dwell_seconds", 2))
         no_person_timeout = float(self.det_cfg.get("no_person_timeout_seconds", 5))
 
@@ -617,6 +623,13 @@ class TeeAgent:
                 # an explicit duration; the SSH sentinel does not.
                 pending_secs = self._take_pending_capture()
                 forced = _take_force_trigger() or pending_secs is not None
+                if not forced and now < _cooldown_until:
+                    # Paused after a runaway. An explicit Capture or a
+                    # touched sentinel still gets through — the pause is
+                    # for the automatic trigger, not for the operator.
+                    person_first_seen = None
+                    time.sleep(det_period)
+                    continue
 
                 if not forced:
                     if in_roi:
@@ -649,7 +662,31 @@ class TeeAgent:
                             detector, no_person_timeout, det_period,
                             fps, session_id, fixed_seconds=pending_secs,
                         )
-                        if _why == "length_cap":
+                        if _why == "length_cap" and _splits >= self.max_splits:
+                            # RUNAWAY GUARD. A split means "the person is
+                            # still there", and with a loose ROI that is
+                            # true forever — someone on the fairway or the
+                            # cart path holds it open, so the tee records
+                            # 30s clips back to back with no end. Each one
+                            # costs ~23s to compress and ~10s to upload on
+                            # a Pi that is also capturing at 50fps: an 88%
+                            # duty cycle, and the queue grows.
+                            log.warning(
+                                "%d consecutive length-cap splits (%.0fs of "
+                                "unbroken recording) — pausing triggers for "
+                                "%.0fs. If this keeps happening the trigger "
+                                "ROI is too large: it is holding on someone "
+                                "who is not teeing off. Narrow tee_box_roi "
+                                "to the tee box.",
+                                _splits, _splits * self.max_clip_seconds,
+                                self.split_cooldown,
+                            )
+                            _splits = 0
+                            _cooldown_until = now + self.split_cooldown
+                            self.buffer.clear()
+                            person_first_seen = None
+                        elif _why == "length_cap":
+                            _splits += 1
                             # A SPLIT, not an ending. Keep the ring buffer
                             # so the next clip opens with its full pre-roll
                             # and OVERLAPS this one — otherwise a swing
@@ -660,6 +697,7 @@ class TeeAgent:
                             # about two seconds.
                             person_first_seen = now
                         else:
+                            _splits = 0
                             self.buffer.clear()
                             person_first_seen = None
                 time.sleep(det_period)

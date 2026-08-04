@@ -112,6 +112,21 @@ buffer_seconds: 5
 # Code defaults if unset: tee 30, green 45.
 max_clip_seconds: 30
 
+# RUNAWAY GUARD. A length-cap split means "the person is still in the
+# ROI", and with a loose ROI that stays true forever — someone on the
+# fairway or the cart path holds it open and the tee records 30s clips
+# back to back with no end. Each costs ~23s to compress and ~10s to
+# upload on a Pi also capturing at 50fps, so the queue only grows.
+#
+# After this many consecutive splits the automatic trigger pauses for
+# split_cooldown_seconds. An operator Capture still gets through.
+#
+# If you see the warning it fires, the real fix is tee_box_roi: a full
+# 1280x720 ROI triggers on anyone anywhere in shot. Draw it around the
+# tee box.
+max_consecutive_splits: 4
+split_cooldown_seconds: 90
+
 # Green-side only: how often to ask the backend whether the tee has
 # signalled end-of-session. Lower = green stops closer to the tee but
 # more HTTP traffic. 1 s is a good balance.
