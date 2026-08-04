@@ -676,6 +676,8 @@ def ransac_parabola(
     out = {
         "ok": False, "n_inliers": 0, "rms_px": None, "inliers": [],
         "outliers": [], "at_impact": None, "aim_px": None, "reason": None,
+        "aim_path_px": None, "aim_at_impact_px": None, "aim_basis": None,
+        "aim_frame": None,
     }
     if not HAS_CV or len(points) < 3:
         out["reason"] = f"need 3+ points, have {len(points)}"
@@ -764,16 +766,62 @@ def ransac_parabola(
     out["at_impact"] = [int(ix), int(iy)]
     out["coef"] = {"x": [float(v) for v in cx], "y": [float(v) for v in cy]}
     if ball_xy and len(ball_xy) == 2:
-        out["aim_px"] = round(
-            math.hypot(ix - float(ball_xy[0]), iy - float(ball_xy[1])), 1,
+        _bx, _by = float(ball_xy[0]), float(ball_xy[1])
+        # TWO WAYS TO ASK "does this track come from the ball", and only
+        # one of them is any good.
+        #
+        # The old one evaluates the fit AT THE POSE IMPACT FRAME. That
+        # bakes in pose's timing, and pose's timing is the weakest number
+        # in the run — it fires on peak wrist speed, which is not the
+        # moment of impact. On the swing at Snee Farm it was EIGHT frames
+        # late, which put the impact frame three frames INSIDE the ball's
+        # own track. Evaluating there lands the "launch point" 200px up in
+        # the air, and the real flight was rejected for aiming 234px wide.
+        #
+        # The right question has no clock in it: run the path DOWN to the
+        # ball's own height and see how far to the side it passes. Same
+        # arithmetic as launch_from_ground, asked earlier. On that swing
+        # it answers 3px.
+        out["aim_at_impact_px"] = round(math.hypot(ix - _bx, iy - _by), 1)
+        _path = None
+        _a, _b, _c = (float(v) for v in cy)
+        _t = None
+        if abs(_a) > 1e-9:
+            _disc = _b * _b - 4.0 * _a * (_c - _by)
+            if _disc >= 0.0:
+                _rt = math.sqrt(_disc)
+                # The earlier root is the launch; the later one is where
+                # the ball comes back down.
+                _t = min((-_b - _rt) / (2.0 * _a), (-_b + _rt) / (2.0 * _a))
+        elif abs(_b) > 1e-9:
+            _t = (_by - _c) / _b            # degenerate: straight line
+        if _t is not None:
+            # Don't extrapolate a parabola halfway to next week. Past a
+            # couple of track-lengths back, the curve is inventing.
+            _f0 = float(points[0]["frame"])
+            _span = max(1.0, float(points[-1]["frame"]) - _f0)
+            if _f0 - _t <= max(30.0, 2.0 * _span):
+                _path = round(
+                    abs(float(np.polyval(cx, _t)) - _bx), 1,
+                )
+                out["aim_frame"] = int(round(_t))
+        out["aim_path_px"] = _path
+        out["aim_px"] = _path if _path is not None else out["aim_at_impact_px"]
+        out["aim_basis"] = (
+            "path run down to the ball's height" if _path is not None
+            else "the fit at the pose impact frame (the path never gets "
+                 "down to the ball)"
         )
     out["ok"] = True
     out["x_degree"] = int(len(cx) - 1)
     out["reason"] = (
         f"{out['n_inliers']}/{len(points)} points on a parabola "
         f"(x deg {out['x_degree']}), rms {out['rms_px']}px"
-        + (f"; run back to impact it lands {out['aim_px']}px from the ball"
-           if out["aim_px"] is not None else "")
+        + (f"; run down to the ball's height it passes "
+           f"{out['aim_px']}px from it (at f{out['aim_frame']})"
+           if out.get("aim_path_px") is not None else
+           f"; at the pose impact frame it lands {out['aim_px']}px from "
+           f"the ball" if out["aim_px"] is not None else "")
     )
     return out
 
@@ -1510,7 +1558,12 @@ def pick_flight(
             "n_points": len(tr["points"]),
             "span_px": tr["span_px"], "rise_px": tr["rise_px"],
             "n_inliers": fit.get("n_inliers"), "rms_px": fit.get("rms_px"),
-            "aim_px": fit.get("aim_px"), "verdict": None,
+            "aim_px": fit.get("aim_px"),
+            "aim_path_px": fit.get("aim_path_px"),
+            "aim_at_impact_px": fit.get("aim_at_impact_px"),
+            "aim_basis": fit.get("aim_basis"),
+            "aim_frame": fit.get("aim_frame"),
+            "verdict": None,
         }
         if not fit.get("ok"):
             rec["verdict"] = f"no fit: {fit.get('reason')}"
@@ -1552,7 +1605,8 @@ def pick_flight(
             if fit["aim_px"] > limit and not _self_evident:
                 rec["verdict"] = (
                     f"aims {fit['aim_px']:.0f}px from the ball "
-                    f"(limit {limit:.0f})"
+                    f"(limit {limit:.0f}, measured by "
+                    f"{fit.get('aim_basis') or 'the fit at impact'})"
                 )
                 out["tried"].append(rec)
                 continue

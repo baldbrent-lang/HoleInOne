@@ -3536,7 +3536,18 @@ function Debug3Modal({ state, onClose }) {
                               ? `${t.n_inliers}/${t.n} · ${t.rms_px ?? "–"}px`
                               : "–"}
                             {t.aim_px != null && (
-                              <> · aims {Math.round(t.aim_px)}px</>
+                              <> · aims {Math.round(t.aim_px)}px
+                                {t.aim_path_px != null && <> (path)</>}
+                              </>
+                            )}
+                            {t.aim_at_impact_px != null
+                              && t.aim_path_px != null
+                              && Math.abs(t.aim_at_impact_px - t.aim_path_px) > 50 && (
+                              <div style={{ color: "#b7791f" }}>
+                                at the pose impact frame it would read{" "}
+                                {Math.round(t.aim_at_impact_px)}px — pose has
+                                the impact frame wrong
+                              </div>
                             )}
                           </td>
                           <td className="muted">{t.why}</td>
@@ -3575,6 +3586,7 @@ function Debug3Modal({ state, onClose }) {
                         <th align="right">inliers</th>
                         <th align="right">span</th>
                         <th align="right">rise</th>
+                        <th align="right" title="how far the flight passes from the ball, measured by running the path DOWN to the ball's height — not by evaluating it at pose's impact frame, which is routinely several frames out">aims</th>
                         {/* Shape: a ball rises, peaks once, falls. ↑↓ is
                             the apex count, ↓↑ the physically impossible
                             reversal. mono 1.0 = a clean profile. */}
@@ -3617,6 +3629,12 @@ function Debug3Modal({ state, onClose }) {
                           <td align="right">{t.n_inliers}</td>
                           <td align="right">{t.span_px}</td>
                           <td align="right">{t.rise_px}</td>
+                          <td align="right" className="muted"
+                            style={{ whiteSpace: "nowrap" }}
+                            title={t.aim_basis || ""}>
+                            {t.aim_px != null ? `${Math.round(t.aim_px)}px` : "–"}
+                            {t.aim_frame != null && ` @f${t.aim_frame}`}
+                          </td>
                           <td align="right">
                             {t.n_rise_to_fall ?? "–"} / {t.n_fall_to_rise ?? "–"}
                           </td>
