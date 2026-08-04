@@ -489,6 +489,12 @@ class BackgroundUploader(threading.Thread):
         # ENCODING at 1500 kbps, it keeps manufacturing 6 MB files the
         # link cannot move, faster than the spool can rescue them. Lower
         # it on repeated failure, recover it slowly on sustained success.
+        # ...and REMEMBERED ACROSS RESTARTS. It resets to the configured
+        # ceiling in __init__, so every restart re-learned from scratch:
+        # the tee spent an afternoon discovering the link would only take
+        # 400 kbps, then a service restart put it straight back to 1500
+        # and it started manufacturing 17 MB clips again. Restarts are
+        # frequent (every update is one). The state belongs on disk.
         self._kbps_now = int(compress_kbps)
         self._wins = 0
         # DO ONE THING AT A TIME. Observed on the course: a single golfer
@@ -508,6 +514,7 @@ class BackgroundUploader(threading.Thread):
                 log.warning("uploader: no spool dir (%s) — failures will be "
                             "dropped as before", exc)
                 self.spool_dir = None
+        self._load_kbps()
 
     def enqueue(self, session_id: str, clip_path: Path,
                 recording_started_at: Optional[float],
@@ -604,6 +611,36 @@ class BackgroundUploader(threading.Thread):
 
     # ---- worker -----------------------------------------------------
 
+    def _kbps_file(self):
+        return self.spool_dir / "learned_kbps.json" if self.spool_dir else None
+
+    def _load_kbps(self) -> None:
+        """Pick up the bitrate the link taught us before the last restart."""
+        f = self._kbps_file()
+        if f is None or not f.exists():
+            return
+        try:
+            v = int((json.loads(f.read_text()) or {}).get("kbps") or 0)
+        except Exception:  # noqa: BLE001
+            return
+        # Never above the configured ceiling — the operator may have
+        # lowered it since — and never below the floor.
+        if SHRINK_FLOOR_KBPS <= v < self._kbps_now:
+            log.info(
+                "uploader: resuming at %d kbps (learned before the last "
+                "restart; ceiling is %d)", v, self._kbps_now,
+            )
+            self._kbps_now = v
+
+    def _save_kbps(self) -> None:
+        f = self._kbps_file()
+        if f is None:
+            return
+        try:
+            f.write_text(json.dumps({"kbps": int(self._kbps_now)}))
+        except Exception:  # noqa: BLE001
+            pass
+
     def capture_started(self) -> None:
         """The camera is recording. Get off the wire."""
         self._capture_active = True
@@ -649,6 +686,7 @@ class BackgroundUploader(threading.Thread):
                          "bitrate %d -> %d kbps", KBPS_RECOVER_AFTER,
                          self._kbps_now, _up)
                 self._kbps_now = _up
+                self._save_kbps()
             return
         self._wins = 0
         self._fails += 1
@@ -675,6 +713,7 @@ class BackgroundUploader(threading.Thread):
                 self._fails, self._kbps_now, _new, KBPS_RECOVER_AFTER,
             )
             self._kbps_now = _new
+            self._save_kbps()
 
     def _in_backoff(self) -> float:
         """Seconds left of the quiet window, 0 if we may transmit."""
