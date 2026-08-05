@@ -8278,27 +8278,35 @@ export default function AdminProduction() {
     setSelectedIds(new Set((visibleRows || []).map((r) => r.id)));
   }
 
-  async function handleBulkDelete() {
+  function handleBulkDelete() {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
-    if (!confirm(
-      `Delete ${ids.length} selected upload(s)? This removes their source `
-      + `video(s) and can't be undone.`,
-    )) return;
-    setBulkBusy(true);
-    setError(null);
-    let failed = 0;
-    for (const id of ids) {
-      try {
-        await api.deleteLongUpload(adminPassword, id);
-      } catch (e) {
-        failed += 1;
-      }
-    }
-    clearSelection();
-    await refreshAll();
-    setBulkBusy(false);
-    if (failed) setError(`${failed} of ${ids.length} deletions failed.`);
+    setConfirmBox({
+      title: `Delete ${ids.length} selected upload${ids.length === 1 ? "" : "s"}?`,
+      body: "Their source videos and anything produced from them are "
+        + "removed. It cannot be undone.",
+      confirmLabel: `Delete ${ids.length}`,
+      onConfirm: async () => {
+        setConfirmBox(null);
+        setBulkBusy(true);
+        setError(null);
+        clearSelection();
+        let failed = 0;
+        for (const id of ids) {
+          try {
+            await api.deleteLongUpload(adminPassword, id);
+            // One at a time, as each lands — a batch of twenty should
+            // visibly shrink rather than sit still and then jump.
+            dropRow(id);
+          } catch (e) {
+            failed += 1;
+          }
+        }
+        await refreshAll();
+        setBulkBusy(false);
+        if (failed) setError(`${failed} of ${ids.length} deletions failed.`);
+      },
+    });
   }
 
   function openViewer(url, title, startedAt = null, fps = null) {
@@ -8331,6 +8339,19 @@ export default function AdminProduction() {
   const dropRow = useCallback((id) => {
     uploadsList.setItems((prev) => (prev || []).filter((r) => r.id !== id));
   }, [uploadsList.setItems]);
+
+  // The same, for the camera-events list. Takes a function because an
+  // event's interesting state is nested (produced_clip), so a shallow
+  // merge is not enough.
+  const patchEvent = useCallback((id, fn) => {
+    eventsList.setItems((prev) =>
+      (prev || []).map((e) => (e.id === id ? fn(e) : e)),
+    );
+  }, [eventsList.setItems]);
+
+  const dropEvent = useCallback((id) => {
+    eventsList.setItems((prev) => (prev || []).filter((e) => e.id !== id));
+  }, [eventsList.setItems]);
 
   async function handleReproduceEvent(ev) {
     setBusyEventId(ev.id);
@@ -8371,36 +8392,52 @@ export default function AdminProduction() {
     return () => clearTimeout(t);
   }, [busyEventId]);
 
-  async function handleDeleteEvent(ev) {
-    if (!confirm(
-      `Delete camera event #${ev.id}? This removes the raw tee/green clips and the produced clip.`,
-    )) return;
-    setBusyEventId(ev.id);
-    try {
-      await api.deleteCameraEvent(adminPassword, ev.id);
-      await refreshAll();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusyEventId(null);
-    }
+  function handleDeleteEvent(ev) {
+    setConfirmBox({
+      title: `Delete camera event #${ev.id}?`,
+      body: "The raw tee and green clips and the produced clip are all "
+        + "removed. It cannot be undone.",
+      confirmLabel: "Delete event",
+      onConfirm: () => {
+        // Dialog down and event gone, both on the click — same as the
+        // production card's Delete.
+        setConfirmBox(null);
+        dropEvent(ev.id);
+        (async () => {
+          try {
+            await api.deleteCameraEvent(adminPassword, ev.id);
+          } catch (e) {
+            setError(e.message);
+          }
+          await refreshAll();
+        })();
+      },
+    });
   }
 
-  async function handleBroadcastEvent(ev) {
+  function handleBroadcastEvent(ev) {
     // Toggle the produced clip's is_highlight flag — same semantic as
     // the long-upload Broadcast button, just sourced from the event's
-    // produced_clip relation instead of produced_clips[0].
+    // produced_clip relation instead of produced_clips[0]. Optimistic
+    // for the same reason: one boolean, nothing to wait for.
     const clip = ev.produced_clip;
     if (!clip) return;
-    setBusyEventId(ev.id);
-    try {
-      await api.setClipBroadcast(adminPassword, clip.id, !clip.is_highlight);
-      await refreshAll();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusyEventId(null);
-    }
+    const next = !clip.is_highlight;
+    const flip = (v) => patchEvent(ev.id, (e) => ({
+      ...e,
+      produced_clip: { ...e.produced_clip, is_highlight: v },
+    }));
+    flip(next);
+    (async () => {
+      try {
+        await api.setClipBroadcast(adminPassword, clip.id, next);
+      } catch (e) {
+        flip(!next);
+        setError(e.message);
+        return;
+      }
+      refreshAll();
+    })();
   }
 
   // Something mid-produce means the stage text on its card is changing;
@@ -8445,22 +8482,36 @@ export default function AdminProduction() {
     });
   }
 
-  async function handleBroadcast(row) {
+  function handleBroadcast(row) {
     // Toggle the produced clip's is_highlight flag so it shows up on
     // the Broadcast channel. The Production card surfaces the latest
     // produced_clip; that's what we operate on.
     const clip = row.produced_clips?.[0];
     if (!clip) return;
-    busySinceRef.current = Date.now();
-    setBusyId(row.id);
-    try {
-      await api.setClipBroadcast(adminPassword, clip.id, !clip.is_highlight);
-      await refreshAll();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusyId(null);
-    }
+    const next = !clip.is_highlight;
+    // FLIP THE LABEL ON THE CLICK. This is a boolean on one row: there
+    // is nothing to compute and nothing to wait for, and the button used
+    // to sit unchanged for a couple of seconds while a POST and a full
+    // list refetch went by. Set it here, send it, and put it back only
+    // if the server disagrees.
+    const flip = (v) => patchRow(row.id, {
+      produced_clips: (row.produced_clips || []).map(
+        (c) => (c.id === clip.id ? { ...c, is_highlight: v } : c),
+      ),
+    });
+    flip(next);
+    (async () => {
+      try {
+        await api.setClipBroadcast(adminPassword, clip.id, next);
+      } catch (e) {
+        flip(!next);
+        setError(e.message);
+        return;
+      }
+      // Quietly reconcile: the Broadcast channel is shared state and
+      // this row is not the only thing that can change it.
+      refreshAll();
+    })();
   }
 
   function handleEdit(row) {
