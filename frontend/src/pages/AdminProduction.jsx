@@ -8294,6 +8294,23 @@ export default function AdminProduction() {
     await Promise.all([uploadsList.refresh(), eventsList.refresh()]);
   }, [uploadsList.refresh, eventsList.refresh]);
 
+  // THE CARD IS RENDERED FROM THE ROW, SO CHANGE THE ROW. An optimistic
+  // flag held beside the list (busyId) only greys the card if every
+  // other piece of the hand-off agrees; patching the row itself means
+  // the card renders the new state for exactly the same reason it
+  // renders the server's, with nothing in between. Both of these are
+  // synchronous: no await stands between the operator's click and the
+  // card changing.
+  const patchRow = useCallback((id, patch) => {
+    uploadsList.setItems((prev) =>
+      (prev || []).map((r) => (r.id === id ? { ...r, ...patch } : r)),
+    );
+  }, [uploadsList.setItems]);
+
+  const dropRow = useCallback((id) => {
+    uploadsList.setItems((prev) => (prev || []).filter((r) => r.id !== id));
+  }, [uploadsList.setItems]);
+
   async function handleReproduceEvent(ev) {
     setBusyEventId(ev.id);
     try {
@@ -8381,18 +8398,30 @@ export default function AdminProduction() {
     return () => clearInterval(id);
   }, [adminPassword, refreshAll, anyProducing]);
 
-  async function handleDelete(row) {
-    if (!confirm(`Delete upload #${row.id}? This removes the source video(s).`)) return;
-    busySinceRef.current = Date.now();
-    setBusyId(row.id);
-    try {
-      await api.deleteLongUpload(adminPassword, row.id);
-      await refreshAll();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusyId(null);
-    }
+  function handleDelete(row) {
+    setConfirmBox({
+      title: `Delete upload #${row.id}?`,
+      body: "This removes the source video(s) and anything produced from "
+        + "them. It cannot be undone.",
+      confirmLabel: "Delete upload",
+      onConfirm: () => {
+        // Dialog down and row gone, both on the click. A delete that
+        // waits for the server to answer before anything moves reads as
+        // a dead button -- and the answer is never in doubt from the
+        // operator's side. If it does fail, the refresh below puts the
+        // row back and the banner says why.
+        setConfirmBox(null);
+        dropRow(row.id);
+        (async () => {
+          try {
+            await api.deleteLongUpload(adminPassword, row.id);
+          } catch (e) {
+            setError(e.message);
+          }
+          await refreshAll();
+        })();
+      },
+    });
   }
 
   async function handleBroadcast(row) {
@@ -8426,6 +8455,15 @@ export default function AdminProduction() {
     // the auto-produce defaults used by /clips/quick-upload.
     busySinceRef.current = Date.now();
     setBusyId(row.id);
+    // Same as the wizard's Produce: say it in the row, so the card is
+    // greyed by the render that follows the click and not by a later
+    // round trip.
+    patchRow(row.id, {
+      processing_status: "processing",
+      produce_stage: null,
+      produce_done: 0,
+      produce_total: 0,
+    });
     try {
       const fd = new FormData();
       fd.append("segments", "[]");
@@ -8464,12 +8502,16 @@ export default function AdminProduction() {
     // NOT the terminal states on their own. The row is ALREADY
     // "completed" from its last run at the moment you click Re-Produce,
     // so clearing on that fired on the very next render and un-greyed
-    // instantly -- the flicker. Wait for the worker to claim it.
-    if (r.processing_status === "processing") {
-      setBusyId(null);
-      return;
-    }
-    // ...but a run can also FINISH before any poll catches it mid-flight.
+    // instantly -- the flicker.
+    //
+    // Nor on "processing" any more. Handing the grey over to the
+    // server's status the moment it says processing left a window where
+    // a refresh that landed BEFORE the worker claimed the row -- the
+    // one fired as the wizard closes -- reported the old "completed"
+    // and un-greyed the card until the next poll. The flag costs
+    // nothing while the row agrees with it, so it stays up until the
+    // run is actually done.
+    // A run can also FINISH before any poll catches it mid-flight.
     // A wizard produce is a few seconds; if every refresh lands either
     // side of that window, the row goes straight completed -> completed
     // and the flag above never hands over, leaving the card greyed until
@@ -9035,11 +9077,26 @@ export default function AdminProduction() {
           onSaved={refreshAll}
           onProducing={(on) => {
             if (on === false) {
+              // Nothing was queued: put the row back the way it was.
+              patchRow(editingRow.id, {
+                processing_status: editingRow.processing_status,
+                produce_stage: editingRow.produce_stage ?? null,
+              });
               setBusyId((cur) => (cur === editingRow.id ? null : cur));
               return;
             }
             busySinceRef.current = Date.now();
             setBusyId(editingRow.id);
+            // ...and say it in the row, which is what the card actually
+            // renders from. The server claims the row before its POST
+            // returns, so this is what the next refresh reports anyway
+            // -- we are only refusing to wait for it.
+            patchRow(editingRow.id, {
+              processing_status: "processing",
+              produce_stage: null,
+              produce_done: 0,
+              produce_total: 0,
+            });
           }}
           onProduceError={(msg) => setError(msg)}
         />
