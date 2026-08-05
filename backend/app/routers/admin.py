@@ -7872,16 +7872,33 @@ def wizard_produce(
     if impact_frame < 0:
         raise HTTPException(400, "impact_frame must not be negative")
 
-    # Optional. A GREEN frame index -- the produced clip's last frame,
-    # and by then the cut has moved to the green camera. Absent means
-    # "let produce use its own D3_GREEN_SEC".
-    end_frame = payload.get("end_frame")
+    # THE LANDING, on the GREEN camera. The frame the ball touches down
+    # on and where on that frame it lands. Optional and travel together:
+    # either both or neither is useful, so a spot without a frame is
+    # ignored rather than half-applied. Absent means "let produce use its
+    # own D3_GREEN_SEC and stop the tracer where the ball was last seen".
+    landing_frame = payload.get("landing_frame")
     try:
-        end_frame = int(end_frame) if end_frame is not None else None
+        landing_frame = (
+            int(landing_frame) if landing_frame is not None else None)
     except (TypeError, ValueError):
-        raise HTTPException(400, "end_frame must be a whole number")
-    if end_frame is not None and end_frame < 0:
-        raise HTTPException(400, "end_frame must not be negative")
+        raise HTTPException(400, "landing_frame must be a whole number")
+    if landing_frame is not None and landing_frame < 0:
+        raise HTTPException(400, "landing_frame must not be negative")
+
+    landing_spot = payload.get("landing_spot")
+    if landing_spot is not None:
+        if (not isinstance(landing_spot, (list, tuple))
+                or len(landing_spot) < 2):
+            raise HTTPException(400, "landing_spot must be [x, y]")
+        try:
+            landing_spot = [float(landing_spot[0]), float(landing_spot[1])]
+        except (TypeError, ValueError):
+            raise HTTPException(400, "landing_spot must be two numbers")
+    if landing_spot is not None and landing_frame is None:
+        log.info("wizard produce: upload=%s sent a landing spot with no "
+                 "landing frame — ignoring it", upload_id)
+        landing_spot = None
 
     hole_number = payload.get("hole_number")
     try:
@@ -7895,8 +7912,11 @@ def wizard_produce(
         saved = dict(row.edit_metrics or {})
         saved["wizard_ball"] = [bx, by]
         saved["wizard_impact_frame"] = impact_frame
-        if end_frame is not None:
-            saved["end_frame"] = end_frame
+        if landing_frame is not None:
+            saved["landing_frame"] = landing_frame
+        if landing_spot is not None:
+            saved["landing_spot"] = {"x": landing_spot[0],
+                                     "y": landing_spot[1]}
         row.edit_metrics = saved
         db.commit()
     except Exception as exc:  # noqa: BLE001
@@ -7924,7 +7944,8 @@ def wizard_produce(
                 running=True, error=None)
     threading.Thread(
         target=run_wizard_produce_job,
-        args=(upload_id, (bx, by), impact_frame, hole_number, end_frame),
+        args=(upload_id, (bx, by), impact_frame, hole_number,
+              landing_frame, landing_spot),
         daemon=True,
         name=f"wizard-produce-{upload_id}",
     ).start()
@@ -7934,7 +7955,7 @@ def wizard_produce(
     )
     return {"ok": True, "started": True, "upload_id": upload_id,
             "ball": [bx, by], "impact_frame": impact_frame,
-            "end_frame": end_frame}
+            "landing_frame": landing_frame, "landing_spot": landing_spot}
 
 
 @router.delete("/long-uploads/{upload_id}")
@@ -12798,7 +12819,8 @@ def run_wizard_produce_job(
     ball_xy,
     impact_frame: int,
     hole_number: int | None = None,
-    end_frame: int | None = None,
+    landing_frame: int | None = None,
+    landing_spot=None,
 ) -> dict:
     """Stages 4-8, from the operator's ball and impact frame.
 
@@ -12888,20 +12910,23 @@ def run_wizard_produce_job(
                 "flight": _ff.get("points") or [],
                 "impact_frame": _imp,
             }]}
-            # The operator's end frame is a GREEN frame index; the
-            # renderer wants green-clock SECONDS, because every boundary
-            # in the composite is kept in seconds so the two cameras'
-            # different frame rates cannot introduce drift.
+            # The landing frame is a GREEN frame index; the renderer
+            # wants green-clock SECONDS, because every boundary in the
+            # composite is kept in seconds so the two cameras' different
+            # frame rates cannot introduce drift. The clip ends
+            # LANDING_TAIL_SEC after the ball touches down.
             _end_sec = None
-            if end_frame is not None:
+            _land_sec = None
+            if landing_frame is not None:
                 _gp = _local_green(row)
                 _gfps = float(probe_fps(_gp) or 0.0) if _gp else 0.0
                 if _gfps > 0:
-                    _end_sec = float(end_frame) / _gfps
+                    _land_sec = float(landing_frame) / _gfps
+                    _end_sec = _land_sec + LANDING_TAIL_SEC
                 else:
                     log.warning(
-                        "wizard produce: upload=%s has an end frame but no "
-                        "readable green fps — using the default length",
+                        "wizard produce: upload=%s has a landing frame but "
+                        "no readable green fps — using the default length",
                         upload_id,
                     )
             _prog("Rendering the clip", 0, 1)
@@ -12909,6 +12934,10 @@ def run_wizard_produce_job(
                 row, src_path, db, rep, fps,
                 progress=_prog, hole_number=hole_number,
                 end_green_sec=_end_sec,
+                landing=(
+                    {"sec": _land_sec, "xy": list(landing_spot)}
+                    if (_land_sec is not None and landing_spot) else None
+                ),
             )
             log.info(
                 "wizard produce: upload=%s ball=(%.0f,%.0f) impact=f%d -> "
@@ -13135,6 +13164,10 @@ D3_GREEN_SEC = 6.0
 # reads as a glitch rather than a shot landing, and an end frame that
 # lands before the cutover would otherwise ask for a negative duration.
 D3_MIN_GREEN_SEC = 1.0
+# How long the clip runs past the landing when the operator marked one.
+# Long enough to see the ball settle, short enough that it does not sit
+# on an empty green. The wizard mirrors this so its copy matches the cut.
+LANDING_TAIL_SEC = 1.5
 
 
 def _d3_green_delta_sec(db, row) -> tuple[float, str]:
@@ -13230,6 +13263,12 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
         if prior and prior.get("ball_manual"):
             merged["ball"] = prior.get("ball", rec.get("ball"))
             merged["ball_manual"] = True
+        # The landing is the operator's too, and produce has nothing to
+        # say about it -- a run that does not know about one must not
+        # erase it from under the wizard.
+        for _k in ("landing_frame", "landing_spot"):
+            if prior and prior.get(_k) is not None and rec.get(_k) is None:
+                merged[_k] = prior[_k]
         swings = [s for s in swings if int(s.get("idx", -1)) != idx]
         swings.append(merged)
         swings.sort(key=lambda s: int(s.get("idx", 0)))
@@ -13250,7 +13289,8 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
 
 
 def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
-                     hole_number=None, end_green_sec=None) -> dict:
+                     hole_number=None, end_green_sec=None,
+                     landing=None) -> dict:
     """Build the shipped clip STRAIGHT from Debug3's numbers.
 
     Stage 8 used to re-run the whole production pipeline
@@ -13281,7 +13321,14 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
     which carries the audio bed past the cutover; the green cut; and the
     splice), or the composite ends up with a video half and an audio half
     of different lengths. None means "use the default", which is what
-    every automatic produce does."""
+    every automatic produce does.
+
+    `landing` is {"sec": green-clock seconds, "xy": [x, y] in GREEN
+    pixels} when the operator marked where the ball came down. It sets
+    the clip's end (via `end_green_sec`) and is recorded on the swing.
+    It does NOT yet draw a tracer on the green half -- see the note in
+    _d3_green_landing for why that is a separate problem and not a
+    continuation of the tee's line."""
     out = {"ok": False, "clips": [], "error": None}
     swings = [
         s for s in (rep.get("swings") or [])
@@ -13441,6 +13488,14 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # ── clip row + participant ────────────────────────────
             # Matched BEFORE the overlay so the name plate carries the
             # player's actual name rather than the placeholder.
+            if landing:
+                log.info(
+                    "d3 produce: swing %s lands at %.2fs green-clock, "
+                    "(%.0f, %.0f) in the green frame",
+                    i, landing.get("sec") or 0.0,
+                    (landing.get("xy") or [0, 0])[0],
+                    (landing.get("xy") or [0, 0])[1],
+                )
             _url = f"{settings.app_base_url}/uploads/clips/{final.name}"
             clip = VideoClip(
                 course_id=row.course_id,

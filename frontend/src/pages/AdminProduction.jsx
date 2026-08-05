@@ -70,6 +70,11 @@ function addSeconds(iso, sec) {
   return new Date(d.getTime() + sec * 1000).toISOString();
 }
 
+// How long the clip runs past the landing. Long enough to see the ball
+// settle, short enough that it does not sit on an empty green. Mirrors
+// LANDING_TAIL_SEC on the backend, which is what actually cuts.
+const LANDING_TAIL_SEC = 1.5;
+
 function uploadState(row, busy) {
   // The optimistic flag first: the POST returns before the worker flips
   // processing_status, and without this the card un-greys in that gap.
@@ -1206,6 +1211,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
       cutFrame: s.cut_frame ?? null,
       ball: s.ball || null,
       ballManual: !!s.ball_manual,
+      landingFrame: s.landing_frame ?? null,
+      landingSpot: s.landing_spot || null,
       roi: s.roi || null,
       target: s.target || null,
     });
@@ -1640,7 +1647,8 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
       // right and was left alone got overwritten on the next run. If the
       // operator ships this ball, they mean it.
       ball_manual: draft.ball ? true : !!draft.ballManual,
-      end_frame: draft.endFrame ?? null,
+      landing_frame: draft.landingFrame ?? null,
+      landing_spot: draft.landingSpot ?? null,
       roi: draft.roi,
       target: draft.target,
     });
@@ -1658,11 +1666,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
       await api.wizardProduce(adminPassword, row.id, {
         ball: [draft.ball.x, draft.ball.y],
         impact_frame: draft.impactFrame,
-        // A GREEN frame — where the clip stops. Omitted when the
-        // operator never touched it, so produce uses its own default
-        // rather than us echoing back an estimate as if it were a
-        // choice.
-        end_frame: draft.endFrame ?? null,
+        // The landing, on the GREEN camera. The clip ends a beat after
+        // it, and the tracer is drawn to arrive at the spot — so these
+        // two travel together and neither is much use alone.
+        landing_frame: draft.landingFrame ?? null,
+        landing_spot: draft.landingSpot
+          ? [draft.landingSpot.x, draft.landingSpot.y]
+          : null,
       });
       // GREY THE CARD NOW, not when a poll happens to catch it. The
       // server does claim the row before responding, but a wizard produce
@@ -2372,11 +2382,11 @@ function WizardBody({
   // No "start": the clip's lead-in is D3_PRE_ROLL_SEC before the strike,
   // decided by produce, not trimmed by hand. Four things go in here --
   // impact, end, ball, target -- and the first two are frames.
-  const FRAME_PICK_MODES = new Set(["address", "impact", "end", "cut"]);
+  const FRAME_PICK_MODES = new Set(["address", "impact", "landing", "cut"]);
   const frameForMode = {
     address: draft.addressFrame,
     impact: draft.impactFrame,
-    end: draft.endFrame ?? defaultEnd ?? defaultEndFrame(),
+    landing: draft.landingFrame ?? defaultEnd ?? defaultEndFrame(),
     cut: effectiveCutFrame ?? 0,
   };
 
@@ -2384,7 +2394,11 @@ function WizardBody({
   // stops, and by then the cut is on the green camera -- asking the
   // operator to choose it from the tee view is asking about the wrong
   // picture. Everything else is a tee frame.
-  const cameraForMode = (mode) => (mode === "end" ? "green" : "tee");
+  // The landing is a green-camera call: the ball comes down in the green
+  // view, and by then the cut has already moved there. The landing SPOT is
+  // marked on the landing frame, so it stays on the green too.
+  const cameraForMode = (mode) =>
+    (mode === "landing" || mode === "landing_spot") ? "green" : "tee";
 
   // Where produce would end this clip if nobody said otherwise: the
   // green half runs `greenSeconds` past the strike (D3_GREEN_SEC on the
@@ -2420,8 +2434,12 @@ function WizardBody({
     // picture of a different moment. The impact frame is the one the
     // tracer starts from, so it is the one to point at.
     if (editing === "ball") loadFrame(draft.impactFrame ?? 0, "tee");
+    // Marking the spot means looking at the frame it happened on.
+    if (editing === "landing_spot" && draft.landingFrame != null) {
+      loadFrame(draft.landingFrame, "green");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing, draft.impactFrame]);
+  }, [editing, draft.impactFrame, draft.landingFrame]);
 
   async function loadFrame(frameIdx, which = null) {
     const cam = which || cameraForMode(editing);
@@ -2495,7 +2513,12 @@ function WizardBody({
   let leftImageUrl = navUrl || draft.addressImageUrl;
   let leftFrameLabel = `Frame ${navFrame ?? "—"}${atTime()}`;
   const showFrameNav = FRAME_PICK_MODES.has(editing);
-  if (editing === "ball") {
+  if (editing === "landing_spot") {
+    leftImageUrl = navUrl || draft.addressImageUrl;
+    leftFrameLabel =
+      `Landing frame · ${draft.landingFrame ?? "—"}${atTime()}`
+      + " · green camera — mark where it lands";
+  } else if (editing === "ball") {
     // The impact frame, with no frame-nav controls -- the operator is
     // placing a ball here, not choosing a frame.
     leftImageUrl = navUrl || draft.addressImageUrl;
@@ -2507,7 +2530,7 @@ function WizardBody({
     const total = navTotal != null ? ` / ${navTotal - 1}` : "";
     const labels = {
       address: "Address", impact: "Impact",
-      start: "Start", end: "End", cut: "Cut",
+      landing: "Landing", cut: "Cut",
     };
     leftFrameLabel =
       `${labels[editing] || "Frame"} frame · ${navFrame ?? "—"}${total}`
@@ -2593,38 +2616,6 @@ function WizardBody({
         </EditableRow>
 
         <EditableRow
-          label="End frame"
-          value={draft.endFrame != null
-            ? `Frame ${draft.endFrame}`
-            : (defaultEnd != null
-              ? `Frame ${defaultEnd} (default · ${greenSeconds ?? 6}s after impact)`
-              : `Default · ${greenSeconds ?? 6}s after impact`)}
-          active={editing === "end"}
-          onActivate={() => setEditing(editing === "end" ? null : "end")}
-        >
-          <div className="tiny muted" style={{ marginBottom: 6 }}>
-            This is the GREEN camera — by the end of the clip the cut has
-            already moved there, so the last frame is a green frame.
-            Defaults to where produce would stop on its own
-            ({greenSeconds ?? 6}s past impact); step to trim it shorter or
-            let it run.
-          </div>
-          <FrameStepper
-            current={navFrame}
-            total={navTotal}
-            loading={navLoading}
-            onStep={(delta) => loadFrame(clampedStep(delta))}
-            onJump={(n) => loadFrame(clampedJump(n))}
-            onApply={() => {
-              if (navFrame == null) return;
-              setDraft((d) => ({ ...d, endFrame: navFrame }));
-              persistPatch({ end_frame: navFrame });
-              setEditing(null);
-            }}
-          />
-        </EditableRow>
-
-        <EditableRow
           label="Ball at rest"
           value={
             draft.ball
@@ -2649,6 +2640,64 @@ function WizardBody({
                 // re-produce can't quietly move it back.
                 setDraft((d) => ({ ...d, ballManual: true }));
                 persistPatch({ ball: draft.ball, ball_manual: true });
+              }
+              setEditing(null);
+            }}
+          >
+            Done
+          </button>
+        </EditableRow>
+
+        <EditableRow
+          label="Landing frame"
+          value={draft.landingFrame != null
+            ? `Frame ${draft.landingFrame}`
+            : "Not set"}
+          active={editing === "landing"}
+          onActivate={() => setEditing(editing === "landing" ? null : "landing")}
+        >
+          <div className="tiny muted" style={{ marginBottom: 6 }}>
+            The GREEN camera. Step to the frame where the ball first
+            touches down. The clip ends {LANDING_TAIL_SEC}s after this, and
+            the tracer is drawn to arrive here.
+          </div>
+          <FrameStepper
+            current={navFrame}
+            total={navTotal}
+            loading={navLoading}
+            onStep={(delta) => loadFrame(clampedStep(delta), "green")}
+            onJump={(n) => loadFrame(clampedJump(n), "green")}
+            onApply={() => {
+              if (navFrame == null) return;
+              setDraft((d) => ({ ...d, landingFrame: navFrame }));
+              persistPatch({ landing_frame: navFrame });
+              setEditing(null);
+            }}
+          />
+        </EditableRow>
+
+        <EditableRow
+          label="Ball landing spot"
+          value={draft.landingSpot
+            ? `${draft.landingSpot.x}, ${draft.landingSpot.y} px`
+            : "Not set"}
+          active={editing === "landing_spot"}
+          onActivate={() =>
+            setEditing(editing === "landing_spot" ? null : "landing_spot")}
+        >
+          <div className="tiny muted">
+            {draft.landingFrame == null
+              ? "Set the landing frame first — this marks the spot on it."
+              : "Click where the ball lands on the green. This is where "
+                + "the tracer ENDS, so put it on the ball, not near it."}
+          </div>
+          <button
+            type="button"
+            style={{ width: "auto", marginTop: 6 }}
+            disabled={draft.landingFrame == null}
+            onClick={() => {
+              if (draft.landingSpot) {
+                persistPatch({ landing_spot: draft.landingSpot });
               }
               setEditing(null);
             }}
@@ -2858,13 +2907,40 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
   // Clicking anywhere on the frame in ball/target mode also moves the
   // marker — easier than precision-grabbing the dot.
   function onFramePointerDown(e) {
-    if (editing === "ball") {
+    if (editing === "landing_spot") {
+    leftImageUrl = navUrl || draft.addressImageUrl;
+    leftFrameLabel =
+      `Landing frame · ${draft.landingFrame ?? "—"}${atTime()}`
+      + " · green camera — mark where it lands";
+  } else if (editing === "ball") {
       const pt = eventToFrame(e);
       if (pt) setDraft((d) => ({ ...d, ball: pt }));
     } else if (editing === "target") {
       const pt = eventToFrame(e);
       if (pt) setDraft((d) => ({ ...d, target: pt }));
+    } else if (editing === "landing_spot") {
+      const pt = eventToFrame(e);
+      if (pt) setDraft((d) => ({ ...d, landingSpot: pt }));
     }
+  }
+
+  function onLandingPointerDown(e) {
+    if (editing !== "landing_spot") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const target = e.currentTarget;
+    target.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      const pt = eventToFrame(ev);
+      if (pt) setDraft((d) => ({ ...d, landingSpot: pt }));
+    };
+    const up = () => {
+      target.releasePointerCapture?.(e.pointerId);
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
   }
 
   function onTargetPointerDown(e) {
@@ -2955,6 +3031,10 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
     || editing === "ball" || editing === "target");
   const showBall = !!draft.ball;
   const showTarget = !!draft.target;
+  // The landing spot belongs to the landing FRAME, on the green camera.
+  // Showing it over a tee frame would put an orange dot in the trees.
+  const showLandingSpot = !!draft.landingSpot && editing === "landing_spot";
+  const landingEditable = editing === "landing_spot";
   const ballEditable = editing === "ball";
   const targetEditable = editing === "target";
   const roiEditable = editing === "roi";
@@ -3072,6 +3152,32 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
             touchAction: "none",
           }}
           title={`Ball at rest (${draft.ball.x}, ${draft.ball.y})`}
+        />
+      )}
+
+      {hasDims && showLandingSpot && draft.landingSpot && (
+        <div
+          onPointerDown={onLandingPointerDown}
+          style={{
+            position: "absolute",
+            left: pct(draft.landingSpot.x, frameW),
+            top: pct(draft.landingSpot.y, frameH),
+            width: 16, height: 16,
+            borderRadius: "50%",
+            // Amber, not the ball's green: this is a different point on a
+            // different camera, and confusing the two would be easy.
+            background: "#d97706",
+            border: "2px solid #fff",
+            transform: "translate(-50%, -50%)",
+            cursor: landingEditable ? "grab" : "default",
+            boxShadow: "0 0 6px rgba(0,0,0,0.7)",
+            pointerEvents: landingEditable ? "auto" : "none",
+            touchAction: "none",
+          }}
+          title={
+            `Ball landing spot (${draft.landingSpot.x}, `
+            + `${draft.landingSpot.y})`
+          }
         />
       )}
 
