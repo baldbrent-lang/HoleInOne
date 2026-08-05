@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
@@ -86,6 +86,10 @@ export default function AdminParticipants() {
   }
 
   async function resend(p) {
+    // SAY IT ON THE CLICK. The toast used to appear only once the send
+    // came back, so on a slow link the button read as dead and the
+    // operator clicked it again -- twice-sent gallery links.
+    showToast(`Re-sending the gallery link to ${p.name}…`);
     try {
       await api.resendGallery(adminPassword, p.id);
       showToast(`Gallery link re-sent to ${p.name}`);
@@ -96,6 +100,7 @@ export default function AdminParticipants() {
 
   async function refund(p) {
     if (!window.confirm(`Refund ${p.name}? This issues a Stripe refund (or no-op in mock mode) and marks the round as refunded. Their clips stay accessible.`)) return;
+    showToast(`Refunding ${p.name}…`);
     try {
       const r = await api.refundParticipant(adminPassword, p.id);
       if (r.already_refunded) {
@@ -110,6 +115,7 @@ export default function AdminParticipants() {
   }
 
   async function sendSummary(p, force = true) {
+    showToast(`Sending the round summary to ${p.email || p.name}…`);
     try {
       const r = await api.sendRoundSummary(adminPassword, p.id, force);
       if (r.sent) {
@@ -123,9 +129,14 @@ export default function AdminParticipants() {
     }
   }
 
+  // One timer, not one per toast. A "sending…" toast followed by its
+  // result used to leave the first timer running, which cleared the
+  // RESULT a moment after it appeared.
+  const toastTimer = useRef(null);
   function showToast(msg) {
     setToast(msg);
-    setTimeout(() => setToast(null), 2200);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2200);
   }
 
   function clearFilters() {

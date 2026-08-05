@@ -24,8 +24,12 @@ function ChannelsSection({ adminPassword }) {
   const [channels, setChannels] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
   const [sharedKey, setSharedKey] = useState(null);
+  const [pendingKey, setPendingKey] = useState(null);
 
   async function copyShare(key) {
+    // The link is minted server-side, so there IS a wait -- name it
+    // rather than leaving the button looking unpressed.
+    setPendingKey(key);
     try {
       const out = await api.channelShareLink(adminPassword, key);
       const url = `${window.location.origin}${out.path}`;
@@ -38,6 +42,8 @@ function ChannelsSection({ adminPassword }) {
       }
     } catch (e) {
       window.alert(`Couldn't create the share link: ${e.message}`);
+    } finally {
+      setPendingKey(null);
     }
   }
 
@@ -124,7 +130,9 @@ function ChannelsSection({ adminPassword }) {
                 onClick={() => copyShare(ch.key)}
                 title="Copy a share link scoped to ONLY this channel — safe to send to a club pro or course GM. They see this channel's stream and nothing else."
               >
-                {sharedKey === ch.key ? "Copied!" : "🔗 Share"}
+                {sharedKey === ch.key
+                  ? "Copied!"
+                  : pendingKey === ch.key ? "Making a link…" : "🔗 Share"}
               </button>
             </div>
           </div>

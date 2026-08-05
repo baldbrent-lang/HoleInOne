@@ -189,12 +189,17 @@ export default function AdminLongUpload() {
     if (!window.confirm("Delete this stored long upload + its source files? Per-swing clips already produced from it are kept.")) {
       return;
     }
+    // The row goes on the click. Waiting for the delete and then a
+    // re-list means the button reads as dead for two round trips; if it
+    // fails, the re-list below puts the row back.
+    setPriorUploads((prev) =>
+      Array.isArray(prev) ? prev.filter((u) => u.id !== uploadId) : prev);
     try {
       await api.deleteLongUpload(adminPassword, uploadId);
-      refreshPriorUploads();
     } catch (e) {
       setError(e.message);
     }
+    refreshPriorUploads();
   }
 
   useEffect(() => {

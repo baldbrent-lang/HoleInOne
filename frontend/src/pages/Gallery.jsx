@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
@@ -26,6 +26,7 @@ export default function Gallery() {
   async function flag(clipId) {
     const note = window.prompt("What's wrong with this clip?");
     if (!note) return;
+    showToast("Sending…");
     try {
       await api.flagClip(galleryToken, clipId, note);
       showToast("Flagged for review. Thanks.");
@@ -45,9 +46,11 @@ export default function Gallery() {
     }
   }
 
+  const toastTimer = useRef(null);
   function showToast(msg) {
     setToast(msg);
-    setTimeout(() => setToast(null), 2200);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2200);
   }
 
   if (error) {

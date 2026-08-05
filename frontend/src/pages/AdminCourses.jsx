@@ -7,7 +7,7 @@
  * The Dashboard still calls listCourses() to resolve names→ids for the
  * stats chips, but the editing surface lives only here.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
@@ -46,10 +46,16 @@ export default function AdminCourses() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function showToast(msg) { setToast(msg); setTimeout(() => setToast(null), 2500); }
+  const toastTimer = useRef(null);
+  function showToast(msg) {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  }
 
   async function createCourse(e) {
     e.preventDefault();
+    showToast("Adding the course…");
     try {
       const parsed = parseHolesAndYards(newPar3s);
       await api.createCourse(adminPassword, {
@@ -69,6 +75,7 @@ export default function AdminCourses() {
   }
 
   async function runSimulate(courseToken, withHio) {
+    showToast("Injecting a round…");
     try {
       const tts = await api.teeTimes(courseToken);
       const first = tts[0];

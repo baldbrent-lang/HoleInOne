@@ -2362,6 +2362,9 @@ function WizardBody({
   const [navUrl, setNavUrl] = useState(null);
   const [navTotal, setNavTotal] = useState(totalFrames);
   const [navLoading, setNavLoading] = useState(false);
+  // Re-detect runs a detector over the whole clip and then reloads the
+  // page; the button has to hold the state itself.
+  const [redetecting, setRedetecting] = useState(false);
   // Real time needs the SOURCE fps, and it differs per camera (the tee
   // runs ~50fps, the green its own rate) -- so it comes back with the
   // frame rather than being assumed.
@@ -2758,24 +2761,30 @@ function WizardBody({
           type="button"
           className="ghost"
           style={{ width: "100%", marginTop: 6 }}
+          disabled={redetecting}
           onClick={async () => {
             if (!confirm(
               "Re-run auto-detect from the source video? This replaces "
               + "the current handedness / address / impact / ball / "
               + "ROI / target with a fresh detection."
             )) return;
+            // This one runs a detector over the whole clip and then
+            // reloads the page -- tens of seconds with nothing on
+            // screen unless the button says so itself.
+            setRedetecting(true);
             try {
               // Persist into edit_metrics directly; the wizard reads
               // from there on next reload.
               await api.autoDetectLongUpload(adminPassword, row.id);
               window.location.reload();
             } catch (e) {
+              setRedetecting(false);
               alert(`Re-detect failed: ${e.message}`);
             }
           }}
           title="Re-run auto-detect from the source video and replace the current metrics"
         >
-          Re-detect from source
+          {redetecting ? "Re-detecting…" : "Re-detect from source"}
         </button>
       </div>
     </div>
