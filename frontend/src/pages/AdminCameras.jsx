@@ -89,8 +89,26 @@ const TONE_STYLE = {
  *  and worse — problem than one with no green file: the tee-only fallback
  *  filters on `tee_clip_filename.isnot(None)`, so a green-only event is
  *  never swept, never failed, and sits forever. */
-function stuckMessage(ev) {
+function stuckMessage(ev, teeInFlight) {
   const meta = EVENT_STATES[ev.status];
+  // A clip the server is receiving right now is not a stuck one. Saying
+  // "the tee Pi is failing to upload" while it is 82% through, on a link
+  // that takes ten minutes a clip, sends the operator to SSH for a
+  // problem that is resolving itself.
+  if (teeInFlight && !ev.tee_clip_filename) {
+    return (
+      "The tee clip is still coming in — "
+      + (teeInFlight.percent != null ? `${teeInFlight.percent}% ` : "")
+      + (teeInFlight.stale_seconds < 30
+        ? "and still moving. Nothing to do; it will produce when it lands."
+        : `and it has not moved for ${
+            teeInFlight.stale_seconds < 120
+              ? `${teeInFlight.stale_seconds}s`
+              : `${Math.round(teeInFlight.stale_seconds / 60)} min`
+          }. The progress is banked, so it resumes from there when the `
+          + "link comes back.")
+    );
+  }
   if (ev.status !== "tee_uploaded") return meta?.stuck || "";
   const haveTee = !!ev.tee_clip_filename;
   const haveGreen = !!ev.green_clip_filename;
@@ -114,81 +132,6 @@ function stuckMessage(ev) {
   return "Neither clip arrived.";
 }
 
-// A clip a Pi is part-way through sending. "TEE never arrived" reads
-// the same whether the Pi sent none of it or 90% of it, and telling
-// those apart used to mean an SSH session. The server is holding the
-// bytes, so it can just say.
-function UploadsInFlight({ adminPassword }) {
-  const [rows, setRows] = useState([]);
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    if (!adminPassword) return undefined;
-    let cancelled = false;
-    const load = () =>
-      api
-        .uploadsInFlight(adminPassword)
-        .then((r) => !cancelled && setRows(r?.in_flight || []))
-        .catch((e) => !cancelled && setErr(e?.message || String(e)));
-    load();
-    // Often enough that a climbing percentage reads as movement.
-    const id = setInterval(load, 5000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [adminPassword]);
-
-  if (err) return null;
-  if (!rows.length) return null;
-
-  const mb = (b) => (b / (1024 * 1024)).toFixed(1);
-  return (
-    <div className="card" style={{ marginBottom: 12, padding: "10px 14px" }}>
-      <div className="small" style={{ fontWeight: 700 }}>
-        {rows.length} clip{rows.length === 1 ? "" : "s"} still coming in
-      </div>
-      <div className="tiny muted" style={{ marginBottom: 6 }}>
-        Bytes the server is holding for a clip on its way. A percentage
-        that climbs between refreshes is a slow link working; one that
-        sits still is a link that is down.
-      </div>
-      {rows.map((r) => (
-        <div key={`${r.camera}-${r.session_id}`} style={{ marginTop: 6 }}>
-          <div className="tiny" style={{ display: "flex", gap: 8 }}>
-            <span style={{ fontWeight: 600 }}>
-              {r.percent != null ? `${r.percent}%` : "—"}
-            </span>
-            <span className="muted">
-              {mb(r.received_bytes)}
-              {r.total_bytes ? ` / ${mb(r.total_bytes)}` : ""} MB
-            </span>
-            <span className="muted">
-              {r.stale_seconds < 30
-                ? "moving"
-                : `no movement for ${
-                    r.stale_seconds < 120
-                      ? `${r.stale_seconds}s`
-                      : `${Math.round(r.stale_seconds / 60)}m`
-                  }`}
-            </span>
-            <span className="muted" style={{ marginLeft: "auto" }}>
-              {(r.session_id || "").slice(0, 8)}
-            </span>
-          </div>
-          <div style={{
-            height: 5, borderRadius: 3, marginTop: 2,
-            background: "var(--border, #ddd)", overflow: "hidden",
-          }}>
-            <div style={{
-              width: `${Math.max(1, Math.min(100, r.percent || 0))}%`,
-              height: "100%",
-              background: r.stale_seconds < 30 ? "#1a9d55" : "#d69e2e",
-            }} />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function ageSeconds(iso) {
   if (!iso) return null;
   const utcIso = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
@@ -198,11 +141,31 @@ function ageSeconds(iso) {
 /** One clip's arrival state. This is the single most useful thing on the
  *  page: it separates "the Pi never sent it" from "it arrived and produce
  *  did nothing with it". */
-function ClipChip({ label, filename, sizeMb, durationSec, missing, url }) {
+function ClipChip({ label, filename, sizeMb, durationSec, missing, url,
+                   inFlight }) {
   const arrived = !!filename;
-  const tone = !arrived ? "bad" : missing ? "warn" : "ok";
+  // A clip the server is part-way through receiving is not "never
+  // arrived" -- that reads as a dead Pi when it is a working one on a
+  // slow link. Show how far it has got, and whether it is still moving.
+  const coming = !arrived && !!inFlight;
+  const moving = coming && inFlight.stale_seconds < 30;
+  const tone = coming ? (moving ? "ok" : "warn")
+    : !arrived ? "bad" : missing ? "warn" : "ok";
   const s = TONE_STYLE[tone];
-  const detail = !arrived
+  const mb = (b) => (b / (1024 * 1024)).toFixed(1);
+  const detail = coming
+    ? [
+        inFlight.percent != null ? `${inFlight.percent}%` : "sending",
+        `${mb(inFlight.received_bytes)}`
+        + (inFlight.total_bytes ? `/${mb(inFlight.total_bytes)}` : "")
+        + " MB",
+        moving
+          ? "uploading"
+          : `stalled ${inFlight.stale_seconds < 120
+              ? `${inFlight.stale_seconds}s`
+              : `${Math.round(inFlight.stale_seconds / 60)}m`}`,
+      ].join(" · ")
+    : !arrived
     ? "never arrived"
     : missing
       ? "uploaded, file gone"
@@ -220,7 +183,23 @@ function ClipChip({ label, filename, sizeMb, durationSec, missing, url }) {
       }}
     >
       <b>{label}</b>
-      <span className="muted">{arrived ? "✓" : "✗"} {detail}</span>
+      <span className="muted">
+        {coming ? "⟳" : arrived ? "✓" : "✗"} {detail}
+      </span>
+      {coming && inFlight.percent != null && (
+        <span style={{
+          width: 46, height: 4, borderRadius: 2, marginLeft: 2,
+          background: "rgba(0,0,0,0.15)", overflow: "hidden",
+          display: "inline-block",
+        }}>
+          <span style={{
+            display: "block",
+            width: `${Math.max(2, Math.min(100, inFlight.percent))}%`,
+            height: "100%",
+            background: moving ? "#1a9d55" : "#d69e2e",
+          }} />
+        </span>
+      )}
     </span>
   );
   return url ? (
@@ -503,6 +482,11 @@ function CameraEventsPanel({ adminPassword }) {
   const [err, setErr] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [onlyProblems, setOnlyProblems] = useState(false);
+  // Partials the server is holding, keyed cam{id}-{session} so a chip
+  // can find its own. On a slow link a clip is in flight for minutes,
+  // and "never arrived" is the wrong thing to say about it the whole
+  // time.
+  const [inFlight, setInFlight] = useState({});
 
   useEffect(() => {
     if (!adminPassword) return undefined;
@@ -517,6 +501,30 @@ function CameraEventsPanel({ adminPassword }) {
     }
     load();
     const id = setInterval(load, 10000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [adminPassword]);
+
+  useEffect(() => {
+    if (!adminPassword) return undefined;
+    let cancelled = false;
+    const load = () =>
+      api
+        .uploadsInFlight(adminPassword)
+        .then((r) => {
+          if (cancelled) return;
+          const by = {};
+          for (const p of r?.in_flight || []) {
+            by[`${p.camera}-${p.session_id}`] = p;
+          }
+          setInFlight(by);
+        })
+        // Progress is a nicety; the events list must not go blank
+        // because this one failed.
+        .catch(() => {});
+    load();
+    // Faster than the events poll: a percentage has to be seen climbing
+    // to mean anything.
+    const id = setInterval(load, 4000);
     return () => { cancelled = true; clearInterval(id); };
   }, [adminPassword]);
 
@@ -564,8 +572,6 @@ function CameraEventsPanel({ adminPassword }) {
         <Link to="/admin/production">Production</Link>. If clips aren&apos;t
         showing up there, the status here tells you which stage stopped.
       </p>
-
-      <UploadsInFlight adminPassword={adminPassword} />
 
       {err && <div className="card err-text small">{err}</div>}
       {events === null && <div className="card muted small">Loading…</div>}
@@ -617,17 +623,21 @@ function CameraEventsPanel({ adminPassword }) {
                 label="TEE" filename={ev.tee_clip_filename} sizeMb={ev.tee_size_mb}
                 durationSec={ev.tee_duration_sec} missing={ev.tee_missing}
                 url={ev.tee_url}
+                inFlight={inFlight[`cam${ev.tee_camera_id}-${ev.session_id}`]}
               />
               {ev.dual_camera && (
                 <ClipChip
                   label="GREEN" filename={ev.green_clip_filename}
                   sizeMb={ev.green_size_mb} durationSec={ev.green_duration_sec}
                   missing={ev.green_missing} url={ev.green_url}
+                  inFlight={
+                    inFlight[`cam${ev.green_camera_id}-${ev.session_id}`]
+                  }
                 />
               )}
             </div>
 
-            {(isStuck ? stuckMessage(ev) : meta.ok) && (
+            {(isStuck ? stuckMessage(ev, inFlight[`cam${ev.tee_camera_id}-${ev.session_id}`]) : meta.ok) && (
               <div
                 className="small"
                 style={{
@@ -635,7 +645,7 @@ function CameraEventsPanel({ adminPassword }) {
                   background: isStuck ? "rgba(239,68,68,0.08)" : "rgba(127,127,127,0.08)",
                 }}
               >
-                {isStuck ? stuckMessage(ev) : meta.ok}
+                {isStuck ? stuckMessage(ev, inFlight[`cam${ev.tee_camera_id}-${ev.session_id}`]) : meta.ok}
               </div>
             )}
 
