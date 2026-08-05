@@ -387,6 +387,7 @@ class BackendClient:
         deadline_seconds: int = 300,
         max_stalls: int = 40,
         stall_wait: float = 6.0,
+        on_progress=None,
     ) -> dict:
         """Upload a clip in resumable slices.
 
@@ -430,6 +431,18 @@ class BackendClient:
 
         stalls = 0
         _last_log = 0.0
+        _started_at = sent
+
+        def _note(now: int) -> None:
+            # Tell the caller what is banked, even on the failure paths.
+            # A chunked attempt that dies at 86% is not the same event as
+            # one that never connected, and the backoff needs to know.
+            if on_progress is not None:
+                try:
+                    on_progress(max(0, int(now) - int(_started_at)), total)
+                except Exception:  # noqa: BLE001
+                    pass
+
         with open(video_path, "rb") as fh:
             while sent < total:
                 _el = time.time() - _t0
@@ -480,13 +493,16 @@ class BackendClient:
                     )
                     time.sleep(stall_wait)
                     sent = self._upload_offset(upload_id, total, sent)
+                    _note(sent)
                     continue
                 stalls = 0
                 if out.get("resync"):
                     # Server and Pi disagreed on progress; the server wins.
                     sent = int(out.get("received") or 0)
+                    _note(sent)
                     continue
                 sent = int(out.get("received") or (sent + len(body)))
+                _note(sent)
                 if time.time() - _last_log >= 15.0:
                     _last_log = time.time()
                     log.info(
@@ -687,6 +703,7 @@ class BackgroundUploader(threading.Thread):
         # whole-file POSTs.
         self.chunked = bool(chunked)
         self.chunk_bytes = max(64 * 1024, int(chunk_kb) * 1024)
+        self._last_progress = 0
         if self.spool_dir is not None:
             try:
                 self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -839,7 +856,8 @@ class BackgroundUploader(threading.Thread):
         return max(0.0,
                    (self._last_capture_end + self.settle_seconds) - time.time())
 
-    def _note_result(self, ok: bool, held_seconds: float = 0.0) -> None:
+    def _note_result(self, ok: bool, held_seconds: float = 0.0,
+                     progressed_bytes: int = 0) -> None:
         """Widen or clear the quiet window after an attempt.
 
         `held_seconds` is how long the failed attempt occupied the wire,
@@ -847,7 +865,27 @@ class BackgroundUploader(threading.Thread):
         attempt that burned 316 seconds is a 94% duty cycle — the same
         congestion loop the backoff exists to break, just slower. Silence
         has to be proportional to the noise that preceded it.
+
+        `progressed_bytes` is what a chunked attempt banked on the server
+        before it stopped. That distinction did not exist when this was
+        written: a whole-file attempt either arrived or achieved nothing,
+        so long-and-failed meant pure occupation and deserved a long
+        silence. Chunked changes it. Observed on the tee: an attempt
+        carried a clip from 51% to 86% across five modem deaths and was
+        then sent quiet for 452 seconds for its trouble — punished for
+        the very progress it exists to make. An attempt that moved bytes
+        is the link WORKING, just slowly, so it takes the base pause and
+        does not escalate.
         """
+        if not ok and progressed_bytes > 0:
+            self._quiet_until = time.time() + self.backoff_base
+            log.info(
+                "uploader: attempt ended with %.1f MB banked on the server — "
+                "not a failed link, a slow one. Pausing %.0fs, then resuming "
+                "from where it stopped.",
+                progressed_bytes / (1024 * 1024), self.backoff_base,
+            )
+            return
         if ok:
             if self._fails:
                 log.info("uploader: link is back — backoff cleared after "
@@ -915,6 +953,9 @@ class BackgroundUploader(threading.Thread):
     def _send(self, session_id: str, clip_path: Path, ts: Optional[float],
               real_fps: Optional[float], compress: bool, retries: int,
               timeout: int) -> bool:
+        # Bytes this attempt banked on the server, for _note_result. Zero
+        # on the whole-file path, which has no partial state to speak of.
+        self._last_progress = 0
         try:
             if compress and self._kbps_now > 0:
                 compress_for_upload(
@@ -933,11 +974,16 @@ class BackgroundUploader(threading.Thread):
                 # longer a wasted one — a fresh clip behind a queue banks
                 # whatever it manages and the spool resumes from there.
                 _deadline = int(timeout) * max(1, int(retries))
+
+                def _seen(nbytes, _total):
+                    self._last_progress = int(nbytes)
+
                 result = self.client.upload_event_chunked(
                     session_id, clip_path, recording_started_at=ts,
                     chunk_bytes=self.chunk_bytes,
                     chunk_timeout=min(45, max(20, int(timeout))),
                     deadline_seconds=_deadline,
+                    on_progress=_seen,
                 )
             else:
                 result = self.client.upload_event(
@@ -1015,7 +1061,8 @@ class BackgroundUploader(threading.Thread):
             _t_send = time.time()
             ok = self._send(session_id, clip_path, ts, real_fps,
                             compress=True, retries=_tries, timeout=_to)
-            self._note_result(ok, time.time() - _t_send)
+            self._note_result(ok, time.time() - _t_send,
+                              progressed_bytes=self._last_progress)
             if not ok:
                 self._spool(session_id, clip_path, ts, tries=_tries)
             try:
@@ -1108,7 +1155,8 @@ class BackgroundUploader(threading.Thread):
             compress=not meta.get("compressed"), retries=1,
             timeout=self.patient_timeout,
         )
-        self._note_result(ok, time.time() - _t_send)
+        self._note_result(ok, time.time() - _t_send,
+                          progressed_bytes=self._last_progress)
         if ok:
             path.unlink(missing_ok=True)
             path.with_suffix(".json").unlink(missing_ok=True)
@@ -1121,6 +1169,20 @@ class BackgroundUploader(threading.Thread):
         # no single clip ever reaches the 3 tries that trigger the shrink.
         # Staying on the oldest until it goes up (or shrinks small enough
         # to) is what actually makes progress.
+        #
+        # An attempt that banked bytes does not count as a try, though.
+        # `tries` exists to trigger the shrink, and shrinking re-encodes
+        # the clip — which changes its size and so throws away everything
+        # the server is holding. A clip inching up 51% -> 86% -> 100%
+        # across three sweeps would otherwise re-encode itself back to
+        # zero on the very sweep that was about to finish it.
+        if self._last_progress > 0:
+            log.info(
+                "uploader: %s banked %.1f MB this pass — not counting it as "
+                "a failed try, it is getting there",
+                path.name, self._last_progress / (1024 * 1024),
+            )
+            return False
         try:
             meta["tries"] = tries + 1
             path.with_suffix(".json").write_text(json.dumps(meta))
