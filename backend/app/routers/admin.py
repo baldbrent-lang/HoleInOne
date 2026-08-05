@@ -11870,44 +11870,27 @@ def _debug2_run(row, src_path, db, progress=None):
         pass
     # detect_swings_from_pose returns the SEGMENT LIST directly; the
     # per-burst diagnostics come back through the `debug` dict it fills in.
-    # STAGE 1 LABELS, IT NO LONGER ELIMINATES. The spine-bend and burst-
-    # duration gates were throwing away real swings, and once thrown away
-    # nothing downstream could recover them — the ball at impact and the AI
-    # judge, both far better discriminators than a spine angle, never got to
-    # look. So Debug3 asks for the rejects too and runs stages 2 and 3 on
-    # every burst; what the gates think is recorded as a label, not a
-    # verdict.
     pose_dbg: dict = {}
     cands = list(
-        pose_swing.detect_swings_from_pose(
-            src_path, fps=fps, keep_rejected=True, debug=pose_dbg,
-        )
+        pose_swing.detect_swings_from_pose(src_path, fps=fps, debug=pose_dbg)
         or []
     )
     rep["pose_debug"] = {
         k: pose_dbg.get(k)
         for k in ("n_pose_frames", "n_samples", "coverage",
-                  "n_bend_rejected", "back_bend_min_deg",
-                  "n_gate_passed", "n_rescued", "n_rescued_dropped")
+                  "n_bend_rejected", "back_bend_min_deg")
     }
     # Every burst the detector saw and what happened to it — the stage-1
     # working, including the ones that never became candidates.
     rep["bursts"] = list(pose_dbg.get("bursts_detail") or [])
-    _n_pass = sum(1 for c in cands if c.get("gate_ok"))
-    _n_resc = len(cands) - _n_pass
-    _n_cut = int(pose_dbg.get("n_rescued_dropped") or 0)
     rep["stages"].append({
         "n": 1, "name": "Pose candidates",
         "detail": (
-            f"{_n_pass} burst(s) passed the wrist-speed and spine-bend gates"
+            f"{len(cands)} burst(s) passed the wrist-speed and spine-bend "
+            f"gates"
             + (
-                f" · {_n_resc} that failed are carried anyway, for stages "
-                f"2 and 3 to judge"
-                if _n_resc else ""
-            )
-            + (
-                f" · {_n_cut} weaker one(s) not carried (cap reached)"
-                if _n_cut else ""
+                f" · {pose_dbg['n_bend_rejected']} rejected as upright"
+                if pose_dbg.get("n_bend_rejected") else ""
             )
         ),
         "count": len(cands), "counts": "candidates",
@@ -11934,9 +11917,6 @@ def _debug2_run(row, src_path, db, progress=None):
             "back_bend_deg": c.get("back_bend_deg"),
             "ratio": c.get("ratio"),
             "wrist_xy": c.get("impact_wrist_xy"),
-            # What stage 1 thought — a label now, not a verdict.
-            "pose_gate": c.get("gate_status") or "swing",
-            "pose_gate_ok": bool(c.get("gate_ok", True)),
         }
 
         # 2. IMPACT + BALL from the bottom of the club's heat arc.
@@ -11970,23 +11950,10 @@ def _debug2_run(row, src_path, db, progress=None):
         verdict, reason = chk.get("verdict"), "club-fan heuristic (no API key)"
         if chk.get("image_clean") and os.environ.get("ANTHROPIC_API_KEY"):
             j = judge_swing_heat_image(CLIPS_DIR / chk["image_clean"])
-            entry["judge_confidence"] = j.get("confidence")
             if j.get("is_swing") is True:
                 verdict, reason = "swing", j.get("reason") or "AI judge: swing"
             elif j.get("is_swing") is False:
-                # ONLY A CONFIDENT NO VETOES. This matches the produce path,
-                # which has used _judge_is_confident for a while; Debug3 was
-                # still dropping on any negative, so a hedged "probably not"
-                # killed swings here that produce would have kept.
-                if _judge_is_confident(j.get("confidence")):
-                    verdict = "not_swing"
-                    reason = j.get("reason") or "AI judge: not a swing"
-                else:
-                    reason = (
-                        f"AI judge leaned 'not a swing' but only at "
-                        f"{j.get('confidence') or 'unknown'} confidence — "
-                        f"carried on"
-                    )
+                verdict, reason = "not_swing", j.get("reason") or "AI judge: not a swing"
             else:
                 reason = f"AI judge unavailable ({j.get('reason')})"
         entry["verdict"] = verdict
@@ -13273,8 +13240,26 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     if progress:
         progress("Finding swing candidates", 0, 0)
     _t0 = time.perf_counter()
+    # STAGE 1 LABELS, IT NO LONGER ELIMINATES. The spine-bend and burst-
+    # duration gates were dropping real swings, and a dropped burst was
+    # gone for good: the non-max suppression ran over gate-PASSING bursts
+    # only, so a swing rejected as upright never entered the pool and could
+    # not be returned at all. Stages 2 and 3 — the ball at impact and the
+    # club fan, both far better discriminators than a spine angle — never
+    # got to look at it.
+    #
+    # So Debug3 takes the rejects too and runs 1, 2 and 3 on every one.
+    # What the gates thought is recorded per candidate as a label, and the
+    # panel shows it; nothing is removed on their say-so.
     cands = list(
-        pose_swing.detect_swings_from_pose(src_path, fps=fps, debug=pose_dbg)
+        pose_swing.detect_swings_from_pose(
+            src_path, fps=fps, keep_rejected=True,
+            # Deliberately high. Debug3 is where we want to see everything;
+            # this is a backstop against a pathological pose trace, not a
+            # filter, and stage 1 says so out loud if it ever bites.
+            max_rejected=40,
+            debug=pose_dbg,
+        )
         or []
     )
     _add("pose", time.perf_counter() - _t0)
@@ -13290,7 +13275,8 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
                   "threshold", "n_raw_bursts", "n_bend_rejected",
                   "back_bend_min_deg", "back_bend_max_deg",
                   "strong_ratio", "ratio_min", "ratio_max", "reached_eof",
-                  "n_crop_frames", "n_bootstrap_scans", "bootstrap_found_at")
+                  "n_crop_frames", "n_bootstrap_scans", "bootstrap_found_at",
+                  "n_gate_passed", "n_rescued", "n_rescued_dropped")
     }
     # The wrist-speed trace itself, so a swing that never crossed the
     # threshold is visible as a shape rather than inferred from a count.
@@ -13321,10 +13307,21 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             )
         else:
             _why.append("bursts were found but none passed the gates")
+    _n_pass = sum(1 for c in cands if c.get("gate_ok", True))
+    _n_resc = len(cands) - _n_pass
+    _n_cut = int(pose_dbg.get("n_rescued_dropped") or 0)
     rep["stages"].append({
         "n": 1, "name": "Pose candidates",
-        "detail": ("wrist speed + spine bend, the detector produce uses"
-                   + (" -- " + "; ".join(_why) if _why else "")),
+        "detail": (
+            "wrist speed + spine bend, the detector produce uses -- but "
+            "the gates only LABEL here: every burst goes on to stages 2 "
+            "and 3 whatever they think"
+            + (f" · {_n_pass} passed, {_n_resc} carried despite failing"
+               if _n_resc else "")
+            + (f" · {_n_cut} weaker one(s) not carried (cap reached)"
+               if _n_cut else "")
+            + (" -- " + "; ".join(_why) if _why else "")
+        ),
         "count": len(cands), "counts": "candidates",
         "seconds": _phase.get("pose", 0.0),
     })
@@ -13361,6 +13358,11 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry: dict = {
             "idx": i, "peak_time_sec": round(peak_t, 2),
             "impact_frame": imp_f, "window": [f_lo, f_hi],
+            # What stage 1's gates thought — a label now, not a verdict.
+            # "rescued" candidates reach stages 2 and 3 exactly like the
+            # rest; this only says which ones to look at twice.
+            "pose_gate": c.get("gate_status") or "swing",
+            "pose_gate_ok": bool(c.get("gate_ok", True)),
         }
 
         # STAGE 2: WHERE IS THE BALL AT REST? The club-arc pass, at the
@@ -13710,17 +13712,22 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
 
     rep["stages"].extend([
         {"n": 2, "name": "Ball at impact",
-         "detail": "club-arc vertex on the ground line at the feet -- "
-                   "measured first because stage 3 centres the judge's "
-                   "composite on it and stage 6 needs it to arm the aim gate",
+         "detail": (
+             f"run on all {len(cands)} candidate(s), gate-passing or not -- "
+             f"club-arc vertex on the ground line at the feet, measured "
+             f"first because stage 3 centres the judge's composite on it "
+             f"and stage 6 needs it to arm the aim gate"
+         ),
          "count": sum(1 for s in rep["swings"] if s.get("ball_hint")),
          "counts": "balls located",
          "seconds": _phase.get("club_arc", 0.0)},
         {"n": 3, "name": "AI judge on the club fan",
-         "detail": "motion-heat composite around that ball, judged on the "
-                   "club's angular sweep -- only a HIGH-confidence 'not a "
-                   "swing' drops the candidate, and it does so before any "
-                   "tracking runs",
+         "detail": (
+             f"run on all {len(cands)} candidate(s) -- motion-heat "
+             f"composite around that ball, judged on the club's angular "
+             f"sweep. Only a HIGH-confidence 'not a swing' drops the "
+             f"candidate, and it does so before any tracking runs"
+         ),
          "count": len(cands) - n_judged_out, "counts": "candidates kept",
          "seconds": _phase.get("judge", 0.0)},
         {"n": 4, "name": "MOG2 + component + area filter",
