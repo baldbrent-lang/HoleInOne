@@ -7821,6 +7821,17 @@ def wizard_produce(
     if impact_frame < 0:
         raise HTTPException(400, "impact_frame must not be negative")
 
+    # Optional. A GREEN frame index -- the produced clip's last frame,
+    # and by then the cut has moved to the green camera. Absent means
+    # "let produce use its own D3_GREEN_SEC".
+    end_frame = payload.get("end_frame")
+    try:
+        end_frame = int(end_frame) if end_frame is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "end_frame must be a whole number")
+    if end_frame is not None and end_frame < 0:
+        raise HTTPException(400, "end_frame must not be negative")
+
     hole_number = payload.get("hole_number")
     try:
         hole_number = int(hole_number) if hole_number is not None else None
@@ -7833,6 +7844,8 @@ def wizard_produce(
         saved = dict(row.edit_metrics or {})
         saved["wizard_ball"] = [bx, by]
         saved["wizard_impact_frame"] = impact_frame
+        if end_frame is not None:
+            saved["end_frame"] = end_frame
         row.edit_metrics = saved
         db.commit()
     except Exception as exc:  # noqa: BLE001
@@ -7860,7 +7873,7 @@ def wizard_produce(
                 running=True, error=None)
     threading.Thread(
         target=run_wizard_produce_job,
-        args=(upload_id, (bx, by), impact_frame, hole_number),
+        args=(upload_id, (bx, by), impact_frame, hole_number, end_frame),
         daemon=True,
         name=f"wizard-produce-{upload_id}",
     ).start()
@@ -7869,7 +7882,8 @@ def wizard_produce(
         upload_id, bx, by, impact_frame,
     )
     return {"ok": True, "started": True, "upload_id": upload_id,
-            "ball": [bx, by], "impact_frame": impact_frame}
+            "ball": [bx, by], "impact_frame": impact_frame,
+            "end_frame": end_frame}
 
 
 @router.delete("/long-uploads/{upload_id}")
@@ -12733,6 +12747,7 @@ def run_wizard_produce_job(
     ball_xy,
     impact_frame: int,
     hole_number: int | None = None,
+    end_frame: int | None = None,
 ) -> dict:
     """Stages 4-8, from the operator's ball and impact frame.
 
@@ -12811,10 +12826,27 @@ def run_wizard_produce_job(
                 "flight": _ff.get("points") or [],
                 "impact_frame": _imp,
             }]}
+            # The operator's end frame is a GREEN frame index; the
+            # renderer wants green-clock SECONDS, because every boundary
+            # in the composite is kept in seconds so the two cameras'
+            # different frame rates cannot introduce drift.
+            _end_sec = None
+            if end_frame is not None:
+                _gp = _local_green(row)
+                _gfps = float(probe_fps(_gp) or 0.0) if _gp else 0.0
+                if _gfps > 0:
+                    _end_sec = float(end_frame) / _gfps
+                else:
+                    log.warning(
+                        "wizard produce: upload=%s has an end frame but no "
+                        "readable green fps — using the default length",
+                        upload_id,
+                    )
             _prog("Rendering the clip", 0, 1)
             out = _d3_fast_produce(
                 row, src_path, db, rep, fps,
                 progress=_prog, hole_number=hole_number,
+                end_green_sec=_end_sec,
             )
             log.info(
                 "wizard produce: upload=%s ball=(%.0f,%.0f) impact=f%d -> "
@@ -13037,6 +13069,10 @@ D3_POST_TRACER_SEC = 1.5     # tee tail after the tracer line stops
 # drives all three consumers (the audio bed rendered under the green
 # half, the green cut itself, and the splice), so they cannot drift.
 D3_GREEN_SEC = 6.0
+# Floor for an operator-trimmed green side. Below about a second the cut
+# reads as a glitch rather than a shot landing, and an end frame that
+# lands before the cutover would otherwise ask for a negative duration.
+D3_MIN_GREEN_SEC = 1.0
 
 
 def _d3_green_delta_sec(db, row) -> tuple[float, str]:
@@ -13152,7 +13188,7 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
 
 
 def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
-                     hole_number=None) -> dict:
+                     hole_number=None, end_green_sec=None) -> dict:
     """Build the shipped clip STRAIGHT from Debug3's numbers.
 
     Stage 8 used to re-run the whole production pipeline
@@ -13175,7 +13211,15 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
     The tee is rendered long enough to carry AUDIO across the whole
     composite (the green camera has no microphone), but only the
     pre-cutover portion is shown as video — same contract
-    `splice_impact_clip` already expects."""
+    `splice_impact_clip` already expects.
+
+    `end_green_sec` is the operator's end frame, in GREEN-clock seconds,
+    from the edit wizard. It replaces D3_GREEN_SEC for this run only --
+    and it must replace it in all three places at once (the tee render,
+    which carries the audio bed past the cutover; the green cut; and the
+    splice), or the composite ends up with a video half and an audio half
+    of different lengths. None means "use the default", which is what
+    every automatic produce does."""
     out = {"ok": False, "clips": [], "error": None}
     swings = [
         s for s in (rep.get("swings") or [])
@@ -13256,10 +13300,34 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             t_tracer_end = max(p["frame"] for p in pts) / fps
             t1 = t_tracer_end + D3_POST_TRACER_SEC
             tee_video_dur = t1 - t0
+
+            # How much green follows the cutover. Normally D3_GREEN_SEC;
+            # when the operator set an end frame in the wizard, the
+            # distance from the cutover to that frame instead. Worked out
+            # HERE, before anything uses it, because three things below
+            # have to agree on one number.
+            _green_sec = D3_GREEN_SEC
+            if end_green_sec is not None and green_path is not None:
+                _want = float(end_green_sec) - (t1 - float(delta))
+                if _want < D3_MIN_GREEN_SEC:
+                    log.warning(
+                        "d3 produce: swing %s end frame is %.2fs after the "
+                        "cutover -- below the %.1fs floor, using the floor",
+                        i, _want, D3_MIN_GREEN_SEC,
+                    )
+                    _green_sec = D3_MIN_GREEN_SEC
+                else:
+                    _green_sec = _want
+                    log.info(
+                        "d3 produce: swing %s green side set to %.2fs by "
+                        "the operator's end frame (default %.1fs)",
+                        i, _green_sec, D3_GREEN_SEC,
+                    )
+
             # The tee file must also carry the audio bed under the green
             # half, so render past the cutover even though that footage
             # is never shown.
-            t_render_end = t1 + (D3_GREEN_SEC if green_path else 0.0)
+            t_render_end = t1 + (_green_sec if green_path else 0.0)
 
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
             _rv = render_tracer_video(
@@ -13292,7 +13360,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-green.mp4"
                     )
                     if not cut_segment(
-                        green_path, green_seg, g0, g0 + D3_GREEN_SEC,
+                        green_path, green_seg, g0, g0 + _green_sec,
                     ):
                         log.warning(
                             "d3 produce: green cut failed for swing %s "
@@ -13302,7 +13370,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
 
             if green_seg is not None:
                 if not splice_impact_clip(
-                    _tee, tee_video_dur, green_seg, D3_GREEN_SEC, final,
+                    _tee, tee_video_dur, green_seg, _green_sec, final,
                 ):
                     raise RuntimeError("composite splice failed")
             else:

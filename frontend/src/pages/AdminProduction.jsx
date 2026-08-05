@@ -1651,6 +1651,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
       await api.wizardProduce(adminPassword, row.id, {
         ball: [draft.ball.x, draft.ball.y],
         impact_frame: draft.impactFrame,
+        // A GREEN frame — where the clip stops. Omitted when the
+        // operator never touched it, so produce uses its own default
+        // rather than us echoing back an estimate as if it were a
+        // choice.
+        end_frame: draft.endFrame ?? null,
       });
       // GREY THE CARD NOW, not when a poll happens to catch it. The
       // server does claim the row before responding, but a wizard produce
