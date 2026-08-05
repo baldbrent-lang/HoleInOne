@@ -77,6 +77,7 @@ from ..models import (
     HIOStatus,
     HoleInOneEvent,
     LongVideoUpload,
+    BroadcastView,
     Participant,
     Showcase,
     TeeTime,
@@ -3986,6 +3987,49 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
                 deleted_files.append(name)
         except Exception as exc:
             log.warning("clip delete: failed to unlink %s: %s", fp, exc)
+
+    # NOTHING MAY STILL POINT AT THE ROW. Every one of these is a real
+    # foreign key, so a single dangling reference turned the delete into
+    # an IntegrityError -- the operator confirmed, the request 500'd, and
+    # the clip stayed exactly where it was. Camera-sourced clips always
+    # have at least one: camera_events.produced_clip_id is stamped the
+    # moment the clip is produced.
+    db.query(CameraEvent).filter(
+        CameraEvent.produced_clip_id == clip_id,
+    ).update({"produced_clip_id": None}, synchronize_session=False)
+    for _col in (
+        HoleInOneEvent.tee_clip_id,
+        HoleInOneEvent.wide_clip_id,
+        HoleInOneEvent.hole_clip_id,
+    ):
+        db.query(HoleInOneEvent).filter(_col == clip_id).update(
+            {_col: None}, synchronize_session=False,
+        )
+    # A view log for a clip that no longer exists is meaningless, and the
+    # column is NOT NULL, so these go rather than getting cleared.
+    db.query(BroadcastView).filter(
+        BroadcastView.clip_id == clip_id,
+    ).delete(synchronize_session=False)
+
+    # The parent upload's edit_metrics remembers which swing became which
+    # clip. Leaving a dead clip_id there makes the card's click-to-plot
+    # match a swing to a clip that is gone.
+    if clip.long_upload_id:
+        _up = db.get(LongVideoUpload, clip.long_upload_id)
+        _em = dict(_up.edit_metrics or {}) if _up else {}
+        _swings = _em.get("swings")
+        if isinstance(_swings, list) and any(
+            isinstance(s, dict) and s.get("clip_id") == clip_id for s in _swings
+        ):
+            _em["swings"] = [
+                {**s, "clip_id": None}
+                if isinstance(s, dict) and s.get("clip_id") == clip_id
+                else s
+                for s in _swings
+            ]
+            # A fresh dict, so SQLAlchemy sees the assignment as dirty
+            # without needing an explicit flag_modified.
+            _up.edit_metrics = _em
 
     db.add(
         AuditLog(

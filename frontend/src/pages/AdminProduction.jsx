@@ -148,8 +148,8 @@ function PoseTrace({ series, threshold, bursts, durationSec }) {
   );
 }
 
-function ProduceStatusOverlay({ row, greyed }) {
-  const queued = row.queue_state === "queued";
+function ProduceStatusOverlay({ row, greyed, override }) {
+  const queued = !override && row.queue_state === "queued";
   if (!greyed && !queued) return null;
 
   const stage = row.produce_stage;
@@ -157,9 +157,15 @@ function ProduceStatusOverlay({ row, greyed }) {
   const done = row.produce_done || 0;
   // Only a per-candidate stage carries a meaningful total; the one-off
   // stages report 0 and get an indeterminate bar rather than a fake 0%.
-  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
+  // An override ("Deleting…") is not a produce run and has no progress.
+  const pct =
+    !override && total > 0 ? Math.min(100, Math.round((done / total) * 100)) : null;
 
-  const label = queued
+  // The card is greyed for something OTHER than a produce — say the
+  // delete — and has to name it. The produce stages are stale in that
+  // case: they describe the run that made the clip, not what is
+  // happening now.
+  const label = override ? override : queued
     ? `Waiting to produce${
         row.queue_position ? ` · ${row.queue_position} of ${row.queue_depth}` : ""
       }`
@@ -243,6 +249,79 @@ function ProduceStatusOverlay({ row, greyed }) {
             />
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* A centred "are you sure?" — window.confirm pins its box to the top of
+   the browser chrome, which on a wide operator screen is nowhere near
+   what the operator just clicked. This sits in the middle of the
+   viewport, and, unlike window.confirm, it can be dismissed the instant
+   the operator says yes so the greyed card underneath is visible while
+   the work runs. */
+function ConfirmDialog({ open, title, body, confirmLabel, onConfirm, onCancel }) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") onCancel?.();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onCancel]);
+  if (!open) return null;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 120,
+        background: "rgba(15, 23, 42, 0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+      }}
+    >
+      <div
+        className="card"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          maxWidth: 460,
+          width: "100%",
+          margin: 0,
+          textAlign: "center",
+          boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+        }}
+      >
+        <h4 style={{ marginTop: 0 }}>{title}</h4>
+        {body && (
+          <p className="muted" style={{ fontSize: 14, marginBottom: 18 }}>
+            {body}
+          </p>
+        )}
+        <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto", minWidth: 110 }}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="danger"
+            style={{ width: "auto", minWidth: 110 }}
+            autoFocus
+            onClick={onConfirm}
+          >
+            {confirmLabel || "Delete"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -8040,6 +8119,12 @@ export default function AdminProduction() {
   const error = actionError || uploadsList.error || eventsList.error;
   const setError = setActionError;
   const [busyId, setBusyId] = useState(null);
+  // What the greyed card SAYS it is doing, when it isn't a produce.
+  // Null means "a produce run", which the overlay narrates from the
+  // server's own stage fields.
+  const [busyLabel, setBusyLabel] = useState(null);
+  // A centred confirmation: {title, body, confirmLabel, onConfirm}.
+  const [confirmBox, setConfirmBox] = useState(null);
   const [busyEventId, setBusyEventId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title, startedAt, fps}
   const [editingRow, setEditingRow] = useState(null);
@@ -8446,10 +8531,21 @@ export default function AdminProduction() {
     }
   }
 
+  // A label outlives nothing: when the card stops being busy it stops
+  // saying anything.
+  useEffect(() => {
+    if (busyId == null) setBusyLabel(null);
+  }, [busyId]);
+
   // Hand the greyed-out state from the optimistic flag to the server's
   // status, without a gap between them.
   useEffect(() => {
     if (busyId == null) return;
+    // A delete is not a produce: the row's processing_status is whatever
+    // the last produce left behind, so both hand-offs below would fire
+    // immediately and un-grey a card that is still mid-delete. The
+    // handler clears it itself when the request comes back.
+    if (busyLabel) return;
     const r = (rows || []).find((x) => x.id === busyId);
     if (!r) return;
     // NOT the terminal states on their own. The row is ALREADY
@@ -8472,7 +8568,7 @@ export default function AdminProduction() {
     if (Number.isFinite(done) && done >= busySinceRef.current) {
       setBusyId(null);
     }
-  }, [rows, busyId]);
+  }, [rows, busyId, busyLabel]);
 
   // Failsafe: never leave a card greyed for good if the worker dies before
   // it claims the row, or crashes without setting a status.
@@ -8793,27 +8889,42 @@ export default function AdminProduction() {
                       swingPos: pos >= 0 ? pos : swingIdx,
                     });
                   }}
-                  onDeleteClip={async (clip, clipIdx) => {
+                  onDeleteClip={(clip, clipIdx) => {
                     const label = clip.hole_number != null
                       ? `clip ${clipIdx + 1} (hole ${clip.hole_number})`
                       : `clip ${clipIdx + 1}`;
-                    if (!window.confirm(
-                      `Delete produced ${label}? The video and its files ` +
-                      `are removed; the raw upload and the other clips ` +
-                      `stay, and Re-Produce can recreate it.`
-                    )) {
-                      return;
-                    }
-                    busySinceRef.current = Date.now();
-    setBusyId(row.id);
-                    try {
-                      await api.deleteClip(adminPassword, clip.id);
-                      await refreshAll();
-                    } catch (e) {
-                      setError(e.message);
-                    } finally {
-                      setBusyId(null);
-                    }
+                    setConfirmBox({
+                      title: `Delete produced ${label}?`,
+                      body:
+                        "The video and its files are removed. The raw " +
+                        "upload and the other clips stay, and Re-Produce " +
+                        "can recreate it.",
+                      confirmLabel: "Delete clip",
+                      onConfirm: async () => {
+                        // Dialog down, card greyed, THEN the request —
+                        // same order as the wizard's Produce, and for the
+                        // same reason: the operator has to be able to see
+                        // the state that the click just set.
+                        setConfirmBox(null);
+                        busySinceRef.current = Date.now();
+                        setBusyLabel("Deleting the clip…");
+                        setBusyId(row.id);
+                        try {
+                          await api.deleteClip(adminPassword, clip.id);
+                        } catch (e) {
+                          // Already gone is the outcome we wanted.
+                          if (!/^404/.test(e?.message || "")) {
+                            setError(e.message);
+                          }
+                        }
+                        try {
+                          await refreshAll();
+                        } finally {
+                          setBusyLabel(null);
+                          setBusyId((cur) => (cur === row.id ? null : cur));
+                        }
+                      },
+                    });
                   }}
                 />
               </div>
@@ -8963,7 +9074,11 @@ export default function AdminProduction() {
               </div>
             )}
           </div>
-          <ProduceStatusOverlay row={row} greyed={greyed} />
+          <ProduceStatusOverlay
+            row={row}
+            greyed={greyed}
+            override={busy ? busyLabel : null}
+          />
           </div>
         );
       })}
@@ -9029,6 +9144,15 @@ export default function AdminProduction() {
 
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
       {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
+
+      <ConfirmDialog
+        open={!!confirmBox}
+        title={confirmBox?.title}
+        body={confirmBox?.body}
+        confirmLabel={confirmBox?.confirmLabel}
+        onConfirm={confirmBox?.onConfirm}
+        onCancel={() => setConfirmBox(null)}
+      />
     </div>
   );
 }
