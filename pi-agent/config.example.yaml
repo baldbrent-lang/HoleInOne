@@ -164,6 +164,24 @@ upload_bitrate_kbps: 2500
 # upload_fresh_timeout: 120
 # upload_idle_timeout: 240
 # upload_patient_timeout: 300
+# (patient_timeout is multiplied by 5 when chunked upload is on -- see
+#  below: a long chunked attempt banks progress instead of wasting it.)
+
+# RESUMABLE UPLOAD. The tee's uplink is a USB cellular modem that reboots
+# itself roughly every 30 seconds under load: dmesg shows it alive ~23s
+# at ~125 KB/s, then gone ~8s while it re-enumerates on the USB bus
+# (interface index reached 82 in one afternoon). A 6.5 MB clip needs
+# ~52s of live wire, so it CANNOT finish inside one of those windows --
+# every whole-file POST spent its timeout in a dead window and discarded
+# everything it had already sent. The clip that failed thirty times was
+# never too big for the link; it was too big for the link's uptime.
+#
+# With this on, a clip goes up in ~512 KB slices and the server banks the
+# progress, so a reset costs one slice rather than the whole clip and the
+# next window resumes where the last stopped. Progress also survives the
+# agent restarting. Turn it off only to fall back to whole-file POSTs.
+# upload_chunked: true
+# upload_chunk_kb: 512
 
 # BACK OFF WHEN UPLOADS ARE FAILING. Measured at Snee Farm: with both
 # agents retrying back-to-back the uplink managed 4.8 KB/s; with them

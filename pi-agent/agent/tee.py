@@ -586,6 +586,8 @@ class TeeAgent:
             settle_seconds=float(self.cfg.get("upload_settle_seconds", 120)),
             backoff_base=float(self.cfg.get("upload_backoff_base", 20)),
             backoff_max=float(self.cfg.get("upload_backoff_max", 600)),
+            chunked=bool(self.cfg.get("upload_chunked", True)),
+            chunk_kb=int(self.cfg.get("upload_chunk_kb", 512)),
         )
         self.uploader.start()
 

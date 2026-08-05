@@ -42,7 +42,9 @@ State that lives in-memory only:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -93,6 +95,30 @@ _pending_triggers: dict[int, asyncio.Queue] = {}
 # typically 30-50 MB; this catches malformed uploads / wrong files
 # without rejecting legitimate captures.
 MAX_EVENT_CLIP_BYTES = 500 * 1024 * 1024
+
+# RESUMABLE UPLOAD. The tee's uplink is a USB cellular modem that
+# reboots itself every ~30 seconds under load: alive for ~23s at
+# ~125 KB/s, then gone for ~8s while it re-enumerates. A 6.5 MB clip
+# needs ~52s of live wire, so it can NEVER complete inside one of the
+# modem's lifetimes — every whole-file POST died mid-flight and threw
+# away everything it had sent. Partial uploads live here between
+# chunks so a clip can cross as many modem lifetimes as it needs.
+PARTS_DIR = CLIPS_DIR.parent / "partial"
+PARTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# A part with no activity for this long is abandoned (the Pi gave up,
+# or the clip was re-encoded and restarted under a fresh size).
+PART_MAX_AGE_SECONDS = 24 * 3600
+
+# Upper bound on a single chunk. Generous — the Pi picks the real size
+# (512 KB by default, ~4s of wire at the modem's rate).
+PART_MAX_CHUNK_BYTES = 8 * 1024 * 1024
+
+# Appends are short and serialized; the read of the incoming body
+# happens OUTSIDE this lock so the event loop is never blocked on the
+# network while holding it.
+_PARTS_LOCK = threading.Lock()
+_next_part_prune = 0.0
 
 
 # ---------------------------------------------------------------------
@@ -179,6 +205,186 @@ def _save_event_clip(
     out_path = CLIPS_DIR / fname
     out_path.write_bytes(data)
     return fname
+
+
+def _adopt_event_clip(
+    src: Path,
+    event_id: int,
+    role: str,
+    original_filename: str | None,
+) -> str:
+    """Move an already-complete file into CLIPS_DIR under the standard
+    name. Same result as _save_event_clip, minus reading the whole clip
+    into memory — the resumable path already has it on disk, and
+    PARTS_DIR is a sibling of CLIPS_DIR so the rename is atomic."""
+    ext = "mp4"
+    if original_filename and "." in original_filename:
+        candidate = original_filename.rsplit(".", 1)[-1].lower()
+        if candidate in ("mp4", "mov", "m4v", "webm"):
+            ext = candidate
+    fname = f"event-{event_id}-{role}-{secrets.token_hex(4)}.{ext}"
+    src.replace(CLIPS_DIR / fname)
+    return fname
+
+
+# ---------------------------------------------------------------------
+# Resumable upload state
+# ---------------------------------------------------------------------
+
+
+def _part_paths(camera_id: int, upload_id: str) -> tuple[Path, Path]:
+    """Where this camera's in-progress upload lives. Namespaced by
+    camera id so the tee and green can share a session_id as the
+    upload_id without colliding."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "", upload_id or "")[:80]
+    if not safe:
+        raise HTTPException(400, "upload_id is required")
+    base = PARTS_DIR / f"cam{int(camera_id)}-{safe}"
+    return base.with_suffix(".part"), base.with_suffix(".meta")
+
+
+def _part_received(part: Path, meta: Path, total_size: int) -> int:
+    """Bytes already banked for this upload, or 0 if what's on disk
+    belongs to a different file.
+
+    The size check matters: when the link keeps failing, the uploader
+    re-encodes the clip at a lower bitrate and retries. Those are
+    different bytes under the same session_id, so resuming on top of
+    them would splice two encodes into one corrupt MP4.
+    """
+    if not part.exists():
+        return 0
+    prev = None
+    try:
+        prev = json.loads(meta.read_text()).get("total_size")
+    except (OSError, ValueError, AttributeError):
+        prev = None
+    if total_size > 0 and prev is not None and int(prev) != int(total_size):
+        log.info(
+            "cameras: %s restarted — clip is now %d bytes, not %d (re-encoded)",
+            part.name, int(total_size), int(prev),
+        )
+        part.unlink(missing_ok=True)
+        meta.unlink(missing_ok=True)
+        return 0
+    try:
+        return part.stat().st_size
+    except OSError:
+        return 0
+
+
+def _prune_parts() -> None:
+    """Drop abandoned partials so a fortnight of dead uploads can't
+    fill the disk. Cheap, and rate-limited to once a minute."""
+    global _next_part_prune
+    now = time.time()
+    if now < _next_part_prune:
+        return
+    _next_part_prune = now + 60.0
+    try:
+        for p in PARTS_DIR.iterdir():
+            try:
+                if now - p.stat().st_mtime > PART_MAX_AGE_SECONDS:
+                    p.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+def _resolve_event_role(
+    cam: Camera, session_id: str, db: Session,
+) -> tuple[CameraEvent, str]:
+    """Find the event this upload belongs to and which side it is."""
+    event = db.query(CameraEvent).filter(
+        CameraEvent.session_id == session_id,
+    ).first()
+    if event is None:
+        raise HTTPException(404, "no event for that session_id; trigger first")
+    if cam.id == event.tee_camera_id:
+        return event, "tee"
+    if event.green_camera_id is not None and cam.id == event.green_camera_id:
+        return event, "green"
+    raise HTTPException(403, "this camera is not part of that event")
+
+
+def _record_event_clip(
+    event: CameraEvent,
+    role: str,
+    fname: str,
+    recording_started_at: float | None,
+    db: Session,
+) -> dict:
+    """Attach a stored clip to its event, advance the status, and kick
+    off post-processing. Shared by the whole-file and resumable upload
+    paths so they cannot drift apart."""
+    # First-frame wall-clock time (epoch seconds from the Pi). Stored
+    # per role so the dual-camera cut can align the green clip to the
+    # tee cut's real-world moment instead of trusting frame indices.
+    started_dt = None
+    if recording_started_at is not None:
+        try:
+            started_dt = datetime.utcfromtimestamp(float(recording_started_at))
+        except (ValueError, OverflowError, OSError):
+            started_dt = None
+    if role == "tee":
+        event.tee_clip_filename = fname
+        if started_dt is not None:
+            event.tee_recording_started_at = started_dt
+    else:
+        event.green_clip_filename = fname
+        if started_dt is not None:
+            event.green_recording_started_at = started_dt
+
+    # Decide the new status + whether we're ready to process. A paired
+    # event needs both clips; an unpaired tee event needs only its own.
+    has_tee = event.tee_clip_filename is not None
+    has_green = event.green_clip_filename is not None
+    is_paired = event.green_camera_id is not None
+    ready_to_process = (has_tee and has_green) if is_paired else has_tee
+    if ready_to_process:
+        event.status = "paired_uploaded"
+    elif has_tee:
+        event.status = "tee_uploaded"
+    elif has_green:
+        # Unusual: green came in before tee. Hold; the tee upload
+        # (which is mandatory) will flip the status.
+        event.status = "tee_uploaded"
+    db.commit()
+
+    log.info(
+        "cameras: upload-event event=%s role=%s file=%s status=%s",
+        event.id, role, fname, event.status,
+    )
+
+    # Re-encode + thumbnail in the background so the admin preview
+    # works. Doesn't block the Pi's HTTP response. Runs in parallel
+    # with the production job for paired events; both touch the file
+    # via os-atomic rename, so cv2 reading from one inode while
+    # ffmpeg writes a new one is fine.
+    threading.Thread(
+        target=_post_process_raw_clip,
+        args=(fname,),
+        daemon=True,
+        name=f"post-process-{event.id}-{role}",
+    ).start()
+
+    if ready_to_process:
+        threading.Thread(
+            target=_process_camera_event_job,
+            args=(event.id,),
+            daemon=True,
+            name=f"camera-event-{event.id}",
+        ).start()
+
+    return {
+        "ok": True,
+        "event_id": event.id,
+        "role": role,
+        "filename": fname,
+        "status": event.status,
+        "ready_to_process": ready_to_process,
+    }
 
 
 # ---------------------------------------------------------------------
@@ -585,16 +791,7 @@ async def upload_event(
     if not sid:
         raise HTTPException(400, "session_id is required")
 
-    event = db.query(CameraEvent).filter(CameraEvent.session_id == sid).first()
-    if event is None:
-        raise HTTPException(404, "no event for that session_id; trigger first")
-
-    if cam.id == event.tee_camera_id:
-        role = "tee"
-    elif event.green_camera_id is not None and cam.id == event.green_camera_id:
-        role = "green"
-    else:
-        raise HTTPException(403, "this camera is not part of that event")
+    event, role = _resolve_event_role(cam, sid, db)
 
     data = await video.read()
     if not data:
@@ -605,76 +802,139 @@ async def upload_event(
         )
 
     fname = _save_event_clip(data, event.id, role, video.filename)
-    # First-frame wall-clock time (epoch seconds from the Pi). Stored
-    # per role so the dual-camera cut can align the green clip to the
-    # tee cut's real-world moment instead of trusting frame indices.
-    started_dt = None
-    if recording_started_at is not None:
-        try:
-            started_dt = datetime.utcfromtimestamp(float(recording_started_at))
-        except (ValueError, OverflowError, OSError):
-            started_dt = None
-    if role == "tee":
-        event.tee_clip_filename = fname
-        if started_dt is not None:
-            event.tee_recording_started_at = started_dt
-    else:
-        event.green_clip_filename = fname
-        if started_dt is not None:
-            event.green_recording_started_at = started_dt
+    return _record_event_clip(event, role, fname, recording_started_at, db)
 
-    # Decide the new status + whether we're ready to process. A paired
-    # event needs both clips; an unpaired tee event needs only its own.
-    has_tee = event.tee_clip_filename is not None
-    has_green = event.green_clip_filename is not None
-    is_paired = event.green_camera_id is not None
-    ready_to_process = (has_tee and has_green) if is_paired else has_tee
-    if ready_to_process:
-        event.status = "paired_uploaded"
-    elif has_tee:
-        event.status = "tee_uploaded"
-    elif has_green:
-        # Unusual: green came in before tee. Hold; the tee upload
-        # (which is mandatory) will flip the status.
-        event.status = "tee_uploaded"
+
+@router.get("/{token}/upload-status")
+def upload_status(
+    token: str,
+    upload_id: str,
+    total_size: int = 0,
+    db: Session = Depends(get_db),
+):
+    """How many bytes of this clip the server already holds.
+
+    The Pi calls this before every attempt so it resumes where the last
+    one died rather than starting over. Also the recovery path when a
+    chunk's response is lost in flight — the bytes may well have landed,
+    and this is how the Pi finds out.
+    """
+    cam = _get_camera_by_token(token, db)
     db.commit()
+    _prune_parts()
+    part, meta = _part_paths(cam.id, upload_id)
+    with _PARTS_LOCK:
+        received = _part_received(part, meta, int(total_size or 0))
+    return {
+        "received": received,
+        "total_size": int(total_size or 0),
+        "max_chunk_bytes": PART_MAX_CHUNK_BYTES,
+    }
 
-    log.info(
-        "cameras: upload-event event=%s role=%s file=%s status=%s",
-        event.id,
-        role,
-        fname,
-        event.status,
-    )
 
-    # Re-encode + thumbnail in the background so the admin preview
-    # works. Doesn't block the Pi's HTTP response. Runs in parallel
-    # with the production job for paired events; both touch the file
-    # via os-atomic rename, so cv2 reading from one inode while
-    # ffmpeg writes a new one is fine.
-    threading.Thread(
-        target=_post_process_raw_clip,
-        args=(fname,),
-        daemon=True,
-        name=f"post-process-{event.id}-{role}",
-    ).start()
+@router.post("/{token}/upload-chunk")
+async def upload_chunk(
+    token: str,
+    upload_id: str = Form(...),
+    offset: int = Form(...),
+    total_size: int = Form(...),
+    chunk: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Append one slice of a clip.
 
-    if ready_to_process:
-        threading.Thread(
-            target=_process_camera_event_job,
-            args=(event.id,),
-            daemon=True,
-            name=f"camera-event-{event.id}",
-        ).start()
+    `offset` must match what the server already holds. When it doesn't
+    the answer is `resync` plus the true offset rather than an error —
+    a mismatch means the Pi's idea of progress is stale (a chunk landed
+    but its response never made it back through a dying modem), which is
+    routine here, not a fault.
+    """
+    cam = _get_camera_by_token(token, db)
+    db.commit()
+    if total_size <= 0:
+        raise HTTPException(400, "total_size is required")
+    if total_size > MAX_EVENT_CLIP_BYTES:
+        raise HTTPException(
+            413, f"clip exceeds {MAX_EVENT_CLIP_BYTES // (1024 * 1024)} MB cap"
+        )
+    part, meta = _part_paths(cam.id, upload_id)
+
+    # Read the body BEFORE taking the lock — this awaits on the network
+    # and must not hold up other cameras' appends.
+    body = await chunk.read()
+    if not body:
+        raise HTTPException(400, "empty chunk")
+    if len(body) > PART_MAX_CHUNK_BYTES:
+        raise HTTPException(413, "chunk too large")
+
+    with _PARTS_LOCK:
+        received = _part_received(part, meta, total_size)
+        if int(offset) != received:
+            return {
+                "ok": False,
+                "resync": True,
+                "received": received,
+                "total_size": total_size,
+            }
+        if received + len(body) > total_size:
+            raise HTTPException(400, "chunk runs past the declared total_size")
+        with open(part, "ab") as fh:
+            fh.write(body)
+        received += len(body)
+        meta.write_text(json.dumps({
+            "total_size": int(total_size),
+            "received": int(received),
+            "updated_at": time.time(),
+        }))
 
     return {
         "ok": True,
-        "event_id": event.id,
-        "role": role,
-        "filename": fname,
-        "status": event.status,
-        "ready_to_process": ready_to_process,
+        "received": received,
+        "total_size": total_size,
+        "complete": received >= total_size,
     }
+
+
+@router.post("/{token}/upload-complete")
+def upload_complete(
+    token: str,
+    session_id: str = Form(...),
+    upload_id: str = Form(...),
+    total_size: int = Form(...),
+    filename: str | None = Form(None),
+    recording_started_at: float | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Seal a fully-transferred clip and hand it to the normal pipeline.
+
+    Short of the declared size, this reports `resync` with what's
+    actually banked instead of failing, so the Pi simply carries on
+    sending from there.
+    """
+    cam = _get_camera_by_token(token, db)
+    sid = (session_id or "").strip()[:80]
+    if not sid:
+        raise HTTPException(400, "session_id is required")
+    event, role = _resolve_event_role(cam, sid, db)
+    part, meta = _part_paths(cam.id, upload_id)
+
+    with _PARTS_LOCK:
+        received = _part_received(part, meta, int(total_size))
+        if received < int(total_size):
+            return {
+                "ok": False,
+                "resync": True,
+                "received": received,
+                "total_size": int(total_size),
+            }
+        fname = _adopt_event_clip(part, event.id, role, filename)
+        meta.unlink(missing_ok=True)
+
+    log.info(
+        "cameras: resumable upload complete — event=%s role=%s %.1f MB",
+        event.id, role, int(total_size) / (1024 * 1024),
+    )
+    return _record_event_clip(event, role, fname, recording_started_at, db)
 
 
 # ---------------------------------------------------------------------

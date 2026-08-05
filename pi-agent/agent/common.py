@@ -4,6 +4,7 @@ heartbeat thread. Imported by both the tee and green role runners.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -359,6 +360,167 @@ class BackendClient:
         )
         return out
 
+    # ---- resumable upload -------------------------------------------
+
+    def _upload_offset(self, upload_id: str, total_size: int,
+                       fallback: int) -> int:
+        """Ask the server how much of this clip it already holds.
+        Falls back to our own count if the link is down for the ask —
+        a wrong guess is harmless, the next chunk gets a `resync`."""
+        try:
+            out = self._retry(
+                "GET",
+                f"/upload-status?upload_id={upload_id}&total_size={total_size}",
+                retries=1, timeout=20,
+            )
+            return int(out.get("received") or 0)
+        except Exception:  # noqa: BLE001
+            return int(fallback)
+
+    def upload_event_chunked(
+        self,
+        session_id: str,
+        video_path: Path,
+        recording_started_at: float | None = None,
+        chunk_bytes: int = 512 * 1024,
+        chunk_timeout: int = 45,
+        deadline_seconds: int = 300,
+        max_stalls: int = 40,
+        stall_wait: float = 6.0,
+    ) -> dict:
+        """Upload a clip in resumable slices.
+
+        WHY THIS EXISTS. The tee's uplink is a USB cellular modem that
+        reboots every ~30 seconds under load — ~23s alive at ~125 KB/s,
+        then ~8s gone while it re-enumerates on the USB bus. A 6.5 MB
+        clip needs ~52s of live wire. It therefore CANNOT complete
+        inside one modem lifetime, and every whole-file POST spent its
+        timeout in a dead window and discarded everything it had sent.
+        The clip that failed thirty times was never too big for the
+        link; it was too big for the link's uptime.
+
+        Chunks are ~4s of wire each, so a reset costs one chunk, not the
+        whole clip, and the next window picks up where the last left
+        off. Progress is banked on the SERVER, so it also survives the
+        agent restarting.
+        """
+        try:
+            total = video_path.stat().st_size
+        except OSError as exc:
+            raise RuntimeError(f"cannot stat {video_path}: {exc}") from exc
+        if total <= 0:
+            raise RuntimeError(f"{video_path.name} is empty")
+        _mb = total / (1024 * 1024)
+        upload_id = str(session_id)[:80]
+        _t0 = time.time()
+
+        sent = self._upload_offset(upload_id, total, 0)
+        if sent:
+            log.info(
+                "upload: resuming %s at %.1f/%.1f MB (%.0f%% already banked "
+                "on the server)",
+                video_path.name, sent / (1024 * 1024), _mb, 100.0 * sent / total,
+            )
+        else:
+            log.info(
+                "upload: %s is %.1f MB — sending in %d KB chunks, %ds budget",
+                video_path.name, _mb, int(chunk_bytes // 1024),
+                int(deadline_seconds),
+            )
+
+        stalls = 0
+        _last_log = 0.0
+        with open(video_path, "rb") as fh:
+            while sent < total:
+                _el = time.time() - _t0
+                if _el > deadline_seconds:
+                    raise RuntimeError(
+                        f"{video_path.name}: {sent / (1024 * 1024):.1f}/"
+                        f"{_mb:.1f} MB after {_el:.0f}s — out of budget, "
+                        f"keeping the progress for the next attempt"
+                    )
+                fh.seek(sent)
+                body = fh.read(int(chunk_bytes))
+                if not body:
+                    # The file shrank under us (re-encoded mid-flight).
+                    raise RuntimeError(
+                        f"{video_path.name} ended at {sent} of {total} bytes"
+                    )
+                try:
+                    out = self._retry(
+                        "POST", "/upload-chunk",
+                        data={
+                            "upload_id": upload_id,
+                            "offset": str(sent),
+                            "total_size": str(total),
+                        },
+                        make_files=lambda b=body: {
+                            "chunk": ("chunk.bin", io.BytesIO(b),
+                                      "application/octet-stream"),
+                        },
+                        timeout=int(chunk_timeout),
+                        retries=1,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # A dead window, almost certainly. Don't abandon the
+                    # clip — wait for the modem to come back and re-ask
+                    # where we are, because this chunk may have landed
+                    # and only its reply was lost.
+                    stalls += 1
+                    if stalls > max_stalls:
+                        raise RuntimeError(
+                            f"{video_path.name}: {stalls} stalled chunks at "
+                            f"{sent / (1024 * 1024):.1f}/{_mb:.1f} MB ({exc})"
+                        ) from exc
+                    log.info(
+                        "upload: %s stalled at %.1f/%.1f MB (%s) — waiting "
+                        "%.0fs for the link, progress is kept",
+                        video_path.name, sent / (1024 * 1024), _mb,
+                        str(exc)[:80], stall_wait,
+                    )
+                    time.sleep(stall_wait)
+                    sent = self._upload_offset(upload_id, total, sent)
+                    continue
+                stalls = 0
+                if out.get("resync"):
+                    # Server and Pi disagreed on progress; the server wins.
+                    sent = int(out.get("received") or 0)
+                    continue
+                sent = int(out.get("received") or (sent + len(body)))
+                if time.time() - _last_log >= 15.0:
+                    _last_log = time.time()
+                    log.info(
+                        "upload: %s %.1f/%.1f MB (%.0f%%)",
+                        video_path.name, sent / (1024 * 1024), _mb,
+                        100.0 * sent / total,
+                    )
+
+        data = {
+            "session_id": session_id,
+            "upload_id": upload_id,
+            "total_size": str(total),
+            "filename": video_path.name,
+        }
+        if recording_started_at is not None:
+            data["recording_started_at"] = repr(float(recording_started_at))
+        out = self._retry(
+            "POST", "/upload-complete", data=data, timeout=60, retries=3,
+        )
+        if out.get("resync"):
+            # Rare: the server holds less than we think (a part pruned
+            # mid-flight). Report it as a failure so the spool retries
+            # the whole clip rather than silently losing it.
+            raise RuntimeError(
+                f"{video_path.name}: server has "
+                f"{int(out.get('received') or 0)} of {total} bytes at commit"
+            )
+        _el = max(0.001, time.time() - _t0)
+        log.info(
+            "upload OK (chunked): %s, %.1f MB in %.1fs (~%.0f kbps)",
+            video_path.name, _mb, _el, (total * 8 / 1024) / _el,
+        )
+        return out
+
 
 # ---------------------------------------------------------------------
 # Heartbeat thread
@@ -448,6 +610,8 @@ class BackgroundUploader(threading.Thread):
         backoff_base: float = 20.0,
         backoff_max: float = 600.0,
         settle_seconds: float = 120.0,
+        chunked: bool = True,
+        chunk_kb: int = 512,
     ):
         super().__init__(daemon=True, name="uploader")
         self.client = client
@@ -467,7 +631,15 @@ class BackgroundUploader(threading.Thread):
         # Fresh clip with others waiting / fresh clip alone / spool retry.
         self.fresh_timeout = int(fresh_timeout)
         self.idle_timeout = int(idle_timeout)
-        self.patient_timeout = int(patient_timeout)
+        # THE SPOOL RETRY CAN AFFORD TO WAIT — and with chunking it can
+        # afford far more than it could before. A long whole-file attempt
+        # was occupation: it held the wire for minutes and, if it missed,
+        # left nothing behind, which is why this was cut to two minutes.
+        # A long chunked attempt is the opposite — every slice that lands
+        # stays landed. The spool sweep only runs when the queue is empty
+        # and the link is quiet, so the wait costs nothing and is exactly
+        # what a 6 MB clip needs to cross twenty modem lifetimes.
+        self.patient_timeout = int(patient_timeout) * (5 if chunked else 1)
         # BACK OFF WHEN THE LINK IS FAILING. Measured at Snee Farm: with
         # both agents retrying back-to-back the uplink delivered 4.8 KB/s;
         # with them stopped, 162 KB/s. Same link, same minute, 35x. The
@@ -507,6 +679,14 @@ class BackgroundUploader(threading.Thread):
         self._capture_active = False
         self._last_capture_end = 0.0
         self.settle_seconds = float(settle_seconds)
+        # SEND IN SLICES. The tee's modem is up ~23s at a time before it
+        # re-enumerates; a whole-file POST of a 6.5 MB clip cannot finish
+        # inside that and threw away every byte it had sent. Chunks bank
+        # progress server-side, so a clip crosses as many modem lifetimes
+        # as it needs. Set upload_chunked: false in config to go back to
+        # whole-file POSTs.
+        self.chunked = bool(chunked)
+        self.chunk_bytes = max(64 * 1024, int(chunk_kb) * 1024)
         if self.spool_dir is not None:
             try:
                 self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -703,7 +883,7 @@ class BackgroundUploader(threading.Thread):
             self._fails, held_seconds, wait,
         )
         # ...and stop MAKING clips this link cannot carry.
-        if (self._fails >= SHRINK_AFTER_TRIES
+        if (self._fails >= self._shrink_after()
                 and self._kbps_now > SHRINK_FLOOR_KBPS):
             _new = max(SHRINK_FLOOR_KBPS, self._kbps_now // 2)
             log.warning(
@@ -719,6 +899,19 @@ class BackgroundUploader(threading.Thread):
         """Seconds left of the quiet window, 0 if we may transmit."""
         return max(0.0, self._quiet_until - time.time())
 
+    def _shrink_after(self) -> int:
+        """How many failures before we re-encode smaller.
+
+        Chunked uploads change the arithmetic. A failed whole-file POST
+        left nothing behind, so shrinking cost only quality. A failed
+        chunked attempt has banked most of the clip on the server —
+        re-encoding changes the byte count, which correctly invalidates
+        that progress and starts over. So when chunking, shrinking is a
+        last resort rather than a third-strike reflex: give the clip
+        several more passes to inch across first.
+        """
+        return SHRINK_AFTER_TRIES * 3 if self.chunked else SHRINK_AFTER_TRIES
+
     def _send(self, session_id: str, clip_path: Path, ts: Optional[float],
               real_fps: Optional[float], compress: bool, retries: int,
               timeout: int) -> bool:
@@ -732,10 +925,25 @@ class BackgroundUploader(threading.Thread):
                     ),
                     force_input_fps=real_fps,
                 )
-            result = self.client.upload_event(
-                session_id, clip_path, recording_started_at=ts,
-                retries=retries, timeout=timeout,
-            )
+            if self.chunked:
+                # `timeout` x `retries` is the budget the caller already
+                # sized for this clip's place in the queue; chunked spends
+                # it as ONE deadline rather than N whole-file attempts that
+                # each discard their own progress. A short budget is no
+                # longer a wasted one — a fresh clip behind a queue banks
+                # whatever it manages and the spool resumes from there.
+                _deadline = int(timeout) * max(1, int(retries))
+                result = self.client.upload_event_chunked(
+                    session_id, clip_path, recording_started_at=ts,
+                    chunk_bytes=self.chunk_bytes,
+                    chunk_timeout=min(45, max(20, int(timeout))),
+                    deadline_seconds=_deadline,
+                )
+            else:
+                result = self.client.upload_event(
+                    session_id, clip_path, recording_started_at=ts,
+                    retries=retries, timeout=timeout,
+                )
             log.info(
                 "uploaded: event=%s status=%s ready=%s",
                 result.get("event_id"), result.get("status"),
@@ -868,10 +1076,11 @@ class BackgroundUploader(threading.Thread):
         # same link in the same minute. Size is what separates them, so
         # when a clip has failed repeatedly, take the size away.
         _kbps = int(meta.get("kbps") or self._kbps_now or 0)
-        if (tries >= SHRINK_AFTER_TRIES and _kbps > SHRINK_FLOOR_KBPS
+        if (tries >= self._shrink_after() and _kbps > SHRINK_FLOOR_KBPS
                 and path.exists()):
             _new = max(SHRINK_FLOOR_KBPS, _kbps // 2)
             _was = path.stat().st_size / (1024 * 1024)
+            _had_tries = tries
             if compress_for_upload(path, target_kbps=_new):
                 meta["kbps"] = _new
                 meta["tries"] = 0        # a different clip; a fresh budget
@@ -884,7 +1093,7 @@ class BackgroundUploader(threading.Thread):
                     "uploader: %s failed %d times at %d kbps (%.1f MB) — "
                     "re-encoded at %d kbps (%.1f MB). Lower quality beats a "
                     "clip that never arrives.",
-                    path.name, SHRINK_AFTER_TRIES, _kbps, _was, _new,
+                    path.name, _had_tries, _kbps, _was, _new,
                     path.stat().st_size / (1024 * 1024),
                 )
         log.info("uploader: retrying spooled %s (%d previous attempt(s))",
