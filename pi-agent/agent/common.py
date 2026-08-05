@@ -298,6 +298,17 @@ class BackendClient:
             data={"session_id": session_id},
         )
 
+    def recover_event(self, session_id: str) -> dict:
+        # Re-register a session whose trigger was lost, so an already
+        # recorded clip has something to attach to. `recover` keeps the
+        # backend from waking the green Pi for a swing minutes past.
+        return self._retry(
+            "POST", "/event-trigger",
+            data={"session_id": session_id, "recover": "true"},
+            retries=2,
+            timeout=20,
+        )
+
     def event_stop(self, session_id: str) -> dict:
         # Called by the tee Pi the instant its writer.release()
         # returns, before the (potentially slow) upload. Short
@@ -988,6 +999,57 @@ class BackgroundUploader(threading.Thread):
         """
         return SHRINK_AFTER_TRIES * 3 if self.chunked else SHRINK_AFTER_TRIES
 
+    def _deliver(self, session_id: str, clip_path: Path, ts: Optional[float],
+                 retries: int, timeout: int) -> dict:
+        """One delivery of an already-compressed clip. Raises on failure."""
+        if not self.chunked:
+            return self.client.upload_event(
+                session_id, clip_path, recording_started_at=ts,
+                retries=retries, timeout=timeout,
+            )
+        # `timeout` x `retries` is the budget the caller already sized for
+        # this clip's place in the queue; chunked spends it as ONE deadline
+        # rather than N whole-file attempts that each discard their own
+        # progress. A short budget is no longer a wasted one — a fresh clip
+        # behind a queue banks whatever it manages and the spool resumes
+        # from there.
+        def _seen(nbytes, _total):
+            self._last_progress = int(nbytes)
+
+        return self.client.upload_event_chunked(
+            session_id, clip_path, recording_started_at=ts,
+            chunk_bytes=self.chunk_bytes,
+            chunk_timeout=min(45, max(20, int(timeout))),
+            deadline_seconds=int(timeout) * max(1, int(retries)),
+            on_progress=_seen,
+        )
+
+    def _recover_lost_event(self, session_id: str) -> bool:
+        """Re-register a session the server has no event for.
+
+        A trigger can be lost — the backend mid-deploy, the modem between
+        lives — and the tee then records and uploads a clip for a session
+        that was never registered. /event-trigger is idempotent and will
+        create the row, so the footage lands instead of being binned. The
+        `recover` flag stops it waking the green Pi: the swing is minutes
+        in the past, so the green would only record an empty tee box.
+
+        Only the tee can do this; the backend rejects event-trigger from a
+        green camera, and a green clip with no tee half is unusable anyway.
+        """
+        try:
+            out = self.client.recover_event(session_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("uploader: could not re-register %s: %s",
+                        session_id, exc)
+            return False
+        log.warning(
+            "uploader: %s had no event on the server — re-registered it as "
+            "event %s (tee-only) so the clip is not lost",
+            session_id, out.get("event_id"),
+        )
+        return True
+
     def _send(self, session_id: str, clip_path: Path, ts: Optional[float],
               real_fps: Optional[float], compress: bool, retries: int,
               timeout: int) -> bool:
@@ -1005,47 +1067,38 @@ class BackgroundUploader(threading.Thread):
                     ),
                     force_input_fps=real_fps,
                 )
-            if self.chunked:
-                # `timeout` x `retries` is the budget the caller already
-                # sized for this clip's place in the queue; chunked spends
-                # it as ONE deadline rather than N whole-file attempts that
-                # each discard their own progress. A short budget is no
-                # longer a wasted one — a fresh clip behind a queue banks
-                # whatever it manages and the spool resumes from there.
-                _deadline = int(timeout) * max(1, int(retries))
+        except Exception as exc:  # pragma: no cover
+            log.error("compress failed for %s: %s", session_id, exc)
+            return False
 
-                def _seen(nbytes, _total):
-                    self._last_progress = int(nbytes)
-
-                result = self.client.upload_event_chunked(
-                    session_id, clip_path, recording_started_at=ts,
-                    chunk_bytes=self.chunk_bytes,
-                    chunk_timeout=min(45, max(20, int(timeout))),
-                    deadline_seconds=_deadline,
-                    on_progress=_seen,
+        # Two passes at most. The second happens only when the first was
+        # rejected for having no event AND we managed to re-register one.
+        for _pass in (0, 1):
+            try:
+                result = self._deliver(
+                    session_id, clip_path, ts, retries, timeout,
                 )
-            else:
-                result = self.client.upload_event(
-                    session_id, clip_path, recording_started_at=ts,
-                    retries=retries, timeout=timeout,
+            except UnattachableClip as exc:
+                if _pass == 0 and self._recover_lost_event(session_id):
+                    continue
+                self._last_orphaned = True
+                log.error(
+                    "upload rejected for %s: %s — there is no event to "
+                    "attach it to, so it will not be retried",
+                    session_id, exc,
                 )
+                return False
+            except Exception as exc:  # pragma: no cover
+                log.error("background upload failed for %s: %s",
+                          session_id, exc)
+                return False
             log.info(
                 "uploaded: event=%s status=%s ready=%s",
                 result.get("event_id"), result.get("status"),
                 result.get("ready_to_process"),
             )
             return True
-        except UnattachableClip as exc:
-            self._last_orphaned = True
-            log.error(
-                "upload rejected for %s: %s — the event is gone, so this "
-                "clip can never be delivered and will not be retried",
-                session_id, exc,
-            )
-            return False
-        except Exception as exc:  # pragma: no cover
-            log.error("background upload failed for %s: %s", session_id, exc)
-            return False
+        return False
 
     def run(self) -> None:
         while not self._stop.is_set():

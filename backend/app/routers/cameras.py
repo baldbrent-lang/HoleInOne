@@ -575,6 +575,7 @@ async def post_live_frame(
 async def event_trigger(
     token: str,
     session_id: str = Form(...),
+    recover: bool = Form(False),
     db: Session = Depends(get_db),
 ):
     """Tee-Pi-only: signals that a person was detected on the tee box
@@ -629,7 +630,24 @@ async def event_trigger(
     # Wake the paired green Pi if there is one. asyncio.Queue.put_nowait
     # is fire-and-forget — if no green is currently long-polling, the
     # message sits in the queue for the next iteration.
-    partner_id = cam.paired_with_camera_id
+    #
+    # ...unless this is a RECOVERY. A trigger can be lost — the backend
+    # was mid-deploy, the modem was between lives — and the tee then
+    # records and uploads a clip for a session the server never heard
+    # of. Re-registering the session lets that footage land instead of
+    # being discarded, but the swing is minutes in the past: waking the
+    # green now would only have it record an empty tee box and file it
+    # under a session whose green half is long gone.
+    partner_id = None if recover else cam.paired_with_camera_id
+    if recover:
+        # No green half is coming, so don't leave the event waiting for
+        # one — the tee-only path can carry it.
+        event.green_camera_id = None
+        db.commit()
+        log.warning(
+            "cameras: recovered lost trigger session=%s as event=%s "
+            "(tee-only; the green half cannot be recovered)", sid, event.id,
+        )
     if partner_id is not None:
         q = _queue_for(partner_id)
         _drain_queue(q)
