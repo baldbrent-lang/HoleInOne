@@ -4015,6 +4015,26 @@ function Debug2Modal({ state, onClose }) {
                 <span style={{ color: dropped ? "#c0392b" : "#1a9d55" }}>
                   {dropped ? "❌ not a swing" : "✅ swing"}
                 </span>
+                {/* Stage 1 labels now instead of eliminating, so say when a
+                    candidate only got here because the gates were overruled
+                    — that is the case worth eyeballing. */}
+                {sw.pose_gate_ok === false && (
+                  <span
+                    title={
+                      "Stage 1 rejected this burst (" +
+                      (sw.pose_gate || "rejected") +
+                      "). It was carried through anyway so stages 2 and 3 " +
+                      "could judge it."
+                    }
+                    style={{
+                      marginLeft: 8, padding: "1px 6px", borderRadius: 999,
+                      background: "rgba(214,158,46,0.18)", color: "#8a6116",
+                      fontSize: "0.85em", fontWeight: 600,
+                    }}
+                  >
+                    rescued · stage 1 said {sw.pose_gate || "no"}
+                  </span>
+                )}
               </div>
               <div className="tiny muted">{sw.verdict_reason}</div>
 

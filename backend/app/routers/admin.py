@@ -11870,27 +11870,44 @@ def _debug2_run(row, src_path, db, progress=None):
         pass
     # detect_swings_from_pose returns the SEGMENT LIST directly; the
     # per-burst diagnostics come back through the `debug` dict it fills in.
+    # STAGE 1 LABELS, IT NO LONGER ELIMINATES. The spine-bend and burst-
+    # duration gates were throwing away real swings, and once thrown away
+    # nothing downstream could recover them — the ball at impact and the AI
+    # judge, both far better discriminators than a spine angle, never got to
+    # look. So Debug3 asks for the rejects too and runs stages 2 and 3 on
+    # every burst; what the gates think is recorded as a label, not a
+    # verdict.
     pose_dbg: dict = {}
     cands = list(
-        pose_swing.detect_swings_from_pose(src_path, fps=fps, debug=pose_dbg)
+        pose_swing.detect_swings_from_pose(
+            src_path, fps=fps, keep_rejected=True, debug=pose_dbg,
+        )
         or []
     )
     rep["pose_debug"] = {
         k: pose_dbg.get(k)
         for k in ("n_pose_frames", "n_samples", "coverage",
-                  "n_bend_rejected", "back_bend_min_deg")
+                  "n_bend_rejected", "back_bend_min_deg",
+                  "n_gate_passed", "n_rescued", "n_rescued_dropped")
     }
     # Every burst the detector saw and what happened to it — the stage-1
     # working, including the ones that never became candidates.
     rep["bursts"] = list(pose_dbg.get("bursts_detail") or [])
+    _n_pass = sum(1 for c in cands if c.get("gate_ok"))
+    _n_resc = len(cands) - _n_pass
+    _n_cut = int(pose_dbg.get("n_rescued_dropped") or 0)
     rep["stages"].append({
         "n": 1, "name": "Pose candidates",
         "detail": (
-            f"{len(cands)} burst(s) passed the wrist-speed and spine-bend "
-            f"gates"
+            f"{_n_pass} burst(s) passed the wrist-speed and spine-bend gates"
             + (
-                f" · {pose_dbg['n_bend_rejected']} rejected as upright"
-                if pose_dbg.get("n_bend_rejected") else ""
+                f" · {_n_resc} that failed are carried anyway, for stages "
+                f"2 and 3 to judge"
+                if _n_resc else ""
+            )
+            + (
+                f" · {_n_cut} weaker one(s) not carried (cap reached)"
+                if _n_cut else ""
             )
         ),
         "count": len(cands), "counts": "candidates",
@@ -11917,6 +11934,9 @@ def _debug2_run(row, src_path, db, progress=None):
             "back_bend_deg": c.get("back_bend_deg"),
             "ratio": c.get("ratio"),
             "wrist_xy": c.get("impact_wrist_xy"),
+            # What stage 1 thought — a label now, not a verdict.
+            "pose_gate": c.get("gate_status") or "swing",
+            "pose_gate_ok": bool(c.get("gate_ok", True)),
         }
 
         # 2. IMPACT + BALL from the bottom of the club's heat arc.
@@ -11950,10 +11970,23 @@ def _debug2_run(row, src_path, db, progress=None):
         verdict, reason = chk.get("verdict"), "club-fan heuristic (no API key)"
         if chk.get("image_clean") and os.environ.get("ANTHROPIC_API_KEY"):
             j = judge_swing_heat_image(CLIPS_DIR / chk["image_clean"])
+            entry["judge_confidence"] = j.get("confidence")
             if j.get("is_swing") is True:
                 verdict, reason = "swing", j.get("reason") or "AI judge: swing"
             elif j.get("is_swing") is False:
-                verdict, reason = "not_swing", j.get("reason") or "AI judge: not a swing"
+                # ONLY A CONFIDENT NO VETOES. This matches the produce path,
+                # which has used _judge_is_confident for a while; Debug3 was
+                # still dropping on any negative, so a hedged "probably not"
+                # killed swings here that produce would have kept.
+                if _judge_is_confident(j.get("confidence")):
+                    verdict = "not_swing"
+                    reason = j.get("reason") or "AI judge: not a swing"
+                else:
+                    reason = (
+                        f"AI judge leaned 'not a swing' but only at "
+                        f"{j.get('confidence') or 'unknown'} confidence — "
+                        f"carried on"
+                    )
             else:
                 reason = f"AI judge unavailable ({j.get('reason')})"
         entry["verdict"] = verdict

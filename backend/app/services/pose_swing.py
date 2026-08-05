@@ -173,6 +173,8 @@ def detect_swings_from_pose(
     ratio_max: float = 25.0,
     start_sec: float = 0.0,
     max_scan_sec: float | None = None,
+    keep_rejected: bool = False,
+    max_rejected: int = 12,
     debug: dict | None = None,
 ) -> list[dict]:
     """Find swings from wrist-speed bursts, gated by back bend.
@@ -182,7 +184,16 @@ def detect_swings_from_pose(
     someone standing straight who just moves their hands does not). Rejects
     fast-hands-but-upright false positives. Returns the same segment shape as
     the other detectors. Empty + a debug reason when mediapipe is missing or
-    nothing is found."""
+    nothing is found.
+
+    `keep_rejected` returns the gate-rejected bursts too, each tagged with
+    `gate_status` / `gate_ok`, so a caller can judge them by other evidence
+    instead of losing them here. Debug3 uses it: the ball at impact and the
+    AI judge are far better discriminators than a spine-angle threshold, but
+    they never got a chance because this function had already thrown the
+    burst away. Bounded by `max_rejected` (weakest bursts dropped first, and
+    the count is reported in `debug`) so a long clip cannot hand the caller
+    a hundred candidates to run vision models over."""
     if debug is not None:
         debug.update({"reason": None, "method": "pose_wrist_speed", "available": False})
 
@@ -620,16 +631,48 @@ def detect_swings_from_pose(
             continue
         gated.append((s_i, e_i, p_i, p_v, b, ratio))
 
-    # Non-max suppression by peak separation — among gate-passing bursts only.
-    gated.sort(key=lambda t: -t[3])
+    # Non-max suppression by peak separation.
+    #
+    # Normally only gate-passing bursts compete. With `keep_rejected` EVERY
+    # burst does, because the gates are the thing being second-guessed: a
+    # real swing rejected as upright or too-short is gone before this point,
+    # and no later stage can rescue what was never returned. NMS still runs
+    # over the combined pool so the caller gets ONE candidate per swing
+    # rather than a duplicate for every burst inside the same 4 seconds.
+    _pool = [(s_i, e_i, p_i, p_v, b, ratio, "swing")
+             for s_i, e_i, p_i, p_v, b, ratio in gated]
+    if keep_rejected:
+        _passed = {t[2] for t in gated}
+        for s_i, e_i, p_i, p_v in bursts:
+            if p_i in _passed:
+                continue
+            _b = _bend_near(p_i)
+            _r = p_v / median if median > 0 else 0.0
+            _pool.append((s_i, e_i, p_i, p_v, _b, _r,
+                          burst_status.get(p_i) or "rejected"))
+    _pool.sort(key=lambda t: -t[3])
     chosen, keep = [], []
     min_sep = int(min_separation_sec * eff_hz)
-    for s_i, e_i, p_i, p_v, b, ratio in gated:
+    for _rec in _pool:
+        p_i = _rec[2]
         if any(abs(p_i - c) < min_sep for c in chosen):
-            burst_status[p_i] = "nms_suppressed"
+            if _rec[6] == "swing":
+                burst_status[p_i] = "nms_suppressed"
             continue
         chosen.append(p_i)
-        keep.append((s_i, e_i, p_i, p_v, b, ratio))
+        keep.append(_rec)
+
+    # Bound the rescued set: weakest first, so a long clip cannot hand the
+    # caller a hundred candidates to run vision models over. Never silent —
+    # what was dropped is reported.
+    n_rescued_dropped = 0
+    if keep_rejected:
+        _resc = [r for r in keep if r[6] != "swing"]
+        if len(_resc) > max_rejected:
+            _resc.sort(key=lambda t: -t[5])          # by ratio, best first
+            _cut = {id(r) for r in _resc[max_rejected:]}
+            n_rescued_dropped = len(_cut)
+            keep = [r for r in keep if id(r) not in _cut]
     keep.sort(key=lambda t: t[2])
 
     def _wrist_native(p_i):
@@ -677,11 +720,16 @@ def detect_swings_from_pose(
         return None
 
     segments = []
-    for s_i, e_i, p_i, p_v, b, ratio in keep:
-        burst_status[p_i] = "swing"
+    for s_i, e_i, p_i, p_v, b, ratio, gate in keep:
+        if gate == "swing":
+            burst_status[p_i] = "swing"
         peak_t = times[p_i] if p_i < len(times) else (p_i / eff_hz)
         conf = "high" if ratio >= 10 else ("medium" if ratio >= 6 else "low")
         segments.append({
+            # Which gate this burst cleared, or the one it failed. Callers
+            # that did not ask for rejects only ever see "swing".
+            "gate_status": gate,
+            "gate_ok": gate == "swing",
             "peak_time_sec": float(peak_t),
             "start_sec": float(max(0.0, peak_t - before_sec)),
             "end_sec": float(min(duration, peak_t + after_sec)),
@@ -707,8 +755,11 @@ def detect_swings_from_pose(
         series = series.reshape(-1, b).max(axis=1)
 
     log.info(
-        "pose_swing: %d swings (bursts=%d, bend-rejected=%d) pose_frames=%d hz=%.1f",
-        len(segments), len(bursts), n_bend_rejected, n_pose, eff_hz,
+        "pose_swing: %d swings (bursts=%d, bend-rejected=%d, rescued=%d, "
+        "rescued-dropped=%d) pose_frames=%d hz=%.1f",
+        len(segments), len(bursts), n_bend_rejected,
+        sum(1 for s in segments if not s.get("gate_ok")), n_rescued_dropped,
+        n_pose, eff_hz,
     )
     if debug is not None:
         debug.update({
@@ -730,6 +781,9 @@ def detect_swings_from_pose(
             "ratio_min": float(ratio_min),
             "ratio_max": float(ratio_max),
             "n_swings": len(segments),
+            "n_gate_passed": sum(1 for s in segments if s.get("gate_ok")),
+            "n_rescued": sum(1 for s in segments if not s.get("gate_ok")),
+            "n_rescued_dropped": int(n_rescued_dropped),
             "reached_eof": reached_eof,
             "series": [round(float(v), 5) for v in series],
             "peaks": [round(float(s["peak_time_sec"]), 2) for s in segments],
