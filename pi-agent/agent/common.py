@@ -66,6 +66,15 @@ CHUNK_GROW_AFTER = 4          # clean chunks before trying a bigger one
 # ceiling.
 CHUNK_GROW_MAX = 64
 
+# Passes over ONE clip, making progress each time but never finishing,
+# before we accept that the encode is too big for this link. Distinct
+# from SHRINK_AFTER_TRIES, which counts attempts that achieved NOTHING.
+# Chunking made that distinction necessary: on a slow-but-working link
+# every attempt banks bytes, so `tries` never rises and the bitrate
+# never came down -- the tee spent a morning inching 4-5 MB clips across
+# a link that would have carried 2 MB ones comfortably.
+SHRINK_AFTER_PASSES = 6
+
 
 # ---------------------------------------------------------------------
 # Config
@@ -1385,11 +1394,36 @@ class BackgroundUploader(threading.Thread):
         # across three sweeps would otherwise re-encode itself back to
         # zero on the very sweep that was about to finish it.
         if self._last_progress > 0:
+            # Not a failed try: `tries` triggers the re-encode, and
+            # re-encoding changes the byte count, which throws away the
+            # progress this pass just banked. Count it separately.
+            _passes = int(meta.get("passes") or 0) + 1
+            meta["passes"] = _passes
+            try:
+                path.with_suffix(".json").write_text(json.dumps(meta))
+            except Exception:  # noqa: BLE001
+                pass
             log.info(
-                "uploader: %s banked %.1f MB this pass — not counting it as "
-                "a failed try, it is getting there",
-                path.name, self._last_progress / (1024 * 1024),
+                "uploader: %s banked %.1f MB this pass (%d pass(es) so far) "
+                "— not counting it as a failed try, it is getting there",
+                path.name, self._last_progress / (1024 * 1024), _passes,
             )
+            # ...but a clip that needs SIX passes is evidence the encode
+            # is too big for this link, progress or no progress. Lower the
+            # bitrate for FUTURE clips and leave this one alone: shrinking
+            # it now would discard exactly the bytes it has been earning.
+            if (_passes >= SHRINK_AFTER_PASSES
+                    and self._kbps_now > SHRINK_FLOOR_KBPS):
+                _new = max(SHRINK_FLOOR_KBPS, self._kbps_now // 2)
+                log.warning(
+                    "uploader: %s has taken %d passes and is still going — "
+                    "dropping the encode %d -> %d kbps so the NEXT clips are "
+                    "small enough to get through. This one is left as it is; "
+                    "re-encoding would throw away what it has banked.",
+                    path.name, _passes, self._kbps_now, _new,
+                )
+                self._kbps_now = _new
+                self._save_kbps()
             return False
         try:
             meta["tries"] = tries + 1
