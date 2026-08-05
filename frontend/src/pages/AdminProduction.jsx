@@ -2343,10 +2343,18 @@ function WizardBody({
   };
 
   useEffect(() => {
-    if (!FRAME_PICK_MODES.has(editing)) return;
-    loadFrame(frameForMode[editing] ?? 0);
+    if (FRAME_PICK_MODES.has(editing)) {
+      loadFrame(frameForMode[editing] ?? 0);
+      return;
+    }
+    // PLACING THE BALL IS AN IMPACT-FRAME JOB. It used to show the
+    // address frame, where the club is still behind the ball and the
+    // golfer's stance hides the spot -- the operator was aiming at a
+    // picture of a different moment. The impact frame is the one the
+    // tracer starts from, so it is the one to point at.
+    if (editing === "ball") loadFrame(draft.impactFrame ?? 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editing]);
+  }, [editing, draft.impactFrame]);
 
   async function loadFrame(frameIdx) {
     setNavLoading(true);
@@ -2377,7 +2385,13 @@ function WizardBody({
   let leftImageUrl = draft.addressImageUrl;
   let leftFrameLabel = `Address frame · ${draft.addressFrame}`;
   const showFrameNav = FRAME_PICK_MODES.has(editing);
-  if (showFrameNav) {
+  if (editing === "ball") {
+    // The impact frame, with no frame-nav controls -- the operator is
+    // placing a ball here, not choosing a frame.
+    leftImageUrl = navUrl || draft.addressImageUrl;
+    leftFrameLabel =
+      `Impact frame · ${draft.impactFrame ?? "—"} — place the ball`;
+  } else if (showFrameNav) {
     leftImageUrl = navUrl || draft.addressImageUrl;
     const total = navTotal != null ? ` / ${navTotal - 1}` : "";
     const labels = {
