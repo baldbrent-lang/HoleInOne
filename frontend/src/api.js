@@ -469,6 +469,16 @@ export const api = {
       body: patch,
       adminPassword: key,
     }),
+  wizardProduce: (key, uploadId, payload = {}) =>
+    // THE edit wizard's produce: stages 4-8 from the operator's ball and
+    // impact frame. Returns as soon as the job is queued -- the work runs
+    // on the server and the production card polls its progress -- so the
+    // wizard can close instead of holding a modal open for minutes.
+    request(`/api/admin/long-uploads/${uploadId}/wizard-produce`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
   renderWizardTracer: (key, uploadId, overrides = {}) =>
     // Heavy: runs the full ai-trace pipeline (address + handedness +
     // impact + ball-track + tracer render). Bump timeout to a few

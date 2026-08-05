@@ -7694,6 +7694,81 @@ def commit_wizard_clip(
     }
 
 
+@router.post("/long-uploads/{upload_id}/wizard-produce")
+def wizard_produce(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """THE edit wizard's produce. Runs stages 4-8 on the operator's ball
+    and impact frame and returns immediately so the wizard can close.
+
+    Body: {ball: [x, y], impact_frame: int, hole_number?: int}
+
+    Stages 1-3 only exist to find those two numbers. An operator who has
+    opened the wizard has already found them by eye, so this starts at
+    stage 4 — the same `find_flight` and the same renderer produce uses,
+    with the operator's answer substituted for the detector's.
+
+    Fire and forget: the job runs on a thread and reports progress to the
+    same store the production card polls, so the operator watches it
+    there rather than in a modal.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+
+    ball = payload.get("ball")
+    if (not isinstance(ball, (list, tuple)) or len(ball) < 2):
+        raise HTTPException(400, "ball must be [x, y]")
+    try:
+        bx, by = float(ball[0]), float(ball[1])
+    except (TypeError, ValueError):
+        raise HTTPException(400, "ball must be two numbers")
+    if payload.get("impact_frame") is None:
+        raise HTTPException(400, "impact_frame is required")
+    try:
+        impact_frame = int(payload["impact_frame"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, "impact_frame must be a whole number")
+    if impact_frame < 0:
+        raise HTTPException(400, "impact_frame must not be negative")
+
+    hole_number = payload.get("hole_number")
+    try:
+        hole_number = int(hole_number) if hole_number is not None else None
+    except (TypeError, ValueError):
+        hole_number = None
+
+    # Remember what the operator chose, so re-opening the wizard shows the
+    # ball where they put it rather than back at the detector's guess.
+    try:
+        saved = dict(row.edit_metrics or {})
+        saved["wizard_ball"] = [bx, by]
+        saved["wizard_impact_frame"] = impact_frame
+        row.edit_metrics = saved
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        log.warning("wizard produce: could not save the ball for %s: %s",
+                    upload_id, exc)
+
+    _debugx_set("produce", upload_id, stage="Queued", done=0, total=0,
+                running=True, error=None)
+    threading.Thread(
+        target=run_wizard_produce_job,
+        args=(upload_id, (bx, by), impact_frame, hole_number),
+        daemon=True,
+        name=f"wizard-produce-{upload_id}",
+    ).start()
+    log.info(
+        "wizard produce: upload=%s queued with ball=(%.0f,%.0f) impact=f%d",
+        upload_id, bx, by, impact_frame,
+    )
+    return {"ok": True, "started": True, "upload_id": upload_id,
+            "ball": [bx, by], "impact_frame": impact_frame}
+
+
 @router.delete("/long-uploads/{upload_id}")
 def delete_long_upload(upload_id: int, db: Session = Depends(get_db)):
     """Delete a stored long upload + its source file(s) from disk.
@@ -12548,6 +12623,142 @@ def produce_queue_status() -> dict:
             "queued_upload_ids": sorted(_produce_pending.keys()),
             "depth": _produce_q.qsize(),
         }
+
+
+def run_wizard_produce_job(
+    upload_id: int,
+    ball_xy,
+    impact_frame: int,
+    hole_number: int | None = None,
+) -> dict:
+    """Stages 4-8, from the operator's ball and impact frame.
+
+    THE EDIT WIZARD'S PRODUCE. Stages 1-3 exist to answer two questions:
+    where is the ball at rest, and which frame is impact. When an operator
+    has opened the wizard they have already answered both, by eye, better
+    than the detector can — so this skips straight to the part that turns
+    those two numbers into a clip.
+
+    It is not a second pipeline. `find_flight` is the same function
+    Debug3 and produce call, and it already accepts `impact_frame` and
+    `rest_ball` from a caller; `_d3_fast_produce` is the same renderer
+    stage 8 uses. This only packs the operator's answer into the shape
+    those two already expect, which is why the wizard cannot drift from
+    produce the way the old per-engine paths did.
+
+    Synchronous. The HTTP handler runs it on a thread and returns at once
+    so the wizard can close.
+    """
+    db = SessionLocal()
+    try:
+        row = db.get(LongVideoUpload, upload_id)
+        if row is None:
+            return {"ok": False, "error": f"upload {upload_id} not found"}
+        if row.tee_filename:
+            storage.ensure_local(CLIPS_DIR, row.tee_filename)
+        if row.green_filename:
+            storage.ensure_local(CLIPS_DIR, row.green_filename)
+        src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+        if not src_path or not src_path.exists():
+            return {"ok": False,
+                    "error": f"tee source missing on disk: {row.tee_filename}"}
+
+        def _prog(stage: str, done: int = 0, total: int = 0) -> None:
+            _debugx_set("produce", upload_id, stage=stage, done=done,
+                        total=total, running=True)
+
+        _debugx_set("produce", upload_id, stage="Starting", done=0, total=0,
+                    running=True, error=None)
+        try:
+            from ..services import debug3 as d3
+
+            fps = float(probe_fps(src_path) or 30.0)
+            _fw, _fh = _probe_frame_size(src_path)
+            _bx, _by = float(ball_xy[0]), float(ball_xy[1])
+            _imp = int(impact_frame)
+
+            # The shape club_bottom_ball returns, so find_flight treats the
+            # operator's ball exactly as it treats a measured one — arming
+            # the aim gate rather than leaving it dead.
+            _rest = {
+                "ok": True, "xy": [_bx, _by],
+                "reason": "placed by the operator in the edit wizard",
+            }
+            _prog("Tracking the ball and fitting the flight", 0, 1)
+            _ff = d3.find_flight(
+                src_path, fps, impact_frame=_imp,
+                frame_w=_fw, frame_h=_fh,
+                ball_side=_wizard_ball_side(db, row),
+                rest_ball=_rest,
+            )
+            if not _ff.get("ok"):
+                _err = _ff.get("reason") or "no flight found"
+                log.info("wizard produce: upload=%s no flight (%s)",
+                         upload_id, _err)
+                return {"ok": False, "error": _err}
+
+            # `_d3_fast_produce` reads swings off a Debug3 report, so hand
+            # it one with the single swing the operator pointed at.
+            rep = {"swings": [{
+                "idx": 0,
+                "ball": _ff.get("ball") or [_bx, _by],
+                "launch_frame": _ff.get("launch_frame"),
+                "flight": _ff.get("points") or [],
+                "impact_frame": _imp,
+            }]}
+            _prog("Rendering the clip", 0, 1)
+            out = _d3_fast_produce(
+                row, src_path, db, rep, fps,
+                progress=_prog, hole_number=hole_number,
+            )
+            log.info(
+                "wizard produce: upload=%s ball=(%.0f,%.0f) impact=f%d -> "
+                "ok=%s clips=%d", upload_id, _bx, _by, _imp,
+                out.get("ok"), len(out.get("clips") or []),
+            )
+            return out
+        finally:
+            _debugx_set("produce", upload_id, running=False, stage="done")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("wizard produce %s crashed: %s", upload_id, exc)
+        _debugx_set("produce", upload_id, running=False, stage="failed",
+                    error=f"{exc}")
+        return {"ok": False, "error": f"{exc}"}
+    finally:
+        db.close()
+
+
+def _wizard_ball_side(db, row) -> str | None:
+    """Which side of the golfer the ball sits on, from the tee camera.
+    Same lookup Debug3 does; None means search both sides."""
+    try:
+        if not getattr(row, "camera_event_id", None):
+            return None
+        ev = db.query(CameraEvent).filter(
+            CameraEvent.id == row.camera_event_id,
+        ).first()
+        if ev is None or not ev.tee_camera_id:
+            return None
+        cam = db.get(Camera, ev.tee_camera_id)
+        return getattr(cam, "ball_side", None) if cam else None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("wizard produce: no ball_side for upload %s: %s",
+                  getattr(row, "id", None), exc)
+        return None
+
+
+def _probe_frame_size(src_path) -> tuple[int, int]:
+    """(width, height) of the source, defaulting to 1280x720."""
+    try:
+        import cv2 as _cv2
+
+        cap = _cv2.VideoCapture(str(src_path))
+        w = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH) or 1280) or 1280
+        h = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT) or 720) or 720
+        cap.release()
+        return w, h
+    except Exception:  # noqa: BLE001
+        return 1280, 720
 
 
 def run_produce_job(

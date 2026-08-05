@@ -1151,11 +1151,10 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
   const [step, setStep] = useState("metrics");
   const [tracer, setTracer] = useState(null); // { url, frames }
   const [renderingTracer, setRenderingTracer] = useState(false);
+  // True only between the click and the server accepting the job — the
+  // produce itself runs long after this component is gone.
+  const [producing, setProducing] = useState(false);
   const [tracerError, setTracerError] = useState(null);
-  // Tracer engine A/B: "ai" (Claude vision, default) vs "classical"
-  // (CV motion + parabola). Switching engines does NOT re-render on
-  // Next — the ↻ Render button forces a fresh render with the selection.
-  const [tracerEngine, setTracerEngine] = useState("ai");
   // start|impact|end signature the current tracer was rendered against.
   // If Step 1 edits any of these frames, Next re-renders instead of
   // reusing the now-stale ball track.
@@ -1238,8 +1237,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       // wizard classical renders — so click-to-plot works on open.
       timedPoints: s.timed_points || [],
     });
-    // Start the engine toggle on whatever produced the saved tracer.
-    setTracerEngine(s.tracer_engine || "ai");
     // A saved tracer corresponds to the saved start/impact/end frames;
     // seed the signature so Next only re-renders after a real edit. No
     // saved tracer → null so the first Next renders fresh.
@@ -1569,7 +1566,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         end_frame: sw.end_frame ?? null,
         ball_at_rest: sw.ball || null,
         ball_manual: !!sw.ball_manual,
-        engine: tracerEngine,
       });
       const frames = out.ball_track_frames || [];
       // Only reflect into the visible tracer if we're still on this swing.
@@ -1586,7 +1582,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         });
         setRenderedFrameSig(frameSig(draft));
         setTracerStats({
-          engine: out.engine || tracerEngine,
+          engine: out.engine || "ai",
           n_points: out.n_points,
           n_candidates: out.n_candidates,
           n_backfilled: out.n_backfilled,
@@ -1603,7 +1599,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
                 ...s,
                 tracer_url: out.tracer_url,
                 ball_track_frames: frames,
-                tracer_engine: out.engine || tracerEngine,
+                tracer_engine: out.engine || "ai",
                 tracer_debug_url: out.debug_url || null,
                 tracer_raw_motion_url: out.raw_motion_url || null,
                 tracer_raw_motion_arc_url: out.raw_motion_arc_url || null,
@@ -1641,6 +1637,27 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       roi: draft.roi,
       target: draft.target,
     });
+  }
+
+  async function handleProduce() {
+    // Save what the operator set, hand the ball + impact frame to the
+    // server, and close. Deliberately NOT awaited to completion: the job
+    // takes minutes and belongs on the production card, not in a modal
+    // the operator has to sit in front of.
+    if (!draft?.ball || draft.impactFrame == null) return;
+    setProducing(true);
+    try {
+      await persistDraftMetrics();
+      await api.wizardProduce(adminPassword, row.id, {
+        ball: [draft.ball.x, draft.ball.y],
+        impact_frame: draft.impactFrame,
+      });
+      onSaved?.();
+      onClose?.();
+    } catch (e) {
+      setProducing(false);
+      setError(e?.message || String(e));
+    }
   }
 
   async function handleNext() {
@@ -1708,7 +1725,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         end_frame: draft.endFrame ?? null,
         ball_at_rest: draft.ball,
         ball_manual: !!draft.ballManual,
-        engine: tracerEngine,
       });
       setTracer({
         url: out.tracer_url,
@@ -1728,7 +1744,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       }
       setRenderedFrameSig(frameSig(draft));
       setTracerStats({
-        engine: out.engine || tracerEngine,
+        engine: out.engine || "ai",
         n_points: out.n_points,
         n_candidates: out.n_candidates,
         n_backfilled: out.n_backfilled,
@@ -1743,7 +1759,7 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
       await persistPatch({
         tracer_url: out.tracer_url,
         ball_track_frames: out.ball_track_frames || [],
-        tracer_engine: out.engine || tracerEngine,
+        tracer_engine: out.engine || "ai",
         tracer_debug_url: out.debug_url || null,
         tracer_raw_motion_url: out.raw_motion_url || null,
         tracer_raw_motion_arc_url: out.raw_motion_arc_url || null,
@@ -1950,13 +1966,11 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}
         >
           <div>
-            <h3 style={{ margin: 0 }}>
-              Edit wizard {step === "finalize"
-                ? "· Step 3: Final video"
-                : step === "tracer"
-                  ? "· Step 2: Tracer"
-                  : "· Step 1: Metrics"}
-            </h3>
+            {/* One step now: set the ball and the impact frame, then
+                Produce. The old Tracer / Final-video steps existed to pick
+                between tracer engines and hand-plot a track; there is one
+                engine and Debug3's pipeline plots it. */}
+            <h3 style={{ margin: 0 }}>Edit wizard</h3>
             <div className="small muted">
               Upload #{row.id} · {row.course_name || `course ${row.course_id}`} ·{" "}
               {isMulti
@@ -2162,61 +2176,6 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
               ← Back
             </button>
           )}
-          {step === "metrics" && (
-            <div className="row" style={{ gap: 4, alignItems: "center", marginRight: "auto" }}>
-              <span className="tiny upper muted">Tracer</span>
-              <button
-                type="button"
-                className={tracerEngine === "ai" ? "small" : "ghost small"}
-                style={{ width: "auto" }}
-                onClick={() => setTracerEngine("ai")}
-                disabled={renderingTracer}
-                title="Claude vision tracer"
-              >
-                AI
-              </button>
-              <button
-                type="button"
-                className={tracerEngine === "classical" ? "small" : "ghost small"}
-                style={{ width: "auto" }}
-                onClick={() => setTracerEngine("classical")}
-                disabled={renderingTracer}
-                title="Classical CV tracer — MOG2 background subtraction (motion + parabola, no API)"
-              >
-                Classical
-              </button>
-              <button
-                type="button"
-                className={tracerEngine === "knn" ? "small" : "ghost small"}
-                style={{ width: "auto" }}
-                onClick={() => setTracerEngine("knn")}
-                disabled={renderingTracer}
-                title="Classical CV tracer with the KNN background subtractor — same pipeline as Classical, different motion detector; often cleaner against drifting clouds / rippling water"
-              >
-                KNN
-              </button>
-              <button
-                type="button"
-                className={tracerEngine === "ai_mog2" ? "small" : "ghost small"}
-                style={{ width: "auto" }}
-                onClick={() => setTracerEngine("ai_mog2")}
-                disabled={renderingTracer}
-                title="Produce's engine: AI tracer first, then the MOG2 per-frame candidate trail fills the launch (impact → first AI pick) and extends past the last pick — frames increasing gradually, 4s post-impact cap. Needs ANTHROPIC_API_KEY."
-              >
-                MOG2+AI
-              </button>
-              <button
-                type="button"
-                className="ghost small"
-                style={{ width: "auto" }}
-                onClick={handleForceRender}
-                disabled={running || !!error || !draft || renderingTracer}
-                title="Force a fresh tracer render with the selected engine. Next → reuses the existing ball track unless start/impact/end frames changed."
-              >
-                {renderingTracer ? "Rendering…" : "↻ Render"}
-              </button>
-            </div>
-          )}
           <button
             type="button"
             className="ghost"
@@ -2226,39 +2185,29 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
           >
             Cancel
           </button>
-          {step === "metrics" && (
-            <button
-              type="button"
-              disabled={running || !!error || !draft || renderingTracer}
-              onClick={handleNext}
-              style={{ width: "auto" }}
-              title="Save metrics and continue. Re-renders the tracer only if the start/impact/end frames changed (or there's no track yet) — use ↻ Render to force a fresh render."
-            >
-              {renderingTracer ? "Rendering tracer…" : "Next →"}
-            </button>
-          )}
-          {step === "tracer" && (
-            <button
-              type="button"
-              disabled={renderingTracer || finalizing}
-              onClick={handleAdvanceToFinalize}
-              style={{ width: "auto" }}
-              title="Apply graphics and review the final video"
-            >
-              {finalizing ? "Finalizing…" : "Next →"}
-            </button>
-          )}
-          {step === "finalize" && (
-            <button
-              type="button"
-              disabled={committing || finalizing}
-              onClick={onClose}
-              style={{ width: "auto" }}
-              title="Close the wizard. The most recent Produce run is already on Produced Clips."
-            >
-              Finish
-            </button>
-          )}
+          {/* ONE BUTTON. Stages 1-3 exist to find the ball and the impact
+              frame; by the time the wizard is open the operator has found
+              both by eye. So this hands those two numbers to the same
+              pipeline produce uses and closes -- the work happens on the
+              server and the production card shows its progress. */}
+          <button
+            type="button"
+            disabled={producing || !draft || !draft.ball
+                      || draft.impactFrame == null}
+            onClick={handleProduce}
+            style={{ width: "auto" }}
+            title={
+              !draft?.ball
+                ? "Place the ball at rest first"
+                : draft?.impactFrame == null
+                  ? "Set the impact frame first"
+                  : "Produce this swing from the ball and impact frame "
+                    + "above, then close. Progress shows on the "
+                    + "production card."
+            }
+          >
+            {producing ? "Starting…" : "Produce"}
+          </button>
         </div>
       </div>
     </div>
