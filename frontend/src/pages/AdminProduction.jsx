@@ -1634,6 +1634,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
       address_image_url: draft.addressImageUrl,
       impact_frame: draft.impactFrame,
       ball: draft.ball,
+      // PRESSING PRODUCE IS AN ENDORSEMENT. ball_manual is what stops a
+      // later produce re-detecting over the top, and it used to be set
+      // only by the ball editor's Done button -- so a ball that looked
+      // right and was left alone got overwritten on the next run. If the
+      // operator ships this ball, they mean it.
+      ball_manual: draft.ball ? true : !!draft.ballManual,
+      end_frame: draft.endFrame ?? null,
       roi: draft.roi,
       target: draft.target,
     });

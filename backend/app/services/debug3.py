@@ -836,6 +836,7 @@ def find_flight(
     frame_h: int | None = None,
     ball_side: str | None = None,
     rest_ball: dict | None = None,
+    ball_locked: bool = False,
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -852,6 +853,15 @@ def find_flight(
 
     Stages: blobs -> tracks -> RANSAC flight -> launch frame from the ground
     crossing -> ball from the club arc measured AT that frame.
+
+    `ball_locked` makes `rest_ball` the ANSWER rather than a hint. By
+    default this measures the ball itself from the club arc at the launch
+    frame and that measurement wins -- correct when nobody knows better,
+    and wrong the moment somebody does. An operator who placed the ball by
+    eye in the edit wizard knows better, and having their placement
+    silently replaced by a detector is worse than not offering the control
+    at all. When locked, the club-arc pass is skipped entirely (it can no
+    longer change anything, and it is not free).
 
     Returns {ok, ball, ball_source, launch_frame, points, reason, debug}.
     """
@@ -1085,7 +1095,24 @@ def find_flight(
         # measured at full resolution over the real downswing. On the swing
         # this was settled against, the arc landed 3px from a ball visible
         # in the check frame while the extrapolation was 67px right of it.
-        if out["launch_frame"] is not None:
+        _locked_xy = None
+        if ball_locked and isinstance(rest_ball, dict):
+            _rb = rest_ball.get("xy")
+            if _rb and len(_rb) >= 2:
+                _locked_xy = [float(_rb[0]), float(_rb[1])]
+
+        if _locked_xy is not None:
+            # The operator placed it. Record what the flight extrapolated
+            # to as the alternative -- useful for judging the fit -- but
+            # the placement is the answer.
+            dbg["ball_alt"] = out["ball"]
+            dbg["ball_alt_source"] = out["ball_source"]
+            dbg["club_arc"] = {
+                "reason": "skipped — the ball was placed by the operator",
+            }
+            out["ball"] = _locked_xy
+            out["ball_source"] = "placed by the operator"
+        elif out["launch_frame"] is not None:
             from .debug2 import club_bottom_ball
 
             club = club_bottom_ball(

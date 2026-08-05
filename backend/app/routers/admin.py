@@ -12859,6 +12859,13 @@ def run_wizard_produce_job(
                 frame_w=_fw, frame_h=_fh,
                 ball_side=_wizard_ball_side(db, row),
                 rest_ball=_rest,
+                # THE OPERATOR PLACED IT. Without this the club-arc pass
+                # re-measures the ball at the launch frame and its answer
+                # wins -- so the placement moved, sometimes by tens of
+                # pixels, and the tracer started somewhere the operator
+                # did not put it. A control that gets silently overruled
+                # is worse than no control.
+                ball_locked=True,
             )
             if not _ff.get("ok"):
                 _err = _ff.get("reason") or "no flight found"
@@ -12872,7 +12879,11 @@ def run_wizard_produce_job(
             # it one with the single swing the operator pointed at.
             rep = {"swings": [{
                 "idx": 0,
-                "ball": _ff.get("ball") or [_bx, _by],
+                # Belt and braces: find_flight is locked to the operator's
+                # ball above, so this is the same value -- but the clip is
+                # rendered from THIS number, and it must not be able to
+                # drift from what the operator set.
+                "ball": [_bx, _by],
                 "launch_frame": _ff.get("launch_frame"),
                 "flight": _ff.get("points") or [],
                 "impact_frame": _imp,
@@ -13615,6 +13626,27 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         _ball_side_why = f"lookup failed: {exc}"
     from ..services import pose_swing
 
+    # BALLS THE OPERATOR PLACED BY HAND. edit_metrics already refuses to
+    # overwrite these when a produce saves its own numbers back
+    # (_d3_save_swing); this is the other half of that promise -- the
+    # render must USE them rather than re-detecting over the top. Keyed
+    # by swing index, the same way _d3_save_swing pairs them.
+    _manual_balls: dict = {}
+    try:
+        for _s in ((row.edit_metrics or {}).get("swings") or []):
+            if isinstance(_s, dict) and _s.get("ball_manual") and _s.get("ball"):
+                _b = _s["ball"]
+                _xy = ([float(_b.get("x")), float(_b.get("y"))]
+                       if isinstance(_b, dict) else
+                       [float(_b[0]), float(_b[1])])
+                _manual_balls[int(_s.get("idx", 0))] = _xy
+        if _manual_balls:
+            log.info("debug3: upload=%s has %d operator-placed ball(s) — "
+                     "they will not be re-detected",
+                     upload_id, len(_manual_balls))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3: could not read operator-placed balls: %s", exc)
+
     # Diagnostic images only when someone is going to look at them.
     _art_dir = CLIPS_DIR if debug_artifacts else None
 
@@ -13980,12 +14012,18 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         # here and from the extrapolation there, 3px versus 67px on the same
         # swing), which is what two implementations of one process always
         # eventually do.
+        _manual = _manual_balls.get(i)
         _ff = d3.find_flight(
             src_path, fps, impact_frame=imp_f,
             head_xy=c.get("impact_head_xy"),
             feet_xy=c.get("impact_feet_xy"),
             frame_w=_fw, frame_h=_fh, ball_side=_ball_side,
-            rest_ball=_pre,
+            rest_ball=(
+                {"ok": True, "xy": _manual,
+                 "reason": "placed by the operator in the edit wizard"}
+                if _manual else _pre
+            ),
+            ball_locked=_manual is not None,
             debug_dir=_art_dir,
             debug_prefix=f"d3-{upload_id}-{tok}-{i}-",
         )
