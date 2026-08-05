@@ -749,6 +749,42 @@ CLIPS_DIR = Path(__file__).resolve().parents[2] / settings.upload_dir / "clips"
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _local_tee(row):
+    """This upload's tee video on local disk, pulled back from object
+    storage first if it is not there.
+
+    THE DISK IS EPHEMERAL. Replit's filesystem is wiped on every deploy,
+    so a clip uploaded an hour ago lives in object storage and not under
+    CLIPS_DIR. The produce path has always rehydrated before reading;
+    nine read-only endpoints did not, and simply 404'd. That is why the
+    edit wizard showed "No frame" for a perfectly good upload — the
+    frame grabber asked the local disk a question only object storage
+    could answer.
+
+    Returns the path (which may still not exist if the file is genuinely
+    gone — callers keep their own existence check), or None when the row
+    names no tee file at all.
+    """
+    if not getattr(row, "tee_filename", None):
+        return None
+    try:
+        storage.ensure_local(CLIPS_DIR, row.tee_filename)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not rehydrate tee %s: %s", row.tee_filename, exc)
+    return CLIPS_DIR / row.tee_filename
+
+
+def _local_green(row):
+    """The green half, same contract as `_local_tee`."""
+    if not getattr(row, "green_filename", None):
+        return None
+    try:
+        storage.ensure_local(CLIPS_DIR, row.green_filename)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not rehydrate green %s: %s", row.green_filename, exc)
+    return CLIPS_DIR / row.green_filename
+
+
 @router.get("/clips")
 def list_all_clips(
     limit: int = 100, offset: int = 0, db: Session = Depends(get_db),
@@ -1756,7 +1792,7 @@ def _run_long_upload_job(
                 )
             green_src_path: Path | None = None
             if row.green_filename:
-                candidate = CLIPS_DIR / row.green_filename
+                candidate = _local_green(row)
                 if not candidate.exists():
                     raise RuntimeError(
                         f"green source file missing on disk: {row.green_filename}"
@@ -5320,14 +5356,14 @@ def reprocess_long_upload(
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
-    src_path = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+    src_path = _local_tee(row)
     if not src_path or not src_path.exists():
         raise HTTPException(
             404,
             f"tee source file missing on disk: {row.tee_filename}",
         )
     if row.green_filename:
-        candidate = CLIPS_DIR / row.green_filename
+        candidate = _local_green(row)
         if not candidate.exists():
             raise HTTPException(
                 404,
@@ -5412,7 +5448,7 @@ def detect_swings_for_upload(
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "upload has no tee video")
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
@@ -5514,7 +5550,7 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "upload has no tee video")
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
@@ -5729,7 +5765,7 @@ def long_upload_frame(
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "upload has no tee video")
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
@@ -5824,7 +5860,7 @@ def render_wizard_tracer(
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "upload has no tee video")
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
@@ -6940,7 +6976,7 @@ def render_tracer_fast(
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "upload has no tee video")
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
@@ -7150,7 +7186,7 @@ def scan_plot_region(
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "no tee video on this upload")
-    src = CLIPS_DIR / row.tee_filename
+    src = _local_tee(row)
     if not src.exists():
         raise HTTPException(404, "tee video missing on disk")
 
@@ -7280,7 +7316,7 @@ def finalize_wizard_video(
 
     # Frame → seconds. Frame indices are in the tee SOURCE's space, so
     # use the source fps (fall back to tracer_info, then 30).
-    tee_src = CLIPS_DIR / row.tee_filename if row.tee_filename else None
+    tee_src = _local_tee(row)
     fps = float(probe_fps(tee_src) or 0) if (tee_src and tee_src.exists()) else 0.0
     if fps <= 0:
         fps = float((saved.get("tracer_info") or {}).get("fps") or 0)
@@ -7301,7 +7337,7 @@ def finalize_wizard_video(
         float(int(end_frame_saved) + 1) / fps if end_frame_saved is not None else None
     )
 
-    green_path = CLIPS_DIR / row.green_filename if row.green_filename else None
+    green_path = _local_green(row)
     has_green = green_path is not None and green_path.exists()
 
     cut_src_sec = None
@@ -7753,6 +7789,22 @@ def wizard_produce(
         log.warning("wizard produce: could not save the ball for %s: %s",
                     upload_id, exc)
 
+    # CLAIM THE ROW BEFORE RETURNING. The production card greys on
+    # processing_status, and the wizard closes the moment this responds --
+    # so if the status were left to the worker thread, the operator would
+    # watch the wizard vanish and the card sit there looking untouched.
+    # Set here, synchronously, exactly as the queue worker does.
+    try:
+        row.processing_status = "processing"
+        row.processing_started_at = _utcnow_naive()
+        row.processing_completed_at = None
+        row.last_error = None
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        log.warning("wizard produce: could not claim upload %s: %s",
+                    upload_id, exc)
+
     _debugx_set("produce", upload_id, stage="Queued", done=0, total=0,
                 running=True, error=None)
     threading.Thread(
@@ -7835,13 +7887,13 @@ def test_cut_long_upload(
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "long upload has no tee file")
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
     green_path: Path | None = None
     if row.green_filename:
-        gp = CLIPS_DIR / row.green_filename
+        gp = _local_green(row)
         if gp.exists():
             green_path = gp
 
@@ -8006,13 +8058,13 @@ def process_long_upload_segment(
         raise HTTPException(404, "long upload not found")
     if not row.tee_filename:
         raise HTTPException(400, "long upload has no tee file")
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
 
     green_src_path: Path | None = None
     if row.green_filename:
-        candidate = CLIPS_DIR / row.green_filename
+        candidate = _local_green(row)
         if not candidate.exists():
             raise HTTPException(
                 404,
@@ -10106,7 +10158,7 @@ def _run_produce_debug_job(
         if not row or not row.tee_filename:
             raise RuntimeError("upload has no tee video")
         storage.ensure_local(CLIPS_DIR, row.tee_filename)
-        src_path = CLIPS_DIR / row.tee_filename
+        src_path = _local_tee(row)
         if not src_path.exists():
             raise RuntimeError(f"tee source missing: {row.tee_filename}")
 
@@ -10767,7 +10819,7 @@ def rescan_ball(upload_id: int, db: Session = Depends(get_db)):
     if not row or not row.tee_filename:
         raise HTTPException(404, "upload not found or has no tee video")
     storage.ensure_local(CLIPS_DIR, row.tee_filename)
-    src_path = CLIPS_DIR / row.tee_filename
+    src_path = _local_tee(row)
     if not src_path.exists():
         raise HTTPException(404, "tee source missing on disk")
     tee_fps = probe_fps(src_path) or 30.0
@@ -12394,7 +12446,7 @@ def _debugx_start(kind: str, upload_id: int, runner) -> dict:
             if not row or not row.tee_filename:
                 raise RuntimeError("upload not found or has no tee video")
             storage.ensure_local(CLIPS_DIR, row.tee_filename)
-            src_path = CLIPS_DIR / row.tee_filename
+            src_path = _local_tee(row)
             if not src_path.exists():
                 raise RuntimeError("tee source missing on disk")
 
@@ -12695,6 +12747,8 @@ def run_wizard_produce_job(
                 _err = _ff.get("reason") or "no flight found"
                 log.info("wizard produce: upload=%s no flight (%s)",
                          upload_id, _err)
+                _finish_wizard_produce(db, upload_id, ok=False, n_ok=0,
+                                       error=_err)
                 return {"ok": False, "error": _err}
 
             # `_d3_fast_produce` reads swings off a Debug3 report, so hand
@@ -12716,6 +12770,13 @@ def run_wizard_produce_job(
                 "ok=%s clips=%d", upload_id, _bx, _by, _imp,
                 out.get("ok"), len(out.get("clips") or []),
             )
+            _n_ok = len(out.get("clips") or [])
+            _finish_wizard_produce(
+                db, upload_id,
+                ok=bool(out.get("ok")) and _n_ok > 0,
+                n_ok=_n_ok,
+                error=out.get("error"),
+            )
             return out
         finally:
             _debugx_set("produce", upload_id, running=False, stage="done")
@@ -12723,9 +12784,37 @@ def run_wizard_produce_job(
         log.exception("wizard produce %s crashed: %s", upload_id, exc)
         _debugx_set("produce", upload_id, running=False, stage="failed",
                     error=f"{exc}")
+        _finish_wizard_produce(db, upload_id, ok=False, n_ok=0,
+                               error=f"{exc}")
         return {"ok": False, "error": f"{exc}"}
     finally:
         db.close()
+
+
+def _finish_wizard_produce(db, upload_id: int, ok: bool, n_ok: int,
+                           error=None) -> None:
+    """Release the row the wizard's produce claimed.
+
+    A card greyed by `processing_status = "processing"` stays greyed until
+    something sets a terminal status. Every exit path from the job goes
+    through here -- success, no-flight, and crash -- because the one that
+    does not is the one that leaves an upload looking permanently stuck.
+    """
+    try:
+        row = db.get(LongVideoUpload, upload_id)
+        if row is None:
+            return
+        row.processing_status = "completed" if ok else "failed"
+        row.processing_completed_at = _utcnow_naive()
+        row.last_error = None if ok else (str(error)[:500] if error else None)
+        if ok:
+            row.last_n_segments = n_ok
+            row.last_n_succeeded = n_ok
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        log.warning("wizard produce: could not release upload %s: %s",
+                    upload_id, exc)
 
 
 def _wizard_ball_side(db, row) -> str | None:
