@@ -478,6 +478,11 @@ export const api = {
       body: patch,
       adminPassword: key,
     }),
+  uploadsInFlight: (key) =>
+    // Clips a Pi is part-way through sending, with the bytes the server
+    // is actually holding. The difference between "not sent" and "90%
+    // there" used to require an SSH session.
+    request(`/api/admin/uploads-in-flight`, { adminPassword: key }),
   wizardProduce: (key, uploadId, payload = {}) =>
     // THE edit wizard's produce: stages 4-8 from the operator's ball and
     // impact frame. Returns as soon as the job is queued -- the work runs

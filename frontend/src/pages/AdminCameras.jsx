@@ -114,6 +114,81 @@ function stuckMessage(ev) {
   return "Neither clip arrived.";
 }
 
+// A clip a Pi is part-way through sending. "TEE never arrived" reads
+// the same whether the Pi sent none of it or 90% of it, and telling
+// those apart used to mean an SSH session. The server is holding the
+// bytes, so it can just say.
+function UploadsInFlight({ adminPassword }) {
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!adminPassword) return undefined;
+    let cancelled = false;
+    const load = () =>
+      api
+        .uploadsInFlight(adminPassword)
+        .then((r) => !cancelled && setRows(r?.in_flight || []))
+        .catch((e) => !cancelled && setErr(e?.message || String(e)));
+    load();
+    // Often enough that a climbing percentage reads as movement.
+    const id = setInterval(load, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [adminPassword]);
+
+  if (err) return null;
+  if (!rows.length) return null;
+
+  const mb = (b) => (b / (1024 * 1024)).toFixed(1);
+  return (
+    <div className="card" style={{ marginBottom: 12, padding: "10px 14px" }}>
+      <div className="small" style={{ fontWeight: 700 }}>
+        {rows.length} clip{rows.length === 1 ? "" : "s"} still coming in
+      </div>
+      <div className="tiny muted" style={{ marginBottom: 6 }}>
+        Bytes the server is holding for a clip on its way. A percentage
+        that climbs between refreshes is a slow link working; one that
+        sits still is a link that is down.
+      </div>
+      {rows.map((r) => (
+        <div key={`${r.camera}-${r.session_id}`} style={{ marginTop: 6 }}>
+          <div className="tiny" style={{ display: "flex", gap: 8 }}>
+            <span style={{ fontWeight: 600 }}>
+              {r.percent != null ? `${r.percent}%` : "—"}
+            </span>
+            <span className="muted">
+              {mb(r.received_bytes)}
+              {r.total_bytes ? ` / ${mb(r.total_bytes)}` : ""} MB
+            </span>
+            <span className="muted">
+              {r.stale_seconds < 30
+                ? "moving"
+                : `no movement for ${
+                    r.stale_seconds < 120
+                      ? `${r.stale_seconds}s`
+                      : `${Math.round(r.stale_seconds / 60)}m`
+                  }`}
+            </span>
+            <span className="muted" style={{ marginLeft: "auto" }}>
+              {(r.session_id || "").slice(0, 8)}
+            </span>
+          </div>
+          <div style={{
+            height: 5, borderRadius: 3, marginTop: 2,
+            background: "var(--border, #ddd)", overflow: "hidden",
+          }}>
+            <div style={{
+              width: `${Math.max(1, Math.min(100, r.percent || 0))}%`,
+              height: "100%",
+              background: r.stale_seconds < 30 ? "#1a9d55" : "#d69e2e",
+            }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ageSeconds(iso) {
   if (!iso) return null;
   const utcIso = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
@@ -489,6 +564,8 @@ function CameraEventsPanel({ adminPassword }) {
         <Link to="/admin/production">Production</Link>. If clips aren&apos;t
         showing up there, the status here tells you which stage stopped.
       </p>
+
+      <UploadsInFlight adminPassword={adminPassword} />
 
       {err && <div className="card err-text small">{err}</div>}
       {events === null && <div className="card muted small">Loading…</div>}

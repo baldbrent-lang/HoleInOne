@@ -5815,6 +5815,65 @@ def _default_end_frame(db, row, green_path, impact_frame, green_total):
         return None
 
 
+@router.get("/uploads-in-flight")
+def uploads_in_flight():
+    """Clips a Pi is part-way through sending, and how far it has got.
+
+    A stuck upload used to be invisible from the app: the card said the
+    tee clip "never arrived" whether the Pi had sent none of it or 90% of
+    it, and the only way to tell them apart was to SSH in and read the
+    agent's log. The server is holding the bytes -- it can just say.
+
+    Sorted by staleness, so the one that has not moved in longest is
+    first. `stale_seconds` is what distinguishes "climbing slowly" from
+    "abandoned": a live upload's part file is touched every chunk.
+    """
+    from ..routers.cameras import PARTS_DIR
+
+    out = []
+    now = time.time()
+    try:
+        for part in sorted(PARTS_DIR.glob("*.part")):
+            try:
+                st = part.stat()
+            except OSError:
+                continue
+            total = None
+            meta = part.with_suffix(".meta")
+            try:
+                total = int(json.loads(meta.read_text()).get("total_size") or 0)
+            except (OSError, ValueError, TypeError, AttributeError):
+                total = None
+            # cam{id}-{session}.part
+            _stem = part.stem
+            _cam, _, _session = _stem.partition("-")
+            out.append({
+                "camera": _cam,
+                "session_id": _session or None,
+                "received_bytes": st.st_size,
+                "total_bytes": total,
+                "percent": (
+                    round(100.0 * st.st_size / total, 1)
+                    if total else None
+                ),
+                "stale_seconds": int(max(0, now - st.st_mtime)),
+            })
+    except OSError as exc:
+        log.warning("uploads-in-flight: cannot read %s: %s", PARTS_DIR, exc)
+    out.sort(key=lambda r: -r["stale_seconds"])
+    return {
+        "in_flight": out,
+        "count": len(out),
+        # What the numbers mean, so the panel does not have to guess.
+        "note": (
+            "Bytes the server is holding for a clip still on its way. A "
+            "percentage that climbs between refreshes is a slow link "
+            "working; one that sits still is a Pi that has stopped "
+            "trying, or a link that is down."
+        ),
+    }
+
+
 @router.get("/long-uploads/{upload_id}/frame")
 def long_upload_frame(
     upload_id: int,
