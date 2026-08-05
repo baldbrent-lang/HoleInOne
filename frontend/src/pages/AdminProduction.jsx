@@ -639,7 +639,9 @@ const PLOT_WINDOW_POST = 100;
  * saved graphics, and commits it to Produced Clips — the same
  * pipeline as the wizard's Produce, minus the wizard.
  */
-function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
+function ClickToPlotModal({
+  row, swingPos, adminPassword, onClose, onBackground, onDone,
+}) {
   const swings = row.edit_metrics?.swings || [];
   const swing = swings[swingPos] || {};
   // FLIGHT WINDOW. Pre-swing motion (waggle, address, shadow) is noise on
@@ -690,9 +692,8 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
     return init;
   });
   const [marks, setMarks] = useState(() => ({ ...baked }));
-  const [busy, setBusy] = useState(false);
-  const [busyMsg, setBusyMsg] = useState(null);
-  const [error, setError] = useState(null);
+  // No busy state: Save & close hands the run to the production card
+  // and closes, so there is never a moment where this modal is waiting.
   // THE PIXEL SPACE THE DOTS ARE IN — this swing's own, when produce
   // recorded it. Every dot is placed by `p.x / frameW`, so frameW has to
   // be the width the points were MEASURED at, not merely the width of
@@ -784,11 +785,17 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       onClose();
       return;
     }
-    setBusy(true);
-    setError(null);
+    // OUT OF THE OPERATOR'S WAY, IMMEDIATELY. This is four server calls
+    // and a video render -- tens of seconds -- and the modal used to sit
+    // there greyed for all of it, then un-grey on a failure with a line
+    // of red text at the bottom of a full-screen editor. Same shape as
+    // the wizard's Produce: hand the run to the production card, which
+    // is where a minutes-long job belongs, and close.
+    const stage = (msg) => onBackground?.(msg);
+    stage("Re-rendering the tracer…");
+    onClose();
     try {
       // 1. Bake the picks into the swing's track (cv2 only, no AI).
-      setBusyMsg("Re-rendering tracer…");
       const hasWindow =
         swing.start_frame != null && swing.end_frame != null;
       const fast = await api.renderWizardTracerFast(adminPassword, row.id, {
@@ -822,7 +829,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       // 2. Re-finalize with the swing's saved graphics + frame window.
       // `swing` gives this swing its OWN final file so it can't clobber
       // the video behind another swing's committed clip.
-      setBusyMsg("Applying graphics…");
+      stage("Applying the graphics…");
       const fin = await api.finalizeWizardVideo(adminPassword, row.id, {
         player_name: swing.finalized_player_name || "Brent Baldwin",
         hole_number: holeNumber,
@@ -859,8 +866,18 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       // shift positions); fall back to position (clip order matches
       // swing order on an untouched row). Without clip_id the backend
       // updates the upload's most recent clip, i.e. some other swing.
-      setBusyMsg("Updating Produced Clips…");
-      const clipId = swing.clip_id ?? clipForSwing?.id ?? null;
+      stage("Updating Produced Clips…");
+      // ONLY A CLIP THAT STILL EXISTS. The id recorded on the swing
+      // outlives the clip: delete the produced clip and the swing keeps
+      // pointing at it, so the commit came back 404 "clip not found on
+      // this upload" and the whole save died at the last step. If the
+      // recorded clip is not among the row's clips any more, commit
+      // without it and let the backend make a new one.
+      const liveIds = new Set((row.produced_clips || []).map((c) => c.id));
+      const clipId =
+        swing.clip_id != null && liveIds.has(swing.clip_id)
+          ? swing.clip_id
+          : clipForSwing?.id ?? null;
       const committed = await api.commitWizardClip(
         adminPassword, row.id,
         clipId != null ? { clip_id: clipId } : {},
@@ -875,13 +892,10 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           swings: withClip,
         });
       }
-      onSaved?.();
-      onClose();
+      onDone?.(true, null);
     } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-      setBusyMsg(null);
+      // The modal is gone, so the failure has to surface on the card.
+      onDone?.(false, e.message);
     }
   }
 
@@ -905,7 +919,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
       role="dialog"
       aria-modal="true"
       aria-label={`Click-to-plot for upload ${row.id}`}
-      onClick={busy ? undefined : onClose}
+      onClick={onClose}
       style={{
         position: "fixed", inset: 0,
         background: "rgba(0,0,0,0.85)",
@@ -937,13 +951,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
             </span>
           </div>
           <div className="row" style={{ gap: 8, alignItems: "center" }}>
-            {busy && busyMsg && (
-              <span className="small muted">
-                <span className="shimmer" style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", marginRight: 6, verticalAlign: "middle" }} />
-                {busyMsg}
-              </span>
-            )}
-            {!busy && nChanged > 0 && (
+            {nChanged > 0 && (
               <span className="small" style={{ color: "var(--emerald-700)" }}>
                 {pendAdd.length > 0 && `${pendAdd.length} new`}
                 {pendAdd.length > 0 && pendClear.length > 0 && " · "}
@@ -960,7 +968,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                 type="button"
                 className="ghost small"
                 style={{ width: "auto", padding: "0 6px" }}
-                disabled={busy || impactFrame == null}
+                disabled={impactFrame == null}
                 onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) - 10))}
               >
                 −10
@@ -969,7 +977,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                 type="button"
                 className="ghost small"
                 style={{ width: "auto", padding: "0 6px" }}
-                disabled={busy || impactFrame == null}
+                disabled={impactFrame == null}
                 onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) - 1))}
               >
                 −1
@@ -977,7 +985,6 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               <input
                 type="number"
                 value={impactFrame ?? ""}
-                disabled={busy}
                 onChange={(e) => {
                   const n = parseInt(e.target.value, 10);
                   setImpactFrame(Number.isFinite(n) ? Math.max(0, n) : null);
@@ -988,7 +995,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                 type="button"
                 className="ghost small"
                 style={{ width: "auto", padding: "0 6px" }}
-                disabled={busy || impactFrame == null}
+                disabled={impactFrame == null}
                 onClick={() => setImpactFrame((f) => (f ?? 0) + 1)}
               >
                 +1
@@ -997,7 +1004,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                 type="button"
                 className="ghost small"
                 style={{ width: "auto", padding: "0 6px" }}
-                disabled={busy || impactFrame == null}
+                disabled={impactFrame == null}
                 onClick={() => setImpactFrame((f) => (f ?? 0) + 10)}
               >
                 +10
@@ -1007,8 +1014,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                   type="button"
                   className="ghost small"
                   style={{ width: "auto", padding: "0 6px" }}
-                  disabled={busy}
-                  onClick={() => setImpactFrame(firstTrackF)}
+                    onClick={() => setImpactFrame(firstTrackF)}
                   title={`The earliest point in the saved track is f${firstTrackF}. If the ball is already moving there, that is closer to the real strike than f${impactFrame}.`}
                 >
                   ← f{firstTrackF}
@@ -1024,7 +1030,6 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               type="button"
               className={placingBall ? "small" : "ghost small"}
               style={{ width: "auto" }}
-              disabled={busy}
               onClick={() => setPlacingBall((v) => !v)}
               title="Click the map to set where the tracer line STARTS - the ball at impact. This anchors the whole line, so it matters more than any single flight point."
             >
@@ -1044,7 +1049,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               className="ghost small"
               onClick={resetMarks}
               style={{ width: "auto" }}
-              disabled={busy || nChanged === 0}
+              disabled={nChanged === 0}
               title="Put every point back to what was saved before this modal was opened"
             >
               Reset
@@ -1054,7 +1059,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               className="ghost small"
               onClick={clearAllMarks}
               style={{ width: "auto" }}
-              disabled={busy || Object.keys(marks).length === 0}
+              disabled={Object.keys(marks).length === 0}
               title="Remove ALL plotted points for this swing. Saving then re-renders the tracer with none of them."
             >
               Clear all ({Object.keys(marks).length})
@@ -1064,7 +1069,6 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               className="ghost small"
               onClick={onClose}
               style={{ width: "auto" }}
-              disabled={busy}
             >
               Cancel
             </button>
@@ -1073,14 +1077,14 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
               className="small"
               onClick={saveAndClose}
               style={{ width: "auto" }}
-              disabled={busy || nChanged === 0}
+              disabled={nChanged === 0}
               title={
                 nChanged === 0
                   ? "Click dots on the heat to add/remove ball points first — green dots are already in the saved track"
                   : "Re-render the tracer with the changes, re-apply graphics, and update Produced Clips"
               }
             >
-              {busy ? "Saving…" : "Save & close"}
+              {"Save & close"}
             </button>
           </div>
         </div>
@@ -1172,8 +1176,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
                   key={`mk-${f}`}
                   type="button"
                   className="ghost small"
-                  disabled={busy}
-                  onClick={() =>
+                    onClick={() =>
                     setMarks((m) => {
                       const next = { ...m };
                       delete next[f];
@@ -1192,7 +1195,6 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
           </div>
         )}
 
-        {error && <div className="err-text small" style={{ marginTop: 4 }}>{error}</div>}
       </div>
     </div>
   );
@@ -8966,8 +8968,7 @@ export default function AdminProduction() {
                   <button
                     className="small ghost"
                     onClick={() => handleProduceDebug(row)}
-                    disabled={busy}
-                    title="Dev: produce AND run a per-swing diagnostic — classical-CV heatmap vs AI tracer"
+                        title="Dev: produce AND run a per-swing diagnostic — classical-CV heatmap vs AI tracer"
                   >
                     🐞 Debug
                   </button>
@@ -8976,8 +8977,7 @@ export default function AdminProduction() {
                   <button
                     className="small ghost"
                     onClick={() => handleDebug2(row)}
-                    disabled={busy}
-                    title="Dev: pose candidates → impact + ball from the club arc → AI judge → windowed MOG2 heat → chain walked up from the ball. Shows every stage."
+                        title="Dev: pose candidates → impact + ball from the club arc → AI judge → windowed MOG2 heat → chain walked up from the ball. Shows every stage."
                   >
                     🔬 Debug2
                   </button>
@@ -8986,8 +8986,7 @@ export default function AdminProduction() {
                   <button
                     className="small ghost"
                     onClick={() => handleDebug3(row)}
-                    disabled={busy}
-                    title="Dev: MOG2 per frame → drop the golfer → keep ball-sized blobs → link across frames → RANSAC parabola. A different method from Debug2; shows every stage."
+                        title="Dev: MOG2 per frame → drop the golfer → keep ball-sized blobs → link across frames → RANSAC parabola. A different method from Debug2; shows every stage."
                   >
                     🧿 Debug3
                   </button>
@@ -9107,8 +9106,30 @@ export default function AdminProduction() {
           row={plotModal.row}
           swingPos={plotModal.swingPos}
           adminPassword={adminPassword}
-          onClose={() => { setPlotModal(null); refreshAll(); }}
-          onSaved={refreshAll}
+          onClose={() => setPlotModal(null)}
+          // The save runs after this modal has closed, so its progress
+          // belongs on the card: greyed, named stage, held until the new
+          // video is actually in.
+          onBackground={(msg) => {
+            const id = plotModal.row.id;
+            busySinceRef.current = Date.now();
+            setBusyLabel(msg);
+            setBusyId(id);
+            patchRow(id, {
+              processing_status: "processing",
+              produce_stage: null,
+              produce_done: 0,
+              produce_total: 0,
+            });
+          }}
+          onDone={async (ok, err) => {
+            if (!ok) setError(err);
+            // Only now: the card stays greyed until the re-rendered
+            // video is on the row, not until the first call returns.
+            await refreshAll();
+            setBusyLabel(null);
+            setBusyId((cur) => (cur === plotModal.row.id ? null : cur));
+          }}
         />
       )}
 
