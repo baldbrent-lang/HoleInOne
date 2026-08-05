@@ -1133,7 +1133,7 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
  * a stub — wiring the draft back to the production pipeline lands
  * next.
  */
-function EditWizard({ row, adminPassword, onClose, onSaved }) {
+function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
   // Hydrate from whatever was already persisted: only auto-detect on
   // the very first Edit. Subsequent re-opens skip the AI call and
   // pre-fill the wizard from row.edit_metrics.
@@ -1652,6 +1652,14 @@ function EditWizard({ row, adminPassword, onClose, onSaved }) {
         ball: [draft.ball.x, draft.ball.y],
         impact_frame: draft.impactFrame,
       });
+      // GREY THE CARD NOW, not when a poll happens to catch it. The
+      // server does claim the row before responding, but a wizard produce
+      // is only a few seconds long -- the refresh below can easily land
+      // after it has already finished, and then the operator sees the
+      // card change with no "producing" in between. Same optimistic flag
+      // the main Produce button uses; the parent hands over to the
+      // server's own status as soon as it says processing.
+      onProducing?.();
       onSaved?.();
       onClose?.();
     } catch (e) {
@@ -7864,6 +7872,9 @@ export default function AdminProduction() {
   const [busyEventId, setBusyEventId] = useState(null);
   const [viewer, setViewer] = useState(null); // {url, title, startedAt, fps}
   const [editingRow, setEditingRow] = useState(null);
+  // When the current optimistic "busy" began, so a completion stamped
+  // before it (the PREVIOUS run's) cannot be mistaken for this one's.
+  const busySinceRef = useRef(0);
   // Standalone click-to-plot modal opened from a card's 🖱 button:
   // {row, swingPos} — swingPos is the index into edit_metrics.swings.
   const [plotModal, setPlotModal] = useState(null);
@@ -7934,6 +7945,7 @@ export default function AdminProduction() {
     // the operator with a visible panel carrying the error, instead of a
     // button that appears to do nothing.
     setD2({ running: true, uploadId: row.id, report: null, error: null });
+    busySinceRef.current = Date.now();
     setBusyId(row.id);
     try {
       await api.debug2(adminPassword, row.id);
@@ -7950,6 +7962,7 @@ export default function AdminProduction() {
     // Window first, same reason as Debug2: a throw after this still leaves
     // a visible panel carrying the error.
     setD3({ running: true, uploadId: row.id, report: null, error: null });
+    busySinceRef.current = Date.now();
     setBusyId(row.id);
     try {
       await api.debug3(adminPassword, row.id);
@@ -8201,6 +8214,7 @@ export default function AdminProduction() {
 
   async function handleDelete(row) {
     if (!confirm(`Delete upload #${row.id}? This removes the source video(s).`)) return;
+    busySinceRef.current = Date.now();
     setBusyId(row.id);
     try {
       await api.deleteLongUpload(adminPassword, row.id);
@@ -8218,6 +8232,7 @@ export default function AdminProduction() {
     // produced_clip; that's what we operate on.
     const clip = row.produced_clips?.[0];
     if (!clip) return;
+    busySinceRef.current = Date.now();
     setBusyId(row.id);
     try {
       await api.setClipBroadcast(adminPassword, clip.id, !clip.is_highlight);
@@ -8240,6 +8255,7 @@ export default function AdminProduction() {
   async function handleProduce(row) {
     // Stub: kicks off a default reprocess on the existing row. Matches
     // the auto-produce defaults used by /clips/quick-upload.
+    busySinceRef.current = Date.now();
     setBusyId(row.id);
     try {
       const fd = new FormData();
@@ -8265,12 +8281,24 @@ export default function AdminProduction() {
     if (busyId == null) return;
     const r = (rows || []).find((x) => x.id === busyId);
     if (!r) return;
-    // ONLY "processing". Including the terminal states was the bug: the
-    // row is ALREADY "completed" from its last run at the moment you click
-    // Re-Produce, so this effect fired on the very next render and cleared
-    // busy instantly -- which is the flicker. Wait for the worker to
-    // actually claim it.
+    // NOT the terminal states on their own. The row is ALREADY
+    // "completed" from its last run at the moment you click Re-Produce,
+    // so clearing on that fired on the very next render and un-greyed
+    // instantly -- the flicker. Wait for the worker to claim it.
     if (r.processing_status === "processing") {
+      setBusyId(null);
+      return;
+    }
+    // ...but a run can also FINISH before any poll catches it mid-flight.
+    // A wizard produce is a few seconds; if every refresh lands either
+    // side of that window, the row goes straight completed -> completed
+    // and the flag above never hands over, leaving the card greyed until
+    // the 180s failsafe. So a completion stamped AFTER we went busy also
+    // releases it -- that is this run finishing, not the previous one.
+    const done = r.processing_completed_at
+      ? Date.parse(r.processing_completed_at)
+      : NaN;
+    if (Number.isFinite(done) && done >= busySinceRef.current) {
       setBusyId(null);
     }
   }, [rows, busyId]);
@@ -8605,7 +8633,8 @@ export default function AdminProduction() {
                     )) {
                       return;
                     }
-                    setBusyId(row.id);
+                    busySinceRef.current = Date.now();
+    setBusyId(row.id);
                     try {
                       await api.deleteClip(adminPassword, clip.id);
                       await refreshAll();
@@ -8805,6 +8834,10 @@ export default function AdminProduction() {
           adminPassword={adminPassword}
           onClose={() => { setEditingRow(null); refreshAll(); }}
           onSaved={refreshAll}
+          onProducing={() => {
+            busySinceRef.current = Date.now();
+            setBusyId(editingRow.id);
+          }}
         />
       )}
 
