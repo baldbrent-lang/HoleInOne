@@ -65,7 +65,13 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import SessionLocal, get_db
-from ..models import Camera, CameraEvent, Course, VideoClip
+from ..models import (
+    Camera,
+    CameraEvent,
+    Course,
+    DeletedCameraSession,
+    VideoClip,
+)
 from ..services import storage
 from ..services.video import probe_video_info
 
@@ -602,6 +608,22 @@ async def event_trigger(
     sid = (session_id or "").strip()[:80]
     if not sid:
         raise HTTPException(400, "session_id is required")
+
+    # A DELETION IS FINAL. Recovery exists for triggers that were lost
+    # (backend mid-deploy, modem between lives) and it cannot tell that
+    # case from an event the operator deliberately removed — both are
+    # simply a missing row. Without this check the delete is undone as
+    # soon as the Pi's backlog drains, which is how sixteen deleted
+    # events came back as 502-518. Only recovery is blocked: a genuine
+    # live trigger reusing the id would still be honoured.
+    if recover and db.query(DeletedCameraSession).filter(
+        DeletedCameraSession.session_id == sid,
+    ).first() is not None:
+        db.commit()  # keep the last_seen_at bump
+        log.info("cameras: refused to recover deleted session %s", sid)
+        raise HTTPException(
+            403, "this session was deleted; not part of that event",
+        )
 
     # Idempotency: if this session_id has already been registered (e.g.
     # the Pi retried because the first response was lost), return the

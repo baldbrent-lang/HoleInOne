@@ -431,6 +431,33 @@ class CameraEvent(Base):
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class DeletedCameraSession(Base):
+    """Sessions an operator deleted, so they cannot come back.
+
+    A Pi holds its clips locally until they upload, which on a bad link
+    can be hours. Deleting the event removes the row but not the clip
+    still sitting on the Pi -- and since a missing row is also what a
+    LOST TRIGGER looks like, the uploader's recovery path would happily
+    re-register the session and resurrect the event. Observed on the
+    tee: sixteen deleted events reappeared as 502-518 when the spool
+    finally drained.
+
+    This is how the backend tells the two cases apart. "Never existed"
+    is recoverable; "existed and was deleted" is final.
+
+    Rows are tiny and there is no need to prune them aggressively -- a
+    session_id is a UUID4 and a course does not generate many deletions.
+    """
+
+    __tablename__ = "deleted_camera_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    event_id: Mapped[Optional[int]] = mapped_column(nullable=True)
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, index=True)
+
+
 class BroadcastView(Base):
     """Per-viewer dedup for the /broadcast/next playlist.
 

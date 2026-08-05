@@ -72,6 +72,7 @@ from ..models import (
     Camera,
     CameraEvent,
     ClipProcessingStatus,
+    DeletedCameraSession,
     Course,
     HIOStatus,
     HoleInOneEvent,
@@ -5229,6 +5230,21 @@ def delete_camera_event(event_id: int, db: Session = Depends(get_db)):
     event = db.get(CameraEvent, event_id)
     if event is None:
         raise HTTPException(404, "camera event not found")
+
+    # TOMBSTONE FIRST. The Pi may still be holding this event's clip --
+    # on a bad link a clip can sit spooled for hours -- and the
+    # uploader's lost-trigger recovery re-registers any session the
+    # server has no row for. Without this marker a deletion is undone
+    # the moment the backlog drains; sixteen deleted events came back
+    # as 502-518 that way. Recorded before anything else so a failure
+    # later in the delete cannot leave the session resurrectable.
+    if event.session_id and not db.query(DeletedCameraSession).filter(
+        DeletedCameraSession.session_id == event.session_id,
+    ).first():
+        db.add(DeletedCameraSession(
+            session_id=event.session_id, event_id=event.id,
+        ))
+        db.commit()
 
     for fname in (event.tee_clip_filename, event.green_clip_filename):
         if not fname:
