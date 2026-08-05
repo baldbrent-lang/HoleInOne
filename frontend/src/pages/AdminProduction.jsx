@@ -579,7 +579,7 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip
               onClick={() => onDeleteClip(cur, idx)}
               title={`Delete this produced clip (clip ${idx + 1}${
                 cur?.hole_number != null ? ` · hole ${cur.hole_number}` : ""
-              }) and its files. The raw upload and other clips stay; Re-Produce can recreate it.`}
+              }), its files and the swing it was cut from. The raw upload and other clips stay.`}
             >
               🗑
             </button>
@@ -8882,9 +8882,10 @@ export default function AdminProduction() {
                     setConfirmBox({
                       title: `Delete produced ${label}?`,
                       body:
-                        "The video and its files are removed. The raw " +
-                        "upload and the other clips stay, and Re-Produce " +
-                        "can recreate it.",
+                        "The video, its files and the swing it was cut " +
+                        "from are all removed — so a re-produce will not " +
+                        "bring it back. The raw upload and the other " +
+                        "clips stay.",
                       confirmLabel: "Delete clip",
                       onConfirm: async () => {
                         // Dialog down, card greyed, THEN the request —
@@ -8900,10 +8901,30 @@ export default function AdminProduction() {
                         // meant the card un-greyed with the deleted
                         // video still on screen, which then vanished a
                         // few seconds later on its own.
-                        patchRow(row.id, {
-                          produced_clips: (row.produced_clips || [])
-                            .filter((c) => c.id !== clip.id),
-                        });
+                        {
+                          // The swing goes with the clip, server-side.
+                          // Mirror it here by the same rule (clip_id
+                          // only) so the wizard cannot be opened on a
+                          // swing that is already gone.
+                          const _sw = row.edit_metrics?.swings;
+                          const _dropSwing =
+                            Array.isArray(_sw)
+                            && _sw.some((s) => s?.clip_id === clip.id);
+                          patchRow(row.id, {
+                            produced_clips: (row.produced_clips || [])
+                              .filter((c) => c.id !== clip.id),
+                            ...(_dropSwing
+                              ? {
+                                  edit_metrics: {
+                                    ...row.edit_metrics,
+                                    swings: _sw.filter(
+                                      (s) => s?.clip_id !== clip.id,
+                                    ),
+                                  },
+                                }
+                              : {}),
+                          });
+                        }
                         try {
                           await api.deleteClip(adminPassword, clip.id);
                         } catch (e) {

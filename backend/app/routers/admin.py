@@ -4011,32 +4011,78 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
         BroadcastView.clip_id == clip_id,
     ).delete(synchronize_session=False)
 
-    # The parent upload's edit_metrics remembers which swing became which
-    # clip. Leaving a dead clip_id there makes the card's click-to-plot
-    # match a swing to a clip that is gone.
+    # THE SWING GOES WITH THE CLIP. To the operator the trash icon on the
+    # produced tile deletes a SWING -- that is what they are looking at
+    # -- so leaving the swing in edit_metrics meant the edit wizard still
+    # offered both swings after one had been deleted, and the next
+    # produce would put the clip straight back. The swing list is the
+    # wizard's source of truth, so the entry is removed outright, exactly
+    # as the wizard's own per-swing ✕ does.
+    #
+    # Matched by the clip_id produce stamps on the swing. Positional
+    # matching is the fallback for rows that predate that stamp, and
+    # only when NO swing on the row carries one -- a mixed row means the
+    # positions have already shifted and a guess would delete the wrong
+    # swing's work.
+    swing_removed = False
     if clip.long_upload_id:
         _up = db.get(LongVideoUpload, clip.long_upload_id)
         _em = dict(_up.edit_metrics or {}) if _up else {}
         _swings = _em.get("swings")
-        if isinstance(_swings, list) and any(
-            isinstance(s, dict) and s.get("clip_id") == clip_id for s in _swings
-        ):
-            _em["swings"] = [
-                {**s, "clip_id": None}
-                if isinstance(s, dict) and s.get("clip_id") == clip_id
-                else s
+        if isinstance(_swings, list) and _swings:
+            _keep = None
+            if any(
+                isinstance(s, dict) and s.get("clip_id") == clip_id
                 for s in _swings
-            ]
-            # A fresh dict, so SQLAlchemy sees the assignment as dirty
-            # without needing an explicit flag_modified.
-            _up.edit_metrics = _em
+            ):
+                _keep = [
+                    s for s in _swings
+                    if not (isinstance(s, dict) and s.get("clip_id") == clip_id)
+                ]
+            elif not any(
+                isinstance(s, dict) and s.get("clip_id") is not None
+                for s in _swings
+            ):
+                _order = (
+                    db.query(VideoClip.id)
+                    .filter(VideoClip.long_upload_id == clip.long_upload_id)
+                    .order_by(VideoClip.captured_at.asc(), VideoClip.id.desc())
+                    .all()
+                )
+                _pos = [r[0] for r in _order].index(clip_id) \
+                    if clip_id in [r[0] for r in _order] else None
+                if _pos is not None and _pos < len(_swings):
+                    _keep = [s for i, s in enumerate(_swings) if i != _pos]
+            if _keep is not None and len(_keep) != len(_swings):
+                _em["swings"] = _keep
+                # A fresh dict, so SQLAlchemy sees the assignment as
+                # dirty without needing an explicit flag_modified.
+                _up.edit_metrics = _em
+                swing_removed = True
+        # The card's "Produced · n/m clips" badge counts these, and a
+        # stale count is how a row with one clip left reads as two.
+        if _up is not None:
+            _left = (
+                db.query(VideoClip)
+                .filter(
+                    VideoClip.long_upload_id == clip.long_upload_id,
+                    VideoClip.id != clip_id,
+                )
+                .count()
+            )
+            _up.last_n_succeeded = _left
+            if (_up.last_n_segments or 0) > _left:
+                _up.last_n_segments = _left
 
     db.add(
         AuditLog(
             actor="admin",
             action="delete_clip",
             target=f"clip:{clip.id}",
-            detail=f"deleted {len(deleted_files)} files, freed {freed} bytes",
+            detail=(
+                f"deleted {len(deleted_files)} files, freed {freed} bytes"
+                + (", removed its swing" if swing_removed else "")
+            ),
         )
     )
     db.delete(clip)
@@ -4046,6 +4092,7 @@ def delete_clip(clip_id: int, db: Session = Depends(get_db)):
         "clip_id": clip_id,
         "freed_bytes": freed,
         "files_unlinked": deleted_files,
+        "swing_removed": swing_removed,
     }
 
 
