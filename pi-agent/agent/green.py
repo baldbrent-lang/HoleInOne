@@ -52,8 +52,10 @@ class GreenAgent:
         # signals it. Kept above the tee's own cap so the tee's stop is
         # always what ends a normal clip, with enough headroom that a
         # slow stop-poll doesn't truncate the green half; if the signal
-        # never arrives, this bounds the damage.
-        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 45))
+        # never arrives, this bounds the damage. Moves with the tee's cap:
+        # at 120s there, 45s here would have the GREEN cutting every long
+        # clip short, which is the one thing this must never do.
+        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 150))
         # How often to ask the backend whether the tee has signalled
         # end-of-session. 1 s keeps the green's clip within ~1 s of
         # the tee's clip without spamming the endpoint.

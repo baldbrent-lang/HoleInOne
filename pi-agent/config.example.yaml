@@ -91,32 +91,43 @@ detection:
 # this buffer first so the address frame and backswing are captured.
 buffer_seconds: 5
 
-# HOW LONG A CLIP IS. Not a runaway guard any more — on the tee this is
-# hit routinely, and that is the point.
+# A SAFETY RAIL — but it was briefly the clip length, and the history
+# matters if you are thinking of changing it.
 #
-# A session used to run until the tee box emptied, which on a par-3 with
-# a group waiting meant 143 s, 175 s, 215 s clips. At ~1500 kbps that is
-# 27-40 MB, and a course uplink cannot move that inside the 180 s upload
-# write timeout, so none of them ever arrived. 30 s is ~5.5 MB, which
-# does. A waiting group now yields a series of 30 s clips that each make
-# it, instead of one long one that does not — and one swing per clip is
-# what the tracer wants anyway.
+# A session runs until the tee box empties, which on a par-3 with a group
+# waiting meant 143 s, 175 s, 215 s clips. When an upload was one
+# whole-file POST against a 180 s write timeout, 27-40 MB never arrived,
+# so the cap was cut to 30 s: a series of clips that each made it, rather
+# than one long one that did not.
+#
+# Chunked, resumable upload removed that ceiling. A clip goes up in
+# slices, the server banks each one, and a clip that needs twenty minutes
+# and four link outages still lands. Size costs TIME now, not the clip —
+# and the encode bitrate steps down on its own when the link proves it
+# cannot keep up, so a long clip on a bad link gets smaller rather than
+# getting lost.
+#
+# So this is back to bounding a stuck ROI rather than deciding how long a
+# swing may be. 30 s was cutting real swings in half; 120 s covers a
+# golfer's whole time over the ball with room to spare.
 #
 # The split keeps the pre-roll buffer, so consecutive clips OVERLAP by
 # buffer_seconds and a swing landing on a boundary is still complete in
-# one of them. Raise it if your uplink is good; lower it if 30 s clips
-# still fail to upload.
+# one of them.
 #
 # GREEN side: leave this ABOVE the tee's value. The green stops when the
-# tee signals it, so its cap is only a backstop for a lost signal.
-# Code defaults if unset: tee 30, green 45.
-max_clip_seconds: 30
+# tee signals it, so its cap is only a backstop for a lost signal — set
+# below the tee's and the GREEN starts truncating every long clip, which
+# is the one thing it must never do.
+# Code defaults if unset: tee 120, green 150.
+max_clip_seconds: 120
 
 # RUNAWAY GUARD. A length-cap split means "the person is still in the
 # ROI", and with a loose ROI that stays true forever — someone on the
-# fairway or the cart path holds it open and the tee records 30s clips
-# back to back with no end. Each costs ~23s to compress and ~10s to
-# upload on a Pi also capturing at 50fps, so the queue only grows.
+# fairway or the cart path holds it open and the tee records capped
+# clips back to back with no end. Each costs real compress and upload
+# time on a Pi also capturing at 50fps, so the queue only grows. Longer
+# clips make each one dearer, which is what this guard is for.
 #
 # After this many consecutive splits the automatic trigger pauses for
 # split_cooldown_seconds. An operator Capture still gets through.
@@ -124,8 +135,13 @@ max_clip_seconds: 30
 # If you see the warning it fires, the real fix is tee_box_roi: a full
 # 1280x720 ROI triggers on anyone anywhere in shot. Draw it around the
 # tee box.
-max_consecutive_splits: 4
-split_cooldown_seconds: 90
+#
+# These move with max_clip_seconds. At 30 s clips, 4 splits then 90 s off
+# was a modest duty cycle; at 120 s the same numbers are eight minutes
+# solid then a 90 s pause, which guards nothing. Two capped clips in a
+# row is already four minutes of unbroken presence.
+max_consecutive_splits: 2
+split_cooldown_seconds: 180
 
 # Green-side only: how often to ask the backend whether the tee has
 # signalled end-of-session. Lower = green stops closer to the tee but

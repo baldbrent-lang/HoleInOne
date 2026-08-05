@@ -334,19 +334,34 @@ class TeeAgent:
         # only ever hit if the detector misclassifies something (eg a
         # parked cart) as a person for an extended period. 10 min is
         # long enough for a foursome on a slow tee box.
-        # CLIP LENGTH IS UPLOAD SIZE. A tee clip runs at ~1500 kbps after
-        # compression, so 30s is about 5.5 MB and 143s is 27 MB — and on
-        # the link at Snee Farm (measured: 164 KB/s down one minute, 0 the
-        # next, 270ms RTT) nothing above about 10 MB completes inside the
-        # 180s write timeout. This is not a safety cap any more; it is how
-        # long a clip is. A group standing on the tee produces a series of
-        # 30s clips that each arrive, instead of one 3-minute clip that
-        # never does — and one swing per clip is what produce wants anyway.
-        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 30))
-        # How many 30s clips in an unbroken row before we decide the ROI
+        # CLIP LENGTH USED TO BE UPLOAD SIZE. It was cut to 30s when an
+        # upload was one whole-file POST against a 180s write timeout:
+        # nothing above ~10 MB ever completed, so a long clip did not
+        # arrive at all and the cap was how long a clip COULD be.
+        #
+        # Chunked, resumable upload removed that ceiling. A clip is sent
+        # in slices, the server banks each one, and a clip that needs
+        # twenty minutes and four link outages still lands. Size now costs
+        # TIME, not the clip -- and the encode bitrate comes down on its
+        # own when the link proves it cannot keep up, so a long clip on a
+        # bad link gets smaller rather than getting lost.
+        #
+        # So the cap goes back to being a safety rail. 30s was cutting
+        # real swings in half; 120s covers a golfer's whole time over the
+        # ball with room to spare, and still bounds a stuck ROI to two
+        # minutes of footage rather than an unbounded recording.
+        self.max_clip_seconds = float(cfg.get("max_clip_seconds", 120))
+        # How many capped clips in an unbroken row before we decide the ROI
         # is holding on somebody who is not going to swing, and pause.
-        self.max_splits = int(cfg.get("max_consecutive_splits", 4))
-        self.split_cooldown = float(cfg.get("split_cooldown_seconds", 90))
+        #
+        # These MOVE WITH THE CAP. At 30s clips, four splits then 90s off
+        # was 8 minutes of recording an hour; at 120s the same numbers are
+        # eight minutes solid then a 90s pause — an 84% duty cycle, which
+        # is not a guard. Two capped clips in a row is already four
+        # minutes of unbroken presence, which is all the evidence needed
+        # that nobody is about to swing.
+        self.max_splits = int(cfg.get("max_consecutive_splits", 2))
+        self.split_cooldown = float(cfg.get("split_cooldown_seconds", 180))
         self.heartbeat_seconds = int(cfg.get("heartbeat_seconds", 60))
         # Compress each clip to H.264 at this bitrate (kbps) before upload.
         # Makes clips play in any browser (mp4v won't play in desktop
