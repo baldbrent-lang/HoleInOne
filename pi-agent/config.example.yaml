@@ -91,20 +91,25 @@ detection:
 # this buffer first so the address frame and backswing are captured.
 buffer_seconds: 5
 
-# How long the TEE waits after the trigger before it starts recording.
+# How long BOTH cameras wait after the trigger before they start
+# recording.
 #
 # The trigger fires when a person dwells in the tee box, and from there
 # it is a tee peg, a glove, a look down the fairway and a couple of
 # waggles: ten seconds at the very fastest, usually twenty or more. All
 # of that used to be recorded, compressed and pushed over a cellular
-# link for footage nobody watches. The event is still armed at the
-# trigger (the green starts then, and the backend pairs on it) -- only
-# the tee's recording is held.
+# link for footage nobody watches -- and nothing reaches the green for
+# longer still. The event is still armed at the trigger, so the backend
+# pairs the two halves exactly as before; only the recording waits.
 #
-# The hold applies to the pre-roll as well, so the clip really does
-# begin here rather than buffer_seconds before it. Raise it if your
-# groups are slower; lower it if you ever see a swing clipped at the
-# front. An operator Capture from the Cameras page ignores it entirely.
+# The tee measures the hold from the trigger, the green from when the
+# trigger reaches it (a long-poll return later). The two starts are
+# close, and the backend aligns the cut on wall clock regardless.
+#
+# The hold applies to the pre-roll as well, so a clip really does begin
+# here rather than buffer_seconds before it. Raise it if your groups are
+# slower; lower it if you ever see a swing clipped at the front. An
+# operator Capture from the Cameras page ignores it entirely.
 record_delay_seconds: 10
 
 # A SAFETY RAIL — but it was briefly the clip length, and the history

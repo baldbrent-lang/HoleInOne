@@ -45,6 +45,15 @@ class GreenAgent:
         self.client = BackendClient(cfg["backend_url"], cfg["auth_token"])
         self.cam_cfg = cfg.get("camera", {})
         self.buffer_seconds = float(cfg.get("buffer_seconds", 5))
+        # SAME HOLD AS THE TEE, and for the same reason: the trigger
+        # says a golfer has walked onto the tee box, not that anyone is
+        # about to hit. Nothing reaches the green for another twenty
+        # seconds at least, so the front of the clip was pure cost. The
+        # green measures the hold from when the trigger REACHES it,
+        # which is a long-poll return away from the tee's own start
+        # line — close enough that both halves begin together, and the
+        # backend aligns the cut on wall clock regardless.
+        self.record_delay = float(cfg.get("record_delay_seconds", 10))
         # Runaway-safety cap — recording normally ends on the tee's
         # /event-stop signal, this only kicks in if the signal never
         # arrives. 10 min handles a slow foursome.
@@ -178,7 +187,21 @@ class GreenAgent:
                     "trigger received: session=%s event=%s hole=%s",
                     session_id, trigger.get("event_id"), trigger.get("hole_number"),
                 )
-                self._record_and_upload(session_id)
+                _not_before = None
+                if self.record_delay > 0:
+                    log.info(
+                        "holding %.0fs before recording — the ball is not "
+                        "coming this way yet", self.record_delay,
+                    )
+                    _not_before = time.time() + self.record_delay
+                    while (
+                        not self.stopping.is_set()
+                        and time.time() < _not_before
+                    ):
+                        time.sleep(min(0.2, max(0.0, _not_before - time.time())))
+                    if self.stopping.is_set():
+                        break
+                self._record_and_upload(session_id, not_before=_not_before)
         finally:
             self.stopping.set()
             capture_thread.join(timeout=2)
@@ -213,7 +236,9 @@ class GreenAgent:
             self.buffer.push(time.time(), frame.copy())
             self.streamer.update_frame(frame)
 
-    def _record_and_upload(self, session_id: str) -> None:
+    def _record_and_upload(
+        self, session_id: str, not_before: float | None = None,
+    ) -> None:
         """Commit the current ring buffer to an MP4 and keep writing
         new frames from the buffer until the tee Pi signals stop
         (via /event-stop, observed by polling /event-status) or the
@@ -222,6 +247,17 @@ class GreenAgent:
         if not snapshot:
             log.warning("buffer empty at trigger; skipping session=%s", session_id)
             return
+        # The buffer kept filling through the hold, so committing it
+        # would put back the seconds we just decided not to record.
+        # Never drop it all: the writer sizes itself from a frame.
+        if not_before is not None:
+            _kept = [f for f in snapshot if f[0] >= not_before]
+            _dropped = len(snapshot) - len(_kept)
+            snapshot = _kept if len(_kept) >= 2 else snapshot[-2:]
+            log.info(
+                "record: held %.0fs, dropped %d pre-roll frames",
+                self.record_delay, _dropped,
+            )
         height, width = snapshot[0][1].shape[:2]
         # First-frame wall-clock time (start of the committed pre-roll).
         # Reported on upload for dual-camera cut alignment.
