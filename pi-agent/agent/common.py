@@ -46,6 +46,19 @@ SHRINK_FLOOR_KBPS = 400
 # brief good patch should not undo an adaptation the link earned.
 KBPS_RECOVER_AFTER = 10
 
+# CHUNK SIZE HAS TO FIT THE LINK, not the other way round. Measured on
+# the tee at Snee Farm: the uplink held a steady 12-24 KB/s all morning
+# -- not cycling, just slow -- and a 512 KB chunk needs ~34s at that
+# rate against a 45s timeout. Every chunk that hit a slow patch died on
+# the timeout and re-sent the whole 512 KB from scratch, because there
+# is no partial credit WITHIN a chunk. One clip sat at 82% for 36
+# minutes that way while the link was moving data the entire time.
+#
+# So the chunk shrinks when chunks time out and grows back when they
+# sail through. At 64 KB even a 12 KB/s link places a chunk in ~5s.
+CHUNK_MIN_BYTES = 64 * 1024
+CHUNK_GROW_AFTER = 4          # clean chunks before trying a bigger one
+
 
 # ---------------------------------------------------------------------
 # Config
@@ -436,6 +449,7 @@ class BackendClient:
         max_stalls: int = 40,
         stall_wait: float = 6.0,
         on_progress=None,
+        on_chunk_size=None,
     ) -> dict:
         """Upload a clip in resumable slices.
 
@@ -480,6 +494,10 @@ class BackendClient:
         stalls = 0
         _last_log = 0.0
         _started_at = sent
+        # Adapted DOWN on a timeout and back up on a run of clean chunks.
+        # Local to this attempt plus whatever the caller learned before.
+        _chunk = max(CHUNK_MIN_BYTES, int(chunk_bytes))
+        _clean = 0
 
         def _note(now: int) -> None:
             # Tell the caller what is banked, even on the failure paths.
@@ -501,7 +519,7 @@ class BackendClient:
                         f"keeping the progress for the next attempt"
                     )
                 fh.seek(sent)
-                body = fh.read(int(chunk_bytes))
+                body = fh.read(int(_chunk))
                 if not body:
                     # The file shrank under us (re-encoded mid-flight).
                     raise RuntimeError(
@@ -528,6 +546,24 @@ class BackendClient:
                     # where we are, because this chunk may have landed
                     # and only its reply was lost.
                     stalls += 1
+                    _clean = 0
+                    # A timeout means this chunk was too big for what the
+                    # link is currently giving. Halving costs one more
+                    # round trip; not halving costs the whole chunk again
+                    # every time, which is how 82% became a plateau.
+                    if _chunk > CHUNK_MIN_BYTES:
+                        _chunk = max(CHUNK_MIN_BYTES, _chunk // 2)
+                        log.info(
+                            "upload: dropping to %d KB chunks — the link is "
+                            "not placing %d KB inside %ds",
+                            _chunk // 1024, (_chunk * 2) // 1024,
+                            int(chunk_timeout),
+                        )
+                        if on_chunk_size is not None:
+                            try:
+                                on_chunk_size(_chunk)
+                            except Exception:  # noqa: BLE001
+                                pass
                     if stalls > max_stalls:
                         raise RuntimeError(
                             f"{video_path.name}: {stalls} stalled chunks at "
@@ -544,6 +580,21 @@ class BackendClient:
                     _note(sent)
                     continue
                 stalls = 0
+                # Earn the size back, slowly: a run of clean chunks means
+                # the link has room for a bigger one, and bigger chunks
+                # are fewer round trips.
+                _clean += 1
+                if (_clean >= CHUNK_GROW_AFTER
+                        and _chunk < int(chunk_bytes)):
+                    _clean = 0
+                    _chunk = min(int(chunk_bytes), _chunk * 2)
+                    log.info("upload: back up to %d KB chunks",
+                             _chunk // 1024)
+                    if on_chunk_size is not None:
+                        try:
+                            on_chunk_size(_chunk)
+                        except Exception:  # noqa: BLE001
+                            pass
                 if out.get("resync"):
                     # Server and Pi disagreed on progress; the server wins.
                     sent = int(out.get("received") or 0)
@@ -750,7 +801,12 @@ class BackgroundUploader(threading.Thread):
         # as it needs. Set upload_chunked: false in config to go back to
         # whole-file POSTs.
         self.chunked = bool(chunked)
-        self.chunk_bytes = max(64 * 1024, int(chunk_kb) * 1024)
+        self.chunk_bytes = max(CHUNK_MIN_BYTES, int(chunk_kb) * 1024)
+        # What the link has actually accepted, remembered across attempts.
+        # Re-learning it from 512 KB on every retry means re-paying the
+        # timeouts that taught us in the first place, and on a spooled
+        # clip that is most of the attempt.
+        self._chunk_now = self.chunk_bytes
         self._last_progress = 0
         self._last_orphaned = False
         if self.spool_dir is not None:
@@ -1016,12 +1072,16 @@ class BackgroundUploader(threading.Thread):
         def _seen(nbytes, _total):
             self._last_progress = int(nbytes)
 
+        def _sized(nbytes):
+            self._chunk_now = int(nbytes)
+
         return self.client.upload_event_chunked(
             session_id, clip_path, recording_started_at=ts,
-            chunk_bytes=self.chunk_bytes,
+            chunk_bytes=self._chunk_now,
             chunk_timeout=min(45, max(20, int(timeout))),
             deadline_seconds=int(timeout) * max(1, int(retries)),
             on_progress=_seen,
+            on_chunk_size=_sized,
         )
 
     def _recover_lost_event(self, session_id: str) -> bool:
