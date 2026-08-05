@@ -180,6 +180,40 @@ def load_config(path: Path) -> dict:
 # Backend HTTP client
 # ---------------------------------------------------------------------
 
+class UnattachableClip(RuntimeError):
+    """This clip can never be delivered, however good the link gets.
+
+    Raised when the backend says the event this clip belongs to is not
+    there — the operator deleted it from the stuck-events list, or it
+    was never created. Seen on the tee: a clip reached 100% banked on
+    the server and then got
+
+        POST /upload-complete -> 404: no event for that session_id
+
+    Every byte had arrived; there was simply nothing to attach them to.
+    Without this distinction the spool treats it as an ordinary failure
+    and re-sends a finished 5.8 MB clip against a dead session for the
+    next 24 hours, on a link that can barely carry live footage.
+
+    Deliberately narrow: it covers only the clip-specific rejections.
+    "unknown camera token" and "camera is disabled" are ALSO 4xx and
+    also permanent until someone intervenes, but they are device-wide
+    and operator-fixable — discarding footage over a token typo would
+    be far worse than retrying it.
+    """
+
+
+_ORPHAN_MARKERS = (
+    "no event for that session_id",
+    "not part of that event",
+)
+
+
+def _clip_is_orphaned(body: str) -> bool:
+    low = (body or "").lower()
+    return any(m in low for m in _ORPHAN_MARKERS)
+
+
 class BackendClient:
     """Wraps the four /api/cameras/{token}/... endpoints. Retries
     transient network / 5xx errors with exponential backoff;
@@ -215,8 +249,11 @@ class BackendClient:
                     return resp.json() if resp.content else {}
                 if resp.status_code in (400, 401, 403, 404):
                     # Hard fail — auth or validation problem, retry won't help.
-                    raise RuntimeError(
-                        f"{method} {path} -> {resp.status_code}: {resp.text[:200]}",
+                    _body = resp.text[:200]
+                    _err = (UnattachableClip
+                            if _clip_is_orphaned(_body) else RuntimeError)
+                    raise _err(
+                        f"{method} {path} -> {resp.status_code}: {_body}",
                     )
                 last_err = f"{resp.status_code}: {resp.text[:120]}"
                 log.warning(
@@ -704,6 +741,7 @@ class BackgroundUploader(threading.Thread):
         self.chunked = bool(chunked)
         self.chunk_bytes = max(64 * 1024, int(chunk_kb) * 1024)
         self._last_progress = 0
+        self._last_orphaned = False
         if self.spool_dir is not None:
             try:
                 self.spool_dir.mkdir(parents=True, exist_ok=True)
@@ -956,6 +994,7 @@ class BackgroundUploader(threading.Thread):
         # Bytes this attempt banked on the server, for _note_result. Zero
         # on the whole-file path, which has no partial state to speak of.
         self._last_progress = 0
+        self._last_orphaned = False
         try:
             if compress and self._kbps_now > 0:
                 compress_for_upload(
@@ -996,6 +1035,14 @@ class BackgroundUploader(threading.Thread):
                 result.get("ready_to_process"),
             )
             return True
+        except UnattachableClip as exc:
+            self._last_orphaned = True
+            log.error(
+                "upload rejected for %s: %s — the event is gone, so this "
+                "clip can never be delivered and will not be retried",
+                session_id, exc,
+            )
+            return False
         except Exception as exc:  # pragma: no cover
             log.error("background upload failed for %s: %s", session_id, exc)
             return False
@@ -1061,9 +1108,13 @@ class BackgroundUploader(threading.Thread):
             _t_send = time.time()
             ok = self._send(session_id, clip_path, ts, real_fps,
                             compress=True, retries=_tries, timeout=_to)
-            self._note_result(ok, time.time() - _t_send,
-                              progressed_bytes=self._last_progress)
-            if not ok:
+            # An orphaned clip says nothing about the link, so it must
+            # not widen the backoff or feed the bitrate adaptation.
+            if not self._last_orphaned:
+                self._note_result(ok, time.time() - _t_send,
+                                  progressed_bytes=self._last_progress)
+            # Spooling an orphan would park a clip nothing can ever accept.
+            if not ok and not self._last_orphaned:
                 self._spool(session_id, clip_path, ts, tries=_tries)
             try:
                 clip_path.unlink(missing_ok=True)
@@ -1155,13 +1206,26 @@ class BackgroundUploader(threading.Thread):
             compress=not meta.get("compressed"), retries=1,
             timeout=self.patient_timeout,
         )
-        self._note_result(ok, time.time() - _t_send,
-                          progressed_bytes=self._last_progress)
+        if not self._last_orphaned:
+            self._note_result(ok, time.time() - _t_send,
+                              progressed_bytes=self._last_progress)
         if ok:
             path.unlink(missing_ok=True)
             path.with_suffix(".json").unlink(missing_ok=True)
             log.info("uploader: spooled %s finally went up", path.name)
             return True
+        if self._last_orphaned:
+            # Its event was deleted. The bytes may even all be on the
+            # server already — there is just nothing to attach them to,
+            # and no future attempt changes that. Let it go rather than
+            # spend the link on it for the next 24 hours.
+            path.unlink(missing_ok=True)
+            path.with_suffix(".json").unlink(missing_ok=True)
+            log.warning(
+                "uploader: dropped %s — its event no longer exists, so no "
+                "amount of retrying can deliver it", path.name,
+            )
+            return False
         # DO NOT ROTATE. Touching the file to move on to the next clip
         # assumed failures were clip-specific. They are not: every clip is
         # ~6 MB and the link is taking none of them, so rotating just
