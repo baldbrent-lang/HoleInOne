@@ -58,6 +58,13 @@ KBPS_RECOVER_AFTER = 10
 # sail through. At 64 KB even a 12 KB/s link places a chunk in ~5s.
 CHUNK_MIN_BYTES = 64 * 1024
 CHUNK_GROW_AFTER = 4          # clean chunks before trying a bigger one
+# ...and each failed attempt to grow makes the next one wait longer.
+# Observed on the tee: at 256 KB the link ran clean, four chunks earned a
+# step back to 512 KB, that chunk timed out, and 45 seconds went on
+# relearning what we already knew -- every couple of minutes. A fixed
+# threshold oscillates forever on a link that is simply slower than the
+# ceiling.
+CHUNK_GROW_MAX = 64
 
 
 # ---------------------------------------------------------------------
@@ -498,6 +505,7 @@ class BackendClient:
         # Local to this attempt plus whatever the caller learned before.
         _chunk = max(CHUNK_MIN_BYTES, int(chunk_bytes))
         _clean = 0
+        _grow_need = CHUNK_GROW_AFTER
 
         def _note(now: int) -> None:
             # Tell the caller what is banked, even on the failure paths.
@@ -553,6 +561,9 @@ class BackendClient:
                     # every time, which is how 82% became a plateau.
                     if _chunk > CHUNK_MIN_BYTES:
                         _chunk = max(CHUNK_MIN_BYTES, _chunk // 2)
+                        # Every drop is evidence the ceiling is wrong for
+                        # this link, so make the next attempt at it dearer.
+                        _grow_need = min(CHUNK_GROW_MAX, _grow_need * 2)
                         log.info(
                             "upload: dropping to %d KB chunks — the link is "
                             "not placing %d KB inside %ds",
@@ -584,7 +595,7 @@ class BackendClient:
                 # the link has room for a bigger one, and bigger chunks
                 # are fewer round trips.
                 _clean += 1
-                if (_clean >= CHUNK_GROW_AFTER
+                if (_clean >= _grow_need
                         and _chunk < int(chunk_bytes)):
                     _clean = 0
                     _chunk = min(int(chunk_bytes), _chunk * 2)
@@ -917,14 +928,30 @@ class BackgroundUploader(threading.Thread):
         return self.spool_dir / "learned_kbps.json" if self.spool_dir else None
 
     def _load_kbps(self) -> None:
-        """Pick up the bitrate the link taught us before the last restart."""
+        """Pick up what the link taught us before the last restart."""
         f = self._kbps_file()
         if f is None or not f.exists():
             return
         try:
-            v = int((json.loads(f.read_text()) or {}).get("kbps") or 0)
+            _saved = json.loads(f.read_text()) or {}
+            v = int(_saved.get("kbps") or 0)
         except Exception:  # noqa: BLE001
             return
+        # The chunk size too. Relearning it costs a full chunk timeout
+        # per halving, and the agent restarts often -- every update is
+        # one, and the tee's log shows a restart landing mid-clip. Paying
+        # 45s to rediscover a number we already had is the same waste the
+        # adaptation exists to avoid.
+        try:
+            _cs = int(_saved.get("chunk_bytes") or 0)
+            if CHUNK_MIN_BYTES <= _cs < self._chunk_now:
+                log.info(
+                    "uploader: resuming with %d KB chunks (learned before "
+                    "the last restart)", _cs // 1024,
+                )
+                self._chunk_now = _cs
+        except Exception:  # noqa: BLE001
+            pass
         # Never above the configured ceiling — the operator may have
         # lowered it since — and never below the floor.
         if SHRINK_FLOOR_KBPS <= v < self._kbps_now:
@@ -939,7 +966,10 @@ class BackgroundUploader(threading.Thread):
         if f is None:
             return
         try:
-            f.write_text(json.dumps({"kbps": int(self._kbps_now)}))
+            f.write_text(json.dumps({
+                "kbps": int(self._kbps_now),
+                "chunk_bytes": int(self._chunk_now),
+            }))
         except Exception:  # noqa: BLE001
             pass
 
@@ -1074,6 +1104,7 @@ class BackgroundUploader(threading.Thread):
 
         def _sized(nbytes):
             self._chunk_now = int(nbytes)
+            self._save_kbps()
 
         return self.client.upload_event_chunked(
             session_id, clip_path, recording_started_at=ts,
