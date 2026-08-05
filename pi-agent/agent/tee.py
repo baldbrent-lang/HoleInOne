@@ -329,6 +329,16 @@ class TeeAgent:
             self.det_cfg.get("keepalive_conf_threshold", 0.2)
         )
         self.buffer_seconds = float(cfg.get("buffer_seconds", 5))
+        # NOBODY TEES OFF IMMEDIATELY. The trigger fires when a person
+        # dwells in the tee box, but from there it is a tee peg, a
+        # glove, a couple of waggles -- ten seconds at the very fastest
+        # and usually twenty or more. Recording that is a pile of bytes
+        # to compress and push over a cellular link for footage nobody
+        # will ever watch. So the trigger arms the session and the
+        # recording starts this many seconds later, pre-roll and all.
+        # An operator Capture from the Cameras page ignores it: that
+        # click means "record now".
+        self.record_delay = float(cfg.get("record_delay_seconds", 10))
         # Runaway-safety cap. A normal session ends when the tee box
         # has been empty for no_person_timeout_seconds; this cap is
         # only ever hit if the detector misclassifies something (eg a
@@ -676,9 +686,32 @@ class TeeAgent:
                     except Exception as exc:
                         log.error("event_trigger failed (%s) — skipping", exc)
                     else:
+                        # LET THEM GET SET. The event is armed (the green
+                        # is already recording off the same trigger); the
+                        # tee just does not start rolling yet. An
+                        # operator Capture is exempt -- that click means
+                        # record now.
+                        _not_before = None
+                        if pending_secs is None and self.record_delay > 0:
+                            log.info(
+                                "holding %.0fs before recording — a golfer "
+                                "needs at least that long to tee up",
+                                self.record_delay,
+                            )
+                            _not_before = time.time() + self.record_delay
+                            while (
+                                not self.stopping.is_set()
+                                and time.time() < _not_before
+                            ):
+                                time.sleep(
+                                    min(0.2, max(0.0, _not_before - time.time()))
+                                )
+                            if self.stopping.is_set():
+                                break
                         _why = self._record_and_upload(
                             detector, no_person_timeout, det_period,
                             fps, session_id, fixed_seconds=pending_secs,
+                            not_before=_not_before,
                         )
                         if _why == "length_cap" and _splits >= self.max_splits:
                             # RUNAWAY GUARD. A split means "the person is
@@ -733,6 +766,7 @@ class TeeAgent:
     def _record_and_upload(
         self, detector, no_person_timeout: float, det_period: float,
         fps: float, session_id: str, fixed_seconds: float | None = None,
+        not_before: float | None = None,
     ) -> str:
         """Persist the pre-roll buffer + keep recording until no person
         is seen for `no_person_timeout` seconds (capped by
@@ -744,6 +778,20 @@ class TeeAgent:
         if not snapshot:
             log.warning("buffer empty at trigger; skipping session=%s", session_id)
             return "no_buffer"
+        # THE HOLD APPLIES TO THE PRE-ROLL TOO. The buffer has been
+        # filling throughout the wait, so keeping it would put the very
+        # seconds we decided not to record at the front of the clip.
+        # Drop everything older than the start line -- but never all of
+        # it: the writer needs a frame to size itself from, and the last
+        # couple are the freshest picture there is.
+        if not_before is not None:
+            _kept = [f for f in snapshot if f[0] >= not_before]
+            _dropped = len(snapshot) - len(_kept)
+            snapshot = _kept if len(_kept) >= 2 else snapshot[-2:]
+            log.info(
+                "record: held %.0fs, dropped %d pre-roll frames",
+                self.record_delay, _dropped,
+            )
         height, width = snapshot[0][1].shape[:2]
 
         # Wall-clock time of the first frame in the clip (the start of
