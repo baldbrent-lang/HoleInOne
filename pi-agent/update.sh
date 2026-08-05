@@ -51,7 +51,7 @@ if compgen -G "$TMP_DIR/repo/pi-agent/models/*" >/dev/null; then
     "$INSTALL_DIR/models/"
 fi
 
-echo "==> refreshing top-level files (golfreelz_agent.py, update.sh, README)"
+echo "==> refreshing top-level files (agent, update.sh, point-at.sh, README)"
 install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" \
   "$TMP_DIR/repo/pi-agent/golfreelz_agent.py" \
   "$INSTALL_DIR/golfreelz_agent.py"
@@ -67,6 +67,9 @@ install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" \
 install -m 644 -o "$SERVICE_USER" -g "$SERVICE_USER" \
   "$TMP_DIR/repo/pi-agent/config.example.yaml" \
   "$INSTALL_DIR/config.example.yaml"
+install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" \
+  "$TMP_DIR/repo/pi-agent/point-at.sh" \
+  "$INSTALL_DIR/point-at.sh"
 
 echo "==> pip: applying requirements.txt (failures non-fatal — see warnings)"
 if ! "$INSTALL_DIR/venv/bin/pip" install --quiet \
