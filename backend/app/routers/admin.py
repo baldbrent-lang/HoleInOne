@@ -5745,6 +5745,50 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     }
 
 
+def _frame_wall_clock(db, row, which: str, frame_idx: int, fps: float):
+    """Real-world instant of a frame, as an ISO string (or None).
+
+    A frame number and an offset into the clip both describe a position
+    in a file; neither tells the operator WHEN the shot happened, which
+    is what matches a clip to a group on the tee sheet. The Pis stamp the
+    wall-clock instant of their first frame, so this is that instant plus
+    frame/fps.
+
+    Per camera, because the two recordings do not start together: the
+    green's own stamp when it has one, otherwise the tee's shifted by the
+    measured delta. Falls back to base_captured_at (the trigger time),
+    which is close but not frame-exact -- better than showing nothing.
+    """
+    if fps is None or fps <= 0:
+        return None
+    try:
+        start = None
+        ev = None
+        if getattr(row, "camera_event_id", None):
+            ev = db.query(CameraEvent).filter(
+                CameraEvent.id == row.camera_event_id,
+            ).first()
+        if str(which).lower() == "green":
+            start = getattr(ev, "green_recording_started_at", None)
+            if start is None:
+                _tee = getattr(ev, "tee_recording_started_at", None) or getattr(
+                    row, "base_captured_at", None)
+                if _tee is not None:
+                    delta, _ = _d3_green_delta_sec(db, row)
+                    start = _tee + timedelta(seconds=float(delta))
+        else:
+            start = getattr(ev, "tee_recording_started_at", None)
+        if start is None:
+            start = getattr(row, "base_captured_at", None)
+        if start is None:
+            return None
+        return (start + timedelta(seconds=float(frame_idx) / fps)).isoformat()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("wall clock for upload %s frame %s failed: %s",
+                  getattr(row, "id", None), frame_idx, exc)
+        return None
+
+
 def _default_end_frame(db, row, green_path, impact_frame, green_total):
     """The green frame produce would stop on, from a tee impact frame.
 
@@ -5825,11 +5869,18 @@ def long_upload_frame(
     finally:
         cap.release()
 
+    _fps = float(probe_fps(src_path) or 0.0)
     return {
         "upload_id": upload_id,
         "frame": clamped,
         "which": "green" if _green else "tee",
-        "fps": float(probe_fps(src_path) or 0.0),
+        "fps": _fps,
+        # When this frame was actually captured, not how far into the
+        # file it is -- the operator matches clips to groups by time of
+        # day, and an offset into a clip cannot do that.
+        "wall_clock": _frame_wall_clock(
+            db, row, "green" if _green else "tee", clamped, _fps,
+        ),
         # What produce puts on the green side of the cut, so the wizard
         # can default the end frame to the same shape the pipeline uses
         # instead of hard-coding a number that quietly drifts from it.

@@ -2331,6 +2331,9 @@ function WizardBody({
   // frame rather than being assumed.
   const [navFps, setNavFps] = useState(null);
   const [navWhich, setNavWhich] = useState("tee");
+  // Real-world instant of the frame on screen, from the Pi's own stamp
+  // of when its first frame was captured.
+  const [navWallClock, setNavWallClock] = useState(null);
   // D3_GREEN_SEC, echoed by the backend so the wizard's default end
   // frame and produce's actual green coverage cannot drift apart.
   const [greenSeconds, setGreenSeconds] = useState(null);
@@ -2425,6 +2428,7 @@ function WizardBody({
       setNavUrl(data.image_url);
       setNavWhich(data.which || cam);
       if (data.fps) setNavFps(data.fps);
+      setNavWallClock(data.wall_clock || null);
       if (data.green_seconds) setGreenSeconds(data.green_seconds);
       if (data.total_frames) setNavTotal(data.total_frames);
       if (data.default_end_frame != null) {
@@ -2466,21 +2470,30 @@ function WizardBody({
     return Math.max(0, Math.min(max, n));
   }
 
-  // Real time, to a tenth. A frame number says nothing about where you
-  // are in the swing; "12.4s" does, and it is what the produced clip's
-  // boundaries are actually reckoned in.
-  const atTime = (f) =>
-    (navFps && f != null) ? ` · ${(f / navFps).toFixed(1)}s` : "";
+  // TIME OF DAY, not an offset into the clip. "28.5s" describes a
+  // position in a file; "9:08:30.02" is when the shot happened, which is
+  // what matches a clip to a group on the tee sheet. Hundredths because
+  // at 50fps a frame is 20ms -- tenths would make consecutive frames
+  // read identically while stepping.
+  const atTime = () => {
+    const d = parseApiDate(navWallClock);
+    if (!d) return "";
+    const hh = d.getHours();
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    const cs = String(Math.floor(d.getMilliseconds() / 10)).padStart(2, "0");
+    return ` · ${hh}:${mm}:${ss}.${cs}`;
+  };
 
   let leftImageUrl = navUrl || draft.addressImageUrl;
-  let leftFrameLabel = `Frame ${navFrame ?? "—"}${atTime(navFrame)}`;
+  let leftFrameLabel = `Frame ${navFrame ?? "—"}${atTime()}`;
   const showFrameNav = FRAME_PICK_MODES.has(editing);
   if (editing === "ball") {
     // The impact frame, with no frame-nav controls -- the operator is
     // placing a ball here, not choosing a frame.
     leftImageUrl = navUrl || draft.addressImageUrl;
     leftFrameLabel =
-      `Impact frame · ${draft.impactFrame ?? "—"}${atTime(draft.impactFrame)}`
+      `Impact frame · ${draft.impactFrame ?? "—"}${atTime()}`
       + " — place the ball";
   } else if (showFrameNav) {
     leftImageUrl = navUrl || draft.addressImageUrl;
@@ -2491,7 +2504,7 @@ function WizardBody({
     };
     leftFrameLabel =
       `${labels[editing] || "Frame"} frame · ${navFrame ?? "—"}${total}`
-      + atTime(navFrame)
+      + atTime()
       + (navWhich === "green" ? " · green camera" : "");
   }
 
