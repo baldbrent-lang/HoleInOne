@@ -1661,6 +1661,13 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
     // the operator has to sit in front of.
     if (!draft?.ball || draft.impactFrame == null) return;
     setProducing(true);
+    // GREY THE CARD ON THE CLICK, not two round trips later. Saving the
+    // metrics and queueing the job are both server calls, and on the
+    // course link they are not fast -- the operator was clicking Produce
+    // and watching nothing happen for seconds. Nothing here can fail in
+    // a way that makes an early grey wrong: if either call throws we
+    // clear it again below.
+    onProducing?.(true);
     try {
       await persistDraftMetrics();
       await api.wizardProduce(adminPassword, row.id, {
@@ -1674,17 +1681,12 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
           ? [draft.landingSpot.x, draft.landingSpot.y]
           : null,
       });
-      // GREY THE CARD NOW, not when a poll happens to catch it. The
-      // server does claim the row before responding, but a wizard produce
-      // is only a few seconds long -- the refresh below can easily land
-      // after it has already finished, and then the operator sees the
-      // card change with no "producing" in between. Same optimistic flag
-      // the main Produce button uses; the parent hands over to the
-      // server's own status as soon as it says processing.
-      onProducing?.();
       onSaved?.();
       onClose?.();
     } catch (e) {
+      // Nothing was queued, so put the card back rather than leaving it
+      // greyed for a run that never started.
+      onProducing?.(false);
       setProducing(false);
       setError(e?.message || String(e));
     }
@@ -2907,12 +2909,7 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
   // Clicking anywhere on the frame in ball/target mode also moves the
   // marker — easier than precision-grabbing the dot.
   function onFramePointerDown(e) {
-    if (editing === "landing_spot") {
-    leftImageUrl = navUrl || draft.addressImageUrl;
-    leftFrameLabel =
-      `Landing frame · ${draft.landingFrame ?? "—"}${atTime()}`
-      + " · green camera — mark where it lands";
-  } else if (editing === "ball") {
+    if (editing === "ball") {
       const pt = eventToFrame(e);
       if (pt) setDraft((d) => ({ ...d, ball: pt }));
     } else if (editing === "target") {
@@ -3029,7 +3026,12 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
 
   const showRoi = !!draft.roi && (editing === null || editing === "roi"
     || editing === "ball" || editing === "target");
-  const showBall = !!draft.ball;
+  // The ball at rest is a TEE-frame fact. While the operator is on a
+  // green frame it is a green dot sitting on grass that will not move --
+  // which reads as the landing marker being broken, because the actual
+  // landing marker is the one that has not been placed yet.
+  const onGreenFrame = editing === "landing_spot" || editing === "landing";
+  const showBall = !!draft.ball && !onGreenFrame;
   const showTarget = !!draft.target;
   // The landing spot belongs to the landing FRAME, on the green camera.
   // Showing it over a tee frame would put an orange dot in the trees.
@@ -3057,7 +3059,8 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
         background: "var(--border, #222)",
         borderRadius: 6,
         overflow: "hidden",
-        cursor: (ballEditable || targetEditable) ? "crosshair" : "default",
+        cursor: (ballEditable || targetEditable || landingEditable)
+          ? "crosshair" : "default",
         userSelect: "none",
       }}
     >
@@ -8997,7 +9000,11 @@ export default function AdminProduction() {
           adminPassword={adminPassword}
           onClose={() => { setEditingRow(null); refreshAll(); }}
           onSaved={refreshAll}
-          onProducing={() => {
+          onProducing={(on) => {
+            if (on === false) {
+              setBusyId((cur) => (cur === editingRow.id ? null : cur));
+              return;
+            }
             busySinceRef.current = Date.now();
             setBusyId(editingRow.id);
           }}
