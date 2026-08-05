@@ -458,8 +458,17 @@ export const api = {
       adminPassword: key,
       timeoutMs: 90_000,
     }),
-  getLongUploadFrame: (key, uploadId, frame) =>
-    request(`/api/admin/long-uploads/${uploadId}/frame?frame=${frame}`, {
+  getLongUploadFrame: (key, uploadId, frame, which = "tee",
+                      impactFrame = null) =>
+    // `which` picks the camera. The END frame is a green-camera call --
+    // it is where the produced clip stops, and by then the cut is on the
+    // green -- so that one asks for "green". Passing impactFrame lets the
+    // server work out where produce would end the clip, which needs the
+    // tee->green offset it alone holds.
+    request(
+      `/api/admin/long-uploads/${uploadId}/frame?frame=${frame}`
+      + `&which=${encodeURIComponent(which)}`
+      + (impactFrame != null ? `&impact_frame=${impactFrame}` : ""), {
       adminPassword: key,
       timeoutMs: 20_000,
     }),

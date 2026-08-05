@@ -5745,41 +5745,77 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     }
 
 
+def _default_end_frame(db, row, green_path, impact_frame, green_total):
+    """The green frame produce would stop on, from a tee impact frame.
+
+    None when there is nothing to reckon from -- the caller then shows
+    the clip's last frame, which is what it did before.
+    """
+    if impact_frame is None:
+        return None
+    try:
+        tee_path = _local_tee(row)
+        tee_fps = float(probe_fps(tee_path) or 0.0) if tee_path else 0.0
+        green_fps = float(probe_fps(green_path) or 0.0)
+        if tee_fps <= 0 or green_fps <= 0:
+            return None
+        delta, _ = _d3_green_delta_sec(db, row)
+        t_impact_green = (float(impact_frame) / tee_fps) - float(delta)
+        n = int(round((t_impact_green + D3_GREEN_SEC) * green_fps))
+        if green_total:
+            n = max(0, min(int(green_total) - 1, n))
+        return max(0, n)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("default end frame for %s failed: %s",
+                  getattr(row, "id", None), exc)
+        return None
+
+
 @router.get("/long-uploads/{upload_id}/frame")
 def long_upload_frame(
     upload_id: int,
     frame: int = 0,
+    which: str = "tee",
+    impact_frame: int | None = None,
     db: Session = Depends(get_db),
 ):
-    """Grab a single frame from this upload's tee video as a JPG and
-    return its public URL. The wizard pages through frames (±1, ±10)
-    while the operator picks address / impact / ball-at-rest etc.
+    """Grab a single frame from this upload as a JPG and return its
+    public URL. The wizard pages through frames (±1, ±10) while the
+    operator picks impact / end / ball-at-rest etc.
 
-    Frames are cached on disk under `detect-{id}-frame-{N}.jpg` so
-    re-visiting the same frame doesn't reseek. Use this for any
-    frame-level UI; address auto-detect already writes
-    `detect-{id}_address.jpg` via /auto-detect.
+    `which` selects the camera. The END frame is a green-camera decision
+    -- it is where the produced clip stops, and by then the cut is on the
+    green -- so asking the operator to choose it from the tee view is
+    asking about the wrong picture.
+
+    Frames are cached on disk under `detect-{id}-frame-{N}.jpg` (green:
+    `-green-frame-`) so re-visiting the same frame doesn't reseek.
     """
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
-    if not row.tee_filename:
+    _green = str(which or "tee").lower() == "green"
+    if _green and not row.green_filename:
+        raise HTTPException(400, "upload has no green video")
+    if not _green and not row.tee_filename:
         raise HTTPException(400, "upload has no tee video")
-    src_path = _local_tee(row)
+    src_path = _local_green(row) if _green else _local_tee(row)
+    _name = row.green_filename if _green else row.tee_filename
     if not src_path.exists():
-        raise HTTPException(404, f"tee source file missing on disk: {row.tee_filename}")
+        raise HTTPException(404, f"source file missing on disk: {_name}")
 
     import cv2  # type: ignore
 
     cap = cv2.VideoCapture(str(src_path))
     try:
         if not cap.isOpened():
-            raise HTTPException(500, f"could not open {row.tee_filename}")
+            raise HTTPException(500, f"could not open {_name}")
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         clamped = max(0, min(total - 1 if total else 0, int(frame)))
-        out_path = CLIPS_DIR / f"detect-{upload_id}-frame-{clamped}.jpg"
+        _tag = "green-frame" if _green else "frame"
+        out_path = CLIPS_DIR / f"detect-{upload_id}-{_tag}-{clamped}.jpg"
         if not out_path.exists():
             cap.set(cv2.CAP_PROP_POS_FRAMES, clamped)
             ok, img = cap.read()
@@ -5792,6 +5828,21 @@ def long_upload_frame(
     return {
         "upload_id": upload_id,
         "frame": clamped,
+        "which": "green" if _green else "tee",
+        "fps": float(probe_fps(src_path) or 0.0),
+        # What produce puts on the green side of the cut, so the wizard
+        # can default the end frame to the same shape the pipeline uses
+        # instead of hard-coding a number that quietly drifts from it.
+        "green_seconds": D3_GREEN_SEC,
+        # Where produce would end this clip, in GREEN frames. Computed
+        # here because the tee->green offset lives here: a moment at tee
+        # time T is at green time T - delta, and guessing that delta
+        # client-side would put the default end seconds out on any pair
+        # whose recordings did not start together.
+        "default_end_frame": (
+            _default_end_frame(db, row, src_path, impact_frame, total)
+            if _green else None
+        ),
         "total_frames": total,
         "width": width,
         "height": height,

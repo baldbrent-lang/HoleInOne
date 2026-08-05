@@ -2321,6 +2321,19 @@ function WizardBody({
   const [navUrl, setNavUrl] = useState(null);
   const [navTotal, setNavTotal] = useState(totalFrames);
   const [navLoading, setNavLoading] = useState(false);
+  // Real time needs the SOURCE fps, and it differs per camera (the tee
+  // runs ~50fps, the green its own rate) -- so it comes back with the
+  // frame rather than being assumed.
+  const [navFps, setNavFps] = useState(null);
+  const [navWhich, setNavWhich] = useState("tee");
+  // D3_GREEN_SEC, echoed by the backend so the wizard's default end
+  // frame and produce's actual green coverage cannot drift apart.
+  const [greenSeconds, setGreenSeconds] = useState(null);
+  // Where produce would stop, in green frames — the server works it out
+  // because the tee->green offset lives there.
+  const [defaultEnd, setDefaultEnd] = useState(null);
+  // One correction per entry into end mode, or the two would ping-pong.
+  const endCorrectedRef = useRef(false);
 
   // Default cut frame (until manually set): 2.5 s after impact. The
   // produced clip cuts from the tee tracer to the green camera here.
@@ -2341,18 +2354,49 @@ function WizardBody({
 
   // Frame-pick modes: address, impact, start, end, cut. Each seeds the
   // navigator from the corresponding draft frame index when entered.
-  const FRAME_PICK_MODES = new Set(["address", "impact", "start", "end", "cut"]);
+  // No "start": the clip's lead-in is D3_PRE_ROLL_SEC before the strike,
+  // decided by produce, not trimmed by hand. Four things go in here --
+  // impact, end, ball, target -- and the first two are frames.
+  const FRAME_PICK_MODES = new Set(["address", "impact", "end", "cut"]);
   const frameForMode = {
     address: draft.addressFrame,
     impact: draft.impactFrame,
-    start: draft.startFrame ?? 0,
-    end: draft.endFrame ?? (totalFrames ? totalFrames - 1 : 0),
+    end: draft.endFrame ?? defaultEnd ?? defaultEndFrame(),
     cut: effectiveCutFrame ?? 0,
   };
 
+  // THE END FRAME IS A GREEN DECISION. It is where the produced clip
+  // stops, and by then the cut is on the green camera -- asking the
+  // operator to choose it from the tee view is asking about the wrong
+  // picture. Everything else is a tee frame.
+  const cameraForMode = (mode) => (mode === "end" ? "green" : "tee");
+
+  // Where produce would end this clip if nobody said otherwise: the
+  // green half runs `greenSeconds` past the strike (D3_GREEN_SEC on the
+  // backend, echoed by the frame endpoint so the two cannot drift).
+  function defaultEndFrame() {
+    const fps = navFps || 30;
+    const secs = greenSeconds || 6;
+    const base = draft.impactFrame ?? 0;
+    const n = Math.round(base + secs * fps);
+    const max = (navTotal ?? totalFrames ?? 0) - 1;
+    return max > 0 ? Math.min(max, n) : n;
+  }
+
+  // OPEN ON THE IMPACT FRAME. The wizard used to land on the address
+  // frame, which is the least useful picture in the clip -- the swing has
+  // not happened and nothing on this panel refers to it. Frame 100 is the
+  // fallback when impact has never been chosen: far enough in to be past
+  // the walk-up, cheap to seek.
   useEffect(() => {
+    loadFrame(draft.impactFrame ?? 100, "tee");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (editing !== "end") endCorrectedRef.current = false;
     if (FRAME_PICK_MODES.has(editing)) {
-      loadFrame(frameForMode[editing] ?? 0);
+      loadFrame(frameForMode[editing] ?? 0, cameraForMode(editing));
       return;
     }
     // PLACING THE BALL IS AN IMPACT-FRAME JOB. It used to show the
@@ -2360,19 +2404,46 @@ function WizardBody({
     // golfer's stance hides the spot -- the operator was aiming at a
     // picture of a different moment. The impact frame is the one the
     // tracer starts from, so it is the one to point at.
-    if (editing === "ball") loadFrame(draft.impactFrame ?? 0);
+    if (editing === "ball") loadFrame(draft.impactFrame ?? 0, "tee");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, draft.impactFrame]);
 
-  async function loadFrame(frameIdx) {
+  async function loadFrame(frameIdx, which = null) {
+    const cam = which || cameraForMode(editing);
     setNavLoading(true);
     try {
-      const data = await api.getLongUploadFrame(adminPassword, row.id, frameIdx);
+      const data = await api.getLongUploadFrame(
+        adminPassword, row.id, frameIdx, cam,
+        cam === "green" ? draft.impactFrame ?? null : null,
+      );
       setNavFrame(data.frame);
       setNavUrl(data.image_url);
+      setNavWhich(data.which || cam);
+      if (data.fps) setNavFps(data.fps);
+      if (data.green_seconds) setGreenSeconds(data.green_seconds);
       if (data.total_frames) setNavTotal(data.total_frames);
+      if (data.default_end_frame != null) {
+        setDefaultEnd(data.default_end_frame);
+        // The server's answer needs the tee->green offset, so it only
+        // arrives WITH the first green frame -- by which time we have
+        // already shown a client-side estimate. Correct to it once, so
+        // the operator lands on the frame produce would actually stop
+        // on rather than our approximation of it.
+        if (
+          editing === "end"
+          && draft.endFrame == null
+          && !endCorrectedRef.current
+          && data.frame !== data.default_end_frame
+        ) {
+          endCorrectedRef.current = true;
+          loadFrame(data.default_end_frame, "green");
+        }
+      }
     } catch (e) {
       console.warn("frame fetch failed", e);
+      // A missing green half must not leave the operator staring at the
+      // previous frame with no explanation.
+      if (cam === "green") setNavUrl(null);
     } finally {
       setNavLoading(false);
     }
@@ -2390,15 +2461,22 @@ function WizardBody({
     return Math.max(0, Math.min(max, n));
   }
 
-  let leftImageUrl = draft.addressImageUrl;
-  let leftFrameLabel = `Address frame · ${draft.addressFrame}`;
+  // Real time, to a tenth. A frame number says nothing about where you
+  // are in the swing; "12.4s" does, and it is what the produced clip's
+  // boundaries are actually reckoned in.
+  const atTime = (f) =>
+    (navFps && f != null) ? ` · ${(f / navFps).toFixed(1)}s` : "";
+
+  let leftImageUrl = navUrl || draft.addressImageUrl;
+  let leftFrameLabel = `Frame ${navFrame ?? "—"}${atTime(navFrame)}`;
   const showFrameNav = FRAME_PICK_MODES.has(editing);
   if (editing === "ball") {
     // The impact frame, with no frame-nav controls -- the operator is
     // placing a ball here, not choosing a frame.
     leftImageUrl = navUrl || draft.addressImageUrl;
     leftFrameLabel =
-      `Impact frame · ${draft.impactFrame ?? "—"} — place the ball`;
+      `Impact frame · ${draft.impactFrame ?? "—"}${atTime(draft.impactFrame)}`
+      + " — place the ball";
   } else if (showFrameNav) {
     leftImageUrl = navUrl || draft.addressImageUrl;
     const total = navTotal != null ? ` / ${navTotal - 1}` : "";
@@ -2407,7 +2485,9 @@ function WizardBody({
       start: "Start", end: "End", cut: "Cut",
     };
     leftFrameLabel =
-      `${labels[editing] || "Frame"} frame · ${navFrame ?? "—"}${total}`;
+      `${labels[editing] || "Frame"} frame · ${navFrame ?? "—"}${total}`
+      + atTime(navFrame)
+      + (navWhich === "green" ? " · green camera" : "");
   }
 
   return (
@@ -2467,57 +2547,6 @@ function WizardBody({
         }}
       >
         <EditableRow
-          label="Start frame"
-          value={draft.startFrame != null
-            ? `Frame ${draft.startFrame}`
-            : "Frame 0 (clip start)"}
-          active={editing === "start"}
-          onActivate={() => setEditing(editing === "start" ? null : "start")}
-        >
-          <div className="tiny muted" style={{ marginBottom: 6 }}>
-            Step backward / forward to trim the clip in. Defaults to
-            the start of the source (frame 0). Address / impact frames
-            below the new start are bumped forward to match.
-          </div>
-          <FrameStepper
-            current={navFrame}
-            total={navTotal}
-            loading={navLoading}
-            onStep={(delta) => loadFrame(clampedStep(delta))}
-            onJump={(n) => loadFrame(clampedJump(n))}
-            onApply={() => {
-              if (navFrame == null) return;
-              const newStart = navFrame;
-              // Auto-bump address / impact when the operator picks a
-              // start frame past them — keeps the wizard's frame order
-              // sane (start ≤ address ≤ impact) without forcing an
-              // extra round-trip to re-pick them. End frame is left
-              // alone; an operator who deliberately set a short clip
-              // can re-trim.
-              setDraft((d) => {
-                const next = { ...d, startFrame: newStart };
-                if (d.addressFrame != null && d.addressFrame < newStart) {
-                  next.addressFrame = newStart;
-                }
-                if (d.impactFrame != null && d.impactFrame < newStart) {
-                  next.impactFrame = newStart;
-                }
-                return next;
-              });
-              const patch = { start_frame: newStart };
-              if (draft.addressFrame != null && draft.addressFrame < newStart) {
-                patch.address_frame = newStart;
-              }
-              if (draft.impactFrame != null && draft.impactFrame < newStart) {
-                patch.impact_frame = newStart;
-              }
-              persistPatch(patch);
-              setEditing(null);
-            }}
-          />
-        </EditableRow>
-
-        <EditableRow
           label="Impact frame"
           value={`Frame ${draft.impactFrame}`}
           active={editing === "impact"}
@@ -2542,15 +2571,18 @@ function WizardBody({
           label="End frame"
           value={draft.endFrame != null
             ? `Frame ${draft.endFrame}`
-            : (totalFrames
-              ? `Frame ${totalFrames - 1} (clip end)`
-              : "Clip end")}
+            : (defaultEnd != null
+              ? `Frame ${defaultEnd} (default · ${greenSeconds ?? 6}s after impact)`
+              : `Default · ${greenSeconds ?? 6}s after impact`)}
           active={editing === "end"}
           onActivate={() => setEditing(editing === "end" ? null : "end")}
         >
           <div className="tiny muted" style={{ marginBottom: 6 }}>
-            Step backward / forward to trim the clip out. Defaults to
-            the last frame of the source.
+            This is the GREEN camera — by the end of the clip the cut has
+            already moved there, so the last frame is a green frame.
+            Defaults to where produce would stop on its own
+            ({greenSeconds ?? 6}s past impact); step to trim it shorter or
+            let it run.
           </div>
           <FrameStepper
             current={navFrame}
