@@ -33,6 +33,9 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   const [error, setError] = useState(null);
   const pagesLoadedRef = useRef(0);
   const loadingRef = useRef(false);
+  // The refresh currently in flight, so a caller that needs post-change
+  // data can queue behind it instead of being turned away.
+  const inflightRef = useRef(null);
   const sentinelRef = useRef(null);
   const fetcherRef = useRef(fetcher);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,22 +80,43 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   const refresh = useCallback(async () => {
     // Re-fetch the contiguous range the user has already loaded so a
     // background poll updates statuses without dropping scroll position.
-    if (loadingRef.current) return;
-    const totalLoaded = pagesLoadedRef.current * pageSize;
-    if (totalLoaded === 0) return reload();
-    loadingRef.current = true;
-    setError(null);
+    //
+    // IT ALWAYS FETCHES. This used to return immediately when another
+    // load was in flight, which quietly broke every caller that awaits
+    // it to learn the result of something it just changed: a delete
+    // landing while the 4s poll was mid-request resolved against data
+    // fetched BEFORE the delete, so the caller un-greyed the card and
+    // the row only caught up on the following poll. Wait for whoever is
+    // ahead of us, then fetch -- the whole point is data from after the
+    // change.
+    const ahead = inflightRef.current;
+    if (ahead) {
+      try { await ahead; } catch { /* their failure is not ours */ }
+    }
+    const run = (async () => {
+      const totalLoaded = pagesLoadedRef.current * pageSize;
+      if (totalLoaded === 0) return reload();
+      loadingRef.current = true;
+      setError(null);
+      try {
+        const fresh = await fetcherRef.current(totalLoaded, 0);
+        setItems(fresh);
+        // hasMore stays sticky-true unless the refresh came up short,
+        // which means rows were deleted and there might be fewer pages
+        // than we thought.
+        setHasMore(fresh.length === totalLoaded);
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        loadingRef.current = false;
+      }
+      return undefined;
+    })();
+    inflightRef.current = run;
     try {
-      const fresh = await fetcherRef.current(totalLoaded, 0);
-      setItems(fresh);
-      // hasMore stays sticky-true unless the refresh came up short,
-      // which means rows were deleted and there might be fewer pages
-      // than we thought.
-      setHasMore(fresh.length === totalLoaded);
-    } catch (e) {
-      setError(e.message || String(e));
+      await run;
     } finally {
-      loadingRef.current = false;
+      if (inflightRef.current === run) inflightRef.current = null;
     }
   }, [pageSize, reload]);
 

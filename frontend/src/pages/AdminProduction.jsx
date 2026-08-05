@@ -355,6 +355,25 @@ function qualityText(qualityLabel, width, height) {
   return "";
 }
 
+/* Stamp a run's completion into a clip's URLs so the browser cannot
+   serve the previous run's video or thumbnail from cache. Returns the
+   clips untouched when there is nothing to stamp — the ids and every
+   other field are preserved, since the card matches clips by id. */
+function bustUrl(url, v) {
+  if (!url || v == null) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}v=${v}`;
+}
+
+function bustClips(clips, completedAt) {
+  const v = completedAt ? Date.parse(completedAt) : null;
+  if (!clips || !Number.isFinite(v)) return clips;
+  return clips.map((c) => ({
+    ...c,
+    video_url: bustUrl(c.video_url, v),
+    thumbnail_url: bustUrl(c.thumbnail_url, v),
+  }));
+}
+
 function Thumb({ src, alt, missing, placeholder, onClick }) {
   // Shared thumbnail box for all three Production tiles. Clicking opens
   // the video viewer when an onClick handler is provided. Width is
@@ -8717,6 +8736,16 @@ export default function AdminProduction() {
         const state = uploadState(row, busyId === row.id);
         const greyed = state === "processing";
         const busy = busyId === row.id;
+        // THE PREVIEW HAS TO BE THE NEW ONE THE MOMENT THE GREY LIFTS.
+        // A re-produce can hand back the same URL with different bytes,
+        // and the browser will happily keep showing the picture it
+        // already has -- so the card un-greyed onto the OLD video and
+        // only caught up whenever the cache felt like it. Stamping the
+        // run's completion into the URL makes it a different resource
+        // for every run.
+        const producedClips = bustClips(
+          row.produced_clips, row.processing_completed_at,
+        );
         return (
           // Wrapper exists so the status overlay can sit OUTSIDE the
           // opacity: a child of the greyed card would be dimmed to 0.6
@@ -8833,7 +8862,7 @@ export default function AdminProduction() {
                   onOpenViewer={openViewer}
                 />
                 <ProducedTile
-                  clips={row.produced_clips}
+                  clips={producedClips}
                   swings={row.edit_metrics?.swings}
                   onOpenViewer={openViewer}
                   onClickToPlot={(swingIdx) => {
@@ -8866,6 +8895,15 @@ export default function AdminProduction() {
                         busySinceRef.current = Date.now();
                         setBusyLabel("Deleting the clip…");
                         setBusyId(row.id);
+                        // ...and the video goes with it. Leaving the
+                        // clip on the row until the refresh answered
+                        // meant the card un-greyed with the deleted
+                        // video still on screen, which then vanished a
+                        // few seconds later on its own.
+                        patchRow(row.id, {
+                          produced_clips: (row.produced_clips || [])
+                            .filter((c) => c.id !== clip.id),
+                        });
                         try {
                           await api.deleteClip(adminPassword, clip.id);
                         } catch (e) {
