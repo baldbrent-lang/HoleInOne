@@ -1138,7 +1138,9 @@ function ClickToPlotModal({ row, swingPos, adminPassword, onClose, onSaved }) {
  * a stub — wiring the draft back to the production pipeline lands
  * next.
  */
-function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
+function EditWizard({
+  row, adminPassword, onClose, onSaved, onProducing, onProduceError,
+}) {
   // Hydrate from whatever was already persisted: only auto-detect on
   // the very first Edit. Subsequent re-opens skip the AI call and
   // pre-fill the wizard from row.edit_metrics.
@@ -1660,35 +1662,38 @@ function EditWizard({ row, adminPassword, onClose, onSaved, onProducing }) {
     // takes minutes and belongs on the production card, not in a modal
     // the operator has to sit in front of.
     if (!draft?.ball || draft.impactFrame == null) return;
+    const payload = {
+      ball: [draft.ball.x, draft.ball.y],
+      impact_frame: draft.impactFrame,
+      // The landing, on the GREEN camera. The clip ends a beat after
+      // it, and the tracer is drawn to arrive at the spot — so these
+      // two travel together and neither is much use alone.
+      landing_frame: draft.landingFrame ?? null,
+      landing_spot: draft.landingSpot
+        ? [draft.landingSpot.x, draft.landingSpot.y]
+        : null,
+    };
     setProducing(true);
-    // GREY THE CARD ON THE CLICK, not two round trips later. Saving the
-    // metrics and queueing the job are both server calls, and on the
-    // course link they are not fast -- the operator was clicking Produce
-    // and watching nothing happen for seconds. Nothing here can fail in
-    // a way that makes an early grey wrong: if either call throws we
-    // clear it again below.
+    // GREY THE CARD ON THE CLICK, not two round trips later...
     onProducing?.(true);
+    // ...and GET OUT OF ITS WAY. This is a full-screen modal sitting on
+    // top of the card, so greying the card early bought nothing while
+    // the wizard was still up: the operator clicked Produce and watched
+    // the modal sit there for two server round trips before it closed
+    // and revealed the state that had been set all along. Dismiss on the
+    // click, then save and queue in the background. Neither call needs a
+    // modal to live in, and a failure belongs on the page anyway.
+    onClose?.();
     try {
       await persistDraftMetrics();
-      await api.wizardProduce(adminPassword, row.id, {
-        ball: [draft.ball.x, draft.ball.y],
-        impact_frame: draft.impactFrame,
-        // The landing, on the GREEN camera. The clip ends a beat after
-        // it, and the tracer is drawn to arrive at the spot — so these
-        // two travel together and neither is much use alone.
-        landing_frame: draft.landingFrame ?? null,
-        landing_spot: draft.landingSpot
-          ? [draft.landingSpot.x, draft.landingSpot.y]
-          : null,
-      });
+      await api.wizardProduce(adminPassword, row.id, payload);
       onSaved?.();
-      onClose?.();
     } catch (e) {
       // Nothing was queued, so put the card back rather than leaving it
-      // greyed for a run that never started.
+      // greyed for a run that never started. The wizard is gone by now,
+      // so the message has to go to the page.
       onProducing?.(false);
-      setProducing(false);
-      setError(e?.message || String(e));
+      onProduceError?.(e?.message || String(e));
     }
   }
 
@@ -9008,6 +9013,7 @@ export default function AdminProduction() {
             busySinceRef.current = Date.now();
             setBusyId(editingRow.id);
           }}
+          onProduceError={(msg) => setError(msg)}
         />
       )}
 
