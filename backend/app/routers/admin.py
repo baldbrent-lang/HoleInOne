@@ -11663,7 +11663,7 @@ def calibrate_green_camera(
     payload: dict = Body(...),
     db: Session = Depends(get_db),
 ):
-    """Save a green camera's image -> green-plane mapping.
+    """Save a camera's image -> green-plane mapping.
 
     Body: {"image_points": [[x,y], ...], "world_points": [[X,Y], ...],
            "pin": {"image": [x,y], "world": [X,Y]} | null}
@@ -11672,19 +11672,30 @@ def calibrate_green_camera(
     the back. The operator picks the origin; marking the pin makes
     distances readable without moving it.
 
-    Blocking piece for closest-to-the-pin AND for finishing the tee-side
-    tracer at the real landing spot — see docs/contests.md.
+    BOTH ROLES, for different jobs. On the GREEN camera this MEASURES --
+    closest-to-the-pin -- so it is held to MAX_RMS_FT. On the TEE camera
+    it AIMS: a landing marked on the green becomes feet on the green
+    becomes a pixel in the tee frame, which is where the tracer has to
+    finish. The tee's view of the green is small and far, so the same
+    four clicks carry more world error -- but a few feet there is a few
+    pixels on screen, and holding it to the measuring tolerance would
+    reject a fit that is entirely good enough for the only job it has.
+    Hence the looser limit, and `purpose` recorded so nothing downstream
+    can mistake an aiming fit for a measuring one.
     """
     from ..services import green_calibration as gc
 
     cam = db.get(Camera, camera_id)
     if not cam:
         raise HTTPException(404, "camera not found")
-    if (cam.assigned_role or "").lower() != "green":
+    _role = (cam.assigned_role or "").lower()
+    if _role not in ("green", "tee"):
         raise HTTPException(
-            409, "calibration applies to GREEN cameras — it maps the green's "
-                 "surface, which a tee camera cannot see well enough to measure",
+            409, "calibration applies to green and tee cameras — it maps "
+                 "the green's surface onto this camera's image",
         )
+    _is_tee = _role == "tee"
+    _limit = gc.MAX_RMS_FT_TEE if _is_tee else gc.MAX_RMS_FT
     try:
         H, rms, rms_meaningful = gc.compute_homography(
             payload.get("image_points"), payload.get("world_points"),
@@ -11692,11 +11703,11 @@ def calibrate_green_camera(
     except gc.CalibrationError as exc:
         raise HTTPException(400, str(exc))
 
-    if rms_meaningful and rms > gc.MAX_RMS_FT:
+    if rms_meaningful and rms > _limit:
         raise HTTPException(
             400,
             f"fit is off by {rms} ft on your own marked points (limit "
-            f"{gc.MAX_RMS_FT} ft). Check the measurements or re-click — a "
+            f"{_limit} ft). Check the measurements or re-click — a "
             f"bad mapping is worse than none, because it answers "
             f"confidently and wrongly.",
         )
@@ -11709,6 +11720,10 @@ def calibrate_green_camera(
         "pin": pin,
         "rms_error_ft": rms if rms_meaningful else None,
         "n_points": len(payload.get("image_points") or []),
+        # What this fit is allowed to be used for. A tee fit aims the
+        # tracer; it must never be read as a distance.
+        "purpose": "tracer_aim" if _is_tee else "measure",
+        "role": _role,
         "calibrated_at": _utcnow_naive().isoformat(),
     }
     db.add(AuditLog(
@@ -11768,7 +11783,12 @@ def measure_green_point(
             422, "that pixel doesn't land on the green's plane (the horizon "
                  "maps to infinity) — click on the putting surface",
         )
-    return pos
+    # A TEE camera's fit exists to AIM the tracer, not to measure. It is
+    # useful for checking the mapping looks sane; it is not a yardage.
+    # Say so here rather than letting a number stand on its own.
+    _purpose = (cam.green_homography or {}).get("purpose")
+    return {**pos, "purpose": _purpose or "measure",
+            "measures_distance": _purpose != "tracer_aim"}
 
 
 @router.delete("/cameras/{camera_id}/watch")

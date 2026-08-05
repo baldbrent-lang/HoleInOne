@@ -1183,11 +1183,20 @@ export default function AdminCameras() {
                   >
                     {cam.enabled ? "Disable" : "Enable"}
                   </button>
-                  {cam.assigned_role === "green" && (
+                  {(cam.assigned_role === "green"
+                    || cam.assigned_role === "tee") && (
                     <button
                       type="button" className="secondary small"
                       onClick={() => setCalibratingCam(cam)}
-                      title="Map this camera's pixels onto the green in feet — needed for closest-to-the-pin and for finishing the tracer at the landing spot"
+                      title={cam.assigned_role === "tee"
+                        ? "Map the GREEN's surface onto this tee camera's "
+                          + "image. Click the same four green features you "
+                          + "used on the green camera. This is what lets a "
+                          + "landing marked on the green be drawn in the tee "
+                          + "view, so the tracer finishes where the ball did."
+                        : "Map this camera's pixels onto the green in feet — "
+                          + "needed for closest-to-the-pin and for finishing "
+                          + "the tracer at the landing spot"}
                     >
                       {cam.green_homography ? "Calibration ✓" : "Calibrate"}
                     </button>
@@ -1203,15 +1212,7 @@ export default function AdminCameras() {
                         : "Pause triggering"}
                     </button>
                   )}
-                  {cam.assigned_role === "green" && (
-                    <button
-                      type="button" className="secondary small"
-                      onClick={() => setCalibratingCam(cam)}
-                      title="Map this camera's pixels onto the green in feet — needed for closest-to-the-pin and for finishing the tracer at the landing spot"
-                    >
-                      {cam.green_homography ? "Calibration ✓" : "Calibrate"}
-                    </button>
-                  )}
+
                   {cam.assigned_role === "tee" && (
                     <button
                       type="button" className="small"

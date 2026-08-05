@@ -31,6 +31,13 @@ log = logging.getLogger("golfreelz.green_calibration")
 # mis-clicked or mis-measured, and a bad homography is worse than none
 # because it produces confident wrong answers.
 MAX_RMS_FT = 5.0
+# A TEE camera's view of the green is small and far, so the same four
+# clicks carry more world error -- but the tee calibration is not used to
+# MEASURE anything. It aims the end of the tracer, where a few feet on
+# the green is a few pixels on screen. Holding it to the measuring
+# tolerance would reject a fit that is entirely good enough for the only
+# job it has.
+MAX_RMS_FT_TEE = 20.0
 
 Point = Sequence[float]
 
@@ -174,6 +181,28 @@ def image_to_green(calibration: dict, x: float, y: float) -> Optional[dict]:
         # feet-and-inches would be a lie. contests.md makes this a rule.
         out["distance_from_pin_display"] = _feet_display(d)
     return out
+
+
+def green_to_image(calibration: dict, X: float, Y: float):
+    """Feet on the green -> pixel in THIS camera's image. The inverse of
+    `image_to_green`, and the piece that lets a landing marked on the
+    green camera be drawn in the tee camera's frame.
+
+    Returns (x, y) or None when the camera has no calibration, the matrix
+    will not invert, or the point projects behind the camera.
+    """
+    H = (calibration or {}).get("homography")
+    if not H:
+        return None
+    try:
+        import numpy as np
+
+        Hi = np.linalg.inv(np.asarray(H, dtype=float))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("calibration will not invert: %s", exc)
+        return None
+    pt = _apply(Hi.tolist(), float(X), float(Y))
+    return pt
 
 
 def _feet_display(d: float) -> str:
