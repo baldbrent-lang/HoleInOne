@@ -1229,7 +1229,6 @@ function EditWizard({
   const [frameDims, setFrameDims] = useState({
     width: null, height: null, totalFrames: null,
   });
-  const [running, setRunning] = useState(false);
   const [error, setError] = useState(null);
   const [editing, setEditing] = useState(null);
   // 'metrics' = step 1 (handedness/frames/ball/ROI/target);
@@ -1259,7 +1258,6 @@ function EditWizard({
   const isMulti = row?.swing_count === "multiple";
   const [swings, setSwings] = useState([]);
   const [selectedSwing, setSelectedSwing] = useState(0);
-  const [detectingSwings, setDetectingSwings] = useState(false);
   // Mirror of selectedSwing readable inside async callbacks without
   // re-creating them, so a render that finishes after the operator
   // switched tabs only updates the display if they're still on that swing.
@@ -1356,123 +1354,53 @@ function EditWizard({
 
   useEffect(() => {
     if (!row) return;
-    let cancelled = false;
 
-    // Multi-swing: detect swings (if not cached), pick swing 0,
-    // hydrate from edit_metrics.swings[0].
+    // THE WIZARD NEVER MAKES THE OPERATOR WAIT. It used to open into a
+    // spinner -- "Detecting swings (audio + motion)…" on a multi-swing
+    // row, "waiting for upload-time auto-detect" on a single -- and the
+    // second could poll for two minutes before giving up. On a course
+    // link that is dead time in front of a golfer, and the numbers it
+    // was waiting for are exactly the ones the operator is about to
+    // overrule by hand. So: if edit_metrics already has something, use
+    // it; otherwise open on the first frame with nothing filled in and
+    // let the operator work.
+    const dims = {
+      width: saved?.frame_width ?? row.tee_width ?? null,
+      height: saved?.frame_height ?? row.tee_height ?? null,
+      totalFrames: row.tee_nb_frames || null,
+    };
+
     if (isMulti) {
       const cached = saved?.swings;
       if (Array.isArray(cached) && cached.length > 0) {
         setSwings(cached);
         applySaved(cached[selectedSwing] || cached[0] || {});
-        setFrameDims({
-          width: saved.frame_width ?? row.tee_width ?? null,
-          height: saved.frame_height ?? row.tee_height ?? null,
-          totalFrames: row.tee_nb_frames || null,
-        });
+        setFrameDims(dims);
         return;
       }
-      setDetectingSwings(true);
-      setError(null);
-      api
-        .detectSwingsForUpload(adminPassword, row.id)
-        .then(async (data) => {
-          if (cancelled) return;
-          let list = data.swings || [];
-          // Auto-detect found nothing — common for clips with no
-          // clean audio impact (mic too far, quiet scene, indoor
-          // testing). Seed a placeholder swing so the wizard still
-          // opens and the operator can pick the address/impact
-          // frames manually from the timeline.
-          if (list.length === 0) {
-            list = [
-              {
-                idx: 0,
-                start_frame: 0,
-                end_frame: row.tee_nb_frames || null,
-                address_frame: 0,
-                impact_frame: 0,
-                fps: row.tee_fps || 30,
-              },
-            ];
-          }
-          setSwings(list);
-          setFrameDims({
-            width: row.tee_width || null,
-            height: row.tee_height || null,
-            totalFrames: row.tee_nb_frames || null,
-          });
-          applySaved(list[0]);
-          try { onSaved?.(); } catch {}
-        })
-        .catch((e) => { if (!cancelled) setError(e.message); })
-        .finally(() => { if (!cancelled) setDetectingSwings(false); });
-      return () => { cancelled = true; };
-    }
-
-    // Single-swing: hydrate from edit_metrics, else auto-detect.
-    if (saved && (saved.address_frame != null || saved.ball)) {
-      applySaved(saved);
+      // One empty swing, ready to be filled in. No detect call.
+      setSwings([{ idx: 0, fps: row.tee_fps || 30 }]);
       setFrameDims({
-        width: saved.frame_width ?? row.tee_width ?? null,
-        height: saved.frame_height ?? row.tee_height ?? null,
+        width: row.tee_width || null,
+        height: row.tee_height || null,
         totalFrames: row.tee_nb_frames || null,
       });
+      applySaved({});
       return;
     }
 
-    // Auto-detect runs at upload time and writes straight into
-    // edit_metrics, so the wizard never calls /auto-detect itself.
-    // If the saved blob is still empty when the wizard opens, the
-    // background detect hasn't finished yet (or this upload predates
-    // the upload-time spawn). Poll the row every few seconds until
-    // metrics show up; the operator can also click Re-detect to
-    // force a fresh run from the source.
-    setRunning(true);
-    const tick = async () => {
-      try {
-        const rows = await api.listLongUploads(adminPassword);
-        const fresh = (rows || []).find((r) => r.id === row.id);
-        const em = fresh?.edit_metrics;
-        if (em && (em.address_frame != null || em.ball)) {
-          if (cancelled) return;
-          applySaved(em);
-          setFrameDims({
-            width: em.frame_width ?? fresh.tee_width ?? null,
-            height: em.frame_height ?? fresh.tee_height ?? null,
-            totalFrames: fresh.tee_nb_frames || null,
-          });
-          setRunning(false);
-          return true;
-        }
-      } catch (e) {
-        if (!cancelled) setError(e.message);
-      }
-      return false;
-    };
-    (async () => {
-      // First check is immediate; then poll every 3s up to ~2 min.
-      if (await tick()) return;
-      for (let i = 0; i < 40 && !cancelled; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        if (cancelled) return;
-        if (await tick()) return;
-      }
-      if (!cancelled) {
-        setRunning(false);
-        // Auto-detect didn't complete or found nothing. Seed a
-        // placeholder draft so the wizard still opens and the
-        // operator can pick the address/impact frames manually
-        // from the timeline.
-        applySaved({});
-        setFrameDims({
-          width: row.tee_width || null,
-          height: row.tee_height || null,
-          totalFrames: row.tee_nb_frames || null,
-        });
-      }
-    })();
-    return () => { cancelled = true; };
+    if (saved && (saved.address_frame != null || saved.ball)) {
+      applySaved(saved);
+      setFrameDims(dims);
+      return;
+    }
+
+    applySaved({});
+    setFrameDims({
+      width: row.tee_width || null,
+      height: row.tee_height || null,
+      totalFrames: row.tee_nb_frames || null,
+    });
   }, [row, adminPassword]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Multi-swing: re-hydrate the draft whenever the operator picks a
@@ -2116,22 +2044,6 @@ function EditWizard({
             minHeight: 0,
           }}
         >
-          {running && (
-            <div className="row" style={{ alignItems: "center", gap: 12 }}>
-              <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
-              <span className="small">
-                Waiting for upload-time auto-detect to finish — usually 10–20s…
-              </span>
-            </div>
-          )}
-          {detectingSwings && (
-            <div className="row" style={{ alignItems: "center", gap: 12 }}>
-              <div className="shimmer" style={{ width: 18, height: 18, borderRadius: "50%" }} />
-              <span className="small">
-                Detecting swings (audio + motion)…
-              </span>
-            </div>
-          )}
           {error && (
             <div className="err-text small">{error}</div>
           )}
@@ -2141,7 +2053,7 @@ function EditWizard({
               switch the Tracer engine below.
             </div>
           )}
-          {isMulti && !detectingSwings && swings.length > 0 && (
+          {isMulti && swings.length > 0 && (
             <SwingSelectorBar
               swings={swings}
               selectedSwing={selectedSwing}
@@ -2150,7 +2062,7 @@ function EditWizard({
               onAddSwing={addSwing}
             />
           )}
-          {!running && !detectingSwings && !error && draft && step === "metrics" && (
+          {!error && draft && step === "metrics" && (
             <WizardBody
               row={row}
               adminPassword={adminPassword}
@@ -2164,7 +2076,7 @@ function EditWizard({
               persistPatch={persistPatch}
             />
           )}
-          {!running && !error && draft && step === "tracer" && tracerStats && (
+          {!error && draft && step === "tracer" && tracerStats && (
             <div
               className="tiny"
               style={{
@@ -2240,7 +2152,7 @@ function EditWizard({
               {" — switch the Tracer toggle on Step 1 and hit ↻ Render to compare."}
             </div>
           )}
-          {!running && !error && draft && step === "tracer" && (
+          {!error && draft && step === "tracer" && (
             <TracerStep
               row={row}
               adminPassword={adminPassword}
@@ -2261,7 +2173,7 @@ function EditWizard({
               setManualPositions={setManualPositions}
             />
           )}
-          {!running && !error && draft && step === "finalize" && (
+          {!error && draft && step === "finalize" && (
             <FinalizeStep
               row={row}
               finalUrl={finalUrl}
@@ -2500,11 +2412,12 @@ function WizardBody({
 
   // OPEN ON THE IMPACT FRAME. The wizard used to land on the address
   // frame, which is the least useful picture in the clip -- the swing has
-  // not happened and nothing on this panel refers to it. Frame 100 is the
-  // fallback when impact has never been chosen: far enough in to be past
-  // the walk-up, cheap to seek.
+  // not happened and nothing on this panel refers to it. With nothing
+  // detected the wizard opens on the FIRST frame: no detection runs any
+  // more, so there is no impact frame to open on and no reason to guess
+  // at one -- the operator scrubs from the top.
   useEffect(() => {
-    loadFrame(draft.impactFrame ?? 100, "tee");
+    loadFrame(draft.impactFrame ?? 0, "tee");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
