@@ -36,6 +36,7 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   // The refresh currently in flight, so a caller that needs post-change
   // data can queue behind it instead of being turned away.
   const inflightRef = useRef(null);
+  const pendingRef = useRef(null);
   const sentinelRef = useRef(null);
   const fetcherRef = useRef(fetcher);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,48 +78,73 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
     }
   }, [hasMore, pageSize]);
 
-  const refresh = useCallback(async () => {
-    // Re-fetch the contiguous range the user has already loaded so a
-    // background poll updates statuses without dropping scroll position.
-    //
-    // IT ALWAYS FETCHES. This used to return immediately when another
-    // load was in flight, which quietly broke every caller that awaits
-    // it to learn the result of something it just changed: a delete
-    // landing while the 4s poll was mid-request resolved against data
-    // fetched BEFORE the delete, so the caller un-greyed the card and
-    // the row only caught up on the following poll. Wait for whoever is
-    // ahead of us, then fetch -- the whole point is data from after the
-    // change.
-    const ahead = inflightRef.current;
-    if (ahead) {
-      try { await ahead; } catch { /* their failure is not ours */ }
-    }
-    const run = (async () => {
-      const totalLoaded = pagesLoadedRef.current * pageSize;
-      if (totalLoaded === 0) return reload();
-      loadingRef.current = true;
-      setError(null);
-      try {
-        const fresh = await fetcherRef.current(totalLoaded, 0);
-        setItems(fresh);
-        // hasMore stays sticky-true unless the refresh came up short,
-        // which means rows were deleted and there might be fewer pages
-        // than we thought.
-        setHasMore(fresh.length === totalLoaded);
-      } catch (e) {
-        setError(e.message || String(e));
-      } finally {
-        loadingRef.current = false;
-      }
-      return undefined;
-    })();
-    inflightRef.current = run;
+  // The fetch itself. Wrapped below so callers can never stack more
+  // than one of these behind the one that is running.
+  const doRefresh = useCallback(async () => {
+    const totalLoaded = pagesLoadedRef.current * pageSize;
+    if (totalLoaded === 0) return reload();
+    loadingRef.current = true;
+    setError(null);
     try {
-      await run;
+      const fresh = await fetcherRef.current(totalLoaded, 0);
+      setItems(fresh);
+      // hasMore stays sticky-true unless the refresh came up short,
+      // which means rows were deleted and there might be fewer pages
+      // than we thought.
+      setHasMore(fresh.length === totalLoaded);
+    } catch (e) {
+      setError(e.message || String(e));
     } finally {
-      if (inflightRef.current === run) inflightRef.current = null;
+      loadingRef.current = false;
     }
+    return undefined;
   }, [pageSize, reload]);
+
+  const refresh = useCallback(() => {
+    // AT MOST ONE RUNNING AND ONE WAITING.
+    //
+    // This used to return immediately whenever a load was in flight,
+    // which quietly broke every caller that awaits it to learn the
+    // result of something it just changed: a delete landing during the
+    // poll's request resolved against data fetched BEFORE the delete,
+    // so the caller un-greyed the card and the row caught up a poll
+    // later.
+    //
+    // Making it always fetch fixed that and introduced something worse.
+    // The page polls every 3-8s, and this endpoint probes file metadata
+    // for every row -- on production that takes longer than the
+    // interval, so each tick queued another full fetch behind the last
+    // and they piled up without ever draining. The server spent all its
+    // time answering a backlog of its own most expensive query.
+    //
+    // So: one queued fetch, shared. A caller arriving now joins the
+    // pending one, whose request starts AFTER this call -- which is all
+    // "data from after my change" ever required.
+    if (pendingRef.current) return pendingRef.current;
+
+    const ahead = inflightRef.current;
+    if (!ahead) {
+      const p = doRefresh().finally(() => {
+        if (inflightRef.current === p) inflightRef.current = null;
+      });
+      inflightRef.current = p;
+      return p;
+    }
+
+    const queued = (async () => {
+      try { await ahead; } catch { /* their failure is not ours */ }
+      pendingRef.current = null;
+      const p = doRefresh();
+      inflightRef.current = p;
+      try {
+        await p;
+      } finally {
+        if (inflightRef.current === p) inflightRef.current = null;
+      }
+    })();
+    pendingRef.current = queued;
+    return queued;
+  }, [doRefresh]);
 
   // Kick off page 1 on mount + whenever `deps` change. We intentionally
   // depend on `reload` (stable) and the caller-supplied deps so e.g.
