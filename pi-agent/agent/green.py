@@ -81,7 +81,14 @@ class GreenAgent:
         # config; set bitrate 0 to disable compression (fast wired/WiFi).
         self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 1500))
         self.upload_scale_height = cfg.get("upload_scale_height", 720)
-        self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-green"))
+        # NOT /tmp. The spool (work_dir/pending) holds clips part-way
+        # through an upload, sometimes for tens of minutes across
+        # link outages -- and /tmp does not survive a reboot. The
+        # unit's StateDirectory= creates this owned by the service
+        # user, so a config that never mentions work_dir still gets
+        # somewhere durable.
+        self.work_dir = Path(
+            cfg.get("work_dir", "/var/lib/golfreelz-agent"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.stopping = threading.Event()
         self.buffer: Optional[FrameBuffer] = None

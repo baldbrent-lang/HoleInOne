@@ -385,7 +385,14 @@ class TeeAgent:
         # Set to 0 to disable.
         self.upload_bitrate_kbps = int(cfg.get("upload_bitrate_kbps", 3500))
         self.upload_scale_height = cfg.get("upload_scale_height")
-        self.work_dir = Path(cfg.get("work_dir", "/tmp/golfreelz-tee"))
+        # NOT /tmp. The spool (work_dir/pending) holds clips part-way
+        # through an upload, sometimes for tens of minutes across
+        # link outages -- and /tmp does not survive a reboot. The
+        # unit's StateDirectory= creates this owned by the service
+        # user, so a config that never mentions work_dir still gets
+        # somewhere durable.
+        self.work_dir = Path(
+            cfg.get("work_dir", "/var/lib/golfreelz-agent"))
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.stopping = threading.Event()
 
