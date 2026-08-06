@@ -88,10 +88,18 @@ def fit_state(points: list, window: int = 12, target=None,
     if target is not None and len(target) >= 2:
         tx, ty = float(target[0]), float(target[1])
         vx = float(cx[0])
+        # x IS THE CLOCK, so it has to be a working one. On a flight that
+        # is near-vertical in the image -- the ball hit straight down the
+        # camera axis -- x barely changes over the seed, and dividing by
+        # that tiny, noise-dominated vx puts the landing anywhere at all.
+        # A pin from a bad clock is worse than no pin, so require x to
+        # carry a real share of the motion.
+        speed = float(np.median(np.hypot(np.diff(x), np.diff(y)))) \
+            if len(pts) > 1 else 0.0
         if land_frame is not None:
             t_land = float(land_frame) - float(t0)
             ok_land = t_land > 1.0
-        elif abs(vx) > 1e-3:
+        elif abs(vx) > 1e-3 and abs(vx) >= 0.25 * speed:
             t_land = (tx - float(cx[1])) / vx
             # Only ahead of us, and not so far ahead that a near-zero
             # horizontal speed puts the landing in another minute.
@@ -252,9 +260,42 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
 
     pts = sorted(seed_points, key=lambda p: p["frame"])
     handoff = int(pts[-1]["frame"])
+
+    # THE SEED HAS TO BE ABLE TO CARRY AN EXTRAPOLATION.
+    #
+    # Three points is enough to SOLVE a quadratic and nowhere near enough
+    # to trust one a hundred frames later. Marks clustered into a few
+    # pixels over a few frames -- which is what you get plotting the ball
+    # near apex, where it barely moves -- leave the curvature term
+    # entirely to noise. The fit still succeeds; it just describes
+    # nothing. Extrapolated, it shoots up, turns over, and comes back
+    # down through the golfer, and every detector then follows it there.
+    #
+    # So refuse, and say which part is short. The operator can plot a few
+    # more marks earlier in the flight, where the ball is moving.
+    _span = int(pts[-1]["frame"]) - int(pts[0]["frame"])
+    _travel = math.hypot(pts[-1]["x"] - pts[0]["x"], pts[-1]["y"] - pts[0]["y"])
+    if len(pts) < 4:
+        raise ValueError("need at least 4 seed points to extrapolate from")
+    if _span < 4:
+        raise ValueError(
+            f"the seed spans only {_span} frames — plot marks further "
+            "apart in time, early in the flight where the ball moves")
+    if _travel < 12.0:
+        raise ValueError(
+            f"the seed travels only {_travel:.0f}px — too little motion "
+            "to fit a flight to; plot marks earlier, nearer impact")
+
+    # WHICH WAY THE BALL IS GOING, from the seed as a whole. Everything
+    # below is checked against this: a ball in the tee view travels one
+    # way until it lands, so a prediction or a pick that heads back the
+    # other way is not the ball.
+    ux, uy = (pts[-1]["x"] - pts[0]["x"]) / _travel, \
+             (pts[-1]["y"] - pts[0]["y"]) / _travel
+
     state = fit_state(pts, target=target)
     if state is None:
-        raise SystemExit("need at least 3 seed points to fit a model")
+        raise ValueError("could not fit a flight to the seed points")
 
     # Template from the hand-off frame itself.
     cap.set(cv2.CAP_PROP_POS_FRAMES, float(handoff))
@@ -283,6 +324,19 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
         cur_g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         px, py = predict(state, f)
         step = predicted_step(state, f)
+
+        # THE MODEL MAY NOT DOUBLE BACK. A parabola fitted in image space
+        # has an apex, and past it the curve descends -- back down the
+        # way it came, toward the tee. The ball does not do that: it is
+        # flying away from the camera, so it climbs toward the horizon
+        # and then settles at the green, never returning to where it was
+        # struck. Once the predicted step points back along the launch
+        # direction the fit has left the flight, and probing on just
+        # feeds the detectors a window over the golfer.
+        _ax, _ay = predict(state, f - 1)
+        if (px - _ax) * ux + (py - _ay) * uy < 0:
+            rows.append({"frame": f, "reason": "prediction turned back"})
+            break
         # Window: the predicted step plus padding, floored so it never
         # collapses at apex.
         half = int(max(win_min, round(step * win_pad)))
@@ -308,10 +362,24 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
             # differently across that line, so it has to be measured.
             "win_std": round(float(cur_g[y0:y1, x0:x1].std()), 2),
         }
+        # MOTION IS THE OTHER HALF OF THE FILTER. A score floor says the
+        # window contained something with the right LOOK; it says nothing
+        # about whether that thing is where a ball could have got to. The
+        # golfer's shoulder and a moving branch both score well, and
+        # following them is what draws those zig-zags back down the
+        # frame. So each pick is also asked to move like the ball: onward
+        # along the launch direction, and no further than the model says
+        # is possible.
+        _lead = math.hypot(last_seen["x"] - px, last_seen["y"] - py)
+        _reach = max(win_min, step * (f - last_seen["frame"]) * 2.0) + _lead
         for k, v in got.items():
             if v is None:
                 row[k] = None
                 continue
+            _dx = v["x"] - last_seen["x"]
+            _dy = v["y"] - last_seen["y"]
+            _onward = _dx * ux + _dy * uy
+            _jump = math.hypot(_dx, _dy)
             row[k] = {
                 "xy": [round(v["x"], 1), round(v["y"], 1)],
                 "err_px": round(math.hypot(v["x"] - px, v["y"] - py), 1),
@@ -319,6 +387,9 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
                 # Kept in the report even when it fails: the rejected
                 # scores are what the floors get calibrated against.
                 "credible": bool(v["score"] >= floors[k]),
+                # ...and separately, whether a ball could be there at all.
+                "plausible": bool(_onward >= -1.0 and _jump <= _reach),
+                "onward_px": round(float(_onward), 1),
             }
             if "polarity" in v:
                 row[k]["polarity"] = v["polarity"]
@@ -337,7 +408,7 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
         # raw scores and pick the knee.
         picks = [
             (k, got[k]) for k in ("diff", "log", "ncc")
-            if got[k] and got[k]["score"] >= floors[k]
+            if got[k] and row[k]["credible"] and row[k]["plausible"]
         ]
         agree = []
         for i in range(len(picks)):
@@ -388,6 +459,8 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
         "target": list(target) if target else None,
         "landing_frame": land_f,
         "frames_probed": len(probed),
+        "stopped_because": next(
+            (r["reason"] for r in reversed(rows) if r.get("reason")), None),
         "last_agreed_frame": last_seen["frame"],
         "frames_extended": last_seen["frame"] - handoff,
         "agreement_frames": sum(1 for r in probed if r.get("agree")),
@@ -395,6 +468,10 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
             k: {
                 "found": len(_hits(k)),
                 "credible": sum(1 for r in _hits(k) if r[k]["credible"]),
+                # Cleared the floor AND could physically be the ball.
+                # The gap between these two is the foliage.
+                "usable": sum(1 for r in _hits(k)
+                              if r[k]["credible"] and r[k]["plausible"]),
                 "floor": floors[k],
                 "median_err_px": round(float(np.median(
                     [r[k]["err_px"] for r in _hits(k)])), 2) if _hits(k) else None,

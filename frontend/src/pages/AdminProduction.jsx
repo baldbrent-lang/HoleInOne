@@ -377,10 +377,16 @@ function SkyProbePanel({ probe, onClose }) {
           window texture {s.window_std?.median} (low = sky, high = trees)
         </span>
         <span className="tiny" style={{ color: s.target ? "#3ee37a" : "#f59e0b" }}>
-          {s.target
+          {s.target && s.landing_frame != null
             ? `flight pinned to target → lands f${s.landing_frame}`
-            : "unpinned — set the red target flag for a constrained fit"}
+            : s.target
+              ? "target set but unusable as a clock — the flight is too "
+                + "vertical in this view to say when it gets there"
+              : "unpinned — set the red target flag for a constrained fit"}
         </span>
+        {s.stopped_because && (
+          <span className="tiny muted">stopped: {s.stopped_because}</span>
+        )}
         <span className="tiny" style={{ display: "inline-flex", gap: 8 }}>
           {PROBE_LAYERS.map((l) => (
             <span key={l.key} style={{ color: l.colour }}>
@@ -407,6 +413,10 @@ function SkyProbePanel({ probe, onClose }) {
                 title="Cleared its credibility floor. Everything finds SOMETHING in a small window; this is what was worth believing.">
               credible
             </th>
+            <th style={{ paddingRight: 12 }}
+                title="Credible AND somewhere a ball could actually have got to: onward along the flight, no further than the model allows. The gap between this and credible is the foliage and the golfer.">
+              usable
+            </th>
             <th style={{ paddingRight: 12 }}>median err</th>
             <th>median score</th>
           </tr>
@@ -423,6 +433,7 @@ function SkyProbePanel({ probe, onClose }) {
                 {det[k]?.credible ?? "—"}
                 <span className="muted"> (≥{det[k]?.floor})</span>
               </td>
+              <td style={{ paddingRight: 12 }}>{det[k]?.usable ?? "—"}</td>
               <td style={{ paddingRight: 12 }}>
                 {det[k]?.median_err_px == null
                   ? "—" : `${det[k].median_err_px}px`}
@@ -871,7 +882,11 @@ function ClickToPlotModal({
     for (const r of rows) {
       out.pred.push({ frame: r.frame, x: r.pred[0], y: r.pred[1] });
       for (const k of ["log", "ncc", "diff"]) {
-        if (r[k] && r[k].credible) {
+        // Credible AND plausible. A score floor only says the window
+        // held something ball-LOOKING; plausibility says a ball could
+        // have got there. Drawing the difference is what put those
+        // zig-zags back down over the golfer.
+        if (r[k] && r[k].credible && r[k].plausible) {
           out[k].push({ frame: r.frame, x: r[k].xy[0], y: r[k].xy[1] });
         }
       }

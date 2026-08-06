@@ -98,8 +98,14 @@ def main(argv=None):
     _target = None
     if a.target:
         _target = [float(v) for v in a.target.split(",")]
-    rep = probe(a.video, seed, a.frames, a.max_frames, a.win_min, a.win_pad,
-                floors, _target)
+    try:
+        rep = probe(a.video, seed, a.frames, a.max_frames, a.win_min,
+                    a.win_pad, floors, _target)
+    except ValueError as exc:
+        # A seed too short or too still to extrapolate from -- a message,
+        # not a traceback.
+        print(f"cannot probe: {exc}")
+        return 2
     rep["floors"] = floors
     rep["video"] = str(a.video)
     rep["fps"] = fps
@@ -124,11 +130,14 @@ def main(argv=None):
     print(f"extended         {s['frames_extended']} frames "
           f"(to f{s['last_agreed_frame']}) on 2-of-3 agreement")
     print(f"agreement        {s['agreement_frames']}/{s['frames_probed']} frames")
+    if s.get("stopped_because"):
+        print(f"stopped          {s['stopped_because']}")
     print(f"window texture   median std {s['window_std']['median']} "
           "(low = sky, high = trees)")
     for k, v in s["per_detector"].items():
         print(f"  {k:<5} found {v['found']:>4}  "
               f"credible {v['credible']:>4} (>={v['floor']})  "
+              f"usable {v['usable']:>4}  "
               f"median err {v['median_err_px']}px  "
               f"median score {v['median_score']}")
     if a.out:

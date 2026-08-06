@@ -7468,10 +7468,10 @@ def sky_probe_swing(
         for p in (seed or [])
         if p and p.get("frame") is not None
     ]
-    if len(seed) < 3:
+    if len(seed) < 4:
         raise HTTPException(
             400,
-            "need at least 3 seed points — plot a few on the flight in "
+            "need at least 4 seed points — plot a few on the flight in "
             "click-to-plot first, then probe",
         )
 
@@ -7499,13 +7499,19 @@ def sky_probe_swing(
     if _target and (_target[0] is None or _target[1] is None):
         _target = None
 
-    rep = sp.probe(
-        src, seed, None, _max,
-        int(payload.get("win_min") or 12),
-        float(payload.get("win_pad") or 2.5),
-        floors,
-        [float(_target[0]), float(_target[1])] if _target else None,
-    )
+    try:
+        rep = sp.probe(
+            src, seed, None, _max,
+            int(payload.get("win_min") or 12),
+            float(payload.get("win_pad") or 2.5),
+            floors,
+            [float(_target[0]), float(_target[1])] if _target else None,
+        )
+    except ValueError as exc:
+        # A seed too short or too still to extrapolate from. That is the
+        # operator's to fix -- plot a few more marks, earlier -- so say
+        # so rather than returning a confident line drawn from nothing.
+        raise HTTPException(400, str(exc)) from exc
     _name = f"skyprobe-{upload_id}-{int(payload.get('swing') or 0)}.png"
     _img = None
     try:
