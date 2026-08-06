@@ -7412,6 +7412,106 @@ def render_tracer_fast(
     }
 
 
+@router.post("/long-uploads/{upload_id}/sky-probe")
+def sky_probe_swing(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """Probe whether the ball is still findable past the blob detector.
+
+    The measurement behind the predictive-tracker idea, run from the app
+    so it can be pointed at real swings on the day rather than only at
+    clips someone remembered to copy off the Pi.
+
+    Seeds from the points sent in `seed` (what the operator has plotted
+    in click-to-plot -- the honest seed for a swing the pipeline failed
+    on), else from the swing's saved ball track. Returns the summary,
+    the per-frame rows, and a montage image of the probed windows: the
+    numbers say a detector found something, only the picture says
+    whether that something was the ball.
+
+    Body: swing (index), seed [{frame,x,y}], max_frames, floors {..}.
+    """
+    from ..services import sky_probe as sp
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.tee_filename:
+        raise HTTPException(400, "no tee video on this upload")
+    src = _local_tee(row)
+    if not src.exists():
+        raise HTTPException(404, "tee video missing on disk")
+
+    seed = payload.get("seed")
+    if not seed:
+        # Fall back to whatever the pipeline last managed on this swing.
+        _idx = int(payload.get("swing") or 0)
+        _sw = None
+        for s_ in ((row.edit_metrics or {}).get("swings") or []):
+            if isinstance(s_, dict) and int(s_.get("idx", -1)) == _idx:
+                _sw = s_
+                break
+        if _sw is None:
+            _sw = (row.edit_metrics or {})
+        seed = [
+            {"frame": int(r["frame"]), "x": float(r["x"]), "y": float(r["y"])}
+            for r in (_sw.get("ball_track_frames") or [])
+            if r.get("found") and r.get("x") is not None
+        ]
+    seed = [
+        {"frame": int(p["frame"]), "x": float(p["x"]), "y": float(p["y"])}
+        for p in (seed or [])
+        if p and p.get("frame") is not None
+    ]
+    if len(seed) < 3:
+        raise HTTPException(
+            400,
+            "need at least 3 seed points — plot a few on the flight in "
+            "click-to-plot first, then probe",
+        )
+
+    floors = dict(sp.DEFAULT_FLOORS)
+    for k, v in (payload.get("floors") or {}).items():
+        if k in floors:
+            try:
+                floors[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+    # Bounded: this decodes real video on a request thread.
+    _max = max(10, min(240, int(payload.get("max_frames") or 120)))
+
+    rep = sp.probe(
+        src, seed, None, _max,
+        int(payload.get("win_min") or 12),
+        float(payload.get("win_pad") or 2.5),
+        floors,
+    )
+    _name = f"skyprobe-{upload_id}-{int(payload.get('swing') or 0)}.png"
+    _img = None
+    try:
+        if sp.render_montage(src, rep, CLIPS_DIR / _name):
+            _img = (f"{settings.app_base_url}/uploads/clips/{_name}"
+                    f"?v={int((CLIPS_DIR / _name).stat().st_mtime)}")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("sky-probe montage failed for %s: %s", upload_id, exc)
+    s_ = rep["summary"]
+    log.info(
+        "sky-probe upload=%s seed=%d handoff=f%s probed=%d extended=%d "
+        "agree=%d/%d", upload_id, len(seed), s_["handoff_frame"],
+        s_["frames_probed"], s_["frames_extended"], s_["agreement_frames"],
+        s_["frames_probed"],
+    )
+    return {
+        "summary": s_,
+        "rows": rep["rows"],
+        "floors": floors,
+        "seed_points": len(seed),
+        "montage_url": _img,
+    }
+
+
 @router.post("/long-uploads/{upload_id}/scan-region")
 def scan_plot_region(
     upload_id: int,

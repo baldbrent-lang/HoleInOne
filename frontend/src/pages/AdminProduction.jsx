@@ -327,6 +327,108 @@ function ConfirmDialog({ open, title, body, confirmLabel, onConfirm, onCancel })
   );
 }
 
+/* What the sky probe found. Deliberately blunt: the headline is how
+   many frames past the hand-off two detectors AGREED, because that is
+   the number that decides whether a sky-phase tracker is worth
+   building. The montage sits underneath because the numbers can only
+   say a detector found something -- the picture says whether that
+   something was the ball. */
+function SkyProbePanel({ probe, onClose }) {
+  if (probe.error) {
+    return (
+      <div className="err-text small" style={{ marginTop: 8 }}>
+        Sky probe failed: {probe.error}
+      </div>
+    );
+  }
+  const s = probe.summary || {};
+  const det = s.per_detector || {};
+  const rate = s.frames_probed
+    ? Math.round((100 * s.agreement_frames) / s.frames_probed)
+    : 0;
+  return (
+    <div
+      className="card"
+      style={{ marginTop: 8, padding: 10, background: "rgba(0,0,0,0.35)" }}
+    >
+      <div className="row" style={{ alignItems: "center", gap: 10 }}>
+        <b className="small">🛰 Sky probe</b>
+        <span className="small">
+          hand-off <b>f{s.handoff_frame}</b> · probed {s.frames_probed} ·{" "}
+          <b style={{ color: s.frames_extended > 5 ? "#3ee37a" : "#f59e0b" }}>
+            extended {s.frames_extended}
+          </b>{" "}
+          frames · agreement {rate}%
+        </span>
+        <span className="tiny muted">
+          window texture {s.window_std?.median} (low = sky, high = trees)
+        </span>
+        <button
+          type="button"
+          className="ghost small"
+          style={{ width: "auto", marginLeft: "auto" }}
+          onClick={onClose}
+        >
+          Dismiss
+        </button>
+      </div>
+      <table className="small" style={{ marginTop: 6, width: "auto" }}>
+        <thead>
+          <tr style={{ textAlign: "left" }}>
+            <th style={{ paddingRight: 12 }}>detector</th>
+            <th style={{ paddingRight: 12 }}>found</th>
+            <th style={{ paddingRight: 12 }}
+                title="Cleared its credibility floor. Everything finds SOMETHING in a small window; this is what was worth believing.">
+              credible
+            </th>
+            <th style={{ paddingRight: 12 }}>median err</th>
+            <th>median score</th>
+          </tr>
+        </thead>
+        <tbody>
+          {["diff", "log", "ncc"].map((k) => (
+            <tr key={k}>
+              <td style={{ paddingRight: 12 }}>
+                {k === "diff" ? "frame-diff (today)"
+                  : k === "log" ? "Laplacian blob" : "template match"}
+              </td>
+              <td style={{ paddingRight: 12 }}>{det[k]?.found ?? "—"}</td>
+              <td style={{ paddingRight: 12 }}>
+                {det[k]?.credible ?? "—"}
+                <span className="muted"> (≥{det[k]?.floor})</span>
+              </td>
+              <td style={{ paddingRight: 12 }}>
+                {det[k]?.median_err_px == null
+                  ? "—" : `${det[k].median_err_px}px`}
+              </td>
+              <td>{det[k]?.median_score ?? "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {probe.montage_url && (
+        <>
+          <div className="tiny muted" style={{ marginTop: 6 }}>
+            Each cell is the search window, blown up: ✛ prediction,
+            ● green Laplacian, ● magenta template, ● red frame-diff. A
+            frame label in green means two detectors agreed. If the
+            circles are sitting on a leaf rather than a ball, the
+            agreement rate is lying to you.
+          </div>
+          <img
+            src={probe.montage_url}
+            alt="Sky probe windows"
+            style={{
+              marginTop: 6, width: "100%", imageRendering: "pixelated",
+              borderRadius: 4, border: "1px solid var(--border)",
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 function MetaRow({ k, v }) {
   // Empty string / null / undefined → blank value (no em-dash). The label
   // stays so the rows in adjacent tiles still line up vertically.
@@ -711,6 +813,35 @@ function ClickToPlotModal({
     return init;
   });
   const [marks, setMarks] = useState(() => ({ ...baked }));
+  // The sky probe's last result: {summary, montage_url, ...}. Research
+  // instrument, not part of producing a clip -- it measures whether the
+  // ball is still findable past the point the blob detector loses it.
+  const [probe, setProbe] = useState(null);
+  const [probing, setProbing] = useState(false);
+
+  async function runSkyProbe() {
+    if (probing) return;
+    // Seed from what is ON SCREEN: the marks the operator has plotted,
+    // which for a swing the pipeline failed on is the only honest seed
+    // there is. Falls back server-side to the saved track.
+    const seed = Object.entries(marks)
+      .map(([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y }))
+      .sort((a, b) => a.frame - b.frame);
+    setProbing(true);
+    setProbe(null);
+    try {
+      const out = await api.skyProbe(adminPassword, row.id, {
+        swing: swing.idx ?? swingPos,
+        seed: seed.length >= 3 ? seed : null,
+      });
+      setProbe(out);
+    } catch (e) {
+      setProbe({ error: e?.message || String(e) });
+    } finally {
+      setProbing(false);
+    }
+  }
+
   // No busy state: Save & close hands the run to the production card
   // and closes, so there is never a moment where this modal is waiting.
   // THE PIXEL SPACE THE DOTS ARE IN — this swing's own, when produce
@@ -1086,6 +1217,16 @@ function ClickToPlotModal({
             <button
               type="button"
               className="ghost small"
+              onClick={runSkyProbe}
+              style={{ width: "auto" }}
+              disabled={probing}
+              title="Research: past the frame where the blob detector loses the ball, predict where it should be, open a small window there, and ask three detectors (frame-diff, Laplacian blob, template match) what they see. Measures whether a sky-phase tracker is worth building on THIS swing. Changes nothing."
+            >
+              {probing ? "Probing…" : "🛰 Sky probe"}
+            </button>
+            <button
+              type="button"
+              className="ghost small"
               onClick={onClose}
               style={{ width: "auto" }}
             >
@@ -1152,6 +1293,9 @@ function ClickToPlotModal({
             </div>
           )}
         </div>
+
+        {probe && <SkyProbePanel probe={probe} onClose={() => setProbe(null)} />}
+
         {/* The legend is a dozen lines of prose that was pushing the map
             up the screen on every open, long after the operator had read
             it once. Collapsed by default; the map gets the height. */}

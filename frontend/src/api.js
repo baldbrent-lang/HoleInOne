@@ -521,6 +521,16 @@ export const api = {
       adminPassword: key,
       timeoutMs: 2 * 60_000,
     }),
+  skyProbe: (key, uploadId, payload = {}) =>
+    // Measures whether the ball is still findable past the blob
+    // detector: predicts, opens a small window, and asks three
+    // detectors. Decodes real video, so give it time.
+    request(`/api/admin/long-uploads/${uploadId}/sky-probe`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+      timeoutMs: 4 * 60_000,
+    }),
   scanPlotRegion: (key, uploadId, payload = {}) =>
     // Frame-diff deep scan of a zoomed region — returns every motion
     // blob as a plottable dot. Decodes real video, so give it time.
