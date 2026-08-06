@@ -17,7 +17,7 @@
  * clips from. `swing_count` survives only as the Edit wizard's shape
  * switch (see isMulti); it is no longer an operator choice.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
@@ -333,7 +333,7 @@ function ConfirmDialog({ open, title, body, confirmLabel, onConfirm, onCancel })
    building. The montage sits underneath because the numbers can only
    say a detector found something -- the picture says whether that
    something was the ball. */
-function SkyProbePanel({ probe, onClose }) {
+function SkyProbePanel({ probe, onClose, showTracks, onToggleTracks }) {
   if (probe.error) {
     return (
       <div className="err-text small" style={{ marginTop: 8 }}>
@@ -376,6 +376,26 @@ function SkyProbePanel({ probe, onClose }) {
         </span>
         <span className="tiny muted">
           window texture {s.window_std?.median} (low = sky, high = trees)
+        </span>
+        <label
+          className="tiny"
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+          title="Draw the probe's paths over the heat map. A detector whose line leaves the motion streak and wanders into the treeline is obvious there and invisible in a median-error number."
+        >
+          <input
+            type="checkbox"
+            checked={showTracks}
+            onChange={(e) => onToggleTracks(e.target.checked)}
+            style={{ width: 14, height: 14 }}
+          />
+          on the map
+        </label>
+        <span className="tiny" style={{ display: "inline-flex", gap: 8 }}>
+          {PROBE_LAYERS.map((l) => (
+            <span key={l.key} style={{ color: l.colour }}>
+              {l.dash ? "┄" : "━"} {l.label}
+            </span>
+          ))}
         </span>
         <button
           type="button"
@@ -838,6 +858,30 @@ function ClickToPlotModal({
   // ball is still findable past the point the blob detector loses it.
   const [probe, setProbe] = useState(null);
   const [probing, setProbing] = useState(false);
+  // Draw the probe's paths over the heat map. On by default when a
+  // probe comes back -- the whole reason to run one is to see where
+  // those points went relative to the real motion.
+  const [showProbeTracks, setShowProbeTracks] = useState(true);
+
+  // Rows -> one path per layer, in frame coords. Only CREDIBLE picks
+  // join a detector's path: an incredible pick is the detector saying
+  // "there was nothing here", and stringing those into a line draws a
+  // flight that nothing ever detected.
+  const probeTracks = useMemo(() => {
+    if (!probe || probe.error || !showProbeTracks) return null;
+    const rows = (probe.rows || []).filter((r) => r.pred);
+    if (!rows.length) return null;
+    const out = { pred: [], log: [], ncc: [], diff: [] };
+    for (const r of rows) {
+      out.pred.push({ frame: r.frame, x: r.pred[0], y: r.pred[1] });
+      for (const k of ["log", "ncc", "diff"]) {
+        if (r[k] && r[k].credible) {
+          out[k].push({ frame: r.frame, x: r[k].xy[0], y: r[k].xy[1] });
+        }
+      }
+    }
+    return out;
+  }, [probe, showProbeTracks]);
 
   async function runSkyProbe() {
     if (probing) return;
@@ -1288,6 +1332,7 @@ function ClickToPlotModal({
                 setBallAtRest(pt);
                 setPlacingBall(false);
               }}
+              probeTracks={probeTracks}
               scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
@@ -1314,7 +1359,14 @@ function ClickToPlotModal({
           )}
         </div>
 
-        {probe && <SkyProbePanel probe={probe} onClose={() => setProbe(null)} />}
+        {probe && (
+          <SkyProbePanel
+            probe={probe}
+            onClose={() => setProbe(null)}
+            showTracks={showProbeTracks}
+            onToggleTracks={setShowProbeTracks}
+          />
+        )}
 
         {/* The legend is a dozen lines of prose that was pushing the map
             up the screen on every open, long after the operator had read
@@ -4616,9 +4668,19 @@ function ImageLightbox({ url, title, onClose }) {
  */
 const DENSE_DOT_ZOOM = 2.5;
 
+/* The sky probe's four paths, and what each one is. Prediction is
+   dashed because it is a model, not a measurement -- the eye should
+   read it as "where we expected" rather than "where it was". */
+const PROBE_LAYERS = [
+  { key: "pred", label: "prediction", colour: "#38bdf8", dash: "6 4" },
+  { key: "log", label: "Laplacian", colour: "#22c55e", dash: null },
+  { key: "ncc", label: "template", colour: "#e879f9", dash: null },
+  { key: "diff", label: "frame-diff", colour: "#ef4444", dash: null },
+];
+
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
-  scanRegion, track, ballXY, placingBall, onPlaceBall,
+  scanRegion, track, ballXY, placingBall, onPlaceBall, probeTracks,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -4831,6 +4893,68 @@ function PlotHeatCanvas({
                 {`f${track[track.length - 1].frame}`}
               </text>
             )}
+          </svg>
+        )}
+
+        {/* WHAT THE SKY PROBE SAW, on the picture rather than in a
+            table. Four paths past the hand-off: where the model said
+            the ball should be, and what each detector picked. Drawn
+            over the heat map because the only way to judge a detector
+            is against the motion streaks -- a path that leaves the
+            streak and wanders into the treeline is obvious here and
+            invisible in a median-error number. */}
+        {hasDims && probeTracks && (
+          <svg
+            viewBox={`0 0 ${frameW} ${frameH}`}
+            preserveAspectRatio="none"
+            style={{
+              position: "absolute", inset: 0, width: "100%", height: "100%",
+              pointerEvents: "none",
+            }}
+          >
+            {PROBE_LAYERS.map(({ key, colour, dash }) => {
+              const pts = probeTracks[key] || [];
+              if (pts.length < 1) return null;
+              return (
+                <g key={key}>
+                  {pts.length > 1 && (
+                    <polyline
+                      points={pts.map((q) => `${q.x},${q.y}`).join(" ")}
+                      fill="none"
+                      stroke={colour}
+                      strokeWidth={Math.max(1.5, frameW / 900)}
+                      strokeOpacity={0.85}
+                      strokeDasharray={dash}
+                    />
+                  )}
+                  {pts.map((q, i) => (
+                    <circle
+                      key={`${key}-${q.frame}-${i}`}
+                      cx={q.x}
+                      cy={q.y}
+                      r={Math.max(1.8, frameW / 750)}
+                      fill="none"
+                      stroke={colour}
+                      strokeWidth={Math.max(1, frameW / 1200)}
+                      strokeOpacity={q.credible === false ? 0.35 : 0.95}
+                    />
+                  ))}
+                  {pts.length > 0 && (
+                    <text
+                      x={pts[pts.length - 1].x + frameW / 150}
+                      y={pts[pts.length - 1].y}
+                      fontSize={Math.max(10, frameW / 130)}
+                      fill={colour}
+                      stroke="#000"
+                      strokeWidth={0.6}
+                      paintOrder="stroke"
+                    >
+                      {key}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
           </svg>
         )}
         {/* BALL AT IMPACT — where the tracer line STARTS. Not a track
