@@ -1127,9 +1127,10 @@ function ClickToPlotModal({
                 setBallAtRest(pt);
                 setPlacingBall(false);
               }}
-              scanRegion={async (region) => {
+              scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
+                  sensitivity,
                   start_frame:
                     winLo != null
                       ? Math.max(swing.start_frame ?? 0, winLo)
@@ -4462,6 +4463,13 @@ function PlotHeatCanvas({
   const [scanDots, setScanDots] = useState([]);
   const [scanning, setScanning] = useState(false);
   const [scanNote, setScanNote] = useState(null);
+  // How hard the next scan looks. Starts at the normal level and steps
+  // up when a scan comes back with nothing new -- the operator can see
+  // the ball, so "no motion found" means the gates were too tight, not
+  // that there is nothing there. Capped at 3, which returns leaves in
+  // the wind as well as the ball; that is the right trade here, since
+  // the operator is the filter.
+  const [scanLevel, setScanLevel] = useState(2);
   const hasDims = !!(frameW && frameH);
   // Dense candidates + scanned dots that aren't already represented by
   // a timed dot (same frame within 2px) — no doubled-up targets.
@@ -4491,7 +4499,7 @@ function PlotHeatCanvas({
     setScanning(true);
     setScanNote(null);
     try {
-      const found = await scanRegion(region);
+      const found = await scanRegion(region, scanLevel);
       const gk = (p) => `${p.frame}:${Math.round(p.x / 3)}:${Math.round(p.y / 3)}`;
       setScanDots((prev) => {
         const seen = new Set(
@@ -4503,11 +4511,20 @@ function PlotHeatCanvas({
           seen.add(k);
           return true;
         });
-        setScanNote(
-          fresh.length
-            ? `+${fresh.length} new detections in view`
-            : "no new motion found in this area",
-        );
+        if (fresh.length) {
+          setScanNote(
+            `+${fresh.length} new detections in view`
+            + (scanLevel > 2 ? " (deep scan)" : ""),
+          );
+        } else if (scanLevel < 3) {
+          // Nothing new at this level. Say what pressing it again will
+          // do rather than leaving the operator to conclude the area is
+          // empty when they can see the ball in it.
+          setScanLevel(scanLevel + 1);
+          setScanNote("nothing new — press Scan again to look harder");
+        } else {
+          setScanNote("no new motion found, even on the deepest scan");
+        }
         return [...prev, ...fresh];
       });
     } catch (e) {
@@ -4919,10 +4936,12 @@ function PlotHeatCanvas({
             title={
               zoom < 1.99
                 ? "Zoom to at least 2× first, then Scan finds every motion blob in the visible area"
-                : "Deep-scan the visible area: frame-diff over the swing window with much looser gates than the tracer — every transient blob in view becomes a clickable dot. Takes a few seconds."
+                : `Deep-scan the visible area (level ${scanLevel} of 3): frame-diff over the swing window with much looser gates than the tracer — every transient blob in view becomes a clickable dot. Finds nothing? Press again; it steps up a level. Takes a few seconds.`
             }
           >
-            {scanning ? "Scanning…" : "🔍 Scan"}
+            {scanning
+              ? "Scanning…"
+              : scanLevel > 2 ? "🔍 Scan harder" : "🔍 Scan"}
           </button>
         )}
         <div style={{
@@ -5438,9 +5457,10 @@ function TracerStep({
               marks={manualPositions}
               onToggleDot={toggleTimedDot}
               onClose={() => setPlotAll(false)}
-              scanRegion={async (region) => {
+              scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
+                  sensitivity,
                   start_frame:
                     draft?.impactFrame != null
                       ? Math.max(

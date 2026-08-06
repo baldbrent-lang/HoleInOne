@@ -7428,7 +7428,19 @@ def scan_plot_region(
     need something clickable on it.
 
     Body: x, y, w, h (native px), start_frame, end_frame (source
-    frames; end defaults to start+240, span hard-capped at 900).
+    frames; end defaults to start+240, span hard-capped at 900), and
+    `sensitivity` 1-3.
+
+    SENSITIVITY EXISTS BECAUSE THE BALL IS SMALL AND FAST. At 720p50 a
+    driven ball crossing frame is a handful of pixels, often dimmer than
+    the foliage sparkle around it, and the level-1 gates (the originals)
+    routinely came back with nothing in a region where the operator can
+    plainly see it. Each level lowers the frame-diff threshold, widens
+    the blob-size band and keeps more blobs per frame; level 3 will hand
+    back leaves moving in the wind, which is fine — the operator clicks
+    the ball and ignores the rest. Only the count is capped, so a noisy
+    region cannot return a megabyte of dots.
+
     Returns {dots: [{frame, x, y}, ...]} in source coords.
     """
     import cv2  # type: ignore
@@ -7454,6 +7466,8 @@ def scan_plot_region(
             y = max(0, min(fh - 2, int(payload.get("y") or 0)))
             w = max(8, min(fw - x, int(payload.get("w") or fw)))
             h = max(8, min(fh - y, int(payload.get("h") or fh)))
+            _sens = int(payload.get("sensitivity") or 2)
+            _sens = max(1, min(3, _sens))
             start = max(0, int(payload.get("start_frame") or 0))
             _end_raw = payload.get("end_frame")
             end = int(_end_raw) if _end_raw is not None else start + 240
@@ -7464,6 +7478,16 @@ def scan_plot_region(
         end = min(end, start + 900)
         if end <= start:
             raise HTTPException(400, "empty frame window")
+
+        # (frame-diff threshold, max blobs kept per frame, biggest blob
+        # area, total dot cap). Level 2 is the default: measurably more
+        # generous than the original gates, still short of returning
+        # every leaf.
+        _THRESH, _PER_FRAME, _AREA_MAX, _CAP = {
+            1: (12, 6, 600, 1200),
+            2: (8, 10, 900, 2000),
+            3: (5, 16, 1400, 3000),
+        }[_sens]
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, float(start))
         prev = None
@@ -7478,36 +7502,37 @@ def scan_plot_region(
             )
             if prev is not None:
                 diff = cv2.absdiff(gray, prev)
-                _, th = cv2.threshold(diff, 12, 255, cv2.THRESH_BINARY)
+                _, th = cv2.threshold(diff, _THRESH, 255, cv2.THRESH_BINARY)
                 th = cv2.dilate(th, None, iterations=1)
                 n, _lbl, stats, cents = cv2.connectedComponentsWithStats(th)
                 frame_hits = []
                 for i in range(1, n):
                     area = int(stats[i, cv2.CC_STAT_AREA])
-                    if 2 <= area <= 600:
+                    if 1 <= area <= _AREA_MAX:
                         frame_hits.append(
                             (area, float(cents[i][0]), float(cents[i][1])),
                         )
                 # Largest few per frame — keeps foliage sparkle from
                 # burying the ball blob in a noisy region.
                 frame_hits.sort(reverse=True)
-                for _area, cx, cy in frame_hits[:6]:
+                for _area, cx, cy in frame_hits[:_PER_FRAME]:
                     dots.append({
                         "frame": int(f),
                         "x": int(round(x + cx)),
                         "y": int(round(y + cy)),
                     })
             prev = gray
-            if len(dots) >= 1200:
+            if len(dots) >= _CAP:
                 break
     finally:
         cap.release()
     log.info(
-        "scan-region upload=%s region=(%d,%d %dx%d) f%d-%d -> %d dots",
-        upload_id, x, y, w, h, start, end, len(dots),
+        "scan-region upload=%s region=(%d,%d %dx%d) f%d-%d sens=%d "
+        "-> %d dots", upload_id, x, y, w, h, start, end, _sens, len(dots),
     )
     return {
-        "dots": dots[:1200],
+        "dots": dots[:_CAP],
+        "sensitivity": _sens,
         "n_frames": end - start + 1,
         "region": {"x": x, "y": y, "w": w, "h": h},
     }
