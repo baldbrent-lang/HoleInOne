@@ -333,7 +333,7 @@ function ConfirmDialog({ open, title, body, confirmLabel, onConfirm, onCancel })
    building. The montage sits underneath because the numbers can only
    say a detector found something -- the picture says whether that
    something was the ball. */
-function SkyProbePanel({ probe, onClose, showTracks, onToggleTracks }) {
+function SkyProbePanel({ probe, onClose }) {
   if (probe.error) {
     return (
       <div className="err-text small" style={{ marginTop: 8 }}>
@@ -350,12 +350,11 @@ function SkyProbePanel({ probe, onClose, showTracks, onToggleTracks }) {
     <div
       className="card"
       style={{
-        marginTop: 8, padding: 10, background: "rgba(0,0,0,0.35)",
-        // The modal is a fixed-height flex column with overflow hidden,
-        // so a panel that grows just pushes the montage off the bottom
-        // where nothing can reach it. Take a bounded slice of the
-        // height and scroll inside it; the map keeps the rest.
-        flexShrink: 0, maxHeight: "45vh", overflowY: "auto",
+        margin: 0, padding: 10, background: "rgba(0,0,0,0.35)",
+        // No height cap and no inner scroll: this is a tab now, not a
+        // panel wedged under the map. It gets the pane, the pane
+        // scrolls. Stacking the two was what squeezed the map down to a
+        // thumbnail on the screen whose whole job is looking at it.
       }}
     >
       <div
@@ -377,19 +376,6 @@ function SkyProbePanel({ probe, onClose, showTracks, onToggleTracks }) {
         <span className="tiny muted">
           window texture {s.window_std?.median} (low = sky, high = trees)
         </span>
-        <label
-          className="tiny"
-          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-          title="Draw the probe's paths over the heat map. A detector whose line leaves the motion streak and wanders into the treeline is obvious there and invisible in a median-error number."
-        >
-          <input
-            type="checkbox"
-            checked={showTracks}
-            onChange={(e) => onToggleTracks(e.target.checked)}
-            style={{ width: 14, height: 14 }}
-          />
-          on the map
-        </label>
         <span className="tiny" style={{ display: "inline-flex", gap: 8 }}>
           {PROBE_LAYERS.map((l) => (
             <span key={l.key} style={{ color: l.colour }}>
@@ -402,6 +388,7 @@ function SkyProbePanel({ probe, onClose, showTracks, onToggleTracks }) {
           className="ghost small"
           style={{ width: "auto", marginLeft: "auto" }}
           onClick={onClose}
+          title="Discard this probe and go back to the map"
         >
           Dismiss
         </button>
@@ -862,6 +849,10 @@ function ClickToPlotModal({
   // probe comes back -- the whole reason to run one is to see where
   // those points went relative to the real motion.
   const [showProbeTracks, setShowProbeTracks] = useState(true);
+  // Which pane has the height: the map, or the probe's numbers. They
+  // were stacked, and the panel squeezed the map down to a thumbnail --
+  // on a screen whose whole job is looking closely at one picture.
+  const [tab, setTab] = useState("map");
 
   // Rows -> one path per layer, in frame coords. Only CREDIBLE picks
   // join a detector's path: an incredible pick is the detector saying
@@ -899,6 +890,7 @@ function ClickToPlotModal({
         seed: seed.length >= 3 ? seed : null,
       });
       setProbe(out);
+      setTab("probe");
     } catch (e) {
       setProbe({ error: e?.message || String(e) });
     } finally {
@@ -1313,7 +1305,37 @@ function ClickToPlotModal({
           </div>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {probe && (
+          <div
+            className="row"
+            style={{ gap: 6, marginBottom: 6, alignItems: "center" }}
+          >
+            {[["map", "🖱 Heat map"], ["probe", "🛰 Sky probe"]].map(
+              ([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={tab === id ? "small" : "small ghost"}
+                  style={{ width: "auto" }}
+                  onClick={() => setTab(id)}
+                >
+                  {label}
+                </button>
+              ),
+            )}
+            <span className="tiny muted">
+              {tab === "map"
+                ? "tick “paths” on the map to overlay the probe"
+                : `hand-off f${probe.summary?.handoff_frame} · extended `
+                  + `${probe.summary?.frames_extended} frames`}
+            </span>
+          </div>
+        )}
+
+        <div style={{
+          flex: 1, minHeight: 0, display: tab === "map" ? "flex" : "none",
+          alignItems: "center", justifyContent: "center",
+        }}>
           {(dots.length > 0 || denseDots.length > 0) && bgUrl ? (
             <PlotHeatCanvas
               bgUrl={bgUrl}
@@ -1333,6 +1355,11 @@ function ClickToPlotModal({
                 setPlacingBall(false);
               }}
               probeTracks={probeTracks}
+              probeToggle={{
+                available: !!probe && !probe.error,
+                on: showProbeTracks,
+                onChange: setShowProbeTracks,
+              }}
               scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
@@ -1359,13 +1386,13 @@ function ClickToPlotModal({
           )}
         </div>
 
-        {probe && (
-          <SkyProbePanel
-            probe={probe}
-            onClose={() => setProbe(null)}
-            showTracks={showProbeTracks}
-            onToggleTracks={setShowProbeTracks}
-          />
+        {probe && tab === "probe" && (
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+            <SkyProbePanel
+              probe={probe}
+              onClose={() => { setProbe(null); setTab("map"); }}
+            />
+          </div>
         )}
 
         {/* The legend is a dozen lines of prose that was pushing the map
@@ -4681,6 +4708,7 @@ const PROBE_LAYERS = [
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
   scanRegion, track, ballXY, placingBall, onPlaceBall, probeTracks,
+  probeToggle,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -5210,6 +5238,27 @@ function PlotHeatCanvas({
           onClick={() => { setZoom(1); setFocus({ x: 50, y: 50 }); }}
           title="Fit full frame"
         >Fit</button>
+        {/* The probe's paths, toggled from the picture they draw on
+            rather than from a panel on another tab. Only appears once
+            there is a probe to show. */}
+        {probeToggle?.available && (
+          <label
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 4,
+              color: "#fff", fontSize: 12, padding: "0 6px",
+              cursor: "pointer", whiteSpace: "nowrap",
+            }}
+            title="Draw the sky probe's paths over the map: dashed cyan prediction, green Laplacian, magenta template, red frame-diff. A line that leaves the motion streak and wanders into the treeline is the answer you came for."
+          >
+            <input
+              type="checkbox"
+              checked={!!probeToggle.on}
+              onChange={(e) => probeToggle.onChange(e.target.checked)}
+              style={{ width: 13, height: 13 }}
+            />
+            paths
+          </label>
+        )}
         {scanRegion && (
           <button
             type="button"
