@@ -32,8 +32,41 @@ TMP_DIR="$(mktemp -d -t golfreelz-update-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "==> branch: $BRANCH"
-echo "==> cloning $REPO_URL"
-git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo"
+
+# ONLY pi-agent/, AND ONLY THE FILES WE INSTALL. A plain --depth 1
+# clone pulls the frontend, the backend and the ONNX model -- around a
+# hundred megabytes -- to deliver a couple of Python files. On the tee's
+# cellular modem that took over ten minutes and had to be abandoned.
+# A blob-filtered sparse checkout fetches the working tree we ask for
+# and nothing else.
+#
+# The model is excluded by default: it is the single biggest file here
+# and it changes almost never, so re-fetching it on every update is
+# pure cost. Set WITH_MODELS=1 when it actually changes.
+#   sudo WITH_MODELS=1 /opt/golfreelz-agent/update.sh <branch>
+_sparse_ok=0
+if git clone --quiet --depth 1 --filter=blob:none --sparse \
+     --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo" 2>/dev/null; then
+  if [[ "${WITH_MODELS:-0}" == "1" ]]; then
+    _paths=('/pi-agent/')
+  else
+    _paths=('/pi-agent/' '!/pi-agent/models/')
+  fi
+  if git -C "$TMP_DIR/repo" sparse-checkout set --no-cone "${_paths[@]}" \
+       2>/dev/null; then
+    _sparse_ok=1
+  fi
+fi
+
+if [[ "$_sparse_ok" -eq 1 ]]; then
+  echo "==> fetched pi-agent/ only (sparse)"
+else
+  # Older git without --filter/--sparse, or a server that refuses the
+  # filter. Fall back to what always worked rather than failing.
+  echo "==> sparse checkout unavailable — full clone (this is the slow one)"
+  rm -rf "$TMP_DIR/repo"
+  git clone --quiet --depth 1 --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo"
+fi
 
 echo "==> stopping $SERVICE_NAME"
 systemctl stop "$SERVICE_NAME"
