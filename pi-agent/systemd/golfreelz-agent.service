@@ -10,6 +10,11 @@ Type=simple
 User=golfreelz
 Group=golfreelz
 WorkingDirectory=/opt/golfreelz-agent
+# Creates /var/lib/golfreelz-agent owned by User=, before ExecStart, on
+# every boot. That is work_dir: the in-flight recording and the upload
+# spool live there. It has to outlive a reboot -- a clip part-way
+# through a slow upload is exactly what the spool is for.
+StateDirectory=golfreelz-agent
 # libcamerify wraps the process with libcamera's V4L2 compat shim. The
 # Raspberry Pi CSI cameras (IMX477 HQ cam, etc.) ONLY deliver processed
 # RGB frames through this shim — opened raw via OpenCV they hand back

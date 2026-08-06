@@ -322,10 +322,20 @@ curfew:
 # Misc
 # ---------------------------------------------------------------------
 
-# Local working directory for in-flight recordings. Default /tmp is
-# fine for a Pi with tmpfs; if you want recordings to survive a
-# reboot mid-upload, point this at a writable SD-card path.
-work_dir: "/tmp/golfreelz-agent"
+# Local working directory for in-flight recordings AND the upload
+# spool (work_dir/pending), which is the reason this is not /tmp any
+# more.
+#
+# It used to be. On a cellular link a clip can sit in the spool for
+# tens of minutes, resuming across attempts -- and /tmp does not
+# survive a reboot. A 21.8 MB clip that was 72% uploaded was lost that
+# way while we were power-cycling the tee's modem: the spool exists
+# precisely to survive failures, so putting it somewhere volatile
+# defeats the whole mechanism.
+#
+# /var/lib/golfreelz-agent is on the SD card and is created by the
+# systemd unit's StateDirectory=, owned by the service user.
+work_dir: "/var/lib/golfreelz-agent"
 
 # Log verbosity. INFO covers normal operation; DEBUG is loud.
 log_level: "INFO"
