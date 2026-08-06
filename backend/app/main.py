@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -14,9 +16,9 @@ from pathlib import Path
 # so this has to land before any cv2.VideoCapture call.
 os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import inspect, text
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -520,15 +522,84 @@ CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 # wins for this path) that rehydrates from object storage when the local
 # file is gone — e.g. after a redeploy wiped the ephemeral disk. FileResponse
 # honours HTTP Range requests, which Safari needs for <video> playback.
+
+# ---------------------------------------------------------------------
+# Byte-range media serving
+# ---------------------------------------------------------------------
+# A <video> can only SEEK if the server answers Range requests. Starlette
+# did not add Range support to FileResponse until 0.45, and production
+# pins fastapi==0.115, which resolves to Starlette 0.38 -- so every clip
+# was served as one 200 with the whole body and the scrubber did nothing.
+# Clicking ahead or back in the raw-video preview silently failed.
+#
+# Serving ranges here rather than bumping the framework: it is a dozen
+# lines, it behaves identically on every Starlette version, and it does
+# not put a dependency upgrade in the path of a course day.
+_RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+_RANGE_CHUNK = 64 * 1024
+
+
+def _ranged_file(path: Path, range_header: str | None) -> Response:
+    """FileResponse, or a 206 slice of it when the client asked for one."""
+    size = path.stat().st_size
+    m = _RANGE_RE.fullmatch((range_header or "").strip()) if range_header else None
+    # No range, or one we do not understand (multi-range, garbage): hand
+    # back the whole file, but SAY that ranges are available so the
+    # browser knows it may ask.
+    if m is None or (not m.group(1) and not m.group(2)):
+        resp = FileResponse(path)
+        resp.headers["Accept-Ranges"] = "bytes"
+        return resp
+
+    first, last = m.group(1), m.group(2)
+    if first == "":
+        # A suffix range -- "the last N bytes". This is how a browser
+        # fetches the moov atom of an mp4 that is not faststart, so it
+        # matters even for a clip nobody scrubs.
+        n = min(int(last), size)
+        start, end = size - n, size - 1
+    else:
+        start = int(first)
+        end = min(int(last), size - 1) if last else size - 1
+
+    if start > end or start >= size:
+        return Response(
+            status_code=416, headers={"Content-Range": f"bytes */{size}"},
+        )
+
+    def _iter():
+        with path.open("rb") as fh:
+            fh.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = fh.read(min(_RANGE_CHUNK, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(
+        _iter(),
+        status_code=206,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+        },
+        media_type=(mimetypes.guess_type(path.name)[0]
+                    or "application/octet-stream"),
+    )
+
+
 @app.get("/uploads/clips/{name}", include_in_schema=False)
-def serve_clip(name: str):
+def serve_clip(name: str, request: Request):
     safe = Path(name).name  # filenames only — no path traversal
     local = CLIPS_DIR / safe
     if not local.exists():
         storage.ensure_local(CLIPS_DIR, safe)
     if not local.exists():
         raise StarletteHTTPException(status_code=404)
-    return FileResponse(local)
+    return _ranged_file(local, request.headers.get("range"))
 
 
 # Serve showcase files (home page videos) with the same bucket-fallback
@@ -539,14 +610,14 @@ SHOWCASE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/uploads/showcase/{name}", include_in_schema=False)
-def serve_showcase(name: str):
+def serve_showcase(name: str, request: Request):
     safe = Path(name).name
     local = SHOWCASE_DIR / safe
     if not local.exists():
         storage.download(f"showcase/{safe}", local)
     if not local.exists():
         raise StarletteHTTPException(status_code=404)
-    return FileResponse(local)
+    return _ranged_file(local, request.headers.get("range"))
 
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_ROOT), name="uploads")
