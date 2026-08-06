@@ -20,7 +20,7 @@ import signal
 import sys
 from pathlib import Path
 
-from agent.common import BackendClient, load_config
+from agent.common import BackendClient, install_dns_cache, load_config
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -39,6 +39,12 @@ def main(argv: list[str]) -> int:
     cfg = load_config(cfg_path)
     setup_logging(cfg.get("log_level", "INFO"))
     log = logging.getLogger("golfreelz_agent")
+
+    # BEFORE THE FIRST REQUEST. On a cellular link that loses DNS
+    # queries, an uncached lookup is a 5s stall or an outright failure
+    # -- and every dead connection triggers a fresh one. Cache them, and
+    # keep serving the last good address when a lookup fails.
+    install_dns_cache()
 
     # First heartbeat tells us our assigned role.
     client = BackendClient(cfg["backend_url"], cfg["auth_token"])

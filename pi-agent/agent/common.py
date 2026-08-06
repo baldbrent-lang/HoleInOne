@@ -243,6 +243,66 @@ def _clip_is_orphaned(body: str) -> bool:
     return any(m in low for m in _ORPHAN_MARKERS)
 
 
+# --------------------------------------------------------------------
+# DNS, on a link that loses packets
+# --------------------------------------------------------------------
+# Measured on the tee's cellular modem: the resolvers answer in ~115 ms
+# when the query arrives, but roughly one query in five never gets
+# there. glibc then waits out its timeout and tries the next server, so
+# a name lookup costs 5 s instead of 0.1 s -- and when both are lost the
+# request dies with "Temporary failure in name resolution" even though
+# the link is up and pinging at 0% loss.
+#
+# The address had not changed in either case. So: remember it. A cached
+# answer serves every connection for TTL_SECONDS, and -- the part that
+# actually saves uploads -- a lookup that FAILS falls back to the last
+# address we know worked, for as long as STALE_SECONDS. An IP that was
+# right ten minutes ago beats an exception every time.
+DNS_TTL_SECONDS = 300.0
+DNS_STALE_SECONDS = 6 * 3600.0
+_dns_cache: dict = {}
+_dns_lock = threading.Lock()
+_real_getaddrinfo = socket.getaddrinfo
+
+
+def _cached_getaddrinfo(host, port, *args, **kwargs):
+    # Key on everything that changes the answer -- family/type/proto/
+    # flags all do, and a cache that ignores them hands back a TCP
+    # result for a UDP request.
+    key = (host, port, args, tuple(sorted(kwargs.items())))
+    now = time.time()
+    with _dns_lock:
+        hit = _dns_cache.get(key)
+    if hit is not None and (now - hit[0]) < DNS_TTL_SECONDS:
+        return hit[1]
+    try:
+        res = _real_getaddrinfo(host, port, *args, **kwargs)
+    except socket.gaierror:
+        if hit is not None and (now - hit[0]) < DNS_STALE_SECONDS:
+            log.warning(
+                "dns: lookup of %s failed — using the address from %.0fs "
+                "ago rather than giving up", host, now - hit[0],
+            )
+            return hit[1]
+        raise
+    with _dns_lock:
+        _dns_cache[key] = (now, res)
+    return res
+
+
+def install_dns_cache() -> None:
+    """Patch socket.getaddrinfo process-wide. Everything resolves
+    through it -- requests, urllib3, anything else -- so this is one
+    call at startup rather than a change at every call site."""
+    if socket.getaddrinfo is not _cached_getaddrinfo:
+        socket.getaddrinfo = _cached_getaddrinfo
+        log.info(
+            "dns: caching resolver installed (%.0fs ttl, %.0fh stale "
+            "fallback) — a dropped query no longer stalls a request",
+            DNS_TTL_SECONDS, DNS_STALE_SECONDS / 3600.0,
+        )
+
+
 class BackendClient:
     """Wraps the four /api/cameras/{token}/... endpoints. Retries
     transient network / 5xx errors with exponential backoff;
