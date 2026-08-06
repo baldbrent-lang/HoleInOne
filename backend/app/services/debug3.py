@@ -1059,6 +1059,17 @@ def find_flight(
             "x_degree": fit.get("x_degree"),
             "aim_px": fit.get("aim_px"), "aim_basis": fit.get("aim_basis"),
         }
+        # THE CLICKABLE POOL, SET BEFORE THE FAILURE RETURN. These are
+        # every ball-sized detection, not just the ones a fit kept, and
+        # they are what click-to-plot offers the operator to click. They
+        # used to be filled in below -- past the early return -- so a
+        # flight that found nothing threw away the very evidence the
+        # operator needs to plot the ball by hand. A failed flight is
+        # exactly when the manual path matters.
+        out["candidates"] = [
+            {"frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"])}
+            for d in (det.get("dets") or [])
+        ]
         if not res.get("ok"):
             out["reason"] = res.get("reason")
             return out
@@ -1066,17 +1077,6 @@ def find_flight(
             {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"])}
             for q in (fit.get("inliers") or [])
         ]
-        # EVERY ball-sized detection, not just the ones the fit kept. These
-        # are what click-to-plot offers as clickable candidates -- without
-        # them the editor can show the saved track but the operator cannot
-        # add anything, because there is nothing to click. This pool is
-        # already filtered to off-body, off-busy, ball-sized blobs, so it is
-        # a better set of candidates than the MOG2 layer's used to be.
-        out["candidates"] = [
-            {"frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"])}
-            for d in (det.get("dets") or [])
-        ]
-
         # The launch FRAME, from where the flight meets the ground.
         lg = launch_from_ground(fit, gy)
         _lap("launch")

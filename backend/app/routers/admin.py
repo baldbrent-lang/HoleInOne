@@ -13063,6 +13063,41 @@ def run_wizard_produce_job(
                 _err = _ff.get("reason") or "no flight found"
                 log.info("wizard produce: upload=%s no flight (%s)",
                          upload_id, _err)
+                # NO FLIGHT IS WHEN THE OPERATOR NEEDS THE DOTS MOST.
+                # The detections were computed either way; dropping them
+                # left click-to-plot empty and the swing unrecoverable
+                # except by another full produce. Save the pool, the
+                # ball and the impact frame so the operator can plot the
+                # flight by hand from this failure.
+                _cands = _ff.get("candidates") or []
+                if _cands:
+                    try:
+                        _d3_save_swing(db, row.id, 0, {
+                            "idx": 0,
+                            "ball": {"x": int(round(_bx)),
+                                     "y": int(round(_by))},
+                            "ball_manual": True,
+                            "impact_frame": _imp,
+                            "track_frame_width": _fw,
+                            "track_frame_height": _fh,
+                            "track_scaled_from_cut": False,
+                            "cand_points": [
+                                {"frame": int(c["frame"]),
+                                 "x": int(round(float(c["x"]))),
+                                 "y": int(round(float(c["y"])))}
+                                for c in _cands
+                            ][:1500],
+                            "flight_error": _err,
+                        }, 0.0)
+                        log.info(
+                            "wizard produce: upload=%s kept %d candidate "
+                            "dots so click-to-plot can rescue it",
+                            upload_id, min(len(_cands), 1500),
+                        )
+                    except Exception as _exc:  # noqa: BLE001
+                        log.warning(
+                            "wizard produce: could not keep the candidate "
+                            "dots for upload %s: %s", upload_id, _exc)
                 _finish_wizard_produce(db, upload_id, ok=False, n_ok=0,
                                        error=_err)
                 return {"ok": False, "error": _err}
@@ -13079,6 +13114,11 @@ def run_wizard_produce_job(
                 "launch_frame": _ff.get("launch_frame"),
                 "flight": _ff.get("points") or [],
                 "impact_frame": _imp,
+                # The clickable pool. Without it _d3_fast_produce writes
+                # cand_points empty, and click-to-plot opens on a swing
+                # with nothing to click -- read-only exactly where the
+                # operator went to correct the tracer by hand.
+                "candidates": _ff.get("candidates") or [],
             }]}
             # The landing frame is a GREEN frame index; the renderer
             # wants green-clock SECONDS, because every boundary in the
