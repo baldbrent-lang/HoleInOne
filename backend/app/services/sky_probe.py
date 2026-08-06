@@ -38,7 +38,8 @@ DEFAULT_FLOORS = {"diff": 6.0, "log": 8.0, "ncc": 0.6}
 # --------------------------------------------------------------------
 # the model: where should the ball be next
 # --------------------------------------------------------------------
-def fit_state(points: list, window: int = 12) -> dict | None:
+def fit_state(points: list, window: int = 12, target=None,
+              land_frame=None) -> dict | None:
     """x linear, y quadratic over the last `window` points.
 
     Deliberately re-fit over a sliding window rather than propagating one
@@ -60,7 +61,61 @@ def fit_state(points: list, window: int = 12) -> dict | None:
         cy = np.polyfit(t, y, 2)
     except Exception:
         return None
-    return {"t0": float(t0), "cx": cx.tolist(), "cy": cy.tolist()}
+    state = {"t0": float(t0), "cx": cx.tolist(), "cy": cy.tolist(),
+             "t_land": None, "target": None}
+
+    # PIN THE FAR END IF WE KNOW IT.
+    #
+    # Free extrapolation is the weak part of this: the model is fitted
+    # over a dozen noisy centroids and then run forward for a second or
+    # more, so a small error in the seed compounds into a prediction
+    # that leaves the flight entirely -- which is how the search window
+    # ends up over a treeline instead of a ball.
+    #
+    # But the far end is not unknown. The operator has already marked
+    # the target (the green, 200 yards out on hole 1), and the ball
+    # finishes there. So this stops being extrapolation and becomes
+    # interpolation between two known points: horizontal speed says
+    # WHEN the ball gets there, and the vertical fit is constrained to
+    # pass through it. The curve can then only be wrong in the middle.
+    #
+    # `land_frame` pins WHEN as well as where. The solve below is done
+    # once on the seed, where the whole remaining flight is still ahead;
+    # every re-fit during the probe then reuses that answer rather than
+    # re-deriving it from a window that is closer and closer to the
+    # target -- which would shrink t_land toward zero and, in the last
+    # frames, fail its own sanity guard and silently unpin the curve.
+    if target is not None and len(target) >= 2:
+        tx, ty = float(target[0]), float(target[1])
+        vx = float(cx[0])
+        if land_frame is not None:
+            t_land = float(land_frame) - float(t0)
+            ok_land = t_land > 1.0
+        elif abs(vx) > 1e-3:
+            t_land = (tx - float(cx[1])) / vx
+            # Only ahead of us, and not so far ahead that a near-zero
+            # horizontal speed puts the landing in another minute.
+            ok_land = 1.0 < t_land < 20.0 * max(1.0, len(pts))
+        else:
+            t_land, ok_land = 0.0, False
+        if ok_land:
+            # y = a·t² + b·t + c with y(t_land) = ty, so
+            # c = ty - a·t_land² - b·t_land. Substituting leaves a
+            # two-parameter least squares over the seed.
+            A = np.column_stack([
+                t * t - t_land * t_land,
+                t - t_land,
+            ])
+            try:
+                ab, *_ = np.linalg.lstsq(A, y - ty, rcond=None)
+                a_, b_ = float(ab[0]), float(ab[1])
+                c_ = ty - a_ * t_land * t_land - b_ * t_land
+                state["cy"] = [a_, b_, c_]
+                state["t_land"] = float(t_land)
+                state["target"] = [tx, ty]
+            except Exception:
+                pass
+    return state
 
 
 def predict(state: dict, frame: int) -> tuple[float, float]:
@@ -187,7 +242,7 @@ def seed_from_pipeline(video: Path, impact: int, ball, fps: float) -> list:
 
 def probe(video: Path, seed_points: list, frames_dir: Path | None,
           max_frames: int, win_min: int, win_pad: float,
-          floors: dict) -> dict:
+          floors: dict, target=None) -> dict:
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         raise SystemExit(f"could not open {video}")
@@ -197,7 +252,7 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
 
     pts = sorted(seed_points, key=lambda p: p["frame"])
     handoff = int(pts[-1]["frame"])
-    state = fit_state(pts)
+    state = fit_state(pts, target=target)
     if state is None:
         raise SystemExit("need at least 3 seed points to fit a model")
 
@@ -213,6 +268,14 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
     last_seen = {"frame": handoff, "x": float(pts[-1]["x"]),
                  "y": float(pts[-1]["y"])}
     end = handoff + max_frames if NB <= 0 else min(handoff + max_frames, NB - 1)
+    # WHEN the ball gets to the target, solved once off the seed while
+    # the whole flight is still ahead. Every re-fit below is handed this
+    # rather than re-solving it, and the probe stops there: anything
+    # found past the target is something else.
+    land_f = None
+    if state.get("t_land") is not None:
+        land_f = int(round(state["t0"] + state["t_land"]))
+        end = min(end, land_f)
     for f in range(handoff + 1, end + 1):
         ok, frame = cap.read()
         if not ok:
@@ -308,7 +371,7 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
             best = max(picks, key=lambda kv: 1 if kv[0] == "log" else 0)[1]
             last_seen = {"frame": f, "x": best["x"], "y": best["y"]}
             pts.append({"frame": f, "x": best["x"], "y": best["y"]})
-            _st = fit_state(pts)
+            _st = fit_state(pts, target=target, land_frame=land_f)
             if _st:
                 state = _st
             _t = cut_template(cur_g, best["x"], best["y"])
@@ -322,6 +385,8 @@ def probe(video: Path, seed_points: list, frames_dir: Path | None,
         return [r for r in probed if r.get(k)]
     summary = {
         "handoff_frame": handoff,
+        "target": list(target) if target else None,
+        "landing_frame": land_f,
         "frames_probed": len(probed),
         "last_agreed_frame": last_seen["frame"],
         "frames_extended": last_seen["frame"] - handoff,

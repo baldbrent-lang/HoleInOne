@@ -376,6 +376,11 @@ function SkyProbePanel({ probe, onClose }) {
         <span className="tiny muted">
           window texture {s.window_std?.median} (low = sky, high = trees)
         </span>
+        <span className="tiny" style={{ color: s.target ? "#3ee37a" : "#f59e0b" }}>
+          {s.target
+            ? `flight pinned to target → lands f${s.landing_frame}`
+            : "unpinned — set the red target flag for a constrained fit"}
+        </span>
         <span className="tiny" style={{ display: "inline-flex", gap: 8 }}>
           {PROBE_LAYERS.map((l) => (
             <span key={l.key} style={{ color: l.colour }}>
@@ -888,6 +893,12 @@ function ClickToPlotModal({
       const out = await api.skyProbe(adminPassword, row.id, {
         swing: swing.idx ?? swingPos,
         seed: seed.length >= 3 ? seed : null,
+        // THE FAR END, IF THE OPERATOR HAS MARKED IT. The wizard's red
+        // flag is the green — the ball ends there. Handing it over
+        // turns the sky segment from an extrapolation that wanders
+        // into an interpolation between two known points, which is
+        // most of why the predicted window was landing in the trees.
+        target: swing.target || null,
       });
       setProbe(out);
       setTab("probe");

@@ -60,6 +60,10 @@ def main(argv=None):
                     help="floor on the LoG robust z-score")
     ap.add_argument("--min-ncc", type=float, default=0.6,
                     help="floor on the NCC correlation")
+    ap.add_argument("--target",
+                    help="x,y of the target (the green) in tee pixels — "
+                         "pins the far end of the flight, which turns the "
+                         "prediction from extrapolation into interpolation")
     ap.add_argument("--frames", type=Path, help="write annotated PNGs here")
     ap.add_argument("--out", type=Path, help="write the report JSON here")
     a = ap.parse_args(argv)
@@ -91,8 +95,11 @@ def main(argv=None):
         a.frames.mkdir(parents=True, exist_ok=True)
 
     floors = {"diff": a.min_diff, "log": a.min_log_z, "ncc": a.min_ncc}
+    _target = None
+    if a.target:
+        _target = [float(v) for v in a.target.split(",")]
     rep = probe(a.video, seed, a.frames, a.max_frames, a.win_min, a.win_pad,
-                floors)
+                floors, _target)
     rep["floors"] = floors
     rep["video"] = str(a.video)
     rep["fps"] = fps
@@ -108,6 +115,9 @@ def main(argv=None):
         print(f"pipeline         ok={pipeline['ok']} "
               f"points={len(pipeline['points'])} "
               f"reason={pipeline['reason']!r}")
+    if s.get("target"):
+        print(f"target           {s['target']} "
+              f"-> landing f{s.get('landing_frame')}  (flight pinned)")
     print(f"hand-off frame   {s['handoff_frame']}  "
           f"(seeded from {len(seed)} points)")
     print(f"probed           {s['frames_probed']} frames")

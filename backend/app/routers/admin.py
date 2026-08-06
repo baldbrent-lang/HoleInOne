@@ -7444,19 +7444,22 @@ def sky_probe_swing(
     if not src.exists():
         raise HTTPException(404, "tee video missing on disk")
 
+    # The swing record is needed either way: for the target it carries,
+    # and for the saved track when the caller sent no seed.
+    _sw = None
     seed = payload.get("seed")
+    _idx = int(payload.get("swing") or 0)
+    for s_ in ((row.edit_metrics or {}).get("swings") or []):
+        if isinstance(s_, dict) and int(s_.get("idx", -1)) == _idx:
+            _sw = s_
+            break
+    if _sw is None:
+        _sw = (row.edit_metrics or {})
     if not seed:
         # Fall back to whatever the pipeline last managed on this swing.
-        _idx = int(payload.get("swing") or 0)
-        _sw = None
-        for s_ in ((row.edit_metrics or {}).get("swings") or []):
-            if isinstance(s_, dict) and int(s_.get("idx", -1)) == _idx:
-                _sw = s_
-                break
-        if _sw is None:
-            _sw = (row.edit_metrics or {})
         seed = [
-            {"frame": int(r["frame"]), "x": float(r["x"]), "y": float(r["y"])}
+            {"frame": int(r["frame"]), "x": float(r["x"]),
+             "y": float(r["y"])}
             for r in (_sw.get("ball_track_frames") or [])
             if r.get("found") and r.get("x") is not None
         ]
@@ -7482,11 +7485,26 @@ def sky_probe_swing(
     # Bounded: this decodes real video on a request thread.
     _max = max(10, min(240, int(payload.get("max_frames") or 120)))
 
+    # THE TARGET PINS THE FAR END. The operator has already marked the
+    # green in the wizard, and the ball finishes there -- so the sky
+    # segment is an interpolation between two known points rather than
+    # an extrapolation that can wander into the treeline.
+    _target = payload.get("target")
+    if not _target:
+        _t = (_sw or {}).get("target")
+        if isinstance(_t, dict) and _t.get("x") is not None:
+            _target = [_t["x"], _t["y"]]
+    if isinstance(_target, dict):
+        _target = [_target.get("x"), _target.get("y")]
+    if _target and (_target[0] is None or _target[1] is None):
+        _target = None
+
     rep = sp.probe(
         src, seed, None, _max,
         int(payload.get("win_min") or 12),
         float(payload.get("win_pad") or 2.5),
         floors,
+        [float(_target[0]), float(_target[1])] if _target else None,
     )
     _name = f"skyprobe-{upload_id}-{int(payload.get('swing') or 0)}.png"
     _img = None
@@ -7507,6 +7525,7 @@ def sky_probe_swing(
         "summary": s_,
         "rows": rep["rows"],
         "floors": floors,
+        "target": _target,
         "seed_points": len(seed),
         "montage_url": _img,
     }
