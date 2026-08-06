@@ -349,9 +349,23 @@ function SkyProbePanel({ probe, onClose }) {
   return (
     <div
       className="card"
-      style={{ marginTop: 8, padding: 10, background: "rgba(0,0,0,0.35)" }}
+      style={{
+        marginTop: 8, padding: 10, background: "rgba(0,0,0,0.35)",
+        // The modal is a fixed-height flex column with overflow hidden,
+        // so a panel that grows just pushes the montage off the bottom
+        // where nothing can reach it. Take a bounded slice of the
+        // height and scroll inside it; the map keeps the rest.
+        flexShrink: 0, maxHeight: "45vh", overflowY: "auto",
+      }}
     >
-      <div className="row" style={{ alignItems: "center", gap: 10 }}>
+      <div
+        className="row"
+        style={{
+          alignItems: "center", gap: 10, flexWrap: "wrap",
+          position: "sticky", top: -10, zIndex: 1,
+          background: "rgba(20,20,20,0.95)", padding: "4px 0",
+        }}
+      >
         <b className="small">🛰 Sky probe</b>
         <span className="small">
           hand-off <b>f{s.handoff_frame}</b> · probed {s.frames_probed} ·{" "}
@@ -415,14 +429,20 @@ function SkyProbePanel({ probe, onClose }) {
             circles are sitting on a leaf rather than a ball, the
             agreement rate is lying to you.
           </div>
-          <img
-            src={probe.montage_url}
-            alt="Sky probe windows"
-            style={{
-              marginTop: 6, width: "100%", imageRendering: "pixelated",
-              borderRadius: 4, border: "1px solid var(--border)",
-            }}
-          />
+          <div style={{ overflowX: "auto", marginTop: 6 }}>
+            <img
+              src={probe.montage_url}
+              alt="Sky probe windows"
+              style={{
+                display: "block", imageRendering: "pixelated",
+                borderRadius: 4, border: "1px solid var(--border)",
+                // Natural size, scrolled sideways if need be. Squeezing
+                // a 10-wide contact sheet into the panel width makes
+                // every cell too small to judge, which defeats it.
+                maxWidth: "none",
+              }}
+            />
+          </div>
         </>
       )}
     </div>
