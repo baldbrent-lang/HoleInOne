@@ -2453,6 +2453,11 @@ function WizardBody({
         tee: { ...t, frame: draft.impactFrame ?? 0 },
         green: { ...g, frame: draft.landingFrame ?? defaultEnd ?? 0 },
         existing: vm?.view_map || null,
+        // What this calibration will apply to. Worth saying out loud:
+        // it is saved against the hole, not this upload, so it is about
+        // to change every swing recorded there.
+        scope: vm?.course_name
+          ? `${vm.course_name} · hole ${vm.hole}` : null,
         reason: vm?.reason || null,
       });
     } catch (e) {
@@ -2780,6 +2785,7 @@ function WizardBody({
               teeFrame={calibrating.tee}
               greenFrame={calibrating.green}
               existing={calibrating.existing}
+              scope={calibrating.scope}
               onClose={() => setCalibrating(null)}
               onSaved={(out) => {
                 setCalibrating(null);
@@ -3233,7 +3239,8 @@ function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
  * treetop, anything in the air: no — it will skew the whole fit.
  */
 function ViewMapModal({
-  uploadId, adminPassword, teeFrame, greenFrame, existing, onClose, onSaved,
+  uploadId, adminPassword, teeFrame, greenFrame, existing, scope,
+  onClose, onSaved,
 }) {
   const [pairs, setPairs] = useState(() => existing?.points || []);
   const [pending, setPending] = useState(null);   // {side, x, y}
@@ -3288,11 +3295,14 @@ function ViewMapModal({
       >
         <div className="row" style={{ alignItems: "baseline", gap: 10 }}>
           <b>Calibrate tee ↔ green</b>
+          {scope && <span className="small">{scope}</span>}
           <span className="tiny muted">
             Click the same GROUND feature in both pictures — a bunker
             corner, the flagstick&apos;s BASE, a bend in the cart path.
             Four pairs minimum, spread out. Anything off the ground (a
-            flag top, a treetop) skews the whole fit.
+            flag top, a treetop) skews the whole fit. Saved against the
+            HOLE, so it aims every swing recorded there — not just this
+            one.
           </span>
           <button
             type="button"

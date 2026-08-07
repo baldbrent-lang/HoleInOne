@@ -7412,21 +7412,46 @@ def render_tracer_fast(
     }
 
 
-def _tee_camera_for(db, row):
-    """The tee camera that shot this upload, or None.
+def _hole_for_upload(db, row) -> int:
+    """Which hole this upload is of.
 
-    The mapping is a property of the INSTALLATION -- two cameras bolted
-    down looking at one hole -- so it lives on the camera and is reused
-    by every swing that camera ever records. An upload with no camera
-    event (a hand-uploaded file) has nowhere to hang it, and says so
-    rather than silently calibrating something that will never be read.
+    LongVideoUpload has no hole column, so it is reconstructed the same
+    way produce does: the camera event when there is one, then whatever
+    the operator finalised, then the clips already cut from it, then 1.
     """
-    if not getattr(row, "camera_event_id", None):
-        return None
-    ev = db.get(CameraEvent, row.camera_event_id)
-    if not ev or not ev.tee_camera_id:
-        return None
-    return db.get(Camera, ev.tee_camera_id)
+    try:
+        if getattr(row, "camera_event_id", None):
+            ev = db.get(CameraEvent, row.camera_event_id)
+            if ev and ev.hole_number:
+                return int(ev.hole_number)
+        _em = row.edit_metrics or {}
+        if _em.get("finalized_hole_number"):
+            return int(_em["finalized_hole_number"])
+        _c = db.query(VideoClip).filter(
+            VideoClip.long_upload_id == row.id,
+            VideoClip.hole_number.isnot(None),
+        ).first()
+        if _c and _c.hole_number:
+            return int(_c.hole_number)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("hole for upload %s failed: %s", getattr(row, "id", None), exc)
+    return 1
+
+
+def _view_map_for(db, row):
+    """(course, hole, view_map). The mapping keyed by hole on the course.
+
+    KEYED BY HOLE RATHER THAN BY CAMERA. It describes two viewpoints of
+    one hole, and it has to be reachable from every upload -- including
+    hand-uploaded files, which never get a camera event and so cannot be
+    traced back to a camera row at all. Keying it on the camera made the
+    calibrate button unusable on exactly those uploads.
+    """
+    course = db.get(Course, row.course_id) if row.course_id else None
+    hole = _hole_for_upload(db, row)
+    if course is None:
+        return None, hole, None
+    return course, hole, (course.view_maps or {}).get(str(hole))
 
 
 def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
@@ -7441,15 +7466,13 @@ def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
 
     if not spot:
         return None, "no landing spot marked on the green"
-    cam = _tee_camera_for(db, row)
-    if cam is None:
-        return None, ("this upload has no camera event, so there is no tee "
-                      "camera to map onto")
-    vm = cam.view_map
+    course, hole, vm = _view_map_for(db, row)
+    if course is None:
+        return None, "this upload is not attached to a course"
     if not vm or not vm.get("homography"):
-        return None, ("the tee camera has no green→tee mapping yet — "
-                      "calibrate it once and every swing on this hole is "
-                      "aimed")
+        return None, (f"hole {hole} at {course.name} has no green→tee "
+                      f"mapping yet — calibrate it once and every swing on "
+                      f"this hole is aimed")
     try:
         x, y = float(spot[0]), float(spot[1])
     except (TypeError, ValueError, IndexError):
@@ -7463,19 +7486,19 @@ def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
 
 @router.get("/long-uploads/{upload_id}/view-map")
 def get_upload_view_map(upload_id: int, db: Session = Depends(get_db)):
-    """The green→tee mapping in force for this upload's tee camera."""
+    """The green→tee mapping in force for this upload's hole."""
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
-    cam = _tee_camera_for(db, row)
+    course, hole, vm = _view_map_for(db, row)
     return {
-        "camera_id": getattr(cam, "id", None),
-        "camera_name": getattr(cam, "name", None),
-        "hole": getattr(cam, "assigned_hole", None),
-        "view_map": (cam.view_map if cam else None),
-        "reason": None if cam else (
-            "this upload has no camera event, so it is not tied to a tee "
-            "camera — nothing to calibrate"
+        "course_id": getattr(course, "id", None),
+        "course_name": getattr(course, "name", None),
+        "hole": hole,
+        "view_map": vm,
+        "reason": None if course else (
+            "this upload is not attached to a course, so there is nowhere "
+            "to store a mapping"
         ),
     }
 
@@ -7491,21 +7514,21 @@ def save_upload_view_map(
     Body: {"points": [{"green": [x,y], "tee": [x,y]}, ...] (>=4),
            "green_size": [w,h], "tee_size": [w,h]}
 
-    Saved on the TEE CAMERA, not the upload: the two cameras are bolted
-    down looking at one hole, so this is done once and every swing they
-    record afterwards is aimed by it.
+    Saved against the COURSE and HOLE, not the upload: the two cameras
+    are bolted down looking at one hole, so this is done once and every
+    swing recorded there afterwards is aimed by it.
     """
     from ..services import green_calibration as gc
 
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
-    cam = _tee_camera_for(db, row)
-    if cam is None:
+    course, hole, _ = _view_map_for(db, row)
+    if course is None:
         raise HTTPException(
             409,
-            "this upload has no camera event, so there is no tee camera to "
-            "save a mapping on",
+            "this upload is not attached to a course, so there is nowhere "
+            "to store a mapping",
         )
     try:
         vm = gc.fit_view_map(
@@ -7530,17 +7553,22 @@ def save_upload_view_map(
         )
     vm["source_upload_id"] = upload_id
     vm["calibrated_at"] = _utcnow_naive().isoformat()
-    cam.view_map = vm
+    # Replace the dict wholesale: SQLAlchemy does not see a mutation of a
+    # JSON column in place, and the write would be silently dropped.
+    _all = dict(course.view_maps or {})
+    _all[str(hole)] = vm
+    course.view_maps = _all
     db.add(AuditLog(
         actor="admin", action="save_view_map",
-        target=f"camera:{cam.id}",
+        target=f"course:{course.id}:hole:{hole}",
         detail=f"points={vm['n_points']} rms_px={vm['rms_px']} "
                f"upload={upload_id}",
     ))
     db.commit()
     return {
         "ok": True,
-        "camera_id": cam.id,
+        "course_id": course.id,
+        "hole": hole,
         "n_points": vm["n_points"],
         "rms_px": vm["rms_px"],
         "accuracy_note": (
