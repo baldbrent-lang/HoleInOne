@@ -7412,129 +7412,34 @@ def render_tracer_fast(
     }
 
 
-@router.post("/long-uploads/{upload_id}/sky-probe")
-def sky_probe_swing(
-    upload_id: int,
-    payload: dict = Body(default={}),
-    db: Session = Depends(get_db),
-):
-    """Probe whether the ball is still findable past the blob detector.
+def _green_scan_window(db, row, green_path, impact_frame, green_total, pad_sec):
+    """(first, last) green frames worth scanning for the landing.
 
-    The measurement behind the predictive-tracker idea, run from the app
-    so it can be pointed at real swings on the day rather than only at
-    clips someone remembered to copy off the Pi.
-
-    Seeds from the points sent in `seed` (what the operator has plotted
-    in click-to-plot -- the honest seed for a swing the pipeline failed
-    on), else from the swing's saved ball track. Returns the summary,
-    the per-frame rows, and a montage image of the probed windows: the
-    numbers say a detector found something, only the picture says
-    whether that something was the ball.
-
-    Body: swing (index), seed [{frame,x,y}], max_frames, floors {..}.
+    From impact -- the ball is in the air from there, and on a short one
+    it can be down before the produced clip even cuts across -- to where
+    produce stops, plus `pad_sec`. Falls back to the whole clip (capped)
+    when there is no impact frame to reckon from, which is still a
+    useful thing to look at, just a slower one.
     """
-    from ..services import sky_probe as sp
-
-    row = db.get(LongVideoUpload, upload_id)
-    if not row:
-        raise HTTPException(404, "long upload not found")
-    if not row.tee_filename:
-        raise HTTPException(400, "no tee video on this upload")
-    src = _local_tee(row)
-    if not src.exists():
-        raise HTTPException(404, "tee video missing on disk")
-
-    # The swing record is needed either way: for the target it carries,
-    # and for the saved track when the caller sent no seed.
-    _sw = None
-    seed = payload.get("seed")
-    _idx = int(payload.get("swing") or 0)
-    for s_ in ((row.edit_metrics or {}).get("swings") or []):
-        if isinstance(s_, dict) and int(s_.get("idx", -1)) == _idx:
-            _sw = s_
-            break
-    if _sw is None:
-        _sw = (row.edit_metrics or {})
-    if not seed:
-        # Fall back to whatever the pipeline last managed on this swing.
-        seed = [
-            {"frame": int(r["frame"]), "x": float(r["x"]),
-             "y": float(r["y"])}
-            for r in (_sw.get("ball_track_frames") or [])
-            if r.get("found") and r.get("x") is not None
-        ]
-    seed = [
-        {"frame": int(p["frame"]), "x": float(p["x"]), "y": float(p["y"])}
-        for p in (seed or [])
-        if p and p.get("frame") is not None
-    ]
-    if len(seed) < 4:
-        raise HTTPException(
-            400,
-            "need at least 4 seed points — plot a few on the flight in "
-            "click-to-plot first, then probe",
-        )
-
-    floors = dict(sp.DEFAULT_FLOORS)
-    for k, v in (payload.get("floors") or {}).items():
-        if k in floors:
-            try:
-                floors[k] = float(v)
-            except (TypeError, ValueError):
-                pass
-    # Bounded: this decodes real video on a request thread.
-    _max = max(10, min(240, int(payload.get("max_frames") or 120)))
-
-    # THE TARGET PINS THE FAR END. The operator has already marked the
-    # green in the wizard, and the ball finishes there -- so the sky
-    # segment is an interpolation between two known points rather than
-    # an extrapolation that can wander into the treeline.
-    _target = payload.get("target")
-    if not _target:
-        _t = (_sw or {}).get("target")
-        if isinstance(_t, dict) and _t.get("x") is not None:
-            _target = [_t["x"], _t["y"]]
-    if isinstance(_target, dict):
-        _target = [_target.get("x"), _target.get("y")]
-    if _target and (_target[0] is None or _target[1] is None):
-        _target = None
-
+    _end = _default_end_frame(db, row, green_path, impact_frame, green_total)
+    if _end is None:
+        return 0, (int(green_total) - 1 if green_total else 240)
     try:
-        rep = sp.probe(
-            src, seed, None, _max,
-            int(payload.get("win_min") or 12),
-            float(payload.get("win_pad") or 2.5),
-            floors,
-            [float(_target[0]), float(_target[1])] if _target else None,
-        )
-    except ValueError as exc:
-        # A seed too short or too still to extrapolate from. That is the
-        # operator's to fix -- plot a few more marks, earlier -- so say
-        # so rather than returning a confident line drawn from nothing.
-        raise HTTPException(400, str(exc)) from exc
-    _name = f"skyprobe-{upload_id}-{int(payload.get('swing') or 0)}.png"
-    _img = None
-    try:
-        if sp.render_montage(src, rep, CLIPS_DIR / _name):
-            _img = (f"{settings.app_base_url}/uploads/clips/{_name}"
-                    f"?v={int((CLIPS_DIR / _name).stat().st_mtime)}")
+        gfps = float(probe_fps(green_path) or 0.0)
+        tee_path = _local_tee(row)
+        tee_fps = float(probe_fps(tee_path) or 0.0) if tee_path else 0.0
+        delta, _ = _d3_green_delta_sec(db, row)
+        _start = int(round(
+            ((float(impact_frame) / tee_fps) - float(delta)) * gfps
+        )) if (gfps > 0 and tee_fps > 0) else 0
     except Exception as exc:  # noqa: BLE001
-        log.warning("sky-probe montage failed for %s: %s", upload_id, exc)
-    s_ = rep["summary"]
-    log.info(
-        "sky-probe upload=%s seed=%d handoff=f%s probed=%d extended=%d "
-        "agree=%d/%d", upload_id, len(seed), s_["handoff_frame"],
-        s_["frames_probed"], s_["frames_extended"], s_["agreement_frames"],
-        s_["frames_probed"],
-    )
-    return {
-        "summary": s_,
-        "rows": rep["rows"],
-        "floors": floors,
-        "target": _target,
-        "seed_points": len(seed),
-        "montage_url": _img,
-    }
+        log.debug("green scan window for %s failed: %s",
+                  getattr(row, "id", None), exc)
+        return 0, _end
+    _last = _end + int(round(pad_sec * gfps))
+    if green_total:
+        _last = min(_last, int(green_total) - 1)
+    return max(0, _start), max(0, _last)
 
 
 @router.post("/long-uploads/{upload_id}/scan-region")
@@ -7553,8 +7458,19 @@ def scan_plot_region(
     need something clickable on it.
 
     Body: x, y, w, h (native px), start_frame, end_frame (source
-    frames; end defaults to start+240, span hard-capped at 900), and
-    `sensitivity` 1-3.
+    frames; end defaults to start+240, span hard-capped at 900),
+    `sensitivity` 1-3, and `which` ("tee" | "green").
+
+    WHICH="GREEN" IS THE LANDING QUESTION. On the tee camera the ball
+    leaves frame and the operator is guessing whether it came down
+    anywhere the green camera can see. Scanning the green half of the
+    clip answers that directly: if the ball lands in frame it draws a
+    short arc of dots ending in a scatter where it bounces, and if
+    nothing moves out there it did not land in view. With no explicit
+    window the green scan covers exactly what the produced clip does --
+    impact through the end of the green cut -- plus `pad_sec` (default
+    2s) beyond it, because a ball that lands just after the clip stops
+    is the case worth seeing.
 
     SENSITIVITY EXISTS BECAUSE THE BALL IS SMALL AND FAST. At 720p50 a
     driven ball crossing frame is a handful of pixels, often dimmer than
@@ -7573,11 +7489,18 @@ def scan_plot_region(
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
-    if not row.tee_filename:
-        raise HTTPException(400, "no tee video on this upload")
-    src = _local_tee(row)
-    if not src.exists():
-        raise HTTPException(404, "tee video missing on disk")
+    _green = str(payload.get("which") or "tee").lower() == "green"
+    _cam = "green" if _green else "tee"
+    if _green:
+        if not row.green_filename:
+            raise HTTPException(400, "no green video on this upload")
+        src = _local_green(row)
+    else:
+        if not row.tee_filename:
+            raise HTTPException(400, "no tee video on this upload")
+        src = _local_tee(row)
+    if not src or not src.exists():
+        raise HTTPException(404, f"{_cam} video missing on disk")
 
     cap = cv2.VideoCapture(str(src))
     try:
@@ -7593,8 +7516,21 @@ def scan_plot_region(
             h = max(8, min(fh - y, int(payload.get("h") or fh)))
             _sens = int(payload.get("sensitivity") or 2)
             _sens = max(1, min(3, _sens))
-            start = max(0, int(payload.get("start_frame") or 0))
+            _start_raw = payload.get("start_frame")
             _end_raw = payload.get("end_frame")
+            _pad = max(0.0, min(10.0, float(payload.get("pad_sec") or 2.0)))
+            if _green and (_start_raw is None or _end_raw is None):
+                # THE CLIP'S OWN GREEN WINDOW, worked out here because
+                # the tee->green offset lives on this side. The caller
+                # sends the tee impact frame -- the one thing it knows --
+                # and gets back the same span produce would cut, padded.
+                _a, _b = _green_scan_window(
+                    db, row, src, payload.get("impact_frame"), nb, _pad)
+                if _start_raw is None:
+                    _start_raw = _a
+                if _end_raw is None:
+                    _end_raw = _b
+            start = max(0, int(_start_raw or 0))
             end = int(_end_raw) if _end_raw is not None else start + 240
         except (TypeError, ValueError):
             raise HTTPException(400, "bad region / frame values")
@@ -7652,13 +7588,17 @@ def scan_plot_region(
     finally:
         cap.release()
     log.info(
-        "scan-region upload=%s region=(%d,%d %dx%d) f%d-%d sens=%d "
-        "-> %d dots", upload_id, x, y, w, h, start, end, _sens, len(dots),
+        "scan-region upload=%s cam=%s region=(%d,%d %dx%d) f%d-%d sens=%d "
+        "-> %d dots", upload_id, _cam, x, y, w, h, start, end, _sens,
+        len(dots),
     )
     return {
         "dots": dots[:_CAP],
+        "which": _cam,
         "sensitivity": _sens,
         "n_frames": end - start + 1,
+        "start_frame": start,
+        "end_frame": end,
         "region": {"x": x, "y": y, "w": w, "h": h},
     }
 

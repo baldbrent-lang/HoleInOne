@@ -327,151 +327,6 @@ function ConfirmDialog({ open, title, body, confirmLabel, onConfirm, onCancel })
   );
 }
 
-/* What the sky probe found. Deliberately blunt: the headline is how
-   many frames past the hand-off two detectors AGREED, because that is
-   the number that decides whether a sky-phase tracker is worth
-   building. The montage sits underneath because the numbers can only
-   say a detector found something -- the picture says whether that
-   something was the ball. */
-function SkyProbePanel({ probe, onClose }) {
-  if (probe.error) {
-    return (
-      <div className="err-text small" style={{ marginTop: 8 }}>
-        Sky probe failed: {probe.error}
-      </div>
-    );
-  }
-  const s = probe.summary || {};
-  const det = s.per_detector || {};
-  const rate = s.frames_probed
-    ? Math.round((100 * s.agreement_frames) / s.frames_probed)
-    : 0;
-  return (
-    <div
-      className="card"
-      style={{
-        margin: 0, padding: 10, background: "rgba(0,0,0,0.35)",
-        // No height cap and no inner scroll: this is a tab now, not a
-        // panel wedged under the map. It gets the pane, the pane
-        // scrolls. Stacking the two was what squeezed the map down to a
-        // thumbnail on the screen whose whole job is looking at it.
-      }}
-    >
-      <div
-        className="row"
-        style={{
-          alignItems: "center", gap: 10, flexWrap: "wrap",
-          position: "sticky", top: -10, zIndex: 1,
-          background: "rgba(20,20,20,0.95)", padding: "4px 0",
-        }}
-      >
-        <b className="small">🛰 Sky probe</b>
-        <span className="small">
-          hand-off <b>f{s.handoff_frame}</b> · probed {s.frames_probed} ·{" "}
-          <b style={{ color: s.frames_extended > 5 ? "#3ee37a" : "#f59e0b" }}>
-            extended {s.frames_extended}
-          </b>{" "}
-          frames · agreement {rate}%
-        </span>
-        <span className="tiny muted">
-          window texture {s.window_std?.median} (low = sky, high = trees)
-        </span>
-        <span className="tiny" style={{ color: s.target ? "#3ee37a" : "#f59e0b" }}>
-          {s.target && s.landing_frame != null
-            ? `flight pinned to target → lands f${s.landing_frame}`
-            : s.target
-              ? "target set but unusable as a clock — the flight is too "
-                + "vertical in this view to say when it gets there"
-              : "unpinned — set the red target flag for a constrained fit"}
-        </span>
-        {s.stopped_because && (
-          <span className="tiny muted">stopped: {s.stopped_because}</span>
-        )}
-        <span className="tiny" style={{ display: "inline-flex", gap: 8 }}>
-          {PROBE_LAYERS.map((l) => (
-            <span key={l.key} style={{ color: l.colour }}>
-              {l.dash ? "┄" : "━"} {l.label}
-            </span>
-          ))}
-        </span>
-        <button
-          type="button"
-          className="ghost small"
-          style={{ width: "auto", marginLeft: "auto" }}
-          onClick={onClose}
-          title="Discard this probe and go back to the map"
-        >
-          Dismiss
-        </button>
-      </div>
-      <table className="small" style={{ marginTop: 6, width: "auto" }}>
-        <thead>
-          <tr style={{ textAlign: "left" }}>
-            <th style={{ paddingRight: 12 }}>detector</th>
-            <th style={{ paddingRight: 12 }}>found</th>
-            <th style={{ paddingRight: 12 }}
-                title="Cleared its credibility floor. Everything finds SOMETHING in a small window; this is what was worth believing.">
-              credible
-            </th>
-            <th style={{ paddingRight: 12 }}
-                title="Credible AND somewhere a ball could actually have got to: onward along the flight, no further than the model allows. The gap between this and credible is the foliage and the golfer.">
-              usable
-            </th>
-            <th style={{ paddingRight: 12 }}>median err</th>
-            <th>median score</th>
-          </tr>
-        </thead>
-        <tbody>
-          {["diff", "log", "ncc"].map((k) => (
-            <tr key={k}>
-              <td style={{ paddingRight: 12 }}>
-                {k === "diff" ? "frame-diff (today)"
-                  : k === "log" ? "Laplacian blob" : "template match"}
-              </td>
-              <td style={{ paddingRight: 12 }}>{det[k]?.found ?? "—"}</td>
-              <td style={{ paddingRight: 12 }}>
-                {det[k]?.credible ?? "—"}
-                <span className="muted"> (≥{det[k]?.floor})</span>
-              </td>
-              <td style={{ paddingRight: 12 }}>{det[k]?.usable ?? "—"}</td>
-              <td style={{ paddingRight: 12 }}>
-                {det[k]?.median_err_px == null
-                  ? "—" : `${det[k].median_err_px}px`}
-              </td>
-              <td>{det[k]?.median_score ?? "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {probe.montage_url && (
-        <>
-          <div className="tiny muted" style={{ marginTop: 6 }}>
-            Each cell is the search window, blown up: ✛ prediction,
-            ● green Laplacian, ● magenta template, ● red frame-diff. A
-            frame label in green means two detectors agreed. If the
-            circles are sitting on a leaf rather than a ball, the
-            agreement rate is lying to you.
-          </div>
-          <div style={{ overflowX: "auto", marginTop: 6 }}>
-            <img
-              src={probe.montage_url}
-              alt="Sky probe windows"
-              style={{
-                display: "block", imageRendering: "pixelated",
-                borderRadius: 4, border: "1px solid var(--border)",
-                // Natural size, scrolled sideways if need be. Squeezing
-                // a 10-wide contact sheet into the panel width makes
-                // every cell too small to judge, which defeats it.
-                maxWidth: "none",
-              }}
-            />
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 function MetaRow({ k, v }) {
   // Empty string / null / undefined → blank value (no em-dash). The label
   // stays so the rows in adjacent tiles still line up vertically.
@@ -856,74 +711,6 @@ function ClickToPlotModal({
     return init;
   });
   const [marks, setMarks] = useState(() => ({ ...baked }));
-  // The sky probe's last result: {summary, montage_url, ...}. Research
-  // instrument, not part of producing a clip -- it measures whether the
-  // ball is still findable past the point the blob detector loses it.
-  const [probe, setProbe] = useState(null);
-  const [probing, setProbing] = useState(false);
-  // Draw the probe's paths over the heat map. On by default when a
-  // probe comes back -- the whole reason to run one is to see where
-  // those points went relative to the real motion.
-  const [showProbeTracks, setShowProbeTracks] = useState(true);
-  // Which pane has the height: the map, or the probe's numbers. They
-  // were stacked, and the panel squeezed the map down to a thumbnail --
-  // on a screen whose whole job is looking closely at one picture.
-  const [tab, setTab] = useState("map");
-
-  // Rows -> one path per layer, in frame coords. Only CREDIBLE picks
-  // join a detector's path: an incredible pick is the detector saying
-  // "there was nothing here", and stringing those into a line draws a
-  // flight that nothing ever detected.
-  const probeTracks = useMemo(() => {
-    if (!probe || probe.error || !showProbeTracks) return null;
-    const rows = (probe.rows || []).filter((r) => r.pred);
-    if (!rows.length) return null;
-    const out = { pred: [], log: [], ncc: [], diff: [] };
-    for (const r of rows) {
-      out.pred.push({ frame: r.frame, x: r.pred[0], y: r.pred[1] });
-      for (const k of ["log", "ncc", "diff"]) {
-        // Credible AND plausible. A score floor only says the window
-        // held something ball-LOOKING; plausibility says a ball could
-        // have got there. Drawing the difference is what put those
-        // zig-zags back down over the golfer.
-        if (r[k] && r[k].credible && r[k].plausible) {
-          out[k].push({ frame: r.frame, x: r[k].xy[0], y: r[k].xy[1] });
-        }
-      }
-    }
-    return out;
-  }, [probe, showProbeTracks]);
-
-  async function runSkyProbe() {
-    if (probing) return;
-    // Seed from what is ON SCREEN: the marks the operator has plotted,
-    // which for a swing the pipeline failed on is the only honest seed
-    // there is. Falls back server-side to the saved track.
-    const seed = Object.entries(marks)
-      .map(([f, p]) => ({ frame: parseInt(f, 10), x: p.x, y: p.y }))
-      .sort((a, b) => a.frame - b.frame);
-    setProbing(true);
-    setProbe(null);
-    try {
-      const out = await api.skyProbe(adminPassword, row.id, {
-        swing: swing.idx ?? swingPos,
-        seed: seed.length >= 3 ? seed : null,
-        // THE FAR END, IF THE OPERATOR HAS MARKED IT. The wizard's red
-        // flag is the green — the ball ends there. Handing it over
-        // turns the sky segment from an extrapolation that wanders
-        // into an interpolation between two known points, which is
-        // most of why the predicted window was landing in the trees.
-        target: swing.target || null,
-      });
-      setProbe(out);
-      setTab("probe");
-    } catch (e) {
-      setProbe({ error: e?.message || String(e) });
-    } finally {
-      setProbing(false);
-    }
-  }
-
   // No busy state: Save & close hands the run to the production card
   // and closes, so there is never a moment where this modal is waiting.
   // THE PIXEL SPACE THE DOTS ARE IN — this swing's own, when produce
@@ -1299,16 +1086,6 @@ function ClickToPlotModal({
             <button
               type="button"
               className="ghost small"
-              onClick={runSkyProbe}
-              style={{ width: "auto" }}
-              disabled={probing}
-              title="Research: past the frame where the blob detector loses the ball, predict where it should be, open a small window there, and ask three detectors (frame-diff, Laplacian blob, template match) what they see. Measures whether a sky-phase tracker is worth building on THIS swing. Changes nothing."
-            >
-              {probing ? "Probing…" : "🛰 Sky probe"}
-            </button>
-            <button
-              type="button"
-              className="ghost small"
               onClick={onClose}
               style={{ width: "auto" }}
             >
@@ -1331,35 +1108,8 @@ function ClickToPlotModal({
           </div>
         </div>
 
-        {probe && (
-          <div
-            className="row"
-            style={{ gap: 6, marginBottom: 6, alignItems: "center" }}
-          >
-            {[["map", "🖱 Heat map"], ["probe", "🛰 Sky probe"]].map(
-              ([id, label]) => (
-                <button
-                  key={id}
-                  type="button"
-                  className={tab === id ? "small" : "small ghost"}
-                  style={{ width: "auto" }}
-                  onClick={() => setTab(id)}
-                >
-                  {label}
-                </button>
-              ),
-            )}
-            <span className="tiny muted">
-              {tab === "map"
-                ? "tick “paths” on the map to overlay the probe"
-                : `hand-off f${probe.summary?.handoff_frame} · extended `
-                  + `${probe.summary?.frames_extended} frames`}
-            </span>
-          </div>
-        )}
-
         <div style={{
-          flex: 1, minHeight: 0, display: tab === "map" ? "flex" : "none",
+          flex: 1, minHeight: 0, display: "flex",
           alignItems: "center", justifyContent: "center",
         }}>
           {(dots.length > 0 || denseDots.length > 0) && bgUrl ? (
@@ -1379,12 +1129,6 @@ function ClickToPlotModal({
               onPlaceBall={(pt) => {
                 setBallAtRest(pt);
                 setPlacingBall(false);
-              }}
-              probeTracks={probeTracks}
-              probeToggle={{
-                available: !!probe && !probe.error,
-                on: showProbeTracks,
-                onChange: setShowProbeTracks,
               }}
               scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
@@ -1411,15 +1155,6 @@ function ClickToPlotModal({
             </div>
           )}
         </div>
-
-        {probe && tab === "probe" && (
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-            <SkyProbePanel
-              probe={probe}
-              onClose={() => { setProbe(null); setTab("map"); }}
-            />
-          </div>
-        )}
 
         {/* The legend is a dozen lines of prose that was pushing the map
             up the screen on every open, long after the operator had read
@@ -2652,6 +2387,55 @@ function WizardBody({
   // One correction per entry into end mode, or the two would ping-pong.
   const endCorrectedRef = useRef(false);
 
+  // MOTION ON THE GREEN, over the frames the produced clip covers plus
+  // a couple of seconds. The landing frame is the hardest thing in this
+  // wizard to find by stepping: the ball is a few pixels, it is in view
+  // for a handful of frames, and it arrives from off-screen. Scanning
+  // the window and drawing every blob at once turns that search into a
+  // glance -- and answers the prior question, whether the ball landed
+  // anywhere the green camera can see, without finding the frame at all.
+  const [greenHeat, setGreenHeat] = useState(null);
+  const [greenScanning, setGreenScanning] = useState(false);
+  const [greenScanNote, setGreenScanNote] = useState(null);
+  const [greenScanLevel, setGreenScanLevel] = useState(2);
+
+  async function scanGreen(level) {
+    if (greenScanning) return;
+    setGreenScanning(true);
+    setGreenScanNote(null);
+    try {
+      const out = await api.scanPlotRegion(adminPassword, row.id, {
+        which: "green",
+        impact_frame: draft.impactFrame ?? null,
+        sensitivity: level,
+      });
+      const dots = out.dots || [];
+      const first = out.start_frame ?? 0;
+      const last = out.end_frame ?? first;
+      setGreenHeat({ dots, first, span: Math.max(1, last - first) });
+      setGreenScanLevel(level);
+      if (!dots.length) {
+        // Nothing found is a real answer at level 3 and a shrug at
+        // level 1, so say which one this was.
+        setGreenScanNote(
+          level >= 3
+            ? "No motion at all in the green window — the ball did not "
+              + "land in this camera's view."
+            : `No motion at level ${level}. Try Deeper.`,
+        );
+      } else {
+        setGreenScanNote(
+          `${dots.length} dots over frames ${first}–${last} `
+          + `(level ${level}). Click the one where it lands.`,
+        );
+      }
+    } catch (e) {
+      setGreenScanNote(e?.message || String(e));
+    } finally {
+      setGreenScanning(false);
+    }
+  }
+
   // Default cut frame (until manually set): 2.5 s after impact. The
   // produced clip cuts from the tee tracer to the green camera here.
   const fps = row?.tee_fps || 30;
@@ -2859,6 +2643,32 @@ function WizardBody({
             draft={draft}
             setDraft={setDraft}
             loading={navLoading}
+            // Only over the green camera: these are green-frame
+            // coordinates and would land in the trees on a tee frame.
+            heat={
+              greenHeat && (editing === "landing" || editing === "landing_spot")
+                ? {
+                  ...greenHeat,
+                  current: navFrame,
+                  // A dot IS the answer to both questions this step
+                  // asks -- which frame, and where in it -- so take
+                  // both and save them. Stepping off the frame
+                  // afterwards must not quietly discard the pick.
+                  onPick: (d) => {
+                    loadFrame(d.frame, "green");
+                    setDraft((prev) => ({
+                      ...prev,
+                      landingFrame: d.frame,
+                      landingSpot: { x: d.x, y: d.y },
+                    }));
+                    persistPatch({
+                      landing_frame: d.frame,
+                      landing_spot: { x: d.x, y: d.y },
+                    });
+                  },
+                }
+                : null
+            }
             frameNav={showFrameNav ? {
               current: navFrame,
               total: navTotal,
@@ -2954,6 +2764,46 @@ function WizardBody({
             touches down. The clip ends {LANDING_TAIL_SEC}s after this, and
             the tracer is drawn to arrive here.
           </div>
+          <div className="row" style={{ gap: 6, marginBottom: 6,
+                                        flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto" }}
+              disabled={greenScanning}
+              onClick={() => scanGreen(greenScanLevel)}
+              title="Diff every frame of the green window the clip covers — impact through the end of the cut, plus 2s — and draw all the motion at once. The ball reads as a short arc ramping blue to orange; an empty picture means it did not land in this camera's view."
+            >
+              {greenScanning ? "Scanning…" : "🔍 Scan for landing"}
+            </button>
+            {greenHeat && (
+              <>
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ width: "auto" }}
+                  disabled={greenScanning || greenScanLevel >= 3}
+                  onClick={() => scanGreen(Math.min(3, greenScanLevel + 1))}
+                  title="Lower the motion threshold and keep more blobs. Level 3 hands back wind in the trees too — you are the filter."
+                >
+                  Deeper
+                </button>
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ width: "auto" }}
+                  onClick={() => { setGreenHeat(null); setGreenScanNote(null); }}
+                >
+                  Clear
+                </button>
+              </>
+            )}
+          </div>
+          {greenScanNote && (
+            <div className="tiny muted" style={{ marginBottom: 6 }}>
+              {greenScanNote}
+            </div>
+          )}
           <FrameStepper
             current={navFrame}
             total={navTotal}
@@ -3166,7 +3016,7 @@ function scaleRoi(roi, factor, frameW, frameH) {
   return { x, y, w, h };
 }
 
-function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading, frameNav }) {
+function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading, frameNav, heat }) {
   const hasDims = !!(frameW && frameH);
   const containerRef = useRef(null);
 
@@ -3381,6 +3231,49 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
         >
           {loading ? "Loading frame…" : "No frame"}
         </div>
+      )}
+      {/* THE GREEN'S MOTION, ALL OF IT AT ONCE. One dot per blob per
+          frame over the window the clip covers, ramped blue (early) to
+          orange (late) so the ball reads as a short coloured arc ending
+          in a scatter where it bounces -- and so an empty picture is an
+          answer too: nothing moved out here, so it did not land in
+          view. Clicking a dot goes to its frame and drops the landing
+          spot on it, which is the whole reason to look. */}
+      {hasDims && heat?.dots?.length > 0 && (
+        <svg
+          viewBox={`0 0 ${frameW} ${frameH}`}
+          preserveAspectRatio="none"
+          style={{ position: "absolute", inset: 0, width: "100%",
+                   height: "100%" }}
+        >
+          {heat.dots.map((d, i) => {
+            const t = heat.span > 0
+              ? Math.max(0, Math.min(1, (d.frame - heat.first) / heat.span))
+              : 0;
+            const hue = 205 - 175 * t;   // blue -> orange
+            const here = d.frame === heat.current;
+            return (
+              <circle
+                key={`${d.frame}-${d.x}-${d.y}-${i}`}
+                cx={d.x}
+                cy={d.y}
+                r={(here ? 5 : 2.6) * (frameW / 900)}
+                fill={`hsl(${hue} 90% 60%)`}
+                fillOpacity={here ? 0.95 : 0.5}
+                stroke={here ? "#fff" : "none"}
+                strokeWidth={frameW / 1200}
+                style={{ cursor: "pointer" }}
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  heat.onPick?.(d);
+                }}
+              >
+                <title>{`frame ${d.frame} · ${d.x}, ${d.y}`}</title>
+              </circle>
+            );
+          })}
+        </svg>
       )}
       {loading && imageUrl && (
         <div
@@ -4721,20 +4614,9 @@ function ImageLightbox({ url, title, onClose }) {
  */
 const DENSE_DOT_ZOOM = 2.5;
 
-/* The sky probe's four paths, and what each one is. Prediction is
-   dashed because it is a model, not a measurement -- the eye should
-   read it as "where we expected" rather than "where it was". */
-const PROBE_LAYERS = [
-  { key: "pred", label: "prediction", colour: "#38bdf8", dash: "6 4" },
-  { key: "log", label: "Laplacian", colour: "#22c55e", dash: null },
-  { key: "ncc", label: "template", colour: "#e879f9", dash: null },
-  { key: "diff", label: "frame-diff", colour: "#ef4444", dash: null },
-];
-
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
-  scanRegion, track, ballXY, placingBall, onPlaceBall, probeTracks,
-  probeToggle,
+  scanRegion, track, ballXY, placingBall, onPlaceBall,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -4950,67 +4832,6 @@ function PlotHeatCanvas({
           </svg>
         )}
 
-        {/* WHAT THE SKY PROBE SAW, on the picture rather than in a
-            table. Four paths past the hand-off: where the model said
-            the ball should be, and what each detector picked. Drawn
-            over the heat map because the only way to judge a detector
-            is against the motion streaks -- a path that leaves the
-            streak and wanders into the treeline is obvious here and
-            invisible in a median-error number. */}
-        {hasDims && probeTracks && (
-          <svg
-            viewBox={`0 0 ${frameW} ${frameH}`}
-            preserveAspectRatio="none"
-            style={{
-              position: "absolute", inset: 0, width: "100%", height: "100%",
-              pointerEvents: "none",
-            }}
-          >
-            {PROBE_LAYERS.map(({ key, colour, dash }) => {
-              const pts = probeTracks[key] || [];
-              if (pts.length < 1) return null;
-              return (
-                <g key={key}>
-                  {pts.length > 1 && (
-                    <polyline
-                      points={pts.map((q) => `${q.x},${q.y}`).join(" ")}
-                      fill="none"
-                      stroke={colour}
-                      strokeWidth={Math.max(1.5, frameW / 900)}
-                      strokeOpacity={0.85}
-                      strokeDasharray={dash}
-                    />
-                  )}
-                  {pts.map((q, i) => (
-                    <circle
-                      key={`${key}-${q.frame}-${i}`}
-                      cx={q.x}
-                      cy={q.y}
-                      r={Math.max(1.8, frameW / 750)}
-                      fill="none"
-                      stroke={colour}
-                      strokeWidth={Math.max(1, frameW / 1200)}
-                      strokeOpacity={q.credible === false ? 0.35 : 0.95}
-                    />
-                  ))}
-                  {pts.length > 0 && (
-                    <text
-                      x={pts[pts.length - 1].x + frameW / 150}
-                      y={pts[pts.length - 1].y}
-                      fontSize={Math.max(10, frameW / 130)}
-                      fill={colour}
-                      stroke="#000"
-                      strokeWidth={0.6}
-                      paintOrder="stroke"
-                    >
-                      {key}
-                    </text>
-                  )}
-                </g>
-              );
-            })}
-          </svg>
-        )}
         {/* BALL AT IMPACT — where the tracer line STARTS. Not a track
             point: the renderer anchors the fitted curve here, so it is
             the one marker that decides where the line begins rather than
@@ -5264,27 +5085,6 @@ function PlotHeatCanvas({
           onClick={() => { setZoom(1); setFocus({ x: 50, y: 50 }); }}
           title="Fit full frame"
         >Fit</button>
-        {/* The probe's paths, toggled from the picture they draw on
-            rather than from a panel on another tab. Only appears once
-            there is a probe to show. */}
-        {probeToggle?.available && (
-          <label
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 4,
-              color: "#fff", fontSize: 12, padding: "0 6px",
-              cursor: "pointer", whiteSpace: "nowrap",
-            }}
-            title="Draw the sky probe's paths over the map: dashed cyan prediction, green Laplacian, magenta template, red frame-diff. A line that leaves the motion streak and wanders into the treeline is the answer you came for."
-          >
-            <input
-              type="checkbox"
-              checked={!!probeToggle.on}
-              onChange={(e) => probeToggle.onChange(e.target.checked)}
-              style={{ width: 13, height: 13 }}
-            />
-            paths
-          </label>
-        )}
         {scanRegion && (
           <button
             type="button"
