@@ -3317,6 +3317,50 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0):
     return out
 
 
+def _extend_to_target(pts, target_xy, fps, width, height):
+    """Points continuing `pts` to `target_xy`, or [] if it cannot.
+
+    Tries the measured ballistic arc first (see _ballistic_tail) and
+    falls back to a plain quadratic Bézier that leaves along the ball's
+    current direction and bends to the target -- which looks right even
+    though nothing in it is measured, and is all a track too short or
+    too flat to fit can support.
+
+    ONE FUNCTION BECAUSE THERE ARE TWO RENDER PATHS. The line is built
+    either by interpolating the operator's own clicks or by sampling a
+    fitted parabola, and produce uses the second. The continuation
+    lived in the first, so every produced clip came back with the
+    tracer stopping exactly where it always had, however carefully the
+    aim had been computed upstream.
+    """
+    if target_xy is None or len(pts) < 2:
+        return [], None
+    tail = _ballistic_tail(pts, target_xy, fps, width, height)
+    if tail:
+        return tail, "ballistic"
+
+    f_last, x_a, y_a = pts[-1]
+    _, x_b, y_b = pts[-2]
+    tx_t, ty_t = float(target_xy[0]), float(target_xy[1])
+    dx, dy = float(x_a - x_b), float(y_a - y_b)
+    dlen = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / dlen, dy / dlen
+    span = math.hypot(tx_t - x_a, ty_t - y_a)
+    cx = x_a + ux * span * 0.4
+    cy = y_a + uy * span * 0.4
+    steps = int(round(fps * 1.5)) if fps else 45
+    out = []
+    for i in range(1, steps + 1):
+        t = i / float(steps)
+        mt = 1.0 - t
+        bx = int(round(mt * mt * x_a + 2 * mt * t * cx + t * t * tx_t))
+        by = int(round(mt * mt * y_a + 2 * mt * t * cy + t * t * ty_t))
+        if not (0 <= bx < width and 0 <= by < height):
+            break
+        out.append((f_last + i, bx, by))
+    return out, ("bezier" if out else None)
+
+
 def _clip_point_to_frame(ax, ay, bx, by, w, h):
     """Point where segment A(inside)->B(outside) crosses the frame
     rect boundary — used to run the tracer exactly to the screen edge
@@ -3760,48 +3804,15 @@ def render_tracer_video(
         # along the ball's current direction, then bends to the target
         # (quadratic Bézier), so there's no kink/squiggle at the join. With
         # no target we simply stop at the last plotted point.
-        if target_xy is not None and len(pts) >= 2:
-            # THE ARC GRAVITY DREW, measured off this swing: see
-            # _ballistic_tail. Its duration falls out of the physics
-            # rather than being a constant, so the dashes travel at the
-            # speed the real ball did.
-            _tail = _ballistic_tail(
-                pts, target_xy, fps, width, height,
-            )
-            if _tail:
-                smoothed_points.extend(_tail)
-                _bt = "ballistic"
-            else:
-                # Not enough curvature in the tracked window to measure
-                # gravity from -- a short track, or one that stops near
-                # apex. Fall back to the plain curve: it leaves along
-                # the ball's direction and bends to the target, which
-                # looks right even though nothing in it is measured.
-                _bt = "bezier"
-                tx_t, ty_t = float(target_xy[0]), float(target_xy[1])
-                _, x_a, y_a = pts[-1]
-                _, x_b, y_b = pts[-2]
-                dx, dy = float(x_a - x_b), float(y_a - y_b)
-                dlen = math.hypot(dx, dy) or 1.0
-                ux, uy = dx / dlen, dy / dlen
-                span = math.hypot(tx_t - x_a, ty_t - y_a)
-                cx = x_a + ux * span * 0.4
-                cy = y_a + uy * span * 0.4
-                steps = int(round(fps * 1.5)) if fps else 45
-                for i in range(1, steps + 1):
-                    t = i / float(steps)
-                    mt = 1.0 - t
-                    bx = int(round(mt * mt * x_a + 2 * mt * t * cx
-                                   + t * t * tx_t))
-                    by = int(round(mt * mt * y_a + 2 * mt * t * cy
-                                   + t * t * ty_t))
-                    if not (0 <= bx < width and 0 <= by < height):
-                        break
-                    smoothed_points.append((f_last + i, bx, by))
+        _tail, _bt = _extend_to_target(
+            pts, target_xy, fps, width, height,
+        )
+        if _tail:
+            smoothed_points.extend(_tail)
             log.info(
-                "tracer tail: %s, %d frames from f%d toward (%.0f, %.0f)",
-                _bt, len(smoothed_points) - len(pts) if _tail else 0,
-                f_last, float(target_xy[0]), float(target_xy[1]),
+                "tracer tail (manual): %s, %d frames from f%d toward "
+                "(%.0f, %.0f)", _bt, len(_tail), pts[-1][0],
+                float(target_xy[0]), float(target_xy[1]),
             )
 
         last_kept_frame_global = (
@@ -4007,6 +4018,29 @@ def render_tracer_video(
                         (f, int(round(cxr)), int(round(cyr))),
                     )
                 _prev_raw = (xf, yf, inside)
+
+            # ON TO THE TARGET, from the curve that was just sampled.
+            # Fitting the continuation to `smoothed_points` rather than
+            # to the raw anchors is deliberate: these ARE the line about
+            # to be drawn, so the tail inherits its slope exactly and
+            # the join cannot show.
+            #
+            # BEFORE the reveal schedule, not after. That schedule says
+            # how much of the line is visible on each frame, and one
+            # built from a shorter list would draw the tail and then
+            # never uncover it -- the same symptom as not drawing it at
+            # all, and far harder to see the cause of.
+            _tail, _bt = _extend_to_target(
+                smoothed_points, target_xy, fps, width, height,
+            )
+            if _tail:
+                smoothed_points.extend(_tail)
+                log.info(
+                    "tracer tail (fit): %s, %d frames from f%d toward "
+                    "(%.0f, %.0f)", _bt, len(_tail), _tail[0][0] - 1,
+                    float(target_xy[0]), float(target_xy[1]),
+                )
+
             # Observed-progress timing: reveal the curve at the ball's
             # actual per-frame pace (front-loaded) instead of the fit's
             # constant rate, which visibly lagged the ball off the tee.
@@ -4050,7 +4084,24 @@ def render_tracer_video(
         ) or min(float(p[2]) for p in smoothed_points) < 0.04 * height
     else:
         _went_off_top = False
-    if smoothed_points and not _went_off_top:
+    # AND THE CAP DOES NOT APPLY TO A FLIGHT WITH A KNOWN END.
+    #
+    # This exists because a continuation with nowhere to go was a guess,
+    # and a guessed parabola dives back down to tee-ground level in the
+    # foreground, which reads as obviously wrong. Cutting it at two
+    # thirds of the ascent was the least-bad answer to a line that had
+    # no business being drawn that far.
+    #
+    # A tail aimed at `target_xy` is not that. Its far end is a marked
+    # landing (or the flag), carried into this frame by the hole's
+    # mapping -- a real place downrange, up near the horizon, which the
+    # curve settles onto rather than diving past. Capping it deleted
+    # exactly the segment the whole feature exists to draw, which is why
+    # the tracer kept coming back looking untouched however the aim was
+    # computed: it was computed, appended, and then truncated away again.
+    if smoothed_points and not _went_off_top and target_xy is not None:
+        info["descent_cap_skipped"] = "aimed at a marked target"
+    if smoothed_points and not _went_off_top and target_xy is None:
         _rest_y_ref = (
             float(ball_rest_xy_native[1])
             if ball_rest_xy_native is not None
