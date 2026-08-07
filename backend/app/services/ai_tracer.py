@@ -3365,10 +3365,23 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0,
         by = y_a + b * s + qy * s * s
         if _guard_x and (bx - px) * _dirx < -0.5:
             break
-        if not (0 <= bx < width and 0 <= by < height):
-            break
-        out.append((f_a + i, int(round(bx)), int(round(by))))
         px = bx
+        # OFF THE TOP IS NOT THE END OF THE FLIGHT. On a wedge from a
+        # camera this close behind, the ball leaves the frame on the way
+        # up, spends a second or two out of view, and comes back down to
+        # a green near the horizon. Breaking here ended the line at the
+        # frame edge and threw the whole descent away -- and when the
+        # exit came early enough to leave fewer than two points, the
+        # tail was refused outright and the shapeless fallback curve got
+        # drawn instead. That is what "bezier · 246 frames" meant.
+        #
+        # So skip what cannot be seen and keep going. The renderer
+        # already understands a gap in the points: it is the same
+        # off-the-top case the parametric fit and the descent cap both
+        # have exceptions for.
+        if not (0 <= bx < width and 0 <= by < height):
+            continue
+        out.append((f_a + i, int(round(bx)), int(round(by))))
     if len(out) < 2:
         return None
     return out
