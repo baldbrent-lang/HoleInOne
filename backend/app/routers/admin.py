@@ -7539,17 +7539,20 @@ def save_upload_view_map(
     except gc.CalibrationError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    # A residual is only evidence at 5+ points; at 4 the fit is exact by
-    # construction and rms_px is None. Refuse a bad over-determined fit,
-    # and let an exact one through with the caveat reported.
-    if vm["rms_px"] is not None and vm["rms_px"] > gc.MAX_RMS_PX:
+    # JUDGE IT ON A POINT IT WAS NOT GIVEN. The residual against its own
+    # points is near zero even on a bad fit here: with the tee-side
+    # points strung along a line the homography has freedom left over to
+    # absorb the click noise exactly. Leave-one-out error is the honest
+    # number -- it answers the question actually being asked of the fit,
+    # which is where an unseen point lands.
+    if vm.get("cv_px") is not None and vm["cv_px"] > gc.MAX_RMS_PX:
         raise HTTPException(
             400,
-            f"the fit misses your own marked points by {vm['rms_px']}px in "
-            f"the tee view (limit {gc.MAX_RMS_PX}px). Check you clicked the "
-            f"same feature in both pictures, and that they are on the "
-            f"GROUND — the top of the flagstick is not on the plane the "
-            f"mapping describes.",
+            f"held-out check: the fit misses a pair it was not given by "
+            f"{vm['cv_px']}px in the tee view (limit {gc.MAX_RMS_PX}px). "
+            f"Check you clicked the same feature in both pictures, and "
+            f"that they are on the GROUND — the top of the flagstick is "
+            f"not on the plane the mapping describes.",
         )
     vm["source_upload_id"] = upload_id
     vm["calibrated_at"] = _utcnow_naive().isoformat()
@@ -7571,13 +7574,16 @@ def save_upload_view_map(
         "hole": hole,
         "n_points": vm["n_points"],
         "rms_px": vm["rms_px"],
+        "cv_px": vm.get("cv_px"),
+        "tee_spread_px": vm.get("tee_spread_px"),
         "accuracy_note": (
-            f"Fit misses your marked points by {vm['rms_px']}px on average "
-            f"in the tee view."
-            if vm["rms_px"] is not None else
-            "Exact fit — 4 points always fit perfectly, so this cannot "
-            "measure its own accuracy. Add a 5th pair for a real error "
-            "estimate, or check it against a landing you can see in both."
+            f"Held out one pair at a time, the fit misses it by "
+            f"{vm['cv_px']}px in the tee view — where the whole green is "
+            f"only {(vm.get('tee_spread_px') or [0])[0]:.0f}px across. "
+            f"Adding pairs is what improves this."
+            if vm.get("cv_px") is not None else
+            "Not enough pairs to check the fit against a point it was not "
+            "given."
         ),
     }
 

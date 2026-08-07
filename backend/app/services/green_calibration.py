@@ -82,6 +82,7 @@ def compute_homography(
     src_hint: str = "spread them around the green (front, back, and both "
                     "sides)",
     dst_hint: str = "check the measured positions",
+    dst_tol: float = 1e-6,
 ) -> tuple[list[list[float]], float, bool]:
     """Solve image -> world (feet).
 
@@ -114,7 +115,13 @@ def compute_homography(
         raise CalibrationError(
             f"three or more {src_label} are on a line — {src_hint}",
         )
-    if _collinear(wld):
+    # `dst_tol` is loosened for the world-feet case and tightened almost
+    # to nothing for a view map. There the destination points ARE nearly
+    # collinear -- the tee camera sees the green as a sliver a few pixels
+    # tall, and no amount of clicking changes that -- so the guard meant
+    # to catch a degenerate arrangement instead fires at random on a
+    # perfectly good one. What protects a view map is the pair count.
+    if _collinear(wld, dst_tol):
         raise CalibrationError(
             f"three or more {dst_label} are on a line — {dst_hint}",
         )
@@ -233,6 +240,29 @@ def green_to_image(calibration: dict, X: float, Y: float):
 # to a tight number. This is aiming, not measuring.
 MAX_RMS_PX = 40.0
 
+# FOUR PAIRS ARE NOT ENOUGH HERE, and the reason is the geometry rather
+# than the algebra. Four determine a homography exactly -- which means
+# they also reproduce every click error exactly, with nothing left over
+# to average it away. That is survivable when the destination points are
+# spread across a frame. They are not: the tee camera is ~180 m back, so
+# the whole green and everything round it projects into a sliver about
+# 200 px wide and FIVE px tall. Fitting a projective transform to
+# destination points that nearly lie on a line is ill-conditioned, and
+# the noise it cannot average away comes out magnified.
+#
+# Measured on a simulated pair of cameras with 1.5 px of click error in
+# each view, mapping points on and behind the green:
+#
+#     pairs   median err   90th pct   worst
+#       4       20.0 px     55.6 px   1215 px
+#       5        2.0 px      5.0 px     40 px
+#       6        1.3 px      2.8 px     13 px
+#       8        1.1 px      2.5 px      —
+#
+# So six, and the UI asks for eight. The jump from four to five is the
+# whole story: it is the first fit that is over-determined.
+MIN_VIEW_MAP_POINTS = 6
+
 
 def fit_view_map(points: Iterable, green_size, tee_size) -> dict:
     """Fit green view -> tee view from clicked pairs.
@@ -265,13 +295,63 @@ def fit_view_map(points: Iterable, green_size, tee_size) -> dict:
             raise CalibrationError(
                 'each point must be {"green": [x, y], "tee": [x, y]}',
             )
+    if len(pts) < MIN_VIEW_MAP_POINTS:
+        raise CalibrationError(
+            f"need at least {MIN_VIEW_MAP_POINTS} pairs — you have "
+            f"{len(pts)}. The tee camera sees the whole green as a sliver "
+            f"a few pixels tall, and a four-pair fit reproduces every "
+            f"click error exactly instead of averaging it out; measured, "
+            f"that is ~20px of error against ~1px at six pairs.",
+        )
     H, rms_norm, meaningful = compute_homography(
         g, t,
         src_label="green points", dst_label="tee points",
         src_hint="spread them around the green — its front and back edges "
                  "and both sides, not all along one edge",
-        dst_hint="the same features must be spread out in the tee view too",
+        dst_hint="two of them are the same point in the tee view",
+        dst_tol=1e-12,
     )
+    # How much room the fit had on the tee side, in that view's own
+    # pixels. Reported rather than enforced: it is what it is, decided by
+    # where the cameras are bolted, and the operator can only respond to
+    # it by clicking more pairs.
+    _tw = [p[0] for p in t]
+    _th = [p[1] for p in t]
+    _spread = [round((max(_tw) - min(_tw)) * tw, 1),
+               round((max(_th) - min(_th)) * th, 1)]
+
+    # THE RESIDUAL IS NOT THE ACCURACY HERE, and reporting it as such
+    # would be the most misleading number on the screen. With the
+    # destination points strung along a line the fit has enough freedom
+    # left to absorb the click noise almost exactly -- it comes back
+    # near zero on a fit that is metres out in the middle.
+    #
+    # So measure what is actually wanted: leave each pair out, fit on
+    # the rest, and see how far the fit misses the pair it never saw.
+    # That is the error on a point the model was not shown, which is
+    # precisely the question being asked of it every time a landing is
+    # mapped.
+    _cv = None
+    if len(pts) >= 5:
+        _errs = []
+        for i in range(len(pts)):
+            _g = [v for j, v in enumerate(g) if j != i]
+            _t = [v for j, v in enumerate(t) if j != i]
+            try:
+                _H, _, _ = compute_homography(
+                    _g, _t, src_label="green points", dst_label="tee points",
+                    dst_tol=1e-12,
+                )
+            except CalibrationError:
+                continue
+            _m = _apply(_H, g[i][0], g[i][1])
+            if _m is None:
+                continue
+            _errs.append(math.hypot((_m[0] - t[i][0]) * tw,
+                                    (_m[1] - t[i][1]) * th))
+        if _errs:
+            _errs.sort()
+            _cv = round(_errs[len(_errs) // 2], 1)
     return {
         "points": [
             {"green": [float(p["green"][0]), float(p["green"][1])],
@@ -284,6 +364,10 @@ def fit_view_map(points: Iterable, green_size, tee_size) -> dict:
         # Back into tee pixels at the resolution it was clicked on, which
         # is the only number the operator can judge.
         "rms_px": round(rms_norm * tw, 1) if meaningful else None,
+        # The number to trust and to show: median error on a pair the
+        # fit was not given. See above for why rms_px is not it.
+        "cv_px": _cv,
+        "tee_spread_px": _spread,
         "n_points": len(pts),
     }
 

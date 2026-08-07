@@ -3403,7 +3403,15 @@ function ViewMapModal({
     }
   }
 
-  const ready = pairs.length >= 4;
+  // SIX, not four. Four pairs determine a homography exactly, so they
+  // also reproduce every click error exactly with nothing left over to
+  // average away — and the tee camera sees the whole green as a sliver
+  // about 200px wide and 5px tall, which is the worst possible shape to
+  // fit a projective transform into. Measured with 1.5px of click error:
+  // four pairs land ~20px out (worst case: off the frame), six land
+  // ~1px out. Eight is better still and costs four more clicks.
+  const MIN_PAIRS = 6;
+  const ready = pairs.length >= MIN_PAIRS;
   return (
     <div
       style={{
@@ -3427,10 +3435,10 @@ function ViewMapModal({
           <span className="tiny muted">
             Click the same GROUND feature in both pictures — a bunker
             corner, the flagstick&apos;s BASE, a bend in the cart path.
-            Four pairs minimum, spread out. Anything off the ground (a
-            flag top, a treetop) skews the whole fit. Saved against the
-            HOLE, so it aims every swing recorded there — not just this
-            one.
+            Six pairs minimum, eight is better, spread as widely as the
+            green allows. Anything off the ground (a flag top, a
+            treetop) skews the whole fit. Saved against the HOLE, so it
+            aims every swing recorded there — not just this one.
           </span>
           <button
             type="button"
@@ -3469,7 +3477,9 @@ function ViewMapModal({
               ? `Now click the SAME feature on the ${
                 pending.side === "tee" ? "green" : "tee"} picture`
               : `${pairs.length} pair${pairs.length === 1 ? "" : "s"}`
-                + (ready ? " — enough to fit" : ` — need ${4 - pairs.length} more`)}
+                + (ready
+                  ? (pairs.length >= 8 ? " — good" : " — enough; 8 is better")
+                  : ` — need ${MIN_PAIRS - pairs.length} more`)}
           </span>
           {pairs.length > 0 && (
             <button
@@ -3498,19 +3508,34 @@ function ViewMapModal({
             disabled={!ready || saving}
             onClick={save}
             title={ready
-              ? "Fit the mapping and store it on this hole's tee camera"
-              : "Four pairs are the minimum a homography needs"}
+              ? "Fit the mapping and store it against this hole"
+              : "Six pairs minimum — four fit exactly and bake in every "
+                + "click error, which on this geometry is ~20px of aim"}
           >
             {saving ? "Fitting…" : "Save mapping"}
           </button>
         </div>
-        {/* A FIFTH PAIR IS WHERE THE NUMBER BECOMES REAL. Four points fit
-            a homography exactly whatever you clicked, so the residual
-            comes back zero however wrong they were. */}
-        {pairs.length === 4 && (
-          <div className="tiny muted" style={{ marginTop: 6 }}>
-            Four pairs fit exactly, so there is no accuracy to report. Add
-            a fifth and the residual becomes real evidence.
+        {/* HELD-OUT ERROR IS THE READOUT — not the residual against the
+            fit's own points, which comes back near zero even on a bad
+            fit here: with the tee-side points strung along a line the
+            homography has freedom left to absorb the click noise
+            exactly. In tee pixels, where the whole green is ~200px
+            wide, so single digits is good. */}
+        {existing?.cv_px != null && (
+          <div className="tiny" style={{ marginTop: 6 }}>
+            <span style={{
+              color: existing.cv_px <= 8 ? "#3ee37a"
+                : existing.cv_px <= 20 ? "#f59e0b" : "#ef4444",
+            }}>
+              Saved fit misses a held-out pair by {existing.cv_px}px
+            </span>
+            {existing.tee_spread_px && (
+              <span className="muted">
+                {" "}· the green spans {existing.tee_spread_px[0]}×
+                {existing.tee_spread_px[1]}px in the tee view, which is
+                why this needs pairs rather than precision
+              </span>
+            )}
           </div>
         )}
         {existing?.calibrated_at && (
