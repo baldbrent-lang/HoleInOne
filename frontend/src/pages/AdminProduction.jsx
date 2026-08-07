@@ -1289,6 +1289,12 @@ function EditWizard({
   // switched tabs only updates the display if they're still on that swing.
   const selectedSwingRef = useRef(selectedSwing);
   useEffect(() => { selectedSwingRef.current = selectedSwing; }, [selectedSwing]);
+  // What the last produce's tracer continuation actually did, recorded
+  // on the swing by the renderer. Three numbers decide the shape --
+  // duration, aim, and which model drew it -- and with none of them on
+  // screen every "still looks wrong" had to be answered by guessing.
+  const lastTail = (row?.edit_metrics?.swings || [])[selectedSwing]
+    ?.tracer_tail || null;
   // Swings we've already kicked an auto-detect render for this session, so
   // selecting a swing fires the AI ball-track at most once (no re-fire /
   // loop when it re-renders after the result is saved).
@@ -2249,10 +2255,29 @@ function EditWizard({
               ran, the clip was remade, and the tracer looked untouched
               with nothing on screen explaining why. */}
           <span className="tiny" style={{
-            marginRight: "auto", maxWidth: 460,
+            marginRight: "auto", maxWidth: 520,
             color: (draft?.landingFrame != null && draft?.landingSpot)
               ? "#3ee37a" : "#f59e0b",
           }}>
+            {/* AND WHAT THE LAST ONE DID. The shape is decided by three
+                numbers -- the duration, the aim, and which model drew
+                it -- and until they were on screen every "still looks
+                wrong" was answered with a guess. */}
+            {lastTail && (
+              <span className="muted" style={{ display: "block" }}>
+                last produce: {lastTail.kind || "no tail"}
+                {lastTail.frames
+                  ? ` · ${lastTail.frames} frames (f${lastTail.from_frame}`
+                    + `→f${lastTail.to_frame})` : ""}
+                {lastTail.land_frame != null
+                  ? ` · clocks say it lands at tee f${lastTail.land_frame}`
+                  : " · flight time ESTIMATED (no clock)"}
+                {lastTail.target
+                  ? ` · aimed (${lastTail.target[0]}, ${lastTail.target[1]})`
+                  : ""}
+                {lastTail.apex_y != null ? ` · apex y${lastTail.apex_y}` : ""}
+              </span>
+            )}
             {draft?.landingFrame != null && draft?.landingSpot
               ? "Tracer will fly to the landing spot, timed off the two "
                 + "camera clocks."

@@ -14221,6 +14221,15 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                          "y": int(round(float(ball[1])))},
                 "tracer_url": _url,
                 "tracer_engine": "debug3",
+                # WHAT THE TRACER'S CONTINUATION ACTUALLY DID: which
+                # model drew it, how many frames it ran, where it was
+                # aimed, and the landing frame the two clocks worked
+                # out. Carried on the swing so the wizard can show it,
+                # because until now the only record was a server log
+                # nobody standing on a tee box can read -- and every
+                # round of "the tracer still looks wrong" was spent
+                # guessing at exactly these numbers.
+                "tracer_tail": (_rv or {}).get("tail"),
                 "persisted_at": round(time.time(), 2),
                 "track_frame_width": _src_w,
                 "track_frame_height": _src_h,

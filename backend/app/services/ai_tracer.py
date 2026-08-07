@@ -4102,11 +4102,39 @@ def render_tracer_video(
             )
             if _tail:
                 smoothed_points.extend(_tail)
+                # RECORDED, NOT JUST LOGGED. Every round of "the tracer
+                # still looks wrong" cost a produce, a screenshot and a
+                # guess, because the numbers that decided the shape --
+                # how long the flight was, where it was aimed, which
+                # model drew it -- existed only in a log nobody at the
+                # course can read. They travel with the swing now.
+                info["tail"] = {
+                    "kind": _bt,
+                    "frames": len(_tail),
+                    "from_frame": int(_tail[0][0] - 1),
+                    "to_frame": int(_tail[-1][0]),
+                    "target": [round(float(target_xy[0]), 1),
+                               round(float(target_xy[1]), 1)],
+                    "land_frame": (int(target_frame)
+                                   if target_frame is not None else None),
+                    "apex_y": int(min(p[2] for p in _tail)),
+                    "end_xy": [int(_tail[-1][1]), int(_tail[-1][2])],
+                }
                 log.info(
-                    "tracer tail (fit): %s, %d frames from f%d toward "
-                    "(%.0f, %.0f)", _bt, len(_tail), _tail[0][0] - 1,
+                    "tracer tail (fit): %s, %d frames f%d->f%d toward "
+                    "(%.0f, %.0f), land_frame=%s, apex y=%d",
+                    _bt, len(_tail), _tail[0][0] - 1, _tail[-1][0],
                     float(target_xy[0]), float(target_xy[1]),
+                    target_frame, info["tail"]["apex_y"],
                 )
+            elif target_xy is not None:
+                info["tail"] = {
+                    "kind": None, "frames": 0,
+                    "target": [round(float(target_xy[0]), 1),
+                               round(float(target_xy[1]), 1)],
+                    "land_frame": (int(target_frame)
+                                   if target_frame is not None else None),
+                }
 
             # Observed-progress timing: reveal the curve at the ball's
             # actual per-frame pace (front-loaded) instead of the fit's
