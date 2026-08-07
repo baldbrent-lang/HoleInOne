@@ -7412,6 +7412,44 @@ def render_tracer_fast(
     }
 
 
+def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx):
+    """Draw the ball's descent on the cut green segment, if it is there.
+
+    Returns the chain that was drawn, or None. Everything about this is
+    best-effort: a swing with no obvious path on the green simply does
+    not get a comet, and a failure here must never cost the clip -- the
+    tee tracer is the product, this is the flourish.
+    """
+    from ..services import green_flight as gf
+
+    try:
+        _gfps = float(probe_fps(green_path) or 0.0)
+        if _gfps <= 0:
+            return None
+        _lf = int(round(float(land_sec) * _gfps))
+        pts, why = gf.find_path(green_path, _lf, land_xy, _gfps)
+        if not pts:
+            log.info("d3 produce: swing %s no green comet — %s", idx, why)
+            return None
+        # The cut segment starts at g0 on the green clock, so its first
+        # frame is that instant in the SOURCE's numbering -- which is
+        # what the chain's frames are in. Lining them up here means the
+        # renderer never has to know about the cut.
+        _first = int(round(float(g0) * _gfps))
+        if not gf.render_comet(green_seg, green_seg, pts, _first):
+            log.warning("d3 produce: swing %s green comet render failed", idx)
+            return None
+        log.info(
+            "d3 produce: swing %s green comet — %d frames f%d..f%d "
+            "into the landing at f%d",
+            idx, len(pts), pts[0]["frame"], pts[-1]["frame"], _lf,
+        )
+        return pts
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3 produce: swing %s green comet failed: %s", idx, exc)
+        return None
+
+
 def _hole_for_upload(db, row) -> int:
     """Which hole this upload is of.
 
@@ -7643,6 +7681,49 @@ def save_hole_pin(
     return {"ok": True, "hole": hole, "pin_green": _vm.get("pin_green"),
             "pin_set_at": _vm.get("pin_set_at"), "tee_xy": xy,
             "reason": reason}
+
+
+@router.post("/long-uploads/{upload_id}/green-flight")
+def find_green_flight(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """The ball's chain of frames coming down on the GREEN camera.
+
+    Body: {"landing_frame", "landing_spot": [x, y]} — both in green
+    terms, which is where the operator marked them.
+
+    The same search produce runs before it draws the comet, exposed so
+    the wizard and click-to-plot can show what WILL be drawn instead of
+    the operator finding out from the finished clip. Returns the chain
+    or the sentence explaining why there isn't one.
+    """
+    from ..services import green_flight as gf
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    if not row.green_filename:
+        raise HTTPException(400, "no green video on this upload")
+    src = _local_green(row)
+    if not src or not src.exists():
+        raise HTTPException(404, "green video missing on disk")
+    _spot = payload.get("landing_spot")
+    _lf = payload.get("landing_frame")
+    if _lf is None or not _spot:
+        return {"points": None,
+                "reason": "mark the landing frame and spot first"}
+    _fps = float(probe_fps(src) or 0.0)
+    if _fps <= 0:
+        return {"points": None, "reason": "could not read the green fps"}
+    try:
+        pts, why = gf.find_path(src, int(_lf), _spot, _fps)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("green-flight for %s failed: %s", upload_id, exc)
+        return {"points": None, "reason": str(exc)}
+    return {"points": pts, "reason": why,
+            "n": len(pts) if pts else 0}
 
 
 @router.post("/long-uploads/{upload_id}/map-landing")
@@ -14145,6 +14226,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                     i, _target_frame, float(landing["sec"]), float(delta),
                 )
 
+            _green_track = None
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
             _rv = render_tracer_video(
                 src_path, _tee,
@@ -14192,6 +14274,20 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                             "— tee-only", i,
                         )
                         green_seg = None
+                    elif landing and landing.get("xy"):
+                        # THE BALL COMING DOWN, ON THE CAMERA THAT SEES
+                        # IT. The tee tracer shows where the ball went;
+                        # this shows it arriving. Only drawn when a
+                        # chain of blobs actually walks back from the
+                        # marked landing -- no chain, no comet, because
+                        # a fabricated one over grass would be worse
+                        # than nothing.
+                        _gcomet = _render_green_comet(
+                            green_path, green_seg, g0,
+                            landing.get("sec"), landing.get("xy"), i,
+                        )
+                        if _gcomet:
+                            _green_track = _gcomet
 
             if green_seg is not None:
                 if not splice_impact_clip(
@@ -14287,6 +14383,11 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 # round of "the tracer still looks wrong" was spent
                 # guessing at exactly these numbers.
                 "tracer_tail": (_rv or {}).get("tail"),
+                # The ball's own path on the green camera, when one was
+                # found. Kept so the wizard can draw it without
+                # re-scanning, and so "why is there no comet" has an
+                # answer that is not a shrug.
+                "green_track": _green_track,
                 "persisted_at": round(time.time(), 2),
                 "track_frame_width": _src_w,
                 "track_frame_height": _src_h,

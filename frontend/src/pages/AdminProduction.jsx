@@ -1083,6 +1083,19 @@ function ClickToPlotModal({
             >
               Clear all ({Object.keys(marks).length})
             </button>
+            {/* WHETHER THE LAST PRODUCE DREW A COMET on the green half,
+                and how long it was. This screen is where a produced
+                swing gets inspected, and "is there a comet" is
+                otherwise only answerable by watching the clip to the
+                end. The search itself lives in the wizard, next to the
+                landing mark it is anchored on. */}
+            {swing?.green_track && (
+              <span className="tiny" style={{ color: "#3ee37a" }}>
+                ☄ green comet · {swing.green_track.length} frames
+                {" "}(f{swing.green_track[0]?.frame}→
+                f{swing.green_track[swing.green_track.length - 1]?.frame})
+              </span>
+            )}
             <button
               type="button"
               className="ghost small"
@@ -2470,6 +2483,35 @@ function WizardBody({
     + `${(_vmCal.calibrated_at || "").slice(0, 10)} · ${_vmCal.n_points} pairs`
     + (_vmCal.cv_px != null ? ` · ±${_vmCal.cv_px}px` : "")
   ) : null;
+  // THE COMET'S PATH, PREVIEWED. Produce draws a comet on the green
+  // half whenever a chain of blobs walks back from the marked landing.
+  // Showing that chain here means the operator knows before producing
+  // whether there will be one -- and when there is not, why.
+  const [greenFlight, setGreenFlight] = useState(null);
+  const [greenFlightBusy, setGreenFlightBusy] = useState(false);
+
+  async function findGreenFlight() {
+    if (greenFlightBusy) return;
+    setGreenFlightBusy(true);
+    try {
+      const out = await api.greenFlight(adminPassword, row.id, {
+        landing_frame: draft.landingFrame,
+        landing_spot: draft.landingSpot
+          ? [draft.landingSpot.x, draft.landingSpot.y] : null,
+      });
+      setGreenFlight(out);
+    } catch (e) {
+      setGreenFlight({ points: null, reason: e?.message || String(e) });
+    } finally {
+      setGreenFlightBusy(false);
+    }
+  }
+
+  // Re-ask whenever the landing moves: the chain is anchored on it, so
+  // a different mark is a different search.
+  useEffect(() => { setGreenFlight(null); },
+           [draft.landingFrame, draft.landingSpot?.x, draft.landingSpot?.y]);
+
   const [greenHeat, setGreenHeat] = useState(null);
   const [greenScanning, setGreenScanning] = useState(false);
   const [greenScanNote, setGreenScanNote] = useState(null);
@@ -2864,6 +2906,13 @@ function WizardBody({
             loading={navLoading}
             onPickGreenPin={pickGreenPin}
             onGreen={navWhich === "green"}
+            // The chain produce would draw its comet along, in the
+            // green camera's own pixels — so it only belongs over a
+            // green frame, same rule as the landing heat.
+            comet={
+              navWhich === "green" && greenFlight?.points
+                ? { points: greenFlight.points, current: navFrame } : null
+            }
             // THE FLAG, IN THE COORDINATES OF WHICHEVER CAMERA IS UP.
             // draft.target is a tee pixel; drawing it over a green
             // frame puts the flag at the same spot in both pictures,
@@ -3072,6 +3121,36 @@ function WizardBody({
           {greenScanNote && (
             <div className="tiny muted" style={{ marginBottom: 6 }}>
               {greenScanNote}
+            </div>
+          )}
+          {/* THE COMET, PREVIEWED. Produce draws one on the green half
+              whenever a chain of blobs walks back from the marked
+              landing. Running the same search here means the operator
+              knows before producing whether there will be one, and when
+              there will not be, why. */}
+          {draft.landingFrame != null && draft.landingSpot && (
+            <div style={{ marginBottom: 6 }}>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto" }}
+                disabled={greenFlightBusy}
+                onClick={findGreenFlight}
+                title="Walk backwards from the landing looking for the ball's own frames. Produce draws a comet along whatever this finds — and nothing at all if it finds no obvious path, because a fabricated one over grass is worse than none."
+              >
+                {greenFlightBusy ? "Looking…" : "☄ Find the ball's descent"}
+              </button>
+              {greenFlight && (
+                <span className="tiny" style={{
+                  marginLeft: 8,
+                  color: greenFlight.points ? "#3ee37a" : "#f59e0b",
+                }}>
+                  {greenFlight.points
+                    ? `${greenFlight.n} frames — produce will draw a comet `
+                      + `along this`
+                    : `no comet: ${greenFlight.reason}`}
+                </span>
+              )}
             </div>
           )}
           <FrameStepper
@@ -3778,7 +3857,7 @@ function ViewMapModal({
 
 function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft,
   loading, frameNav, heat, mappedLanding, onPickGreenPin,
-  greenTarget, onGreen }) {
+  greenTarget, onGreen, comet }) {
   const hasDims = !!(frameW && frameH);
   const containerRef = useRef(null);
 
@@ -4092,6 +4171,42 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft,
                   </text>
                 )}
               </g>
+            );
+          })}
+        </svg>
+      )}
+      {/* THE BALL'S DESCENT, the path produce will run its comet along.
+          Drawn head-to-tail so the direction reads at a glance, and
+          with the frame under the playhead picked out, because the
+          question being asked here is "is that the ball or a shadow"
+          and stepping through is how it gets answered. */}
+      {hasDims && comet?.points?.length > 1 && (
+        <svg
+          viewBox={`0 0 ${frameW} ${frameH}`}
+          preserveAspectRatio="none"
+          style={{ position: "absolute", inset: 0, width: "100%",
+                   height: "100%", pointerEvents: "none" }}
+        >
+          <polyline
+            points={comet.points.map((q) => `${q.x},${q.y}`).join(" ")}
+            fill="none" stroke="#fff" strokeOpacity={0.55}
+            strokeWidth={frameW / 500}
+          />
+          {comet.points.map((q, i) => {
+            const t = i / Math.max(1, comet.points.length - 1);
+            const here = q.frame === comet.current;
+            return (
+              <circle
+                key={`${q.frame}-${i}`}
+                cx={q.x} cy={q.y}
+                r={(here ? 6 : 2 + 3 * t) * (frameW / 900)}
+                fill={here ? "#fff" : `hsl(${40 - 30 * t} 100% ${55 + 25 * t}%)`}
+                fillOpacity={here ? 1 : 0.45 + 0.5 * t}
+                stroke={here ? "#38bdf8" : "none"}
+                strokeWidth={frameW / 700}
+              >
+                <title>{`frame ${q.frame}`}</title>
+              </circle>
             );
           })}
         </svg>

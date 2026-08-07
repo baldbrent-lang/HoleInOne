@@ -551,6 +551,16 @@ export const api = {
       body: payload,
       adminPassword: key,
     }),
+  greenFlight: (key, uploadId, payload = {}) =>
+    // The ball's chain of frames coming down on the green camera — the
+    // same search produce runs before drawing its comet. Decodes about
+    // a second of video, so it is quick but not instant.
+    request(`/api/admin/long-uploads/${uploadId}/green-flight`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+      timeoutMs: 90_000,
+    }),
   mapLanding: (key, uploadId, payload = {}) =>
     request(`/api/admin/long-uploads/${uploadId}/map-landing`, {
       method: "POST",
