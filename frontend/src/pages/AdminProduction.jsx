@@ -3190,6 +3190,22 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
 
   const pct = (v, span) => `${(v / span) * 100}%`;
 
+  // ONE LABEL PER FRAME, not per dot. The scan keeps up to ten blobs a
+  // frame, so numbering every dot would stamp the same number ten times
+  // over one cluster and bury the picture underneath. The first dot of
+  // each frame carries the label; the rest of that frame's cluster is
+  // plainly the same colour beside it.
+  const heatLabelAt = useMemo(() => {
+    const seen = new Set();
+    const out = new Set();
+    (heat?.dots || []).forEach((d, i) => {
+      if (seen.has(d.frame)) return;
+      seen.add(d.frame);
+      out.add(i);
+    });
+    return out;
+  }, [heat]);
+
   return (
     <div
       ref={containerRef}
@@ -3252,25 +3268,52 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
               : 0;
             const hue = 205 - 175 * t;   // blue -> orange
             const here = d.frame === heat.current;
+            const colour = `hsl(${hue} 90% 60%)`;
+            const pick = (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              heat.onPick?.(d);
+            };
             return (
-              <circle
-                key={`${d.frame}-${d.x}-${d.y}-${i}`}
-                cx={d.x}
-                cy={d.y}
-                r={(here ? 5 : 2.6) * (frameW / 900)}
-                fill={`hsl(${hue} 90% 60%)`}
-                fillOpacity={here ? 0.95 : 0.5}
-                stroke={here ? "#fff" : "none"}
-                strokeWidth={frameW / 1200}
-                style={{ cursor: "pointer" }}
-                onPointerDown={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  heat.onPick?.(d);
-                }}
-              >
-                <title>{`frame ${d.frame} · ${d.x}, ${d.y}`}</title>
-              </circle>
+              <g key={`${d.frame}-${d.x}-${d.y}-${i}`}>
+                <circle
+                  cx={d.x}
+                  cy={d.y}
+                  r={(here ? 5 : 2.6) * (frameW / 900)}
+                  fill={colour}
+                  fillOpacity={here ? 0.95 : 0.5}
+                  stroke={here ? "#fff" : "none"}
+                  strokeWidth={frameW / 1200}
+                  style={{ cursor: "pointer" }}
+                  onPointerDown={pick}
+                >
+                  <title>{`frame ${d.frame} · ${d.x}, ${d.y}`}</title>
+                </circle>
+                {/* THE FRAME NUMBER, because the arc is only half the
+                    answer. Knowing the ball is that streak is no use
+                    without knowing which frame to save, and reading it
+                    off a hover tooltip one dot at a time is not
+                    reading. Outlined in black: these sit over grass,
+                    sand and shade in the same picture. */}
+                {heatLabelAt.has(i) && (
+                  <text
+                    x={d.x + frameW / 180}
+                    y={d.y - frameW / 260}
+                    fontSize={frameW / (here ? 62 : 80)}
+                    fontWeight={here ? 700 : 500}
+                    fill={here ? "#fff" : colour}
+                    fillOpacity={here ? 1 : 0.9}
+                    stroke="#000"
+                    strokeWidth={frameW / 900}
+                    strokeOpacity={0.75}
+                    paintOrder="stroke"
+                    style={{ cursor: "pointer" }}
+                    onPointerDown={pick}
+                  >
+                    {d.frame}
+                  </text>
+                )}
+              </g>
             );
           })}
         </svg>
@@ -9340,16 +9383,40 @@ export default function AdminProduction() {
       })}
 
       {rows && rows.length > 0 && (
+        /* A BUTTON, not only a scroll trigger. Auto-load is a
+           convenience and it is at the mercy of the browser deciding
+           the sentinel moved; this is the control that always works,
+           and it says how many uploads are actually on screen so
+           "nothing happened" and "nothing more to load" cannot be
+           confused for each other. */
         <div
           ref={uploadsList.sentinelRef}
           className="muted center small"
-          style={{ padding: 16 }}
+          style={{
+            padding: 16, display: "flex", flexDirection: "column",
+            alignItems: "center", gap: 8,
+          }}
         >
-          {uploadsList.loadingMore
-            ? "Loading more uploads…"
-            : uploadsList.hasMore
-              ? "Scroll for more uploads"
-              : "End of long uploads"}
+          {uploadsList.hasMore ? (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto", minWidth: 200 }}
+              disabled={uploadsList.loadingMore}
+              onClick={() => uploadsList.loadMore()}
+            >
+              {uploadsList.loadingMore
+                ? "Loading more uploads…"
+                : "Load 25 more uploads"}
+            </button>
+          ) : (
+            <span>End of long uploads</span>
+          )}
+          <span className="tiny">
+            {(uploadsList.items?.length ?? 0)} loaded
+            {rows.length !== (uploadsList.items?.length ?? 0)
+              ? ` · ${rows.length} shown` : ""}
+          </span>
         </div>
       )}
 

@@ -13,6 +13,10 @@
  *   - `error`           : last error message string, or null
  *   - `sentinelRef`     : attach to a div at the bottom; entering
  *                         the viewport triggers the next page load
+ *   - `loadMore()`      : fetch the next page explicitly. Callers
+ *                         should put a button on this: auto-load
+ *                         depends on the browser noticing the sentinel
+ *                         moved, and a button does not
  *   - `reload()`        : drop everything and re-fetch page 1
  *   - `refresh()`       : re-fetch the currently-loaded range (for
  *                         poll loops that want fresh status without
@@ -33,6 +37,10 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   const [error, setError] = useState(null);
   const pagesLoadedRef = useRef(0);
   const loadingRef = useRef(false);
+  // A next-page request that arrived while something else held the
+  // loading flag. See releaseLoading() for why this exists.
+  const wantMoreRef = useRef(false);
+  const loadMoreRef = useRef(null);
   // The refresh currently in flight, so a caller that needs post-change
   // data can queue behind it instead of being turned away.
   const inflightRef = useRef(null);
@@ -41,6 +49,27 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   const fetcherRef = useRef(fetcher);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { fetcherRef.current = fetcher; }, [fetcher]);
+
+  // DROPPING A PAGE REQUEST IS PERMANENT, WHICH IS WHY PAGING FELT
+  // BROKEN. The observer only fires on a CHANGE in intersection. If the
+  // sentinel came into view while the poll's refresh held the loading
+  // flag -- and that refresh probes file metadata for every loaded row,
+  // so on production it is in flight a good fraction of the time -- the
+  // callback ran, found the flag set, and returned. The sentinel was
+  // then still on screen, so no further event ever came: the page sat
+  // there saying "scroll for more" until you scrolled away and back.
+  //
+  // So a blocked request is remembered rather than discarded, and
+  // whatever was holding the flag runs it on the way out.
+  const releaseLoading = useCallback(() => {
+    loadingRef.current = false;
+    if (wantMoreRef.current) {
+      wantMoreRef.current = false;
+      // Out of this call stack: the state updates from the load that
+      // just finished have to land first.
+      setTimeout(() => loadMoreRef.current?.(), 0);
+    }
+  }, []);
 
   const reload = useCallback(async () => {
     if (loadingRef.current) return;
@@ -55,13 +84,17 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
     } catch (e) {
       setError(e.message || String(e));
     } finally {
-      loadingRef.current = false;
+      releaseLoading();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageSize]);
+  }, [pageSize, releaseLoading]);
 
   const loadMore = useCallback(async () => {
-    if (loadingRef.current || !hasMore) return;
+    if (!hasMore) return;
+    if (loadingRef.current) {
+      wantMoreRef.current = true;
+      return;
+    }
     loadingRef.current = true;
     setLoadingMore(true);
     try {
@@ -74,9 +107,16 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
       setError(e.message || String(e));
     } finally {
       setLoadingMore(false);
-      loadingRef.current = false;
+      releaseLoading();
     }
-  }, [hasMore, pageSize]);
+  }, [hasMore, pageSize, releaseLoading]);
+
+  // The drain in releaseLoading needs to reach the CURRENT loadMore,
+  // not the one captured when the flag was taken. Assigned during
+  // render rather than in an effect: a queued page must not depend on
+  // an effect having run, which is exactly the kind of ordering
+  // assumption that made paging unreliable in the first place.
+  loadMoreRef.current = loadMore;
 
   // The fetch itself. Wrapped below so callers can never stack more
   // than one of these behind the one that is running.
@@ -95,10 +135,10 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
     } catch (e) {
       setError(e.message || String(e));
     } finally {
-      loadingRef.current = false;
+      releaseLoading();
     }
     return undefined;
-  }, [pageSize, reload]);
+  }, [pageSize, reload, releaseLoading]);
 
   const refresh = useCallback(() => {
     // AT MOST ONE RUNNING AND ONE WAITING.
@@ -176,6 +216,7 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
     loadingMore,
     error,
     sentinelRef,
+    loadMore,
     reload,
     refresh,
     setItems,
