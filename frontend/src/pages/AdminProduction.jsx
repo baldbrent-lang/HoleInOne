@@ -2388,8 +2388,6 @@ function WizardBody({
   // Where produce would stop, in green frames — the server works it out
   // because the tee->green offset lives there.
   const [defaultEnd, setDefaultEnd] = useState(null);
-  // One correction per entry into end mode, or the two would ping-pong.
-  const endCorrectedRef = useRef(false);
 
   // MOTION ON THE GREEN, over the frames the produced clip covers plus
   // a couple of seconds. The landing frame is the hardest thing in this
@@ -2656,22 +2654,33 @@ function WizardBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (editing !== "end") endCorrectedRef.current = false;
-    if (FRAME_PICK_MODES.has(editing)) {
-      loadFrame(frameForMode[editing] ?? 0, cameraForMode(editing));
-      return;
+  // EVERY MODE LOADS ITS OWN PICTURE. This used to reload only for the
+  // four frame-picking modes, plus two special cases -- so entering
+  // Target, or Ball landing spot with no landing frame yet, left
+  // whatever was already on screen. Come to Target straight from
+  // Landing frame and you were marking the flag on a picture of the
+  // green while the app believed you were on the tee, which is how a
+  // tee-coordinate flag ended up drawn over the green view at the same
+  // spot in both.
+  const greenPickFrame = () =>
+    draft.landingFrame ?? defaultEnd ?? defaultEndFrame();
+  const frameForEditing = (mode) => {
+    if (FRAME_PICK_MODES.has(mode)) return frameForMode[mode] ?? 0;
+    // Marking a spot means looking at the frame it happened on.
+    if (mode === "landing_spot" || mode === "target_green") {
+      return greenPickFrame();
     }
     // PLACING THE BALL IS AN IMPACT-FRAME JOB. It used to show the
     // address frame, where the club is still behind the ball and the
     // golfer's stance hides the spot -- the operator was aiming at a
     // picture of a different moment. The impact frame is the one the
-    // tracer starts from, so it is the one to point at.
-    if (editing === "ball") loadFrame(draft.impactFrame ?? 0, "tee");
-    // Marking the spot means looking at the frame it happened on.
-    if (editing === "landing_spot" && draft.landingFrame != null) {
-      loadFrame(draft.landingFrame, "green");
-    }
+    // tracer starts from, so it is the one to point at. Everything else
+    // tee-side wants the same frame.
+    return draft.impactFrame ?? 0;
+  };
+
+  useEffect(() => {
+    loadFrame(frameForEditing(editing), cameraForMode(editing));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, draft.impactFrame, draft.landingFrame]);
 
@@ -2693,23 +2702,12 @@ function WizardBody({
       if (data.width && data.height) {
         setNavDims({ w: data.width, h: data.height });
       }
-      if (data.default_end_frame != null) {
-        setDefaultEnd(data.default_end_frame);
-        // The server's answer needs the tee->green offset, so it only
-        // arrives WITH the first green frame -- by which time we have
-        // already shown a client-side estimate. Correct to it once, so
-        // the operator lands on the frame produce would actually stop
-        // on rather than our approximation of it.
-        if (
-          editing === "end"
-          && draft.endFrame == null
-          && !endCorrectedRef.current
-          && data.frame !== data.default_end_frame
-        ) {
-          endCorrectedRef.current = true;
-          loadFrame(data.default_end_frame, "green");
-        }
-      }
+      // Where produce would stop, in green frames. Only arrives WITH a
+      // green frame, since working it out needs the tee->green offset
+      // the server holds. The "end" mode that used to self-correct to
+      // it is gone -- the End frame row was replaced by Landing frame --
+      // so this is now just recorded for the green modes to default to.
+      if (data.default_end_frame != null) setDefaultEnd(data.default_end_frame);
     } catch (e) {
       console.warn("frame fetch failed", e);
       // A missing green half must not leave the operator staring at the
@@ -2802,13 +2800,32 @@ function WizardBody({
         >
           <FramePreview
             imageUrl={leftImageUrl}
-            frameW={frameW}
-            frameH={frameH}
+            // THE DIMENSIONS OF THE PICTURE ON SCREEN, which is not
+            // always the tee's. The green camera runs at its own
+            // resolution, and every overlay is placed by dividing
+            // through these -- so handing it the tee's size while
+            // showing a green frame puts each marker a fraction off,
+            // and turns a click on the green into a tee-scaled
+            // coordinate.
+            frameW={navDims?.w ?? frameW}
+            frameH={navDims?.h ?? frameH}
             editing={editing}
             draft={draft}
             setDraft={setDraft}
             loading={navLoading}
             onPickGreenPin={pickGreenPin}
+            onGreen={navWhich === "green"}
+            // THE FLAG, IN THE COORDINATES OF WHICHEVER CAMERA IS UP.
+            // draft.target is a tee pixel; drawing it over a green
+            // frame puts the flag at the same spot in both pictures,
+            // which is what it was doing. The hole's pin is held in
+            // GREEN pixels, so on a green frame that is the one to
+            // draw -- the same fact, in the right space.
+            greenTarget={
+              navWhich === "green" && holePin?.pin_green
+                ? { x: holePin.pin_green[0], y: holePin.pin_green[1] }
+                : null
+            }
             // The mirror image of the heat rule: the mapped landing is
             // in TEE coordinates, so it belongs only over a tee frame.
             mappedLanding={
@@ -3702,7 +3719,8 @@ function ViewMapModal({
 }
 
 function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft,
-  loading, frameNav, heat, mappedLanding, onPickGreenPin }) {
+  loading, frameNav, heat, mappedLanding, onPickGreenPin,
+  greenTarget, onGreen }) {
   const hasDims = !!(frameW && frameH);
   const containerRef = useRef(null);
 
@@ -3869,7 +3887,13 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft,
   // green frame it is a green dot sitting on grass that will not move --
   // which reads as the landing marker being broken, because the actual
   // landing marker is the one that has not been placed yet.
-  const onGreenFrame = editing === "landing_spot" || editing === "landing"
+  // WHAT IS ACTUALLY ON SCREEN, not what the mode implies. The two
+  // agree once every mode loads its own camera, but only after the load
+  // lands -- and in the gap between, a tee marker would be painted over
+  // a green frame. `onGreen` is the camera the displayed image came
+  // from, so it is the one to believe.
+  const onGreenFrame = onGreen
+    || editing === "landing_spot" || editing === "landing"
     || editing === "target_green";
   const showBall = !!draft.ball && !onGreenFrame;
   // The target is a TEE-frame point. Over a green frame it would be a
@@ -4013,6 +4037,34 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft,
             );
           })}
         </svg>
+      )}
+      {/* THE FLAG ON THE GREEN CAMERA, at its own coordinates. Same
+          marker as the tee-side one, a different space — which is the
+          whole point: it should sit on the actual flagstick in both
+          pictures, not at the same pixel in both. */}
+      {hasDims && greenTarget && (
+        <div
+          style={{
+            position: "absolute",
+            left: `${(greenTarget.x / frameW) * 100}%`,
+            top: `${(greenTarget.y / frameH) * 100}%`,
+            transform: "translate(-1px, -100%)",
+            pointerEvents: "none",
+          }}
+        >
+          <div style={{
+            width: 2, height: 26, background: "#fff",
+            boxShadow: "0 0 2px rgba(0,0,0,0.9)",
+          }} />
+          <div style={{
+            position: "absolute", left: 2, top: 0,
+            width: 0, height: 0,
+            borderTop: "9px solid transparent",
+            borderBottom: "9px solid transparent",
+            borderLeft: "16px solid #ef4444",
+            filter: "drop-shadow(0 0 1px rgba(0,0,0,0.9))",
+          }} />
+        </div>
       )}
       {/* WHERE THE TRACER WILL FINISH, in this frame. The landing was
           marked on the green camera; this is the same spot carried
