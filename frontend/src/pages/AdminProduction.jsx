@@ -2366,6 +2366,10 @@ function WizardBody({
   const [navFrame, setNavFrame] = useState(null);
   const [navUrl, setNavUrl] = useState(null);
   const [navTotal, setNavTotal] = useState(totalFrames);
+  // The size of the frame on screen, per camera. The green camera runs
+  // at its own resolution, and a click on it means nothing without the
+  // frame it was made in.
+  const [navDims, setNavDims] = useState(null);
   const [navLoading, setNavLoading] = useState(false);
   // Re-detect runs a detector over the whole clip and then reloads the
   // page; the button has to hold the state itself.
@@ -2394,10 +2398,67 @@ function WizardBody({
   // the window and drawing every blob at once turns that search into a
   // glance -- and answers the prior question, whether the ball landed
   // anywhere the green camera can see, without finding the frame at all.
+  // THE LANDING, CARRIED ONTO THE TEE FRAME. The tracer has to finish
+  // where the ball came down, and that is marked on the other camera --
+  // so the green→tee mapping brings it here, and the operator sees it
+  // before producing rather than after.
+  const [teeLanding, setTeeLanding] = useState(null);   // {xy} | {reason}
+  const [viewMap, setViewMap] = useState(null);
+  const [calibrating, setCalibrating] = useState(null); // {tee, green}
   const [greenHeat, setGreenHeat] = useState(null);
   const [greenScanning, setGreenScanning] = useState(false);
   const [greenScanNote, setGreenScanNote] = useState(null);
   const [greenScanLevel, setGreenScanLevel] = useState(2);
+
+  // Re-ask whenever the spot moves: the whole value of showing it is
+  // that it tracks what the operator just clicked.
+  useEffect(() => {
+    const spot = draft.landingSpot;
+    if (!spot) { setTeeLanding(null); return; }
+    let dead = false;
+    (async () => {
+      try {
+        const out = await api.mapLanding(adminPassword, row.id, {
+          x: spot.x, y: spot.y,
+          // The green click was made in the green source's own pixels,
+          // and the answer is wanted in the tee source's.
+          green_size: navWhich === "green" && navDims
+            ? [navDims.w, navDims.h] : null,
+          tee_size: frameW && frameH ? [frameW, frameH] : null,
+        });
+        if (!dead) setTeeLanding(out);
+      } catch (e) {
+        if (!dead) setTeeLanding({ reason: e?.message || String(e) });
+      }
+    })();
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.landingSpot?.x, draft.landingSpot?.y, row.id, viewMap]);
+
+  // Open the calibrator on the two frames the operator is already
+  // working with: impact on the tee, the landing on the green.
+  async function openCalibrator() {
+    setTeeLanding((t) => t);
+    try {
+      const [t, g, vm] = await Promise.all([
+        api.getLongUploadFrame(adminPassword, row.id,
+                               draft.impactFrame ?? 0, "tee"),
+        api.getLongUploadFrame(adminPassword, row.id,
+                               draft.landingFrame ?? defaultEnd ?? 0, "green",
+                               draft.impactFrame ?? null),
+        api.getViewMap(adminPassword, row.id).catch(() => null),
+      ]);
+      setViewMap(vm?.view_map || null);
+      setCalibrating({
+        tee: { ...t, frame: draft.impactFrame ?? 0 },
+        green: { ...g, frame: draft.landingFrame ?? defaultEnd ?? 0 },
+        existing: vm?.view_map || null,
+        reason: vm?.reason || null,
+      });
+    } catch (e) {
+      setTeeLanding({ reason: e?.message || String(e) });
+    }
+  }
 
   async function scanGreen(level) {
     if (greenScanning) return;
@@ -2533,6 +2594,9 @@ function WizardBody({
       setNavWallClock(data.wall_clock || null);
       if (data.green_seconds) setGreenSeconds(data.green_seconds);
       if (data.total_frames) setNavTotal(data.total_frames);
+      if (data.width && data.height) {
+        setNavDims({ w: data.width, h: data.height });
+      }
       if (data.default_end_frame != null) {
         setDefaultEnd(data.default_end_frame);
         // The server's answer needs the tee->green offset, so it only
@@ -2643,6 +2707,13 @@ function WizardBody({
             draft={draft}
             setDraft={setDraft}
             loading={navLoading}
+            // The mirror image of the heat rule: the mapped landing is
+            // in TEE coordinates, so it belongs only over a tee frame.
+            mappedLanding={
+              navWhich !== "green" && teeLanding?.tee_xy
+                ? { x: teeLanding.tee_xy[0], y: teeLanding.tee_xy[1] }
+                : null
+            }
             // Only over the green camera: these are green-frame
             // coordinates and would land in the trees on a tee frame.
             heat={
@@ -2689,6 +2760,36 @@ function WizardBody({
           area · Red flag = target. Click a field on the right to edit —
           then drag the marker, or click anywhere on the frame to place it.
         </div>
+        {calibrating && (
+          calibrating.reason ? (
+            <div className="err-text small" style={{ marginTop: 6 }}>
+              {calibrating.reason}
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto", marginLeft: 8 }}
+                onClick={() => setCalibrating(null)}
+              >
+                OK
+              </button>
+            </div>
+          ) : (
+            <ViewMapModal
+              uploadId={row.id}
+              adminPassword={adminPassword}
+              teeFrame={calibrating.tee}
+              greenFrame={calibrating.green}
+              existing={calibrating.existing}
+              onClose={() => setCalibrating(null)}
+              onSaved={(out) => {
+                setCalibrating(null);
+                // Bump the dependency so the mapped landing is re-asked
+                // with the calibration that was just saved.
+                setViewMap({ saved_at: out?.rms_px ?? "exact", ...out });
+              }}
+            />
+          )
+        )}
       </div>
 
       <div
@@ -2834,19 +2935,49 @@ function WizardBody({
               : "Click where the ball lands on the green. This is where "
                 + "the tracer ENDS, so put it on the ball, not near it."}
           </div>
-          <button
-            type="button"
-            style={{ width: "auto", marginTop: 6 }}
-            disabled={draft.landingFrame == null}
-            onClick={() => {
-              if (draft.landingSpot) {
-                persistPatch({ landing_spot: draft.landingSpot });
-              }
-              setEditing(null);
-            }}
-          >
-            Done
-          </button>
+          {/* WHAT THIS BUYS, said plainly. The spot is marked on the
+              green camera and the tracer is drawn on the tee one, so
+              until the two views are mapped to each other this click
+              cannot reach the line it is meant to finish. */}
+          {draft.landingSpot && (
+            <div className="tiny" style={{ marginTop: 6 }}>
+              {teeLanding?.tee_xy ? (
+                <span style={{ color: "#f97316" }}>
+                  → tee frame {teeLanding.tee_xy[0]}, {teeLanding.tee_xy[1]} px
+                  — the tracer will finish there (shown on the tee frame)
+                </span>
+              ) : (
+                <span className="muted">
+                  Not mapped to the tee view: {teeLanding?.reason || "…"}
+                </span>
+              )}
+            </div>
+          )}
+          <div className="row" style={{ gap: 6, marginTop: 6,
+                                        flexWrap: "wrap" }}>
+            <button
+              type="button"
+              style={{ width: "auto" }}
+              disabled={draft.landingFrame == null}
+              onClick={() => {
+                if (draft.landingSpot) {
+                  persistPatch({ landing_spot: draft.landingSpot });
+                }
+                setEditing(null);
+              }}
+            >
+              Done
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto" }}
+              onClick={openCalibrator}
+              title="Map the green camera's view onto the tee camera's, by clicking the same ground features in both. Done once per hole — every swing these two cameras record afterwards gets its tracer aimed at the real landing."
+            >
+              ⊹ Calibrate tee ↔ green
+            </button>
+          </div>
         </EditableRow>
 
         <EditableRow
@@ -3016,7 +3147,250 @@ function scaleRoi(roi, factor, frameW, frameH) {
   return { x, y, w, h };
 }
 
-function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading, frameNav, heat }) {
+/* One clickable still, with the marks made on it. Used twice by the
+   view-map modal — once per camera — so the two panes cannot drift
+   apart in how a click becomes a coordinate. */
+function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
+  const ref = useRef(null);
+  const hasDims = !!(frame?.width && frame?.height);
+  return (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+        {title}
+      </div>
+      <div
+        ref={ref}
+        onPointerDown={(e) => {
+          if (!hasDims || !ref.current) return;
+          const r = ref.current.getBoundingClientRect();
+          onClick({
+            x: Math.round(((e.clientX - r.left) / r.width) * frame.width),
+            y: Math.round(((e.clientY - r.top) / r.height) * frame.height),
+          });
+        }}
+        style={{
+          position: "relative", width: "100%",
+          aspectRatio: hasDims ? `${frame.width} / ${frame.height}` : "16 / 9",
+          background: "var(--border, #222)", borderRadius: 6,
+          overflow: "hidden", cursor: "crosshair", userSelect: "none",
+        }}
+      >
+        {frame?.image_url && (
+          <img
+            src={frame.image_url}
+            alt={title}
+            draggable={false}
+            style={{ width: "100%", height: "100%", objectFit: "cover",
+                     pointerEvents: "none" }}
+          />
+        )}
+        {hasDims && (
+          <svg
+            viewBox={`0 0 ${frame.width} ${frame.height}`}
+            preserveAspectRatio="none"
+            style={{ position: "absolute", inset: 0, width: "100%",
+                     height: "100%", pointerEvents: "none" }}
+          >
+            {marks.map((m, i) => (
+              <g key={i}>
+                <circle cx={m.x} cy={m.y} r={frame.width / 160} fill="none"
+                        stroke={colour} strokeWidth={frame.width / 400} />
+                <circle cx={m.x} cy={m.y} r={frame.width / 700} fill={colour} />
+                <text x={m.x + frame.width / 110} y={m.y - frame.width / 220}
+                      fontSize={frame.width / 40} fontWeight={700}
+                      fill={colour} stroke="#000"
+                      strokeWidth={frame.width / 500} paintOrder="stroke">
+                  {i + 1}
+                </text>
+              </g>
+            ))}
+            {pending && (
+              /* The half-finished pair, pulsing amber: it is waiting for
+                 its partner in the other picture and is not saved yet. */
+              <circle cx={pending.x} cy={pending.y} r={frame.width / 120}
+                      fill="none" stroke="#f59e0b"
+                      strokeWidth={frame.width / 300}
+                      strokeDasharray={`${frame.width / 90} ${frame.width / 140}`} />
+            )}
+          </svg>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* CALIBRATE THE TWO VIEWS AGAINST EACH OTHER.
+ *
+ * The tracer has to finish where the ball landed, and the landing is
+ * marked on the green camera. Both cameras look at the same flat
+ * ground, so one homography carries green pixels to tee pixels — and
+ * fitting it needs nothing but the same four ground features clicked in
+ * both pictures. No tape measure, no yardage book, no walking out.
+ *
+ * ON THE GROUND is the one rule. A homography is exact only for points
+ * on the surface it was fitted to. Bunker corners, the flagstick's
+ * BASE, a bend in the cart path: yes. The top of the flagstick, a
+ * treetop, anything in the air: no — it will skew the whole fit.
+ */
+function ViewMapModal({
+  uploadId, adminPassword, teeFrame, greenFrame, existing, onClose, onSaved,
+}) {
+  const [pairs, setPairs] = useState(() => existing?.points || []);
+  const [pending, setPending] = useState(null);   // {side, x, y}
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState(null);
+
+  function place(side, pt) {
+    if (!pending) { setPending({ side, ...pt }); return; }
+    if (pending.side === side) { setPending({ side, ...pt }); return; }
+    const pair = pending.side === "tee"
+      ? { tee: [pending.x, pending.y], green: [pt.x, pt.y] }
+      : { green: [pending.x, pending.y], tee: [pt.x, pt.y] };
+    setPairs((p) => [...p, pair]);
+    setPending(null);
+    setNote(null);
+  }
+
+  async function save() {
+    setSaving(true);
+    setNote(null);
+    try {
+      const out = await api.saveViewMap(adminPassword, uploadId, {
+        points: pairs,
+        green_size: [greenFrame?.width, greenFrame?.height],
+        tee_size: [teeFrame?.width, teeFrame?.height],
+      });
+      onSaved?.(out);
+    } catch (e) {
+      setNote(e?.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const ready = pairs.length >= 4;
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 1200,
+        background: "rgba(0,0,0,0.75)", display: "flex",
+        alignItems: "center", justifyContent: "center", padding: 16,
+      }}
+      onClick={onClose}
+    >
+      <div
+        className="card"
+        style={{
+          margin: 0, maxWidth: 1400, width: "100%", maxHeight: "94vh",
+          overflowY: "auto", padding: 14,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="row" style={{ alignItems: "baseline", gap: 10 }}>
+          <b>Calibrate tee ↔ green</b>
+          <span className="tiny muted">
+            Click the same GROUND feature in both pictures — a bunker
+            corner, the flagstick&apos;s BASE, a bend in the cart path.
+            Four pairs minimum, spread out. Anything off the ground (a
+            flag top, a treetop) skews the whole fit.
+          </span>
+          <button
+            type="button"
+            className="ghost small"
+            style={{ width: "auto", marginLeft: "auto" }}
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="row" style={{ gap: 10, marginTop: 8,
+                                      alignItems: "flex-start" }}>
+          <ClickableStill
+            title={`Tee camera · frame ${teeFrame?.frame ?? "—"}`}
+            frame={teeFrame}
+            colour="#38bdf8"
+            marks={pairs.map((p) => ({ x: p.tee[0], y: p.tee[1] }))}
+            pending={pending?.side === "tee" ? pending : null}
+            onClick={(pt) => place("tee", pt)}
+          />
+          <ClickableStill
+            title={`Green camera · frame ${greenFrame?.frame ?? "—"}`}
+            frame={greenFrame}
+            colour="#22c55e"
+            marks={pairs.map((p) => ({ x: p.green[0], y: p.green[1] }))}
+            pending={pending?.side === "green" ? pending : null}
+            onClick={(pt) => place("green", pt)}
+          />
+        </div>
+
+        <div className="row" style={{ gap: 10, marginTop: 10,
+                                      alignItems: "center", flexWrap: "wrap" }}>
+          <span className="small">
+            {pending
+              ? `Now click the SAME feature on the ${
+                pending.side === "tee" ? "green" : "tee"} picture`
+              : `${pairs.length} pair${pairs.length === 1 ? "" : "s"}`
+                + (ready ? " — enough to fit" : ` — need ${4 - pairs.length} more`)}
+          </span>
+          {pairs.length > 0 && (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto" }}
+              onClick={() => { setPairs((p) => p.slice(0, -1)); setPending(null); }}
+            >
+              Undo last pair
+            </button>
+          )}
+          {pending && (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto" }}
+              onClick={() => setPending(null)}
+            >
+              Cancel this point
+            </button>
+          )}
+          <button
+            type="button"
+            className="small"
+            style={{ width: "auto", marginLeft: "auto", minWidth: 160 }}
+            disabled={!ready || saving}
+            onClick={save}
+            title={ready
+              ? "Fit the mapping and store it on this hole's tee camera"
+              : "Four pairs are the minimum a homography needs"}
+          >
+            {saving ? "Fitting…" : "Save mapping"}
+          </button>
+        </div>
+        {/* A FIFTH PAIR IS WHERE THE NUMBER BECOMES REAL. Four points fit
+            a homography exactly whatever you clicked, so the residual
+            comes back zero however wrong they were. */}
+        {pairs.length === 4 && (
+          <div className="tiny muted" style={{ marginTop: 6 }}>
+            Four pairs fit exactly, so there is no accuracy to report. Add
+            a fifth and the residual becomes real evidence.
+          </div>
+        )}
+        {existing?.calibrated_at && (
+          <div className="tiny muted" style={{ marginTop: 6 }}>
+            Currently saved: {existing.n_points} pairs
+            {existing.rms_px != null ? `, off by ${existing.rms_px}px` : ", exact fit"}
+            {" · "}{existing.calibrated_at.slice(0, 16).replace("T", " ")}
+          </div>
+        )}
+        {note && (
+          <div className="err-text small" style={{ marginTop: 8 }}>{note}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading, frameNav, heat, mappedLanding }) {
   const hasDims = !!(frameW && frameH);
   const containerRef = useRef(null);
 
@@ -3316,6 +3690,33 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
               </g>
             );
           })}
+        </svg>
+      )}
+      {/* WHERE THE TRACER WILL FINISH, in this frame. The landing was
+          marked on the green camera; this is the same spot carried
+          across by the green→tee mapping. Shown before producing so a
+          bad calibration is caught by eye — if this sits in the trees
+          instead of on the fairway, the mapping is wrong, and watching
+          a produced tracer end there is a slower way to learn it. */}
+      {hasDims && mappedLanding && (
+        <svg
+          viewBox={`0 0 ${frameW} ${frameH}`}
+          preserveAspectRatio="none"
+          style={{ position: "absolute", inset: 0, width: "100%",
+                   height: "100%", pointerEvents: "none" }}
+        >
+          <circle cx={mappedLanding.x} cy={mappedLanding.y}
+                  r={frameW / 90} fill="none" stroke="#f97316"
+                  strokeWidth={frameW / 380} strokeOpacity={0.95} />
+          <circle cx={mappedLanding.x} cy={mappedLanding.y}
+                  r={frameW / 420} fill="#f97316" />
+          <text x={mappedLanding.x + frameW / 70}
+                y={mappedLanding.y - frameW / 180}
+                fontSize={frameW / 55} fontWeight={600}
+                fill="#f97316" stroke="#000" strokeWidth={frameW / 500}
+                paintOrder="stroke">
+            lands here
+          </text>
         </svg>
       )}
       {loading && imageUrl && (

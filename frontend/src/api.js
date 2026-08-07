@@ -530,6 +530,25 @@ export const api = {
       adminPassword: key,
       timeoutMs: 3 * 60_000,
     }),
+  // The green camera's view mapped onto the tee camera's. Fitted from
+  // features clicked in both frames; stored on the tee camera, so one
+  // calibration aims every swing that camera ever records.
+  getViewMap: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/view-map`, {
+      adminPassword: key,
+    }),
+  saveViewMap: (key, uploadId, payload = {}) =>
+    request(`/api/admin/long-uploads/${uploadId}/view-map`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
+  mapLanding: (key, uploadId, payload = {}) =>
+    request(`/api/admin/long-uploads/${uploadId}/map-landing`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
   commitWizardClip: (key, uploadId, payload = {}) =>
     // payload.clip_id targets a specific produced clip — required on
     // multi-swing uploads or the backend updates the most recent clip.

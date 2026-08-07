@@ -78,6 +78,10 @@ def _collinear(pts: list[list[float]], tol: float = 1e-6) -> bool:
 
 def compute_homography(
     image_points: Iterable, world_points: Iterable,
+    src_label: str = "image_points", dst_label: str = "world_points",
+    src_hint: str = "spread them around the green (front, back, and both "
+                    "sides)",
+    dst_hint: str = "check the measured positions",
 ) -> tuple[list[list[float]], float, bool]:
     """Solve image -> world (feet).
 
@@ -97,24 +101,22 @@ def compute_homography(
     """
     import numpy as np
 
-    img = _as_pairs(image_points, "image_points")
-    wld = _as_pairs(world_points, "world_points")
+    img = _as_pairs(image_points, src_label)
+    wld = _as_pairs(world_points, dst_label)
     if len(img) != len(wld):
         raise CalibrationError(
-            f"got {len(img)} image points and {len(wld)} world points — "
+            f"got {len(img)} {src_label} and {len(wld)} {dst_label} — "
             "they must pair up",
         )
     if len(img) < 4:
         raise CalibrationError("need at least 4 points to fit a homography")
     if _collinear(img):
         raise CalibrationError(
-            "three or more image points are on a line — spread them around "
-            "the green (front, back, and both sides)",
+            f"three or more {src_label} are on a line — {src_hint}",
         )
     if _collinear(wld):
         raise CalibrationError(
-            "three or more world points are on a line — check the measured "
-            "positions",
+            f"three or more {dst_label} are on a line — {dst_hint}",
         )
 
     import cv2
@@ -203,6 +205,113 @@ def green_to_image(calibration: dict, X: float, Y: float):
         return None
     pt = _apply(Hi.tolist(), float(X), float(Y))
     return pt
+
+
+# --------------------------------------------------------------------
+# green view -> tee view, straight across
+# --------------------------------------------------------------------
+# The tracer has to finish where the ball landed, and the landing is
+# marked on the GREEN camera. Going via world feet works and is what
+# `green_to_image` is for, but it needs the tee camera calibrated
+# against measured distances -- a tape measure, a yardage book, and a
+# walk out to the green.
+#
+# Aiming does not need any of that. Both cameras look at the same flat
+# ground, so one homography takes green pixels to tee pixels directly,
+# and the operator fits it by clicking the same four ground features in
+# both pictures: the bunker's corners, the flagstick's BASE, a bend in
+# the cart path. No measurement, done once per hole from a desk.
+#
+# The plane matters. A homography is exact only for points ON the
+# surface it was fitted to. A ball at rest is on the ground, so it maps
+# correctly; the TOP of the flagstick is not, which is why the hint says
+# base.
+
+# Residual limit, in TEE pixels. Generous on purpose: the tee camera's
+# view of the green is small and near the horizon, so a click a few
+# pixels out there is many feet on the ground and the fit cannot be held
+# to a tight number. This is aiming, not measuring.
+MAX_RMS_PX = 40.0
+
+
+def fit_view_map(points: Iterable, green_size, tee_size) -> dict:
+    """Fit green view -> tee view from clicked pairs.
+
+    `points` is [{"green": [x,y], "tee": [x,y]}, ...], four or more, in
+    the pixel coordinates of frames whose sizes are given.
+
+    THE FIT IS STORED NORMALISED. Clicks arrive in whatever resolution
+    the operator happened to be looking at, and the videos this is later
+    applied to are not always that: a cut re-encoded through
+    compress_for_email is capped at 1280 on the long edge, and a camera
+    can be swapped for one with a different sensor. Dividing through by
+    the frame size makes the mapping a property of the two VIEWS rather
+    than of two particular files.
+    """
+    gw, gh = (float(v) for v in (green_size or (0, 0)))
+    tw, th = (float(v) for v in (tee_size or (0, 0)))
+    if min(gw, gh, tw, th) <= 0:
+        raise CalibrationError(
+            "frame sizes are required — the mapping is stored independent "
+            "of resolution and cannot be without them",
+        )
+    pts = list(points or [])
+    g, t = [], []
+    for p in pts:
+        try:
+            g.append([float(p["green"][0]) / gw, float(p["green"][1]) / gh])
+            t.append([float(p["tee"][0]) / tw, float(p["tee"][1]) / th])
+        except (KeyError, TypeError, ValueError, IndexError):
+            raise CalibrationError(
+                'each point must be {"green": [x, y], "tee": [x, y]}',
+            )
+    H, rms_norm, meaningful = compute_homography(
+        g, t,
+        src_label="green points", dst_label="tee points",
+        src_hint="spread them around the green — its front and back edges "
+                 "and both sides, not all along one edge",
+        dst_hint="the same features must be spread out in the tee view too",
+    )
+    return {
+        "points": [
+            {"green": [float(p["green"][0]), float(p["green"][1])],
+             "tee": [float(p["tee"][0]), float(p["tee"][1])]}
+            for p in pts
+        ],
+        "homography": H,
+        "green_size": [gw, gh],
+        "tee_size": [tw, th],
+        # Back into tee pixels at the resolution it was clicked on, which
+        # is the only number the operator can judge.
+        "rms_px": round(rms_norm * tw, 1) if meaningful else None,
+        "n_points": len(pts),
+    }
+
+
+def map_to_tee(view_map: dict, x: float, y: float,
+               green_size=None, tee_size=None):
+    """A green-camera pixel -> the tee camera's pixel for the same spot.
+
+    `green_size` / `tee_size` are the frames the input and output are in;
+    they default to the sizes the mapping was fitted on. Returns (x, y),
+    or None when there is no mapping or the point projects to the horizon
+    -- which is the honest answer for a click in the sky, not an error.
+    """
+    H = (view_map or {}).get("homography")
+    if not H:
+        return None
+    gw, gh = view_map.get("green_size") or (0, 0)
+    tw, th = view_map.get("tee_size") or (0, 0)
+    if green_size and min(green_size) > 0:
+        gw, gh = float(green_size[0]), float(green_size[1])
+    if tee_size and min(tee_size) > 0:
+        tw, th = float(tee_size[0]), float(tee_size[1])
+    if min(gw, gh, tw, th) <= 0:
+        return None
+    pt = _apply(H, float(x) / float(gw), float(y) / float(gh))
+    if pt is None:
+        return None
+    return (pt[0] * float(tw), pt[1] * float(th))
 
 
 def _feet_display(d: float) -> str:

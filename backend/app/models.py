@@ -335,6 +335,28 @@ class Camera(Base):
     # yards and the scale changes across the frame, so nothing downstream
     # may guess a conversion without this.
     green_homography: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # TEE cameras only. The green camera's view mapped onto this one:
+    #
+    #   {"points": [{"green": [x,y], "tee": [x,y]}, ...],   # >=4
+    #    "homography": [[..],[..],[..]],  # NORMALISED green -> normalised tee
+    #    "green_size": [w,h], "tee_size": [w,h],   # what was clicked on
+    #    "rms_px": float | null,          # residual in tee pixels
+    #    "n_points": int, "source_upload_id": int | null,
+    #    "calibrated_at": iso}
+    #
+    # A landing marked on the green camera becomes a pixel in the tee
+    # camera's frame, which is where the tracer has to finish. Fitted
+    # straight between the two views rather than through world feet: the
+    # only job here is aiming, so the operator clicks the same four
+    # ground features in both pictures and never needs a tape measure.
+    #
+    # Held in NORMALISED coordinates so a source at a different
+    # resolution -- a re-encoded cut, a camera swapped to 1080p -- still
+    # maps correctly instead of silently landing a fraction off.
+    #
+    # Null until calibrated, and a null means the tracer stops where the
+    # ball was last seen rather than being aimed at a guess.
+    view_map: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     # TEE cameras only. Which side of the golfer's feet the ball sits on,
     # in the camera's own view: 'left' | 'right' | None.
     #

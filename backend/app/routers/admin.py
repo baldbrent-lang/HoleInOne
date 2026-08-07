@@ -7412,6 +7412,173 @@ def render_tracer_fast(
     }
 
 
+def _tee_camera_for(db, row):
+    """The tee camera that shot this upload, or None.
+
+    The mapping is a property of the INSTALLATION -- two cameras bolted
+    down looking at one hole -- so it lives on the camera and is reused
+    by every swing that camera ever records. An upload with no camera
+    event (a hand-uploaded file) has nowhere to hang it, and says so
+    rather than silently calibrating something that will never be read.
+    """
+    if not getattr(row, "camera_event_id", None):
+        return None
+    ev = db.get(CameraEvent, row.camera_event_id)
+    if not ev or not ev.tee_camera_id:
+        return None
+    return db.get(Camera, ev.tee_camera_id)
+
+
+def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
+    """A landing marked on the green camera -> a pixel in the tee frame.
+
+    Returns (xy, reason). Exactly one is set: either the mapped point or
+    the sentence explaining why there isn't one. Callers show the
+    sentence -- "the tracer stopped early because X" is worth far more
+    than a marker silently not appearing.
+    """
+    from ..services import green_calibration as gc
+
+    if not spot:
+        return None, "no landing spot marked on the green"
+    cam = _tee_camera_for(db, row)
+    if cam is None:
+        return None, ("this upload has no camera event, so there is no tee "
+                      "camera to map onto")
+    vm = cam.view_map
+    if not vm or not vm.get("homography"):
+        return None, ("the tee camera has no green→tee mapping yet — "
+                      "calibrate it once and every swing on this hole is "
+                      "aimed")
+    try:
+        x, y = float(spot[0]), float(spot[1])
+    except (TypeError, ValueError, IndexError):
+        return None, "the landing spot is not an [x, y] pair"
+    pt = gc.map_to_tee(vm, x, y, green_size, tee_size)
+    if pt is None:
+        return None, ("that spot maps to the horizon in the tee view — it is "
+                      "off the ground plane the mapping was fitted to")
+    return [round(pt[0], 1), round(pt[1], 1)], None
+
+
+@router.get("/long-uploads/{upload_id}/view-map")
+def get_upload_view_map(upload_id: int, db: Session = Depends(get_db)):
+    """The green→tee mapping in force for this upload's tee camera."""
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    cam = _tee_camera_for(db, row)
+    return {
+        "camera_id": getattr(cam, "id", None),
+        "camera_name": getattr(cam, "name", None),
+        "hole": getattr(cam, "assigned_hole", None),
+        "view_map": (cam.view_map if cam else None),
+        "reason": None if cam else (
+            "this upload has no camera event, so it is not tied to a tee "
+            "camera — nothing to calibrate"
+        ),
+    }
+
+
+@router.post("/long-uploads/{upload_id}/view-map")
+def save_upload_view_map(
+    upload_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Fit and store green→tee from features clicked in both frames.
+
+    Body: {"points": [{"green": [x,y], "tee": [x,y]}, ...] (>=4),
+           "green_size": [w,h], "tee_size": [w,h]}
+
+    Saved on the TEE CAMERA, not the upload: the two cameras are bolted
+    down looking at one hole, so this is done once and every swing they
+    record afterwards is aimed by it.
+    """
+    from ..services import green_calibration as gc
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    cam = _tee_camera_for(db, row)
+    if cam is None:
+        raise HTTPException(
+            409,
+            "this upload has no camera event, so there is no tee camera to "
+            "save a mapping on",
+        )
+    try:
+        vm = gc.fit_view_map(
+            payload.get("points"),
+            payload.get("green_size"),
+            payload.get("tee_size"),
+        )
+    except gc.CalibrationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    # A residual is only evidence at 5+ points; at 4 the fit is exact by
+    # construction and rms_px is None. Refuse a bad over-determined fit,
+    # and let an exact one through with the caveat reported.
+    if vm["rms_px"] is not None and vm["rms_px"] > gc.MAX_RMS_PX:
+        raise HTTPException(
+            400,
+            f"the fit misses your own marked points by {vm['rms_px']}px in "
+            f"the tee view (limit {gc.MAX_RMS_PX}px). Check you clicked the "
+            f"same feature in both pictures, and that they are on the "
+            f"GROUND — the top of the flagstick is not on the plane the "
+            f"mapping describes.",
+        )
+    vm["source_upload_id"] = upload_id
+    vm["calibrated_at"] = _utcnow_naive().isoformat()
+    cam.view_map = vm
+    db.add(AuditLog(
+        actor="admin", action="save_view_map",
+        target=f"camera:{cam.id}",
+        detail=f"points={vm['n_points']} rms_px={vm['rms_px']} "
+               f"upload={upload_id}",
+    ))
+    db.commit()
+    return {
+        "ok": True,
+        "camera_id": cam.id,
+        "n_points": vm["n_points"],
+        "rms_px": vm["rms_px"],
+        "accuracy_note": (
+            f"Fit misses your marked points by {vm['rms_px']}px on average "
+            f"in the tee view."
+            if vm["rms_px"] is not None else
+            "Exact fit — 4 points always fit perfectly, so this cannot "
+            "measure its own accuracy. Add a 5th pair for a real error "
+            "estimate, or check it against a landing you can see in both."
+        ),
+    }
+
+
+@router.post("/long-uploads/{upload_id}/map-landing")
+def map_landing_to_tee(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """Where a green-camera point lands in the tee frame.
+
+    Body: {"x", "y"} (green px), optional "green_size" / "tee_size".
+    Used by the wizard to SHOW the mapped landing before producing, so
+    a bad calibration is caught by eye rather than by watching a tracer
+    finish in the trees.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    _spot = payload.get("spot")
+    if _spot is None and payload.get("x") is not None:
+        _spot = [payload.get("x"), payload.get("y")]
+    xy, reason = _map_landing_to_tee(
+        db, row, _spot, payload.get("green_size"), payload.get("tee_size"),
+    )
+    return {"tee_xy": xy, "reason": reason}
+
+
 def _green_scan_window(db, row, green_path, impact_frame, green_total, pad_sec):
     """(first, last) green frames worth scanning for the landing.
 
@@ -13738,6 +13905,38 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # is never shown.
             t_render_end = t1 + (_green_sec if green_path else 0.0)
 
+            # WHERE THE TRACER FINISHES. The flight points stop at the
+            # frame the blob detector lost the ball, which on a full
+            # drive is a long way short of the ground -- so the line
+            # ended in mid-air. The landing was known all along, just on
+            # the OTHER camera; the green->tee mapping brings it into
+            # this frame, and render_tracer_video bends the curve to it.
+            #
+            # Uncalibrated, this stays None and the tracer ends where it
+            # always did. Aiming at a guess would be worse.
+            _target_xy = None
+            if landing and landing.get("xy"):
+                _gi = probe_video_info(green_path) or {} if green_path else {}
+                _t_xy, _t_why = _map_landing_to_tee(
+                    db, row, landing.get("xy"),
+                    green_size=(int(_gi.get("width") or 0),
+                                int(_gi.get("height") or 0)),
+                    tee_size=(_src_w or 0, _src_h or 0),
+                )
+                if _t_xy:
+                    _target_xy = (float(_t_xy[0]), float(_t_xy[1]))
+                    log.info(
+                        "d3 produce: swing %s landing (%.0f, %.0f) green -> "
+                        "(%.0f, %.0f) tee; tracer aimed there",
+                        i, float(landing["xy"][0]), float(landing["xy"][1]),
+                        _target_xy[0], _target_xy[1],
+                    )
+                else:
+                    log.info(
+                        "d3 produce: swing %s tracer NOT aimed at the "
+                        "landing — %s", i, _t_why,
+                    )
+
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
             _rv = render_tracer_video(
                 src_path, _tee,
@@ -13746,6 +13945,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 write_start=int(round(t0 * fps)),
                 write_end=int(round(t_render_end * fps)),
                 rest_verified=True,
+                target_xy=_target_xy,
             )
             if not _rv.get("ok") or not _tee.exists():
                 raise RuntimeError(
