@@ -543,6 +543,14 @@ export const api = {
       body: payload,
       adminPassword: key,
     }),
+  saveHolePin: (key, uploadId, payload = {}) =>
+    // The flagstick, in GREEN pixels, stored against the hole. Mapped
+    // to the tee on demand so re-calibrating fixes the target too.
+    request(`/api/admin/long-uploads/${uploadId}/hole-pin`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
   mapLanding: (key, uploadId, payload = {}) =>
     request(`/api/admin/long-uploads/${uploadId}/map-landing`, {
       method: "POST",

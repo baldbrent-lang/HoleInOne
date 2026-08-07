@@ -2405,6 +2405,12 @@ function WizardBody({
   const [teeLanding, setTeeLanding] = useState(null);   // {xy} | {reason}
   const [viewMap, setViewMap] = useState(null);
   const [calibrating, setCalibrating] = useState(null); // {tee, green}
+  // The flagstick in GREEN pixels, remembered against the hole. Mark it
+  // once and the rest of the session's swings can take it -- but it is
+  // stamped with the day it was set, because pins move and a Tuesday
+  // pin on Thursday's swing is worse than no pin at all.
+  const [holePin, setHolePin] = useState(null);
+  const [pinNote, setPinNote] = useState(null);
   const [greenHeat, setGreenHeat] = useState(null);
   const [greenScanning, setGreenScanning] = useState(false);
   const [greenScanNote, setGreenScanNote] = useState(null);
@@ -2434,6 +2440,74 @@ function WizardBody({
     return () => { dead = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft.landingSpot?.x, draft.landingSpot?.y, row.id, viewMap]);
+
+  // What the hole already knows: its mapping, and where the flag was
+  // last marked. Loaded once so the Target row can offer the pin
+  // without the operator asking for it.
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const vm = await api.getViewMap(adminPassword, row.id);
+        if (dead) return;
+        setHolePin(vm?.view_map?.pin_green
+          ? { pin_green: vm.view_map.pin_green,
+              pin_set_at: vm.view_map.pin_set_at }
+          : null);
+      } catch { /* the Target row simply offers nothing */ }
+    })();
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row.id, viewMap]);
+
+  // A click on the green camera in target mode: store the pin against
+  // the hole and take back the tee-frame point it maps to.
+  async function pickGreenPin(pt) {
+    setPinNote(null);
+    try {
+      const out = await api.saveHolePin(adminPassword, row.id, {
+        green: [pt.x, pt.y],
+        green_size: navDims ? [navDims.w, navDims.h] : null,
+        tee_size: frameW && frameH ? [frameW, frameH] : null,
+      });
+      setHolePin({ pin_green: out.pin_green, pin_set_at: out.pin_set_at });
+      if (out.tee_xy) {
+        const t = { x: Math.round(out.tee_xy[0]), y: Math.round(out.tee_xy[1]) };
+        setDraft((d) => ({ ...d, target: t }));
+        persistPatch({ target: t });
+        // Straight back to the tee frame: the whole point is seeing
+        // where the flag ended up in the picture the tracer is drawn on.
+        setEditing("target");
+      } else {
+        setPinNote(out.reason || "could not map that to the tee view");
+      }
+    } catch (e) {
+      setPinNote(e?.message || String(e));
+    }
+  }
+
+  // Re-map the hole's stored pin into THIS swing's target. Mapped fresh
+  // rather than copied: a re-calibration since it was marked should
+  // correct it, not be ignored.
+  async function applyHolePin() {
+    if (!holePin?.pin_green) return;
+    setPinNote(null);
+    try {
+      const out = await api.mapLanding(adminPassword, row.id, {
+        spot: holePin.pin_green,
+        tee_size: frameW && frameH ? [frameW, frameH] : null,
+      });
+      if (out.tee_xy) {
+        const t = { x: Math.round(out.tee_xy[0]), y: Math.round(out.tee_xy[1]) };
+        setDraft((d) => ({ ...d, target: t }));
+        persistPatch({ target: t });
+      } else {
+        setPinNote(out.reason || "could not map the hole's flag");
+      }
+    } catch (e) {
+      setPinNote(e?.message || String(e));
+    }
+  }
 
   // Open the calibrator on the two frames the operator is already
   // working with: impact on the tee, the landing on the green.
@@ -2539,8 +2613,12 @@ function WizardBody({
   // The landing is a green-camera call: the ball comes down in the green
   // view, and by then the cut has already moved there. The landing SPOT is
   // marked on the landing frame, so it stays on the green too.
+  // ...and the flag is a green-camera call for the same reason the
+  // landing is: on the tee frame the pin is a couple of pixels on the
+  // horizon, and on the green camera it is metres across.
   const cameraForMode = (mode) =>
-    (mode === "landing" || mode === "landing_spot") ? "green" : "tee";
+    (mode === "landing" || mode === "landing_spot" || mode === "target_green")
+      ? "green" : "tee";
 
   // Where produce would end this clip if nobody said otherwise: the
   // green half runs `greenSeconds` past the strike (D3_GREEN_SEC on the
@@ -2664,6 +2742,11 @@ function WizardBody({
     leftFrameLabel =
       `Landing frame · ${draft.landingFrame ?? "—"}${atTime()}`
       + " · green camera — mark where it lands";
+  } else if (editing === "target_green") {
+    leftImageUrl = navUrl || draft.addressImageUrl;
+    leftFrameLabel =
+      `Frame ${navFrame ?? "—"}${atTime()}`
+      + " · green camera — click the BASE of the flagstick";
   } else if (editing === "ball") {
     // The impact frame, with no frame-nav controls -- the operator is
     // placing a ball here, not choosing a frame.
@@ -2712,6 +2795,7 @@ function WizardBody({
             draft={draft}
             setDraft={setDraft}
             loading={navLoading}
+            onPickGreenPin={pickGreenPin}
             // The mirror image of the heat rule: the mapped landing is
             // in TEE coordinates, so it belongs only over a tee frame.
             mappedLanding={
@@ -2993,19 +3077,63 @@ function WizardBody({
           onActivate={() => setEditing(editing === "target" ? null : "target")}
         >
           <div className="tiny muted">
-            Drag the red flag on the left to mark where the flag is
-            on the green.
+            {editing === "target_green"
+              ? "Click the BASE of the flagstick — where it meets the "
+                + "grass. The mapping describes the ground, so the top of "
+                + "the stick maps as if it were lying on it, which lands "
+                + "the target well past the hole."
+              : "Drag the red flag on the left to mark where the flag is "
+                + "on the green — or mark it on the green camera, which "
+                + "is the picture you can actually see it in."}
           </div>
-          <button
-            type="button"
-            style={{ width: "auto", marginTop: 6 }}
-            onClick={() => {
-              if (draft.target) persistPatch({ target: draft.target });
-              setEditing(null);
-            }}
-          >
-            Done
-          </button>
+          {holePin?.pin_green && editing !== "target_green" && (
+            <div className="tiny" style={{ marginTop: 6 }}>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto" }}
+                onClick={applyHolePin}
+              >
+                Use this hole&apos;s flag
+              </button>
+              <span className="muted" style={{ marginLeft: 6 }}>
+                marked {holePin.pin_set_at?.slice(0, 10)}
+                {/* PINS MOVE. Same position on a different day is a
+                    different hole location, so the date is the point of
+                    this line, not decoration. */}
+              </span>
+            </div>
+          )}
+          <div className="row" style={{ gap: 6, marginTop: 6,
+                                        flexWrap: "wrap" }}>
+            <button
+              type="button"
+              style={{ width: "auto" }}
+              onClick={() => {
+                if (draft.target) persistPatch({ target: draft.target });
+                setEditing(null);
+              }}
+            >
+              Done
+            </button>
+            <button
+              type="button"
+              className="ghost small"
+              style={{ width: "auto" }}
+              onClick={() => setEditing(
+                editing === "target_green" ? "target" : "target_green")}
+              title="Mark the flagstick on the GREEN camera, where it is metres away rather than a few pixels on the horizon, and carry it to the tee frame through the same mapping the landing uses."
+            >
+              {editing === "target_green"
+                ? "← back to the tee frame"
+                : "⚑ Mark on green camera"}
+            </button>
+          </div>
+          {pinNote && (
+            <div className="err-text tiny" style={{ marginTop: 6 }}>
+              {pinNote}
+            </div>
+          )}
         </EditableRow>
 
         <div className="tiny muted" style={{ marginTop: 4 }}>
@@ -3400,7 +3528,8 @@ function ViewMapModal({
   );
 }
 
-function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, loading, frameNav, heat, mappedLanding }) {
+function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft,
+  loading, frameNav, heat, mappedLanding, onPickGreenPin }) {
   const hasDims = !!(frameW && frameH);
   const containerRef = useRef(null);
 
@@ -3449,6 +3578,12 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
     } else if (editing === "landing_spot") {
       const pt = eventToFrame(e);
       if (pt) setDraft((d) => ({ ...d, landingSpot: pt }));
+    } else if (editing === "target_green") {
+      // A GREEN-frame click. It cannot go into draft.target as it
+      // stands -- that field is tee pixels -- so it goes up to be
+      // mapped across, and comes back as the target.
+      const pt = eventToFrame(e);
+      if (pt) onPickGreenPin?.(pt);
     }
   }
 
@@ -3561,9 +3696,12 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
   // green frame it is a green dot sitting on grass that will not move --
   // which reads as the landing marker being broken, because the actual
   // landing marker is the one that has not been placed yet.
-  const onGreenFrame = editing === "landing_spot" || editing === "landing";
+  const onGreenFrame = editing === "landing_spot" || editing === "landing"
+    || editing === "target_green";
   const showBall = !!draft.ball && !onGreenFrame;
-  const showTarget = !!draft.target;
+  // The target is a TEE-frame point. Over a green frame it would be a
+  // flag planted wherever that pixel happens to fall.
+  const showTarget = !!draft.target && !onGreenFrame;
   // The landing spot belongs to the landing FRAME, on the green camera.
   // Showing it over a tee frame would put an orange dot in the trees.
   const showLandingSpot = !!draft.landingSpot && editing === "landing_spot";
@@ -3606,7 +3744,8 @@ function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft, load
         background: "var(--border, #222)",
         borderRadius: 6,
         overflow: "hidden",
-        cursor: (ballEditable || targetEditable || landingEditable)
+        cursor: (ballEditable || targetEditable || landingEditable
+                 || editing === "target_green")
           ? "crosshair" : "default",
         userSelect: "none",
       }}

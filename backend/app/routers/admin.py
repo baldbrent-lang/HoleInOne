@@ -7582,6 +7582,63 @@ def save_upload_view_map(
     }
 
 
+@router.post("/long-uploads/{upload_id}/hole-pin")
+def save_hole_pin(
+    upload_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Remember where the flagstick is, in green-camera pixels.
+
+    Body: {"green": [x, y]} — the BASE of the stick, or null to forget.
+
+    Stored beside the hole's view map because the pin is a fact about
+    the hole on the day, not about one swing: mark it once and every
+    other swing that session can take it. Kept in GREEN pixels and
+    mapped on demand, so re-calibrating the views corrects the target
+    too instead of leaving a stale tee coordinate behind.
+
+    Pins move. The date it was set is stored with it and shown, because
+    a pin from Tuesday on Thursday's swing is worse than no pin.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    course, hole, vm = _view_map_for(db, row)
+    if course is None:
+        raise HTTPException(409, "this upload is not attached to a course")
+    if not vm:
+        raise HTTPException(
+            409,
+            f"hole {hole} has no green→tee mapping yet — calibrate the two "
+            f"views first, or the pin has nowhere to be carried to",
+        )
+    _g = payload.get("green")
+    _all = dict(course.view_maps or {})
+    _vm = dict(vm)
+    if _g is None:
+        _vm.pop("pin_green", None)
+        _vm.pop("pin_set_at", None)
+    else:
+        try:
+            _vm["pin_green"] = [float(_g[0]), float(_g[1])]
+        except (TypeError, ValueError, IndexError):
+            raise HTTPException(400, "the pin must be an [x, y] pair")
+        _vm["pin_set_at"] = _utcnow_naive().isoformat()
+    _all[str(hole)] = _vm
+    course.view_maps = _all
+    db.commit()
+    xy, reason = (None, None)
+    if _g is not None:
+        xy, reason = _map_landing_to_tee(
+            db, row, _vm["pin_green"],
+            payload.get("green_size"), payload.get("tee_size"),
+        )
+    return {"ok": True, "hole": hole, "pin_green": _vm.get("pin_green"),
+            "pin_set_at": _vm.get("pin_set_at"), "tee_xy": xy,
+            "reason": reason}
+
+
 @router.post("/long-uploads/{upload_id}/map-landing")
 def map_landing_to_tee(
     upload_id: int,
