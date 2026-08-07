@@ -3504,6 +3504,17 @@ def _tip_reveal_schedule(
         j = _proj(float(xa), float(ya))
         if int(fa) > knots[-1][0] and j > knots[-1][1]:
             knots.append((int(fa), j))
+    # PAST THE LAST ANCHOR, THE SAMPLES ARE THEIR OWN TIMING. The
+    # continuation to the landing is emitted one point per frame of the
+    # real flight, so it already knows when each point happens -- but
+    # the knots above come only from TRACKED points, so the schedule
+    # ended where the blob detector did and every remaining sample was
+    # revealed on that one frame. The tip jumped to the green instead
+    # of flying there, which reads as the tracer sprinting.
+    for j in range(knots[-1][1] + 1, len(samples)):
+        fj = int(samples[j][0])
+        if fj > knots[-1][0]:
+            knots.append((fj, j))
     if len(knots) < 2:
         return None
     first_f = knots[0][0]

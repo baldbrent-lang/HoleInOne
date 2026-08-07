@@ -13712,6 +13712,9 @@ def sweep_d3_previews(current_upload_id: int | None = None) -> int:
 # to whole frames is a fifth of a frame of drift per conversion).
 D3_PRE_ROLL_SEC = 2.0        # lead-in before the strike
 D3_POST_TRACER_SEC = 1.5     # tee tail after the tracer line stops
+D3_LANDING_HOLD_SEC = 0.4    # tee tail after the ball touches down
+D3_MAX_EXTRA_TEE_SEC = 8.0   # ...but never hold on the tee this much longer
+D3_LANDING_LEAD_SEC = 1.5    # green starts this far before the touchdown
 # Green-side coverage after the cutover. 6s rather than 4: at 4 the ball
 # had barely settled before the clip ended, and the landing is the payoff
 # — the tee half is the swing, the green half is the result. One constant
@@ -13966,7 +13969,54 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             t0 = max(0.0, t_launch - D3_PRE_ROLL_SEC)
             t_tracer_end = max(p["frame"] for p in pts) / fps
             t1 = t_tracer_end + D3_POST_TRACER_SEC
+
+            # HOLD THE TEE SHOT UNTIL THE BALL LANDS.
+            #
+            # The cutover used to be reckoned from where the BLOB
+            # DETECTOR stopped -- 1.5s after the last tracked point --
+            # which on a wedge is a second after impact and three and a
+            # half seconds before the ball comes down. So the tee half
+            # ended at 12.1s on a flight that landed at 15.5s, and the
+            # tracer's whole descent was rendered onto frames the cut
+            # threw away: 171 of 246 tail frames drawn and discarded.
+            #
+            # That is why the tracer "never changed" however it was
+            # computed. The line was right; nobody could see it.
+            _land_tee = None
+            if landing and landing.get("sec") is not None:
+                try:
+                    _land_tee = float(landing["sec"]) + float(delta)
+                except (TypeError, ValueError):
+                    _land_tee = None
+            if _land_tee is not None and _land_tee > t1:
+                _was = t1
+                t1 = min(_land_tee + D3_LANDING_HOLD_SEC,
+                         t1 + D3_MAX_EXTRA_TEE_SEC)
+                log.info(
+                    "d3 produce: swing %s holding the tee shot to %.2fs "
+                    "(was %.2fs) so the tracer's descent to the landing "
+                    "at %.2fs is inside the clip", i, t1, _was, _land_tee,
+                )
             tee_video_dur = t1 - t0
+
+            # WHERE THE GREEN HALF STARTS, worked out once. The default
+            # is the cutover itself, on the green clock. With a landing
+            # it rewinds to just before the touchdown instead -- holding
+            # the tee to the landing would otherwise begin the green
+            # half AFTER it, and the frame the operator marked, the
+            # whole point of marking one, would never appear.
+            #
+            # Both the length below and the cut further down read this,
+            # because a green segment measured from one start and cut
+            # from another ends in the wrong place: reckoned from the
+            # cutover it would have run 13.9s->15.0s on a ball that
+            # lands at 15.4s.
+            _g_start = t1 - float(delta)
+            if _land_tee is not None:
+                _g_start = min(
+                    _g_start,
+                    max(0.0, float(landing["sec"]) - D3_LANDING_LEAD_SEC),
+                )
 
             # How much green follows the cutover. Normally D3_GREEN_SEC;
             # when the operator set an end frame in the wizard, the
@@ -13975,7 +14025,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # have to agree on one number.
             _green_sec = D3_GREEN_SEC
             if end_green_sec is not None and green_path is not None:
-                _want = float(end_green_sec) - (t1 - float(delta))
+                _want = float(end_green_sec) - _g_start
                 if _want < D3_MIN_GREEN_SEC:
                     log.warning(
                         "d3 produce: swing %s end frame is %.2fs after the "
@@ -14117,7 +14167,14 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 # The real instant at the cutover is t1 on the tee
                 # clock; on the green clock that same instant is
                 # t1 − delta. Seconds throughout — no frame rounding.
-                g0 = t1 - float(delta)
+                # THE GREEN STILL HAS TO SHOW THE BALL LAND. Holding
+                # the tee to the landing would otherwise start the green
+                # half AFTER the touchdown, so the frame the operator
+                # marked -- the whole point of marking it -- would never
+                # appear. So the green rewinds to just before it: the
+                # same instant from two angles, which is what a replay
+                # is and how this looked before the hold.
+                g0 = _g_start
                 if g0 < 0:
                     log.warning(
                         "d3 produce: swing %s cutover lands %.3fs before "
