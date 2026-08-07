@@ -2411,6 +2411,18 @@ function WizardBody({
   // pin on Thursday's swing is worse than no pin at all.
   const [holePin, setHolePin] = useState(null);
   const [pinNote, setPinNote] = useState(null);
+  // Whether this HOLE is already mapped, and how well. The calibration
+  // is a property of two bolted-down cameras, so it is done once and
+  // then never again -- but only if the wizard says so. Silence reads
+  // as "not done", and the operator re-clicks eight pairs for nothing.
+  const [viewMapInfo, setViewMapInfo] = useState(null);
+
+  const _vmCal = viewMapInfo?.view_map;
+  const calLine = _vmCal ? (
+    `${viewMapInfo.course_name} · hole ${viewMapInfo.hole} mapped `
+    + `${(_vmCal.calibrated_at || "").slice(0, 10)} · ${_vmCal.n_points} pairs`
+    + (_vmCal.cv_px != null ? ` · ±${_vmCal.cv_px}px` : "")
+  ) : null;
   const [greenHeat, setGreenHeat] = useState(null);
   const [greenScanning, setGreenScanning] = useState(false);
   const [greenScanNote, setGreenScanNote] = useState(null);
@@ -2450,6 +2462,7 @@ function WizardBody({
       try {
         const vm = await api.getViewMap(adminPassword, row.id);
         if (dead) return;
+        setViewMapInfo(vm || null);
         setHolePin(vm?.view_map?.pin_green
           ? { pin_green: vm.view_map.pin_green,
               pin_set_at: vm.view_map.pin_set_at }
@@ -3063,11 +3076,17 @@ function WizardBody({
               className="ghost small"
               style={{ width: "auto" }}
               onClick={openCalibrator}
-              title="Map the green camera's view onto the tee camera's, by clicking the same ground features in both. Done once per hole — every swing these two cameras record afterwards gets its tracer aimed at the real landing."
+              title="Map the green camera's view onto the tee camera's, by clicking the same ground features in both. Done ONCE per hole — every swing these two cameras record afterwards is aimed by it, so there is nothing to do here on a hole that already shows as mapped."
             >
-              ⊹ Calibrate tee ↔ green
+              {_vmCal ? "⊹ Re-calibrate tee ↔ green" : "⊹ Calibrate tee ↔ green"}
             </button>
           </div>
+          {calLine && (
+            <div className="tiny" style={{ marginTop: 4, color: "#3ee37a" }}>
+              ✓ {calLine} — nothing to do here, this hole is already
+              mapped.
+            </div>
+          )}
         </EditableRow>
 
         <EditableRow
@@ -3287,66 +3306,185 @@ function scaleRoi(roi, factor, frameW, frameH) {
 function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
   const ref = useRef(null);
   const hasDims = !!(frame?.width && frame?.height);
+  // ZOOM IS NOT A CONVENIENCE ON THE TEE PANE. From 180 m back the whole
+  // green is about 200px wide and a handful of pixels tall, so a
+  // bunker corner is a two-pixel target at fit-to-width -- and the fit
+  // is only as good as the clicks. Magnified, the same corner is
+  // something you can actually put a cursor on.
+  const [zoom, setZoom] = useState(1);
+  // Centre of the visible region, as a fraction of the frame.
+  const [focus, setFocus] = useState({ x: 0.5, y: 0.5 });
+
+  // The visible sub-rectangle, clamped so the view never leaves the
+  // picture. Everything below -- the image offset and the click maths --
+  // is derived from these two, so they cannot disagree.
+  const span = 1 / zoom;
+  const left = Math.max(0, Math.min(1 - span, focus.x - span / 2));
+  const top = Math.max(0, Math.min(1 - span, focus.y - span / 2));
+
+  function toFrame(e) {
+    if (!hasDims || !ref.current) return null;
+    const r = ref.current.getBoundingClientRect();
+    const u = left + ((e.clientX - r.left) / r.width) * span;
+    const v = top + ((e.clientY - r.top) / r.height) * span;
+    return {
+      x: Math.max(0, Math.min(frame.width - 1, Math.round(u * frame.width))),
+      y: Math.max(0, Math.min(frame.height - 1, Math.round(v * frame.height))),
+    };
+  }
+
+  // A drag pans, a click places. Told apart by distance, so a slightly
+  // shaky click is still a click rather than a 2px pan that eats it.
+  function onDown(e) {
+    if (!hasDims || !ref.current) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const r = ref.current.getBoundingClientRect();
+    const from = { ...focus };
+    let moved = false;
+    const target = e.currentTarget;
+    target.setPointerCapture?.(e.pointerId);
+    const move = (ev) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) < 4) return;
+      moved = true;
+      if (zoom <= 1) return;
+      setFocus({
+        x: Math.min(1, Math.max(0, from.x - (dx / r.width) * span)),
+        y: Math.min(1, Math.max(0, from.y - (dy / r.height) * span)),
+      });
+    };
+    const up = (ev) => {
+      target.releasePointerCapture?.(e.pointerId);
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      if (!moved) {
+        const pt = toFrame(ev);
+        if (pt) onClick(pt);
+      }
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+  }
+
+  // Wheel zooms about the cursor, so the feature you are aiming at
+  // stays put instead of sliding off as you magnify.
+  function onWheel(e) {
+    if (!hasDims || !ref.current) return;
+    e.preventDefault();
+    const r = ref.current.getBoundingClientRect();
+    const u = left + ((e.clientX - r.left) / r.width) * span;
+    const v = top + ((e.clientY - r.top) / r.height) * span;
+    const next = Math.max(1, Math.min(16, zoom * (e.deltaY < 0 ? 1.25 : 0.8)));
+    setZoom(next);
+    if (next > 1) setFocus({ x: u, y: v });
+    else setFocus({ x: 0.5, y: 0.5 });
+  }
+
+  const btn = {
+    width: "auto", padding: "0 8px", minWidth: 28, background: "rgba(0,0,0,0.6)",
+    color: "#fff", border: "1px solid rgba(255,255,255,0.25)",
+  };
   return (
     <div style={{ flex: 1, minWidth: 0 }}>
-      <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-        {title}
+      <div className="row" style={{ alignItems: "center", gap: 6,
+                                    marginBottom: 4 }}>
+        <span className="tiny upper muted">{title}</span>
+        <span className="row" style={{ gap: 4, marginLeft: "auto" }}>
+          <button type="button" className="small" style={btn}
+                  onClick={() => setZoom((z) => Math.max(1, z / 1.6))}>−</button>
+          <span className="tiny muted" style={{ minWidth: 34,
+                                                textAlign: "center" }}>
+            {zoom.toFixed(1)}×
+          </span>
+          <button type="button" className="small" style={btn}
+                  onClick={() => setZoom((z) => Math.min(16, z * 1.6))}>+</button>
+          <button type="button" className="small" style={btn}
+                  onClick={() => { setZoom(1); setFocus({ x: 0.5, y: 0.5 }); }}
+                  title="Back to the whole frame">Fit</button>
+        </span>
       </div>
       <div
         ref={ref}
-        onPointerDown={(e) => {
-          if (!hasDims || !ref.current) return;
-          const r = ref.current.getBoundingClientRect();
-          onClick({
-            x: Math.round(((e.clientX - r.left) / r.width) * frame.width),
-            y: Math.round(((e.clientY - r.top) / r.height) * frame.height),
-          });
-        }}
+        onPointerDown={onDown}
+        onWheel={onWheel}
         style={{
           position: "relative", width: "100%",
           aspectRatio: hasDims ? `${frame.width} / ${frame.height}` : "16 / 9",
           background: "var(--border, #222)", borderRadius: 6,
-          overflow: "hidden", cursor: "crosshair", userSelect: "none",
+          overflow: "hidden", userSelect: "none",
+          cursor: zoom > 1 ? "grab" : "crosshair",
+          touchAction: "none",
         }}
       >
-        {frame?.image_url && (
-          <img
-            src={frame.image_url}
-            alt={title}
-            draggable={false}
-            style={{ width: "100%", height: "100%", objectFit: "cover",
-                     pointerEvents: "none" }}
-          />
-        )}
-        {hasDims && (
-          <svg
-            viewBox={`0 0 ${frame.width} ${frame.height}`}
-            preserveAspectRatio="none"
-            style={{ position: "absolute", inset: 0, width: "100%",
-                     height: "100%", pointerEvents: "none" }}
-          >
-            {marks.map((m, i) => (
-              <g key={i}>
-                <circle cx={m.x} cy={m.y} r={frame.width / 160} fill="none"
-                        stroke={colour} strokeWidth={frame.width / 400} />
-                <circle cx={m.x} cy={m.y} r={frame.width / 700} fill={colour} />
-                <text x={m.x + frame.width / 110} y={m.y - frame.width / 220}
-                      fontSize={frame.width / 40} fontWeight={700}
-                      fill={colour} stroke="#000"
-                      strokeWidth={frame.width / 500} paintOrder="stroke">
-                  {i + 1}
-                </text>
-              </g>
-            ))}
-            {pending && (
-              /* The half-finished pair, pulsing amber: it is waiting for
-                 its partner in the other picture and is not saved yet. */
-              <circle cx={pending.x} cy={pending.y} r={frame.width / 120}
-                      fill="none" stroke="#f59e0b"
-                      strokeWidth={frame.width / 300}
-                      strokeDasharray={`${frame.width / 90} ${frame.width / 140}`} />
-            )}
-          </svg>
+        {/* The image and its marks share one scaled, offset wrapper, so
+            a mark can never drift from the pixel it was placed on. */}
+        <div
+          style={{
+            position: "absolute",
+            width: `${zoom * 100}%`, height: `${zoom * 100}%`,
+            left: `${-left * zoom * 100}%`, top: `${-top * zoom * 100}%`,
+            pointerEvents: "none",
+          }}
+        >
+          {frame?.image_url && (
+            <img
+              src={frame.image_url}
+              alt={title}
+              draggable={false}
+              style={{ width: "100%", height: "100%", objectFit: "fill",
+                       imageRendering: zoom >= 4 ? "pixelated" : "auto" }}
+            />
+          )}
+          {hasDims && (
+            <svg
+              viewBox={`0 0 ${frame.width} ${frame.height}`}
+              preserveAspectRatio="none"
+              style={{ position: "absolute", inset: 0, width: "100%",
+                       height: "100%" }}
+            >
+              {marks.map((m, i) => (
+                <g key={i}>
+                  {/* Sized in SCREEN terms: divided by the zoom so a
+                      marker stays the same size on screen instead of
+                      swelling into a blob that hides its own target. */}
+                  <circle cx={m.x} cy={m.y} r={frame.width / 160 / zoom}
+                          fill="none" stroke={colour}
+                          strokeWidth={frame.width / 400 / zoom} />
+                  <circle cx={m.x} cy={m.y} r={frame.width / 700 / zoom}
+                          fill={colour} />
+                  <text x={m.x + frame.width / 110 / zoom}
+                        y={m.y - frame.width / 220 / zoom}
+                        fontSize={frame.width / 40 / zoom} fontWeight={700}
+                        fill={colour} stroke="#000"
+                        strokeWidth={frame.width / 500 / zoom}
+                        paintOrder="stroke">
+                    {i + 1}
+                  </text>
+                </g>
+              ))}
+              {pending && (
+                /* The half-finished pair, dashed amber: it is waiting
+                   for its partner in the other picture, unsaved. */
+                <circle cx={pending.x} cy={pending.y}
+                        r={frame.width / 120 / zoom}
+                        fill="none" stroke="#f59e0b"
+                        strokeWidth={frame.width / 300 / zoom}
+                        strokeDasharray={`${frame.width / 90 / zoom} `
+                          + `${frame.width / 140 / zoom}`} />
+              )}
+            </svg>
+          )}
+        </div>
+        {zoom > 1 && (
+          <div className="tiny" style={{
+            position: "absolute", left: 6, bottom: 6, color: "#fff",
+            background: "rgba(0,0,0,0.6)", padding: "1px 6px",
+            borderRadius: 4, pointerEvents: "none",
+          }}>
+            drag to pan · scroll to zoom
+          </div>
         )}
       </div>
     </div>
@@ -3371,6 +3509,10 @@ function ViewMapModal({
   onClose, onSaved,
 }) {
   const [pairs, setPairs] = useState(() => existing?.points || []);
+  // A saved calibration comes back with its pairs already on the
+  // pictures. Say so: an operator who cannot tell a loaded calibration
+  // from a blank one re-does work that was already correct.
+  const preloaded = (existing?.points || []).length;
   const [pending, setPending] = useState(null);   // {side, x, y}
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState(null);
@@ -3432,6 +3574,12 @@ function ViewMapModal({
         <div className="row" style={{ alignItems: "baseline", gap: 10 }}>
           <b>Calibrate tee ↔ green</b>
           {scope && <span className="small">{scope}</span>}
+          {preloaded > 0 && (
+            <span className="tiny" style={{ color: "#3ee37a" }}>
+              already mapped — {preloaded} saved pairs loaded. Adjust or
+              add to them, or just Close; this does not need redoing.
+            </span>
+          )}
           <span className="tiny muted">
             Click the same GROUND feature in both pictures — a bunker
             corner, the flagstick&apos;s BASE, a bend in the cart path.
