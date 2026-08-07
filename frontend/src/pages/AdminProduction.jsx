@@ -2239,6 +2239,30 @@ function EditWizard({
           >
             Cancel
           </button>
+          {/* WHAT THE TRACER WILL DO, said before Produce is pressed.
+              The flight time between the last tracked point and the
+              landing is arithmetic when BOTH the landing frame and the
+              landing spot are set -- both Pis stamp wall-clock. With
+              either missing there is no clock to read, the duration
+              gets estimated from the track alone, and the tail comes
+              out too short and too bent. That was invisible: produce
+              ran, the clip was remade, and the tracer looked untouched
+              with nothing on screen explaining why. */}
+          <span className="tiny" style={{
+            marginRight: "auto", maxWidth: 460,
+            color: (draft?.landingFrame != null && draft?.landingSpot)
+              ? "#3ee37a" : "#f59e0b",
+          }}>
+            {draft?.landingFrame != null && draft?.landingSpot
+              ? "Tracer will fly to the landing spot, timed off the two "
+                + "camera clocks."
+              : draft?.target
+                ? "No landing frame + spot — the tracer will aim at the "
+                  + "flag with an ESTIMATED flight time. Set both landing "
+                  + "fields for the real arc."
+                : "No landing spot and no target — the tracer will stop "
+                  + "where the ball was last detected."}
+          </span>
           {/* ONE BUTTON. Stages 1-3 exist to find the ball and the impact
               frame; by the time the wizard is open the operator has found
               both by eye. So this hands those two numbers to the same
