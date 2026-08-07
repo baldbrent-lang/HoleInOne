@@ -3109,8 +3109,17 @@ function WizardBody({
         <EditableRow
           label="Target"
           value={draft.target ? `${draft.target.x}, ${draft.target.y} px` : "Not set"}
-          active={editing === "target"}
-          onActivate={() => setEditing(editing === "target" ? null : "target")}
+          // The row stays open in either mode — they are two pictures of
+          // the same field, not two different fields.
+          active={editing === "target" || editing === "target_green"}
+          // OPENS ON THE GREEN CAMERA. On the tee frame the pin is a
+          // couple of pixels on the horizon and there is no way to be
+          // accurate about it; on the green camera it is metres across.
+          // So mark it where it is visible and let the mapping carry it
+          // back to the tee, which is the only place it gets used.
+          onActivate={() => setEditing(
+            (editing === "target" || editing === "target_green")
+              ? null : "target_green")}
         >
           <div className="tiny muted">
             {editing === "target_green"
@@ -3118,9 +3127,9 @@ function WizardBody({
                 + "grass. The mapping describes the ground, so the top of "
                 + "the stick maps as if it were lying on it, which lands "
                 + "the target well past the hole."
-              : "Drag the red flag on the left to mark where the flag is "
-                + "on the green — or mark it on the green camera, which "
-                + "is the picture you can actually see it in."}
+              : "The flag, carried back to the tee frame by this hole's "
+                + "mapping. Mark on green camera to set it where you can "
+                + "see it; the tee frame is only for nudging the result."}
           </div>
           {holePin?.pin_green && editing !== "target_green" && (
             <div className="tiny" style={{ marginTop: 6 }}>
@@ -3161,7 +3170,7 @@ function WizardBody({
               title="Mark the flagstick on the GREEN camera, where it is metres away rather than a few pixels on the horizon, and carry it to the tee frame through the same mapping the landing uses."
             >
               {editing === "target_green"
-                ? "← back to the tee frame"
+                ? "← nudge it on the tee frame"
                 : "⚑ Mark on green camera"}
             </button>
           </div>

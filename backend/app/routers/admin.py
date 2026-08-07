@@ -14028,6 +14028,45 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         "landing — %s", i, _t_why,
                     )
 
+            # NO LANDING MARKED? AIM AT THE FLAG. On a par 3 the ball is
+            # going at the pin, and the operator has usually marked it
+            # even when they have not stepped through the green camera
+            # to find the exact frame the ball came down. Without this
+            # the tracer just stops where the blob detector gave up,
+            # which is the whole complaint -- and the target has been
+            # sitting in edit_metrics the entire time, used by the
+            # finalize path and ignored by this one.
+            #
+            # It is second, not first: the landing is where the ball
+            # ACTUALLY went, the flag is where it was aimed, and on a
+            # miss those are not the same place.
+            if _target_xy is None:
+                _em = row.edit_metrics or {}
+                _sw_t = None
+                for _s in (_em.get("swings") or []):
+                    if isinstance(_s, dict) and int(_s.get("idx", -1)) == i:
+                        _sw_t = _s.get("target")
+                        break
+                _t_saved = _sw_t or _em.get("target") or {}
+                try:
+                    if (_t_saved.get("x") is not None
+                            and _t_saved.get("y") is not None):
+                        _target_xy = (float(_t_saved["x"]),
+                                      float(_t_saved["y"]))
+                        log.info(
+                            "d3 produce: swing %s no landing marked; tracer "
+                            "aimed at the saved target (%.0f, %.0f)",
+                            i, _target_xy[0], _target_xy[1],
+                        )
+                except (AttributeError, TypeError, ValueError):
+                    _target_xy = None
+            if _target_xy is None:
+                log.info(
+                    "d3 produce: swing %s has neither a landing spot nor a "
+                    "target — the tracer will stop where the ball was last "
+                    "seen", i,
+                )
+
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
             _rv = render_tracer_video(
                 src_path, _tee,
