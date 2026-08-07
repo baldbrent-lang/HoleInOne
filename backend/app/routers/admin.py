@@ -14067,6 +14067,34 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                     "seen", i,
                 )
 
+            # WHEN IT LANDS, IN THIS VIDEO'S FRAMES — not inferred.
+            #
+            # Both Pis stamp wall-clock, so the landing frame the
+            # operator marked on the green camera is a known instant,
+            # and `delta` (green start minus tee start) carries it onto
+            # the tee clock. The renderer already knows the instant of
+            # the last tracked point, so the flight time between them is
+            # arithmetic.
+            #
+            # This matters because the curve has to reach the target
+            # whatever duration it is given, so a duration guessed short
+            # forces it there in too few frames and the "flight" comes
+            # out a hairpin. Measured, it is a parabola.
+            _target_frame = None
+            if landing and landing.get("sec") is not None and fps:
+                try:
+                    _tf = (float(landing["sec"]) + float(delta)) * float(fps)
+                    if _tf > 0:
+                        _target_frame = int(round(_tf))
+                except (TypeError, ValueError):
+                    _target_frame = None
+            if _target_frame is not None:
+                log.info(
+                    "d3 produce: swing %s lands at tee frame %d "
+                    "(green %.2fs + delta %.2fs)",
+                    i, _target_frame, float(landing["sec"]), float(delta),
+                )
+
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
             _rv = render_tracer_video(
                 src_path, _tee,
@@ -14076,6 +14104,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 write_end=int(round(t_render_end * fps)),
                 rest_verified=True,
                 target_xy=_target_xy,
+                target_frame=_target_frame,
             )
             if not _rv.get("ok") or not _tee.exists():
                 raise RuntimeError(

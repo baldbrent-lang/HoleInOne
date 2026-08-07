@@ -3175,7 +3175,8 @@ def _draw_dashed_tracer(
         )
 
 
-def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0):
+def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0,
+                    land_frame=None):
     """Fly the tracer from the last tracked point to the landing spot.
 
     The blob detector loses the ball mid-flight, a long way short of the
@@ -3189,16 +3190,31 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0):
     shape the flight itself has, and the fit gives the ball's velocity
     at the hand-off and the downward acceleration of this image.
 
-    HOW LONG IS LEFT comes from the horizontal fit, not the vertical
-    one. Both could answer it -- the ballistic equation
+    HOW LONG IS LEFT IS USUALLY NOT A GUESS AT ALL. Both cameras stamp
+    wall-clock, so when the operator has marked the landing frame on the
+    green we know the exact instant the ball came down, and we know the
+    exact instant of the last tracked point. `land_frame` is that
+    landing expressed in this video's own frame numbering, and S is
+    simply the difference. Nothing is inferred.
+
+    Without it, S has to be derived, and then it comes from the
+    HORIZONTAL fit. Both fits could answer -- the ballistic equation
     a·S² + b·S + (y_a - ty) = 0 solves for the frames remaining -- but
     `a` is a curvature, the term a noisy track measures worst, and its
     error goes straight into the duration. Horizontal speed is a slope,
-    measured an order of magnitude better, and the target's x says
-    exactly how far there is to go. So S = (tx - x_a) / vx, and the
-    ballistic solve is kept only for the case x cannot answer: a flight
-    that is near-vertical in this view, where x barely changes and
-    dividing by it is dividing by noise.
+    measured an order of magnitude better, and the target's x says how
+    far there is to go. So S = (tx - x_a) / vx, and the ballistic solve
+    is kept for the case x cannot answer: a flight near-vertical in
+    this view, where x barely changes and dividing by it is dividing by
+    noise.
+
+    A WRONG S IS WHAT MAKES THE LINE TURN. The curve has to reach the
+    target whatever S says, so an S that is too small forces it there
+    in too few frames -- and a parabola asked to do that stops looking
+    like a flight and starts looking like a hairpin. Which is exactly
+    what a derived S produced on a shot whose target sat almost
+    straight up-frame from the last tracked point: a small Δx over a
+    healthy vx reads as "nearly there already".
 
     The vertical is then the parabola that leaves at the measured slope
     and arrives at the marked landing when the ball gets there. It joins
@@ -3244,12 +3260,19 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0):
     _fps = float(fps or 30.0)
     _lo, _hi = 0.15 * _fps, max_sec * _fps
 
+    # THE MEASURED ANSWER FIRST. Two clocks, both stamped by the Pis, so
+    # this is arithmetic rather than inference.
+    S = None
+    if land_frame is not None:
+        _s = float(land_frame) - float(f_a)
+        if _lo <= _s <= _hi:
+            S = _s
+
     # x is the clock, when x is a working clock. It has to carry a real
     # share of the motion, and the target has to be ahead of us on it.
     _speed = float(np.median(np.hypot(np.diff([float(p[1]) for p in win]),
                                       np.diff([float(p[2]) for p in win]))))
-    S = None
-    if abs(vx0) > 1e-3 and abs(vx0) >= 0.25 * max(_speed, 1e-6):
+    if S is None and abs(vx0) > 1e-3 and abs(vx0) >= 0.25 * max(_speed, 1e-6):
         # x can answer, so x's answer stands. An implausible one is a
         # REFUSAL, not a reason to go and ask the vertical instead: if
         # the horizontal says the ball needs a minute to reach that
@@ -3287,37 +3310,72 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0):
     # confident arc drawn from it would hide the error.
     if qy <= 0.0:
         return None
+    # HORIZONTAL IS A DECELERATION, NOT A PARABOLA. A ball flying away
+    # from the camera covers fewer pixels every frame -- its image speed
+    # decays toward zero as it approaches the green. Over a long tail
+    # that decay is severe: at 3.2 px/frame for 70 frames the ball would
+    # cross 224px, and the target is 80px away.
+    #
+    # A quadratic asked to absorb that has to bend so hard it TURNS
+    # AROUND partway and comes back, which is the hairpin. So model it
+    # as a decay to the target instead:
+    #
+    #     x(s) = tx + (x_a - tx)·(1 - s/S)^k
+    #
+    # which starts at x_a, ends exactly on tx, is monotone for any k > 0
+    # -- so it cannot reverse, by construction rather than by a guard --
+    # and matches the measured launch speed when k = vx0·S / (tx - x_a).
+    #
+    # The quadratic stays for the case k is not positive: the measured
+    # horizontal velocity pointing away from the target, which means the
+    # track or the mapping is wrong and there is nothing sensible to
+    # decay toward.
+    _dxt = tx - x_a
+    _k = (vx0 * S / _dxt) if abs(_dxt) > 1e-6 else 0.0
+    _use_decay = _k > 0.05
     qx = (tx - x_a - vx0 * S) / (S * S)
 
     n = int(round(S))
     if n < 2:
         return None
 
-    # THE ARC MAY NOT DOUBLE BACK. A golf ball flies away from the tee
-    # until it lands; a quadratic fitted to a noisy window has no such
-    # scruples. Stop where that starts rather than drawing it.
-    dirx, diry = tx - x_a, ty - y_a
-    dlen = math.hypot(dirx, diry) or 1.0
-    dirx, diry = dirx / dlen, diry / dlen
+    # THE ARC MAY NOT DOUBLE BACK -- HORIZONTALLY. A golf ball travels
+    # one way across the frame until it lands, and a quadratic fitted to
+    # a noisy window has no such scruples, so that much is worth
+    # guarding.
+    #
+    # VERTICALLY IT MUST BE FREE TO TURN OVER: that is what a flight
+    # does. Guarding the full direction vector -- which this did --
+    # killed the descent on every shot whose landing sits ABOVE the last
+    # tracked point in frame, which is most of them, because a landing
+    # 100 yards out is up near the horizon while the ball was last seen
+    # climbing through the middle of the picture. The line rose, reached
+    # apex, and stopped dead.
+    _dirx = 1.0 if tx >= x_a else -1.0
+    _guard_x = abs(tx - x_a) > 4.0
 
     out = []
-    px, py = x_a, y_a
+    px = x_a
     for i in range(1, n + 1):
         s = float(i)
-        bx = x_a + vx0 * s + qx * s * s
+        if _use_decay:
+            bx = tx + (x_a - tx) * ((1.0 - s / S) ** _k)
+        else:
+            bx = x_a + vx0 * s + qx * s * s
         by = y_a + b * s + qy * s * s
-        if (bx - px) * dirx + (by - py) * diry < 0:
+        if _guard_x and (bx - px) * _dirx < -0.5:
             break
         if not (0 <= bx < width and 0 <= by < height):
             break
         out.append((f_a + i, int(round(bx)), int(round(by))))
-        px, py = bx, by
+        px = bx
     if len(out) < 2:
         return None
     return out
 
 
-def _extend_to_target(pts, target_xy, fps, width, height):
+def _extend_to_target(pts, target_xy, fps, width, height,
+                      land_frame=None):
     """Points continuing `pts` to `target_xy`, or [] if it cannot.
 
     Tries the measured ballistic arc first (see _ballistic_tail) and
@@ -3335,7 +3393,8 @@ def _extend_to_target(pts, target_xy, fps, width, height):
     """
     if target_xy is None or len(pts) < 2:
         return [], None
-    tail = _ballistic_tail(pts, target_xy, fps, width, height)
+    tail = _ballistic_tail(pts, target_xy, fps, width, height,
+                           land_frame=land_frame)
     if tail:
         return tail, "ballistic"
 
@@ -3348,7 +3407,13 @@ def _extend_to_target(pts, target_xy, fps, width, height):
     span = math.hypot(tx_t - x_a, ty_t - y_a)
     cx = x_a + ux * span * 0.4
     cy = y_a + uy * span * 0.4
+    # As long as the ball was actually in the air, when the two clocks
+    # can say. The 1.5s is only for when nothing else can.
     steps = int(round(fps * 1.5)) if fps else 45
+    if land_frame is not None:
+        _n = int(round(float(land_frame) - float(f_last)))
+        if 3 <= _n <= int(round((fps or 30.0) * 8.0)):
+            steps = _n
     out = []
     for i in range(1, steps + 1):
         t = i / float(steps)
@@ -3448,6 +3513,7 @@ def render_tracer_video(
     impact_frame_idx: int,
     track_frames: list[dict],
     target_xy: tuple[float, float] | None = None,
+    target_frame: int | None = None,
     write_start: int | None = None,
     write_end: int | None = None,
     rest_verified: bool = False,
@@ -3805,7 +3871,7 @@ def render_tracer_video(
         # (quadratic Bézier), so there's no kink/squiggle at the join. With
         # no target we simply stop at the last plotted point.
         _tail, _bt = _extend_to_target(
-            pts, target_xy, fps, width, height,
+            pts, target_xy, fps, width, height, land_frame=target_frame,
         )
         if _tail:
             smoothed_points.extend(_tail)
@@ -4032,6 +4098,7 @@ def render_tracer_video(
             # all, and far harder to see the cause of.
             _tail, _bt = _extend_to_target(
                 smoothed_points, target_xy, fps, width, height,
+                land_frame=target_frame,
             )
             if _tail:
                 smoothed_points.extend(_tail)
