@@ -3175,6 +3175,148 @@ def _draw_dashed_tracer(
         )
 
 
+def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0):
+    """Fly the tracer from the last tracked point to the landing spot.
+
+    The blob detector loses the ball mid-flight, a long way short of the
+    ground. The landing is known -- marked on the green camera and
+    mapped into this frame -- so the gap between them is not a guess
+    about WHERE, only about HOW. And how is not a free choice: the ball
+    is in the air, so the arc has to be the one gravity draws.
+
+    So measure it rather than invent it. Over the tracked flight, fit x
+    as a line in frame number and y as a quadratic; that is the same
+    shape the flight itself has, and the fit gives the ball's velocity
+    at the hand-off and the downward acceleration of this image.
+
+    HOW LONG IS LEFT comes from the horizontal fit, not the vertical
+    one. Both could answer it -- the ballistic equation
+    a·S² + b·S + (y_a - ty) = 0 solves for the frames remaining -- but
+    `a` is a curvature, the term a noisy track measures worst, and its
+    error goes straight into the duration. Horizontal speed is a slope,
+    measured an order of magnitude better, and the target's x says
+    exactly how far there is to go. So S = (tx - x_a) / vx, and the
+    ballistic solve is kept only for the case x cannot answer: a flight
+    that is near-vertical in this view, where x barely changes and
+    dividing by it is dividing by noise.
+
+    The vertical is then the parabola that leaves at the measured slope
+    and arrives at the marked landing when the ball gets there. It joins
+    the tracked flight without a kink because it inherits its slope, and
+    it ends on the landing because it is built to.
+
+    Returns [(frame, x, y), ...] not including the starting point, or
+    None when the measurement cannot support it. The caller falls back
+    to a plain curve then, because a smooth wrong arc is better than a
+    confident wrong one.
+    """
+    import numpy as np
+
+    if not target_xy or len(pts) < 4:
+        return None
+    tx, ty = float(target_xy[0]), float(target_xy[1])
+    f_a = pts[-1][0]
+
+    # THE WHOLE TRACKED FLIGHT, not the tail of it. The flight is one
+    # parabola, so every point measures the same motion, and a short
+    # lever arm is what ruins a fit. Over a track with ~1px of jitter,
+    # fitting the last dozen points misses the curvature by about half;
+    # thirty of them miss it by four percent.
+    win = list(pts[-60:])
+    if len(win) < 6:
+        return None
+    t = np.array([p[0] - f_a for p in win], dtype=float)
+    if t[-1] - t[0] < 8.0:
+        return None
+    try:
+        cy = np.polyfit(t, [float(p[2]) for p in win], 2)
+        cx = np.polyfit(t, [float(p[1]) for p in win], 1)
+    except Exception:  # noqa: BLE001
+        return None
+    a, b = float(cy[0]), float(cy[1])
+    vx0 = float(cx[0])
+    # Leave from the FITTED position at the hand-off, not the raw last
+    # detection. That point carries the same jitter as every other one,
+    # and here it would be baked into a solve that runs for the rest of
+    # the flight.
+    x_a, y_a = float(cx[1]), float(cy[2])
+
+    _fps = float(fps or 30.0)
+    _lo, _hi = 0.15 * _fps, max_sec * _fps
+
+    # x is the clock, when x is a working clock. It has to carry a real
+    # share of the motion, and the target has to be ahead of us on it.
+    _speed = float(np.median(np.hypot(np.diff([float(p[1]) for p in win]),
+                                      np.diff([float(p[2]) for p in win]))))
+    S = None
+    if abs(vx0) > 1e-3 and abs(vx0) >= 0.25 * max(_speed, 1e-6):
+        # x can answer, so x's answer stands. An implausible one is a
+        # REFUSAL, not a reason to go and ask the vertical instead: if
+        # the horizontal says the ball needs a minute to reach that
+        # target, the target is wrong, and a second opinion that likes
+        # it is how a bad calibration gets drawn confidently.
+        _s = (tx - x_a) / vx0
+        if not (_lo <= _s <= _hi):
+            return None
+        S = _s
+    if S is None:
+        # x barely moves -- near-vertical in this view, so dividing by
+        # it is dividing by noise. The vertical can still time it.
+        # y grows DOWNWARD in an image, so a ball under gravity has
+        # a > 0; a flat or upward fit has no curvature to measure.
+        if a <= 1e-6:
+            return None
+        disc = b * b - 4.0 * a * (y_a - ty)
+        if disc < 0:
+            # The arc tops out above the landing and never gets down to
+            # it. The measurement disagrees with the marked landing;
+            # believing it anyway draws a line that stops in the air.
+            return None
+        _s = (-b + math.sqrt(disc)) / (2.0 * a)
+        if not (_lo <= _s <= _hi):
+            return None
+        S = _s
+
+    # The vertical parabola: leaves at the measured slope, arrives at
+    # the marked landing at S. Its curvature is whatever those two
+    # facts require -- and when the fit and the landing agree, that is
+    # the measured gravity.
+    qy = (ty - y_a - b * S) / (S * S)
+    # Still falling, or the ball would be rising into the ground. That
+    # means the landing mark or the calibration is wrong, and a
+    # confident arc drawn from it would hide the error.
+    if qy <= 0.0:
+        return None
+    qx = (tx - x_a - vx0 * S) / (S * S)
+
+    n = int(round(S))
+    if n < 2:
+        return None
+
+    # THE ARC MAY NOT DOUBLE BACK. A golf ball flies away from the tee
+    # until it lands; a quadratic fitted to a noisy window has no such
+    # scruples. Stop where that starts rather than drawing it.
+    dirx, diry = tx - x_a, ty - y_a
+    dlen = math.hypot(dirx, diry) or 1.0
+    dirx, diry = dirx / dlen, diry / dlen
+
+    out = []
+    px, py = x_a, y_a
+    for i in range(1, n + 1):
+        s = float(i)
+        bx = x_a + vx0 * s + qx * s * s
+        by = y_a + b * s + qy * s * s
+        if (bx - px) * dirx + (by - py) * diry < 0:
+            break
+        if not (0 <= bx < width and 0 <= by < height):
+            break
+        out.append((f_a + i, int(round(bx)), int(round(by))))
+        px, py = bx, by
+    if len(out) < 2:
+        return None
+    return out
+
+
 def _clip_point_to_frame(ax, ay, bx, by, w, h):
     """Point where segment A(inside)->B(outside) crosses the frame
     rect boundary — used to run the tracer exactly to the screen edge
@@ -3619,24 +3761,48 @@ def render_tracer_video(
         # (quadratic Bézier), so there's no kink/squiggle at the join. With
         # no target we simply stop at the last plotted point.
         if target_xy is not None and len(pts) >= 2:
-            tx_t, ty_t = float(target_xy[0]), float(target_xy[1])
-            _, x_a, y_a = pts[-1]
-            _, x_b, y_b = pts[-2]
-            dx, dy = float(x_a - x_b), float(y_a - y_b)
-            dlen = math.hypot(dx, dy) or 1.0
-            ux, uy = dx / dlen, dy / dlen
-            span = math.hypot(tx_t - x_a, ty_t - y_a)
-            cx = x_a + ux * span * 0.4
-            cy = y_a + uy * span * 0.4
-            steps = int(round(fps * 1.5)) if fps else 45
-            for i in range(1, steps + 1):
-                t = i / float(steps)
-                mt = 1.0 - t
-                bx = int(round(mt * mt * x_a + 2 * mt * t * cx + t * t * tx_t))
-                by = int(round(mt * mt * y_a + 2 * mt * t * cy + t * t * ty_t))
-                if not (0 <= bx < width and 0 <= by < height):
-                    break
-                smoothed_points.append((f_last + i, bx, by))
+            # THE ARC GRAVITY DREW, measured off this swing: see
+            # _ballistic_tail. Its duration falls out of the physics
+            # rather than being a constant, so the dashes travel at the
+            # speed the real ball did.
+            _tail = _ballistic_tail(
+                pts, target_xy, fps, width, height,
+            )
+            if _tail:
+                smoothed_points.extend(_tail)
+                _bt = "ballistic"
+            else:
+                # Not enough curvature in the tracked window to measure
+                # gravity from -- a short track, or one that stops near
+                # apex. Fall back to the plain curve: it leaves along
+                # the ball's direction and bends to the target, which
+                # looks right even though nothing in it is measured.
+                _bt = "bezier"
+                tx_t, ty_t = float(target_xy[0]), float(target_xy[1])
+                _, x_a, y_a = pts[-1]
+                _, x_b, y_b = pts[-2]
+                dx, dy = float(x_a - x_b), float(y_a - y_b)
+                dlen = math.hypot(dx, dy) or 1.0
+                ux, uy = dx / dlen, dy / dlen
+                span = math.hypot(tx_t - x_a, ty_t - y_a)
+                cx = x_a + ux * span * 0.4
+                cy = y_a + uy * span * 0.4
+                steps = int(round(fps * 1.5)) if fps else 45
+                for i in range(1, steps + 1):
+                    t = i / float(steps)
+                    mt = 1.0 - t
+                    bx = int(round(mt * mt * x_a + 2 * mt * t * cx
+                                   + t * t * tx_t))
+                    by = int(round(mt * mt * y_a + 2 * mt * t * cy
+                                   + t * t * ty_t))
+                    if not (0 <= bx < width and 0 <= by < height):
+                        break
+                    smoothed_points.append((f_last + i, bx, by))
+            log.info(
+                "tracer tail: %s, %d frames from f%d toward (%.0f, %.0f)",
+                _bt, len(smoothed_points) - len(pts) if _tail else 0,
+                f_last, float(target_xy[0]), float(target_xy[1]),
+            )
 
         last_kept_frame_global = (
             smoothed_points[-1][0] if smoothed_points else None
