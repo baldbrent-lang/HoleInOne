@@ -193,6 +193,16 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
     second here and what the eye wants is the motion. The head sits on
     the ball and a short tail fades behind it, so the shot reads as
     "coming down THERE" rather than as a diagram.
+
+    ONE CONTINUOUS STREAK, NOT A ROW OF DOTS. The obvious way to draw a
+    tail is a blob per recent position, and it looks it: the ball moves
+    tens of pixels per frame here, so those blobs land far apart and
+    read as beads on a string rather than as something moving. It is
+    drawn instead as a single tapered stroke through the same positions
+    -- full width at the head, down to nothing at the far end -- built
+    up in a soft mask so the edges fall off rather than ending in a hard
+    line. The head is the wide end of that stroke, so there is no
+    separate circle to see.
     """
     import cv2  # type: ignore
     import numpy as np  # type: ignore
@@ -218,7 +228,14 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
         cap.release()
         return False
 
+    # Width of the head, in pixels. Everything else is a fraction of it.
     _r = max(3, int(round(W / 220)))
+    # The stroke is walked at this many steps per frame-gap. The ball
+    # covers tens of pixels between frames, and stepping along that gap
+    # is what makes the width and the brightness change SMOOTHLY down
+    # the tail instead of in visible bands.
+    _SUB = 8
+    _COLOUR = np.array([225.0, 245.0, 255.0])   # BGR: a touch warm-white
     idx = 0
     try:
         while True:
@@ -229,26 +246,58 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
             idx += 1
             # The tail is the ball's own recent positions, so it curves
             # with the flight instead of being a straight streak.
-            trail = [(g, by_frame[g]) for g in range(f - tail_frames, f + 1)
+            trail = [by_frame[g] for g in range(f - tail_frames, f + 1)
                      if g in by_frame]
             if trail:
-                overlay = frame.copy()
-                for k, (g, (x, y)) in enumerate(trail):
-                    age = (len(trail) - 1 - k)
-                    t = 1.0 - (age / float(max(1, tail_frames)))
-                    if t <= 0.02:
-                        continue
-                    cv2.circle(overlay, (int(round(x)), int(round(y))),
-                               max(1, int(round(_r * (0.35 + 0.65 * t)))),
-                               (255, 245, 225), -1, cv2.LINE_AA)
-                cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-                # The head again, opaque and ringed, so it stays the
-                # brightest thing on the frame over pale bunker sand.
-                hx, hy = trail[-1][1]
-                cv2.circle(frame, (int(round(hx)), int(round(hy))),
-                           _r + 1, (255, 255, 255), -1, cv2.LINE_AA)
-                cv2.circle(frame, (int(round(hx)), int(round(hy))),
-                           _r + 3, (60, 160, 255), 1, cv2.LINE_AA)
+                # ONE STROKE, TAIL TO HEAD. Drawn into a single-channel
+                # mask so the taper is in the coverage rather than in
+                # the colour -- which is what lets it be blurred into a
+                # soft edge and composited once, instead of stacking
+                # semi-transparent shapes on top of each other.
+                mask = np.zeros((H, W), np.uint8)
+                n = len(trail)
+                px, py = trail[0]
+                for k in range(1, n):
+                    x1, y1 = trail[k - 1]
+                    x2, y2 = trail[k]
+                    for s in range(1, _SUB + 1):
+                        u = s / float(_SUB)
+                        cx = x1 + (x2 - x1) * u
+                        cy = y1 + (y2 - y1) * u
+                        # How far along the whole tail this step is:
+                        # 0 at the oldest position, 1 at the ball.
+                        t = ((k - 1) + u) / float(max(1, n - 1))
+                        # Squared so the tail thins quickly behind the
+                        # head and then lingers, the way a real one does.
+                        w = max(1, int(round(_r * (0.12 + 0.88 * t * t))))
+                        # Later (brighter, wider) steps are drawn last,
+                        # so overlapping ones simply win.
+                        cv2.line(mask, (int(round(px)), int(round(py))),
+                                 (int(round(cx)), int(round(cy))),
+                                 int(round(40 + 215 * (0.25 + 0.75 * t))),
+                                 w * 2, cv2.LINE_AA)
+                        px, py = cx, cy
+                # A blur the width of the head: the stroke stops being a
+                # shape with an outline and becomes a glow.
+                _k = max(3, (_r | 1))
+                mask = cv2.GaussianBlur(mask, (_k, _k), 0)
+                # Composited over the stroke's own corner of the frame.
+                # The rest is the untouched camera, and doing the float
+                # work on a few thousand pixels instead of a million
+                # keeps this off the critical path of a produce.
+                _pad = 3 * _r + _k
+                x0 = max(0, int(min(p[0] for p in trail)) - _pad)
+                x1b = min(W, int(max(p[0] for p in trail)) + _pad)
+                y0 = max(0, int(min(p[1] for p in trail)) - _pad)
+                y1b = min(H, int(max(p[1] for p in trail)) + _pad)
+                if x1b > x0 and y1b > y0:
+                    roi = frame[y0:y1b, x0:x1b]
+                    a = (mask[y0:y1b, x0:x1b].astype(np.float32)
+                         / 255.0)[:, :, None]
+                    roi[:] = np.clip(
+                        roi.astype(np.float32) * (1.0 - a) + _COLOUR * a,
+                        0, 255,
+                    ).astype(np.uint8)
             vw.write(frame)
     finally:
         cap.release()
