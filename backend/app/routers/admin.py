@@ -7412,6 +7412,83 @@ def render_tracer_fast(
     }
 
 
+def _spot_xy(spot):
+    """[x, y] out of whatever shape a landing spot arrived in.
+
+    The wizard persists it as {"x": .., "y": ..} and sends it as a pair;
+    both reach this file, and a comet that only understood one of them
+    was a coin toss over which screen the operator had used.
+    """
+    if spot is None:
+        return None
+    try:
+        if isinstance(spot, dict):
+            return [float(spot["x"]), float(spot["y"])]
+        return [float(spot[0]), float(spot[1])]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def _finalize_green_comet(upload_id, swing_no, green_path, green_cut,
+                          green_end, payload):
+    """Cut the green window out and draw the comet on that cut.
+
+    Returns (segment, 0.0, duration) to concat in place of the raw green
+    clip, or None to leave the green half exactly as it was.
+
+    PRODUCE IS NOT THE ONLY WAY A CLIP GETS BUILT. Click-to-plot's Save
+    and the wizard's re-finalize both come through here, and both used
+    to composite the RAW green camera -- so a comet produce had already
+    drawn was quietly wiped by the next save. Best-effort like the
+    produce-side one: any failure and the green half is simply the
+    camera, which is what it was before.
+    """
+    from ..services import green_flight as gf
+
+    pts = payload.get("green_track")
+    try:
+        _gfps = float(probe_fps(green_path) or 0.0)
+        if _gfps <= 0:
+            return None
+        if not pts:
+            _lf = payload.get("landing_frame")
+            _spot = _spot_xy(payload.get("landing_spot"))
+            if _lf is None or not _spot:
+                return None
+            pts, why = gf.find_path(green_path, int(_lf), _spot, _gfps)
+            if not pts:
+                log.info("finalize: no green comet for %s — %s",
+                         upload_id, why)
+                return None
+        seg = CLIPS_DIR / (
+            f"wizard-{upload_id}-greencomet"
+            + (f"-s{int(swing_no)}" if swing_no is not None else "")
+            + ".mp4"
+        )
+        if not cut_segment(green_path, seg, green_cut, green_end):
+            return None
+        # The cut starts at `green_cut` on the green clock, so its first
+        # frame is that instant in the SOURCE numbering the chain uses.
+        if not gf.render_comet(seg, seg, pts,
+                               int(round(float(green_cut) * _gfps))):
+            seg.unlink(missing_ok=True)
+            return None
+        _dur = float((probe_video_info(seg) or {}).get("duration") or 0.0)
+        if _dur <= 0.05:
+            seg.unlink(missing_ok=True)
+            return None
+        log.info(
+            "finalize: green comet on upload=%s swing=%s — %d frames "
+            "f%d..f%d over a %.2fs cut",
+            upload_id, swing_no, len(pts), pts[0]["frame"],
+            pts[-1]["frame"], _dur,
+        )
+        return seg, 0.0, _dur
+    except Exception as exc:  # noqa: BLE001
+        log.warning("finalize: green comet for %s failed: %s", upload_id, exc)
+        return None
+
+
 def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx):
     """Draw the ball's descent on the cut green segment, if it is there.
 
@@ -8071,9 +8148,18 @@ def finalize_wizard_video(
         if green_dur:
             green_end = min(green_end, green_dur)
         green_end = max(green_cut + 0.1, green_end)
+        # The comet on the green half, when the caller knows of a
+        # descent (or gives a landing to walk back from). Falls through
+        # to the raw camera when there is nothing to draw.
+        _g_src, _g_from, _g_to = green_path, green_cut, green_end
+        _comet = _finalize_green_comet(
+            upload_id, _swing_no, green_path, green_cut, green_end, payload,
+        )
+        if _comet:
+            _g_src, _g_from, _g_to = _comet
         if concat_two_clips(
             tracer_path, start_sec, composite_cut,
-            green_path, green_cut, green_end,
+            _g_src, _g_from, _g_to,
             final_path,
         ) and final_path.exists() and final_path.stat().st_size > 0:
             built = True

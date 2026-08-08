@@ -731,6 +731,140 @@ function ClickToPlotModal({
     swing.track_frame_height
     ?? row.edit_metrics?.frame_height ?? row.tee_height ?? null;
   const bgUrl = swing.tracer_raw_motion_url || swing.mog2_overlay_url;
+
+  // ── THE OTHER CAMERA ──────────────────────────────────────────────
+  // The tee picture answers "where did the tracer go". The green one
+  // answers "where did it come down", and on this screen that is the
+  // same gesture: toggle, and the picture becomes the green camera's
+  // own frame, the dots become a frame-diff scan of the green window,
+  // and a click means "it landed HERE" — the one mark the comet is
+  // walked backwards from, so marking the landing and seeing the comet
+  // are a single action rather than a trip through the wizard.
+  const [cam, setCam] = useState("tee");
+  const [green, setGreen] = useState(null); // /frame payload + defaultEnd
+  const [greenErr, setGreenErr] = useState(null);
+  const [greenDots, setGreenDots] = useState([]);
+  const [greenScanning, setGreenScanning] = useState(false);
+  const [greenNote, setGreenNote] = useState(null);
+  const [greenLevel, setGreenLevel] = useState(2);
+  // Whatever landing is already on record — from the wizard, or from a
+  // produce. Per-swing first, then the upload-level one single-swing
+  // rows use.
+  const [savedLanding] = useState(() => {
+    const f = swing.landing_frame ?? row.edit_metrics?.landing_frame ?? null;
+    const s = swing.landing_spot || row.edit_metrics?.landing_spot || null;
+    return f != null && s
+      ? { frame: f, x: Math.round(s.x ?? s[0]), y: Math.round(s.y ?? s[1]) }
+      : null;
+  });
+  const [landing, setLanding] = useState(savedLanding);
+  const [comet, setComet] = useState(
+    swing.green_track?.length ? { points: swing.green_track } : null,
+  );
+  const [cometBusy, setCometBusy] = useState(false);
+  const landingMoved =
+    (!!landing !== !!savedLanding)
+    || (!!landing && !!savedLanding
+        && (landing.frame !== savedLanding.frame
+            || landing.x !== savedLanding.x
+            || landing.y !== savedLanding.y));
+
+  // THE GREEN PICTURE. Loaded on the first toggle, and again whenever
+  // the landing moves: the frame worth looking at is the one the ball
+  // is on. Before there is a landing that is where the produced clip
+  // stops — its last green frame — which is the picture the operator
+  // asked for.
+  useEffect(() => {
+    if (cam !== "green") return undefined;
+    let dead = false;
+    (async () => {
+      try {
+        setGreenErr(null);
+        const want = landing?.frame ?? green?.defaultEnd ?? null;
+        const out = await api.getLongUploadFrame(
+          adminPassword, row.id,
+          // No idea yet which frame that is: ask for one past the end
+          // and let the server clamp, which also answers where produce
+          // would stop.
+          want ?? 1e9, "green", impactFrame ?? null,
+        );
+        if (dead) return;
+        const end = out.default_end_frame ?? null;
+        if (want == null && end != null && end !== out.frame) {
+          const at = await api.getLongUploadFrame(
+            adminPassword, row.id, end, "green", impactFrame ?? null,
+          );
+          if (!dead) setGreen({ ...at, defaultEnd: end });
+          return;
+        }
+        setGreen({ ...out, defaultEnd: end ?? out.frame });
+      } catch (e) {
+        if (!dead) setGreenErr(e?.message || String(e));
+      }
+    })();
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cam, landing?.frame, row.id]);
+
+  // The heat over the green window — the same scan the wizard's landing
+  // step runs. Fired once on the first toggle so the toggle itself is
+  // the whole gesture; the button re-runs it a level deeper.
+  async function scanGreen(level) {
+    if (greenScanning) return;
+    setGreenScanning(true);
+    setGreenNote(null);
+    try {
+      const out = await api.scanPlotRegion(adminPassword, row.id, {
+        which: "green",
+        impact_frame: impactFrame ?? null,
+        sensitivity: level,
+      });
+      const found = out.dots || [];
+      setGreenDots(found);
+      setGreenLevel(level);
+      setGreenNote(
+        found.length
+          ? `${found.length} dots over f${out.start_frame}–f${out.end_frame} `
+            + `(level ${level}) — click the one where it lands`
+          : level >= 3
+            ? "no motion at all in the green window — the ball did not "
+              + "land in this camera's view"
+            : `nothing at level ${level} — press Deeper`,
+      );
+    } catch (e) {
+      setGreenNote(e?.message || String(e));
+    } finally {
+      setGreenScanning(false);
+    }
+  }
+  const greenScanned = useRef(false);
+  useEffect(() => {
+    if (cam !== "green" || greenScanned.current) return;
+    greenScanned.current = true;
+    scanGreen(2);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cam]);
+
+  // A click on the green camera is a landing, and a landing is a comet:
+  // ask for the chain straight away rather than making the operator
+  // press a second button to find out whether there is one.
+  async function markLanding(pt) {
+    setLanding(pt);
+    setComet(null);
+    setCometBusy(true);
+    try {
+      const out = await api.greenFlight(adminPassword, row.id, {
+        landing_frame: pt.frame,
+        landing_spot: [pt.x, pt.y],
+      });
+      setComet(out);
+    } catch (e) {
+      setComet({ points: null, reason: e?.message || String(e) });
+    } finally {
+      setCometBusy(false);
+    }
+  }
+
   // Resolve this swing's produced clip by IDENTITY (clip_id) first —
   // positional lookup goes stale as soon as a clip is deleted.
   const clipForSwing =
@@ -799,7 +933,7 @@ function ClickToPlotModal({
         ballAtRest.y !== (swing.ball?.y ?? null));
     if (
       overrides.length === 0 && cleared.length === 0
-      && !movedImpact && !movedBall
+      && !movedImpact && !movedBall && !landingMoved
     ) {
       onClose();
       return;
@@ -810,29 +944,58 @@ function ClickToPlotModal({
     // of red text at the bottom of a full-screen editor. Same shape as
     // the wizard's Produce: hand the run to the production card, which
     // is where a minutes-long job belongs, and close.
+    // NOTHING CHANGED ON THE TEE SIDE means nothing about the tracer
+    // changed, and re-rendering it is minutes of work to arrive back at
+    // the same overlay. A landing marked on the green camera only
+    // affects the green half, so skip straight to the finalize that
+    // draws it.
+    // ...but only when the tracer finalize will pick up is already THIS
+    // swing's. finalize composites the upload-level tracer_url, which
+    // the fast render is what sets — on a multi-swing upload where the
+    // last render was another swing's, skipping it would finalize the
+    // wrong tracer.
+    const teeChanged =
+      overrides.length > 0 || cleared.length > 0 || movedImpact || movedBall
+      || !swing.tracer_url
+      || row.edit_metrics?.tracer_url !== swing.tracer_url;
     const stage = (msg) => onBackground?.(msg);
-    stage("Re-rendering the tracer…");
+    stage(teeChanged ? "Re-rendering the tracer…" : "Drawing the comet…");
     onClose();
     try {
       // 1. Bake the picks into the swing's track (cv2 only, no AI).
       const hasWindow =
         swing.start_frame != null && swing.end_frame != null;
-      const fast = await api.renderWizardTracerFast(adminPassword, row.id, {
-        manual_positions: overrides,
-        cleared_frames: cleared,
-        base_track_frames: swing.ball_track_frames || [],
-        impact_frame: impactFrame ?? null,
-        ball_at_rest: ballAtRest || null,
-        target: swing.target || null,
-        render_window: hasWindow
-          ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
-          : null,
-      });
+      const fast = teeChanged
+        ? await api.renderWizardTracerFast(adminPassword, row.id, {
+          manual_positions: overrides,
+          cleared_frames: cleared,
+          base_track_frames: swing.ball_track_frames || [],
+          impact_frame: impactFrame ?? null,
+          ball_at_rest: ballAtRest || null,
+          target: swing.target || null,
+          render_window: hasWindow
+            ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
+            : null,
+        })
+        : {
+          tracer_url: swing.tracer_url,
+          ball_track_frames: swing.ball_track_frames || [],
+        };
       let nextSwings = swings.map((s, i) =>
         i === swingPos
           ? {
               ...s,
               impact_frame: impactFrame ?? s.impact_frame,
+              // The landing, and the descent found from it. Kept on the
+              // swing so a later produce and a later re-open both start
+              // from what was marked here.
+              ...(landing
+                ? {
+                    landing_frame: landing.frame,
+                    landing_spot: { x: landing.x, y: landing.y },
+                    green_track: comet?.points || null,
+                  }
+                : {}),
               ...(ballAtRest
                 // ball_manual marks it operator-placed; the produce
                 // worker checks that flag before writing a detected rest
@@ -844,7 +1007,17 @@ function ClickToPlotModal({
             }
           : s
       );
-      await api.saveEditMetrics(adminPassword, row.id, { swings: nextSwings });
+      await api.saveEditMetrics(adminPassword, row.id, {
+        swings: nextSwings,
+        // Single-swing rows read the landing from the top level (that
+        // is where the wizard puts it), so mirror it there too.
+        ...(landing
+          ? {
+              landing_frame: landing.frame,
+              landing_spot: { x: landing.x, y: landing.y },
+            }
+          : {}),
+      });
       // 2. Re-finalize with the swing's saved graphics + frame window.
       // `swing` gives this swing its OWN final file so it can't clobber
       // the video behind another swing's committed clip.
@@ -867,6 +1040,14 @@ function ClickToPlotModal({
         // finalize silently produced a tee-only clip.
         impact_frame: impactFrame ?? swing.impact_frame ?? null,
         swing: swing.idx ?? swingPos,
+        // THE COMET SURVIVES THE SAVE. finalize composites the green
+        // camera into the clip, and without these it composites the RAW
+        // one — so a save here used to wipe the comet produce had drawn.
+        // The chain if one has been found, else the landing to walk back
+        // from; either way this decides the green half.
+        green_track: comet?.points || swing.green_track || null,
+        landing_frame: landing?.frame ?? null,
+        landing_spot: landing ? [landing.x, landing.y] : null,
       });
       nextSwings = nextSwings.map((s, i) =>
         i === swingPos
@@ -926,7 +1107,8 @@ function ClickToPlotModal({
     (ballAtRest.x !== (swing.ball?.x ?? null) ||
       ballAtRest.y !== (swing.ball?.y ?? null));
   const nChanged =
-    pendAdd.length + pendClear.length + (impactMoved ? 1 : 0) + (ballMoved ? 1 : 0);
+    pendAdd.length + pendClear.length + (impactMoved ? 1 : 0)
+    + (ballMoved ? 1 : 0) + (landingMoved ? 1 : 0);
   // The earliest point actually in the saved track — with a wrong impact
   // frame this is the honest answer to "when does the ball leave", so it
   // is offered as a one-click fix.
@@ -964,10 +1146,41 @@ function ClickToPlotModal({
             <b>🖱 Click-to-plot</b>
             <span className="muted">
               {" "}· #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
-              {holeNumber} · {dots.length} dots
-              {denseDots.length > 0 && ` · ${denseDots.length} candidates`}
-              {winLo != null && ` · showing f${winLo}–f${winHi}`}
+              {holeNumber}
+              {cam === "green"
+                ? ` · green camera · ${greenDots.length} dots`
+                  + (green?.frame != null ? ` · f${green.frame}` : "")
+                : ` · ${dots.length} dots`
+                  + (denseDots.length > 0
+                    ? ` · ${denseDots.length} candidates` : "")
+                  + (winLo != null ? ` · showing f${winLo}–f${winHi}` : "")}
             </span>
+          </div>
+          {/* WHICH CAMERA. Two pictures of the same shot: the tee, where
+              the tracer is drawn, and the green, where it comes down.
+              The tee half is plotted point by point; the green half
+              needs one click — the landing — and finds its own path
+              back from it. */}
+          <div className="row" style={{ gap: 4, alignItems: "center" }}>
+            {["tee", "green"].map((w) => (
+              <button
+                key={w}
+                type="button"
+                className={cam === w ? "small" : "ghost small"}
+                style={{ width: "auto", padding: "0 10px" }}
+                onClick={() => setCam(w)}
+                disabled={w === "green" && !row.green_filename}
+                title={
+                  w === "tee"
+                    ? "The tee camera's motion heat — plot the tracer's ball points"
+                    : row.green_filename
+                      ? "The green camera at the end of the clip — click where the ball lands and the comet is found from there"
+                      : "This upload has no green video"
+                }
+              >
+                {w === "tee" ? "tee" : "☄ green"}
+              </button>
+            ))}
           </div>
           <div className="row" style={{ gap: 8, alignItems: "center" }}>
             {nChanged > 0 && (
@@ -1083,19 +1296,62 @@ function ClickToPlotModal({
             >
               Clear all ({Object.keys(marks).length})
             </button>
-            {/* WHETHER THE LAST PRODUCE DREW A COMET on the green half,
-                and how long it was. This screen is where a produced
-                swing gets inspected, and "is there a comet" is
-                otherwise only answerable by watching the clip to the
-                end. The search itself lives in the wizard, next to the
-                landing mark it is anchored on. */}
-            {swing?.green_track && (
+            {/* THE COMET. In green mode this is the live state of the
+                click just made — searching, found, or the sentence
+                saying why there is no path. In tee mode it is what the
+                last produce drew, which is otherwise only answerable by
+                watching the clip to the end. */}
+            {cam === "green" ? (
+              <>
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ width: "auto" }}
+                  disabled={greenScanning}
+                  onClick={() => scanGreen(Math.min(3, greenLevel + 1))}
+                  title="Frame-diff the green window again, one level deeper: more dots, including leaves in the wind. You are the filter."
+                >
+                  {greenScanning
+                    ? "Scanning…"
+                    : greenLevel >= 3 ? "🔍 Rescan" : "🔍 Deeper"}
+                </button>
+                {landing && (
+                  <span className="tiny muted">
+                    landing f{landing.frame} · {landing.x},{landing.y}
+                  </span>
+                )}
+                <span
+                  className="tiny"
+                  style={{
+                    color: cometBusy
+                      ? "#fde047"
+                      : comet?.points
+                        ? "#3ee37a"
+                        : comet?.reason ? "#f59e0b" : "var(--muted, #999)",
+                    maxWidth: 460,
+                  }}
+                >
+                  {cometBusy
+                    ? "☄ walking back from the landing…"
+                    : comet?.points
+                      ? `☄ ${comet.points.length} frames (f${
+                          comet.points[0].frame}→f${
+                          comet.points[comet.points.length - 1].frame}) — `
+                        + "Save & close draws it on the clip"
+                      : comet?.reason
+                        ? `no comet: ${comet.reason}`
+                        : greenErr
+                          || greenNote
+                          || "click the dot where the ball lands"}
+                </span>
+              </>
+            ) : swing?.green_track ? (
               <span className="tiny" style={{ color: "#3ee37a" }}>
                 ☄ green comet · {swing.green_track.length} frames
                 {" "}(f{swing.green_track[0]?.frame}→
                 f{swing.green_track[swing.green_track.length - 1]?.frame})
               </span>
-            )}
+            ) : null}
             <button
               type="button"
               className="ghost small"
@@ -1125,7 +1381,51 @@ function ClickToPlotModal({
           flex: 1, minHeight: 0, display: "flex",
           alignItems: "center", justifyContent: "center",
         }}>
-          {(dots.length > 0 || denseDots.length > 0) && bgUrl ? (
+          {cam === "green" ? (
+            green?.image_url ? (
+              <PlotHeatCanvas
+                bgUrl={green.image_url}
+                // THE SAME MAP, POINTED AT THE OTHER CAMERA. Dots are
+                // the green window's motion; a click is the landing
+                // rather than a tracer point, so there is no track and
+                // no tracer start to draw — one mark, and the comet
+                // found from it.
+                dots={greenDots}
+                denseDots={[]}
+                frameW={green.width}
+                frameH={green.height}
+                marks={landing ? { [landing.frame]: { x: landing.x, y: landing.y } } : {}}
+                track={[]}
+                comet={comet}
+                onToggleDot={(p, clear) => {
+                  if (clear
+                      || (landing && landing.frame === p.frame
+                          && Math.abs(landing.x - p.x) <= 2
+                          && Math.abs(landing.y - p.y) <= 2)) {
+                    setLanding(null);
+                    setComet(null);
+                    return;
+                  }
+                  markLanding({ frame: p.frame, x: p.x, y: p.y });
+                }}
+                scanRegion={async (region, sensitivity) => {
+                  const out = await api.scanPlotRegion(adminPassword, row.id, {
+                    ...region,
+                    which: "green",
+                    sensitivity,
+                    impact_frame: impactFrame ?? null,
+                  });
+                  return out.dots || [];
+                }}
+              />
+            ) : (
+              <div className="muted small" style={{ textAlign: "center", padding: 24 }}>
+                {greenErr
+                  ? `Could not load the green frame: ${greenErr}`
+                  : "Loading the green camera…"}
+              </div>
+            )
+          ) : (dots.length > 0 || denseDots.length > 0) && bgUrl ? (
             <PlotHeatCanvas
               bgUrl={bgUrl}
               dots={dots}
@@ -1177,6 +1477,20 @@ function ClickToPlotModal({
           How this map works (legend &amp; shortcuts)
         </summary>
         <div className="tiny muted" style={{ marginTop: 4 }}>
+          {cam === "green" && (
+            <p style={{ margin: "0 0 6px" }}>
+              <b>Green camera.</b> The picture is the frame the produced
+              clip ends on, or the landing frame once one is marked; the
+              dots are every scrap of motion in the green window. Click
+              the dot where the ball touches down and the ball&apos;s
+              descent is walked backwards from it — the pale path drawn
+              head-to-tail is exactly what produce draws as a comet.
+              Click the same dot again to unmark it. No path found means
+              no comet: the reason is printed above. Save &amp; close
+              keeps the landing and burns the comet into the green half
+              of the clip.
+            </p>
+          )}
           The green line is the swing&apos;s CURRENT saved tracer path —
           where the rendered tracer actually sits. Green dots are already
           in the saved ball track; amber are unused detections. Click a
@@ -5607,7 +5921,7 @@ const DENSE_DOT_ZOOM = 2.5;
 
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
-  scanRegion, track, ballXY, placingBall, onPlaceBall,
+  scanRegion, track, ballXY, placingBall, onPlaceBall, comet,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -5820,6 +6134,58 @@ function PlotHeatCanvas({
                 {`f${track[track.length - 1].frame}`}
               </text>
             )}
+          </svg>
+        )}
+
+        {/* THE COMET'S PATH. The chain of frames the ball was found on
+            coming down on the green camera — exactly what produce will
+            draw a comet along, so seeing it here is seeing the clip.
+            Head-to-tail: thick and bright at the landing, thin and dim
+            where the ball entered the search, so its direction reads
+            without a legend. Non-interactive. */}
+        {hasDims && (comet?.points?.length || 0) > 1 && (
+          <svg
+            viewBox={`0 0 ${frameW} ${frameH}`}
+            preserveAspectRatio="none"
+            style={{
+              position: "absolute", inset: 0, width: "100%", height: "100%",
+              pointerEvents: "none",
+            }}
+          >
+            {comet.points.slice(1).map((p, i) => {
+              const a = comet.points[i];
+              const t = (i + 1) / (comet.points.length - 1);
+              return (
+                <line
+                  key={`cm-${p.frame}`}
+                  x1={a.x} y1={a.y} x2={p.x} y2={p.y}
+                  stroke="#fff7ed"
+                  strokeOpacity={0.35 + 0.6 * t}
+                  strokeWidth={Math.max(1.5, (frameW / 900) * (1 + 3 * t))}
+                  strokeLinecap="round"
+                />
+              );
+            })}
+            <circle
+              cx={comet.points[comet.points.length - 1].x}
+              cy={comet.points[comet.points.length - 1].y}
+              r={Math.max(4, frameW / 260)}
+              fill="#fff"
+              stroke="#3ea6ff"
+              strokeWidth={Math.max(1, frameW / 900)}
+            />
+            <text
+              x={comet.points[0].x + frameW / 120}
+              y={comet.points[0].y}
+              fontSize={Math.max(11, frameW / 110)}
+              fill="#fed7aa"
+              stroke="#000"
+              strokeWidth={0.6}
+              paintOrder="stroke"
+            >
+              {`comet f${comet.points[0].frame}→f${
+                comet.points[comet.points.length - 1].frame}`}
+            </text>
           </svg>
         )}
 
