@@ -454,7 +454,21 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
         alt={`${label} thumbnail`}
         missing={missing}
         placeholder={notUploaded ? "Not Uploaded" : "No preview"}
-        onClick={videoUrl ? () => onOpenViewer(videoUrl, label, recordingStartedAt, fps) : undefined}
+        onClick={videoUrl
+          ? () => onOpenViewer(videoUrl, label,
+                               recordingStartedAt || startsAt, fps,
+                               // TIME OF DAY ON EVERY RAW VIDEO, not just
+                               // the ones whose Pi reported a first-frame
+                               // stamp. Where it did not, the clip still
+                               // has a start -- the trigger, or the
+                               // upload's base capture time -- which is
+                               // right to a fraction of a second and far
+                               // more use than no clock at all. It is
+                               // marked approximate so it is never
+                               // mistaken for the measured one the
+                               // camera sync is reckoned from.
+                               !recordingStartedAt && !!startsAt)
+          : undefined}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <MetaRow k="Quality" v={hasSource ? qualityText(qualityLabel, width, height) : ""} />
@@ -7859,11 +7873,13 @@ function CameraEventCard({
       }
     : eventStatusBadge(ev.status);
   const triggeredAt = ev.triggered_at;
-  const teeStartsAt = triggeredAt;
-  // Green starts ~5s before trigger because of pre-roll; we don't
-  // have the exact wall-clock the green Pi committed, so use the
-  // shared trigger time for both tiles to keep the math honest.
-  const greenStartsAt = triggeredAt;
+  // WHEN EACH CAMERA'S FIRST FRAME IS. The Pi reports it per camera and
+  // the two differ by a fraction of a second, which is exactly what the
+  // tee->green delta is made of -- so prefer each camera's own stamp and
+  // fall back to the shared trigger time, which the clock overlay then
+  // marks approximate rather than passing off as measured.
+  const teeStartsAt = ev.tee_recording_started_at || triggeredAt;
+  const greenStartsAt = ev.green_recording_started_at || triggeredAt;
   const producedClips = ev.produced_clip ? [ev.produced_clip] : [];
   const hasProduced = !!ev.produced_clip;
   const onBroadcastChannel = !!ev.produced_clip?.is_highlight;
@@ -7926,6 +7942,7 @@ function CameraEventCard({
             fps={ev.tee_fps}
             sizeMb={ev.tee_size_mb}
             startsAt={teeStartsAt}
+            recordingStartedAt={ev.tee_recording_started_at}
             missing={ev.tee_missing}
             notUploaded={!ev.tee_clip_filename}
             qualityLabel={null}
@@ -7946,6 +7963,7 @@ function CameraEventCard({
             fps={ev.green_fps}
             sizeMb={ev.green_size_mb}
             startsAt={greenStartsAt}
+            recordingStartedAt={ev.green_recording_started_at}
             missing={ev.green_missing}
             notUploaded={!ev.green_clip_filename}
             qualityLabel={null}
@@ -8030,7 +8048,7 @@ function fmtClock(ms) {
   return `${get("hour")}:${get("minute")}:${get("second")}.${millis}`;
 }
 
-function VideoLightbox({ url, title, startedAt, fps, onClose }) {
+function VideoLightbox({ url, title, startedAt, startedApprox, fps, onClose }) {
   const videoRef = useRef(null);
   const [curTime, setCurTime] = useState(0);
   const startMs = startedAt ? parseApiDate(startedAt)?.getTime() ?? null : null;
@@ -8111,7 +8129,22 @@ function VideoLightbox({ url, title, startedAt, fps, onClose }) {
                 display: "flex", flexDirection: "column", gap: 2,
               }}
             >
-              {startMs != null && <span>{fmtClock(startMs + curTime * 1000)} CT</span>}
+              {startMs != null && (
+                <span
+                  title={startedApprox
+                    ? "Reckoned from the clip's start time (the trigger), "
+                      + "not the camera's own first-frame stamp — right to "
+                      + "a fraction of a second, but do not read a "
+                      + "tee-to-green offset off it"
+                    : "The camera's own reported first-frame time plus the "
+                      + "position in the clip. The tee and green overlays "
+                      + "are in the same zone, so at the same real instant "
+                      + "they read identically"}
+                >
+                  {startedApprox ? "≈" : ""}
+                  {fmtClock(startMs + curTime * 1000)} CT
+                </span>
+              )}
               {hasFps && <span>Frame {Math.floor(curTime * fps)}</span>}
             </div>
           )}
@@ -9858,9 +9891,10 @@ export default function AdminProduction() {
     });
   }
 
-  function openViewer(url, title, startedAt = null, fps = null) {
+  function openViewer(url, title, startedAt = null, fps = null,
+                      startedApprox = false) {
     if (!url) return;
-    setViewer({ url, title, startedAt, fps });
+    setViewer({ url, title, startedAt, fps, startedApprox });
   }
 
   // Re-fetch the currently-loaded range on both lists. Called by the
@@ -10738,6 +10772,7 @@ export default function AdminProduction() {
         url={viewer?.url}
         title={viewer?.title}
         startedAt={viewer?.startedAt}
+        startedApprox={viewer?.startedApprox}
         fps={viewer?.fps}
         onClose={() => setViewer(null)}
       />

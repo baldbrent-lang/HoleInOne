@@ -5275,6 +5275,20 @@ def list_camera_events(
                 ),
                 "status": r.status,
                 "last_error": r.last_error,
+                # WHEN EACH CAMERA'S FIRST FRAME ACTUALLY IS, as the Pi
+                # reported it. The trigger time is close but not equal --
+                # the two Pis start a fraction of a second apart, which
+                # is the whole reason the delta exists -- so a clock
+                # drawn over the raw video needs the camera's own stamp
+                # rather than the event's.
+                "tee_recording_started_at": (
+                    r.tee_recording_started_at.isoformat()
+                    if r.tee_recording_started_at else None
+                ),
+                "green_recording_started_at": (
+                    r.green_recording_started_at.isoformat()
+                    if r.green_recording_started_at else None
+                ),
                 "tee_camera_id": r.tee_camera_id,
                 "tee_camera_name": tee_cam.name if tee_cam else None,
                 "green_camera_id": r.green_camera_id,
