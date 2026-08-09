@@ -771,13 +771,54 @@ function ClickToPlotModal({
       ? { frame: f, x: Math.round(s.x ?? s[0]), y: Math.round(s.y ?? s[1]) }
       : null;
   });
-  const [landing, setLanding] = useState(savedLanding);
-  const [comet, setComet] = useState(
-    swing.green_track?.length ? { points: swing.green_track } : null,
-  );
+  // THE COMET'S POINTS, PLOTTED THE SAME WAY THE TRACER'S ARE. One
+  // landing was not enough: a click marked the landing and the NEXT
+  // click moved it, so the map could only ever hold one green dot and
+  // nothing accumulated. Here as on the tee side, every click adds a
+  // point and clicking it again takes it away — the difference is only
+  // that these points are a descent rather than a flight, and that the
+  // search can propose them. The last one in time is the landing.
+  const [greenMarks, setGreenMarks] = useState(() => {
+    const init = {};
+    for (const p of swing.green_track || []) {
+      init[p.frame] = { x: Math.round(p.x), y: Math.round(p.y) };
+    }
+    if (!Object.keys(init).length && savedLanding) {
+      init[savedLanding.frame] = { x: savedLanding.x, y: savedLanding.y };
+    }
+    return init;
+  });
+  const [greenBase] = useState(() => JSON.stringify(
+    swing.green_track?.length ? swing.green_track : null));
+  // Why the search said no, when it did. The points it FOUND go into
+  // the marks rather than being kept apart, so the operator can drop a
+  // wrong one or add a missed one instead of taking the chain or
+  // leaving it.
+  const [cometReason, setCometReason] = useState(null);
   const [cometBusy, setCometBusy] = useState(false);
-  const landingMoved =
-    (!!landing !== !!savedLanding)
+  const cometPoints = Object.entries(greenMarks)
+    .map(([f, pt]) => ({ frame: parseInt(f, 10), x: pt.x, y: pt.y }))
+    .sort((a, b) => a.frame - b.frame);
+  const landing = cometPoints.length
+    ? cometPoints[cometPoints.length - 1] : null;
+  const comet = cometPoints.length > 1 ? { points: cometPoints } : null;
+  // What the green half has to say, as one line. It lives over the
+  // picture rather than on the toolbar: on the toolbar a sentence this
+  // long is squeezed into a narrow column, wraps to a dozen lines, and
+  // every one of them comes off the height of the map.
+  const cometStatus = cometBusy
+    ? "☄ walking back from the landing…"
+    : cometPoints.length > 1
+      ? `☄ ${cometPoints.length} frames (f${cometPoints[0].frame}→f${
+          landing.frame}) — Save & close draws it on the clip`
+      : cometPoints.length === 1
+        ? `landing marked at f${landing.frame}`
+          + (cometReason ? ` — ${cometReason}. ` : " — ")
+          + "click more dots along the descent to draw the comet by hand"
+        : greenErr || greenNote || "click the dots the ball comes down on";
+  const greenChanged = JSON.stringify(
+    cometPoints.length > 1 ? cometPoints : null) !== greenBase
+    || (!!landing !== !!savedLanding)
     || (!!landing && !!savedLanding
         && (landing.frame !== savedLanding.frame
             || landing.x !== savedLanding.x
@@ -859,21 +900,49 @@ function ClickToPlotModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cam]);
 
-  // A click on the green camera is a landing, and a landing is a comet:
-  // ask for the chain straight away rather than making the operator
-  // press a second button to find out whether there is one.
-  async function markLanding(pt) {
-    setLanding(pt);
-    setComet(null);
+  // A click adds a point; clicking it again takes it away. Nothing is
+  // replaced — that was the bug.
+  function toggleGreenDot(p, clear = false) {
+    setGreenMarks((m) => {
+      const cur = m[p.frame];
+      if (clear || (cur && Math.abs(cur.x - p.x) <= 2
+                    && Math.abs(cur.y - p.y) <= 2)) {
+        const next = { ...m };
+        delete next[p.frame];
+        return next;
+      }
+      return { ...m, [p.frame]: { x: p.x, y: p.y } };
+    });
+  }
+
+  // Walk the descent back from the latest marked point. Whatever it
+  // finds is merged INTO the marks, so the found chain arrives as
+  // ordinary plotted points the operator can edit rather than as a
+  // separate thing to accept or reject. Run automatically off the first
+  // click, and by the button after that.
+  async function findComet(from) {
+    const at = from || landing;
+    if (!at || cometBusy) return;
     setCometBusy(true);
+    setCometReason(null);
     try {
       const out = await api.greenFlight(adminPassword, row.id, {
-        landing_frame: pt.frame,
-        landing_spot: [pt.x, pt.y],
+        landing_frame: at.frame,
+        landing_spot: [at.x, at.y],
       });
-      setComet(out);
+      if (out?.points?.length) {
+        setGreenMarks((m) => {
+          const next = { ...m };
+          for (const q of out.points) {
+            next[q.frame] = { x: Math.round(q.x), y: Math.round(q.y) };
+          }
+          return next;
+        });
+      } else {
+        setCometReason(out?.reason || "no obvious path");
+      }
     } catch (e) {
-      setComet({ points: null, reason: e?.message || String(e) });
+      setCometReason(e?.message || String(e));
     } finally {
       setCometBusy(false);
     }
@@ -917,6 +986,13 @@ function ClickToPlotModal({
   // Put it back to whatever was saved before this modal was opened.
   function resetMarks() {
     setMarks({ ...baked });
+    setGreenMarks(JSON.parse(greenBase || "null")?.reduce(
+      (acc, q) => ({ ...acc, [q.frame]: { x: Math.round(q.x),
+                                          y: Math.round(q.y) } }), {})
+      || (savedLanding
+        ? { [savedLanding.frame]: { x: savedLanding.x, y: savedLanding.y } }
+        : {}));
+    setCometReason(null);
     setImpactFrame(swing.impact_frame ?? null);
     setBallAtRest(swing.ball ?? null);
     setPlacingBall(false);
@@ -947,7 +1023,7 @@ function ClickToPlotModal({
         ballAtRest.y !== (swing.ball?.y ?? null));
     if (
       overrides.length === 0 && cleared.length === 0
-      && !movedImpact && !movedBall && !landingMoved
+      && !movedImpact && !movedBall && !greenChanged
     ) {
       onClose();
       return;
@@ -1007,7 +1083,8 @@ function ClickToPlotModal({
                 ? {
                     landing_frame: landing.frame,
                     landing_spot: { x: landing.x, y: landing.y },
-                    green_track: comet?.points || null,
+                    green_track: cometPoints.length > 1
+                      ? cometPoints : null,
                   }
                 : {}),
               ...(ballAtRest
@@ -1059,7 +1136,8 @@ function ClickToPlotModal({
         // one — so a save here used to wipe the comet produce had drawn.
         // The chain if one has been found, else the landing to walk back
         // from; either way this decides the green half.
-        green_track: comet?.points || swing.green_track || null,
+        green_track: (cometPoints.length > 1 ? cometPoints : null)
+          || swing.green_track || null,
         landing_frame: landing?.frame ?? null,
         landing_spot: landing ? [landing.x, landing.y] : null,
       });
@@ -1122,7 +1200,7 @@ function ClickToPlotModal({
       ballAtRest.y !== (swing.ball?.y ?? null));
   const nChanged =
     pendAdd.length + pendClear.length + (impactMoved ? 1 : 0)
-    + (ballMoved ? 1 : 0) + (landingMoved ? 1 : 0);
+    + (ballMoved ? 1 : 0) + (greenChanged ? 1 : 0);
   // The earliest point actually in the saved track — with a wrong impact
   // frame this is the honest answer to "when does the ball leave", so it
   // is offered as a one-click fix.
@@ -1139,24 +1217,40 @@ function ClickToPlotModal({
         position: "fixed", inset: 0,
         background: "rgba(0,0,0,0.85)",
         display: "flex", alignItems: "center", justifyContent: "center",
-        zIndex: 1000, padding: 16, cursor: "zoom-out",
+        zIndex: 1000, padding: 6, cursor: "zoom-out",
       }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         className="card"
         style={{
-          maxWidth: "min(1500px, 98vw)", width: "100%",
-          maxHeight: "96vh", height: "96vh", overflow: "hidden",
+          maxWidth: "min(2200px, 99.5vw)", width: "100%",
+          maxHeight: "99vh", height: "99vh", overflow: "hidden",
           cursor: "default", margin: 0,
+          // .card's 20px is a page card's padding; here it is 40px of
+          // picture in each direction.
+          padding: 8,
           display: "flex", flexDirection: "column",
         }}
       >
         <div
           className="row"
-          style={{ alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}
+          style={{
+            alignItems: "center", justifyContent: "space-between",
+            gap: 8, marginBottom: 4,
+            // One row, always. A long label that wraps here turns the
+            // toolbar into a column and takes a third of the map with
+            // it -- which is exactly what the green status line did.
+            flexWrap: "nowrap", overflow: "hidden",
+          }}
         >
-          <div className="small">
+          <div
+            className="small"
+            style={{
+              whiteSpace: "nowrap", overflow: "hidden",
+              textOverflow: "ellipsis", minWidth: 0,
+            }}
+          >
             <b>🖱 Click-to-plot</b>
             <span className="muted">
               {" "}· #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
@@ -1196,7 +1290,13 @@ function ClickToPlotModal({
               </button>
             ))}
           </div>
-          <div className="row" style={{ gap: 8, alignItems: "center" }}>
+          <div
+            className="row"
+            style={{
+              gap: 8, alignItems: "center", flexWrap: "nowrap",
+              flexShrink: 0,
+            }}
+          >
             {nChanged > 0 && (
               <span className="small" style={{ color: "var(--emerald-700)" }}>
                 {pendAdd.length > 0 && `${pendAdd.length} new`}
@@ -1204,6 +1304,13 @@ function ClickToPlotModal({
                 {pendClear.length > 0 && `${pendClear.length} removed`}
               </span>
             )}
+            {/* TEE-ONLY CONTROLS. The impact frame, the tracer's start
+                and the plotted points are all things about the tee
+                picture; on the green camera they are noise, and worse,
+                they are noise that wraps the toolbar onto three lines
+                and takes that height off the map. */}
+            {cam !== "green" && (
+            <>
             <span
               className="small"
               style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
@@ -1290,6 +1397,8 @@ function ClickToPlotModal({
                 start moved
               </span>
             )}
+            </>
+            )}
             <button
               type="button"
               className="ghost small"
@@ -1300,16 +1409,18 @@ function ClickToPlotModal({
             >
               Reset
             </button>
-            <button
-              type="button"
-              className="ghost small"
-              onClick={clearAllMarks}
-              style={{ width: "auto" }}
-              disabled={Object.keys(marks).length === 0}
-              title="Remove ALL plotted points for this swing. Saving then re-renders the tracer with none of them."
-            >
-              Clear all ({Object.keys(marks).length})
-            </button>
+            {cam !== "green" && (
+              <button
+                type="button"
+                className="ghost small"
+                onClick={clearAllMarks}
+                style={{ width: "auto" }}
+                disabled={Object.keys(marks).length === 0}
+                title="Remove ALL plotted points for this swing. Saving then re-renders the tracer with none of them."
+              >
+                Clear all ({Object.keys(marks).length})
+              </button>
+            )}
             {/* THE COMET. In green mode this is the live state of the
                 click just made — searching, found, or the sentence
                 saying why there is no path. In tee mode it is what the
@@ -1329,35 +1440,26 @@ function ClickToPlotModal({
                     ? "Scanning…"
                     : greenLevel >= 3 ? "🔍 Rescan" : "🔍 Deeper"}
                 </button>
-                {landing && (
-                  <span className="tiny muted">
-                    landing f{landing.frame} · {landing.x},{landing.y}
-                  </span>
-                )}
-                <span
-                  className="tiny"
-                  style={{
-                    color: cometBusy
-                      ? "#fde047"
-                      : comet?.points
-                        ? "#3ee37a"
-                        : comet?.reason ? "#f59e0b" : "var(--muted, #999)",
-                    maxWidth: 460,
-                  }}
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ width: "auto" }}
+                  disabled={!landing || cometBusy}
+                  onClick={() => findComet()}
+                  title="Walk the ball's descent backwards from the last marked point and plot every frame it finds. Whatever comes back is added to the marks, so it can be corrected by hand."
                 >
-                  {cometBusy
-                    ? "☄ walking back from the landing…"
-                    : comet?.points
-                      ? `☄ ${comet.points.length} frames (f${
-                          comet.points[0].frame}→f${
-                          comet.points[comet.points.length - 1].frame}) — `
-                        + "Save & close draws it on the clip"
-                      : comet?.reason
-                        ? `no comet: ${comet.reason}`
-                        : greenErr
-                          || greenNote
-                          || "click the dot where the ball lands"}
-                </span>
+                  {cometBusy ? "Looking…" : "☄ Find descent"}
+                </button>
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ width: "auto" }}
+                  disabled={!cometPoints.length}
+                  onClick={() => { setGreenMarks({}); setCometReason(null); }}
+                  title="Remove every plotted comet point"
+                >
+                  Clear ({cometPoints.length})
+                </button>
               </>
             ) : swing?.green_track ? (
               <span className="tiny" style={{ color: "#3ee37a" }}>
@@ -1393,34 +1495,40 @@ function ClickToPlotModal({
 
         <div style={{
           flex: 1, minHeight: 0, display: "flex",
-          alignItems: "center", justifyContent: "center",
+          alignItems: "stretch", justifyContent: "center",
         }}>
           {cam === "green" ? (
             green?.image_url ? (
               <PlotHeatCanvas
                 bgUrl={green.image_url}
                 // THE SAME MAP, POINTED AT THE OTHER CAMERA. Dots are
-                // the green window's motion; a click is the landing
-                // rather than a tracer point, so there is no track and
-                // no tracer start to draw — one mark, and the comet
-                // found from it.
+                // the green window's motion, and every click plots one
+                // of the comet's points — same gesture as the tee side,
+                // so they accumulate. There is no tracer line or start
+                // marker out here; the path IS the marks.
                 dots={greenDots}
                 denseDots={[]}
                 frameW={green.width}
                 frameH={green.height}
-                marks={landing ? { [landing.frame]: { x: landing.x, y: landing.y } } : {}}
+                marks={greenMarks}
                 track={[]}
                 comet={comet}
+                note={cometStatus}
+                noteColour={cometBusy
+                  ? "#fde047"
+                  : comet
+                    ? "#3ee37a"
+                    : cometReason ? "#f59e0b" : "#fde047"}
                 onToggleDot={(p, clear) => {
-                  if (clear
-                      || (landing && landing.frame === p.frame
-                          && Math.abs(landing.x - p.x) <= 2
-                          && Math.abs(landing.y - p.y) <= 2)) {
-                    setLanding(null);
-                    setComet(null);
-                    return;
+                  const first = Object.keys(greenMarks).length === 0;
+                  toggleGreenDot({ frame: p.frame, x: p.x, y: p.y }, clear);
+                  // The first mark is the landing, and the landing is
+                  // the one thing the search needs — so offer the chain
+                  // straight away instead of making the operator plot a
+                  // descent the machine can usually see.
+                  if (first && !clear) {
+                    findComet({ frame: p.frame, x: p.x, y: p.y });
                   }
-                  markLanding({ frame: p.frame, x: p.x, y: p.y });
                 }}
                 scanRegion={async (region, sensitivity) => {
                   const out = await api.scanPlotRegion(adminPassword, row.id, {
@@ -1524,7 +1632,7 @@ function ClickToPlotModal({
         </div>
         </details>
 
-        {Object.keys(marks).length > 0 && (
+        {cam !== "green" && Object.keys(marks).length > 0 && (
           <div
             className="tiny"
             style={{
@@ -5936,6 +6044,7 @@ const DENSE_DOT_ZOOM = 2.5;
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
   scanRegion, track, ballXY, placingBall, onPlaceBall, comet,
+  note, noteColour,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -5952,6 +6061,38 @@ function PlotHeatCanvas({
   // the operator is the filter.
   const [scanLevel, setScanLevel] = useState(2);
   const hasDims = !!(frameW && frameH);
+  // HOW BIG THE PICTURE GETS, IN PIXELS, MEASURED.
+  //
+  // The dots are placed as a percentage of this box while the picture
+  // is drawn object-fit: cover, so the instant the box stops being the
+  // frame's shape the picture is cropped and every dot points at the
+  // wrong grass. The old sizing -- flex:1 with an aspect-ratio and a
+  // max-width -- let flex fix the height and the max-width clip the
+  // width independently, which on a 2560x1440 screen made a 16:9 frame
+  // into a 1.61 box: a tenth of the picture cropped away, and every dot
+  // off with it. On a tall window it was 0.46.
+  //
+  // So the fit is computed rather than asked for: the largest box of
+  // the frame's shape that fits the space available. Exact in every
+  // window shape, and within 1% of the space in all of them.
+  const areaRef = useRef(null);
+  const [fit, setFit] = useState(null);
+  useEffect(() => {
+    const el = areaRef.current;
+    if (!el || !hasDims || typeof ResizeObserver === "undefined") {
+      return undefined;
+    }
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return;
+      const s = Math.min(r.width / frameW, r.height / frameH);
+      setFit({ w: Math.floor(frameW * s), h: Math.floor(frameH * s) });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [frameW, frameH, hasDims]);
   // Dense candidates + scanned dots that aren't already represented by
   // a timed dot (same frame within 2px) — no doubled-up targets.
   const extraDots = [...(denseDots || []), ...scanDots].filter(
@@ -6030,10 +6171,11 @@ function PlotHeatCanvas({
   };
   return (
     <div
+      ref={areaRef}
       style={{
         display: "flex", flexDirection: "column", gap: 6,
         height: "100%", minHeight: 0, maxWidth: "100%", width: "100%",
-        alignItems: "stretch",
+        alignItems: "center", justifyContent: "center",
       }}
     >
       {/* Image area — takes the whole box. The zoom / scan / pan controls
@@ -6043,9 +6185,15 @@ function PlotHeatCanvas({
       <div
         style={{
           position: "relative",
-          flex: 1, minHeight: 0, alignSelf: "center",
-          maxHeight: "100%", maxWidth: "100%",
-          aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+          // The measured fit, in pixels. Falls back to the aspect-ratio
+          // box for the first paint (and for anything without a
+          // ResizeObserver), which is right often enough to not flash.
+          ...(fit
+            ? { width: fit.w, height: fit.h, flex: "0 0 auto" }
+            : {
+              flex: 1, minHeight: 0, maxHeight: "100%", maxWidth: "100%",
+              aspectRatio: hasDims ? `${frameW} / ${frameH}` : "16 / 9",
+            }),
           background: "var(--border, #222)",
           borderRadius: 6, overflow: "hidden",
           userSelect: "none",
@@ -6395,11 +6543,12 @@ function PlotHeatCanvas({
             );
           })}
       </div>
-      {(scanNote || (extraDots.length > 0 && !showDense)) && (
+      {(note || scanNote || (extraDots.length > 0 && !showDense)) && (
         <div
           style={{
             position: "absolute", left: 8, bottom: 8,
-            background: "rgba(0,0,0,0.55)", color: "#fde047",
+            background: "rgba(0,0,0,0.55)",
+            color: (note && noteColour) || "#fde047",
             padding: "3px 10px", borderRadius: 6, fontSize: 12,
             pointerEvents: "none", backdropFilter: "blur(4px)",
             // Stay clear of the control overlay in the opposite corner.
@@ -6408,7 +6557,8 @@ function PlotHeatCanvas({
         >
           {scanNote
             ? `🔍 ${scanNote}`
-            : `🔍 zoom to ${DENSE_DOT_ZOOM}×+ to reveal ${extraDots.length} more clickable detections`}
+            : note
+              || `🔍 zoom to ${DENSE_DOT_ZOOM}×+ to reveal ${extraDots.length} more clickable detections`}
         </div>
       )}
       {/* FLOATING CONTROLS. These used to be a SIBLING above the image
