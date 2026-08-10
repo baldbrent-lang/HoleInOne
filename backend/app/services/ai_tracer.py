@@ -3177,54 +3177,48 @@ def _draw_dashed_tracer(
 
 def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=12.0,
                     land_frame=None):
-    """Fly the tracer from the last tracked point to the landing spot.
+    """Extend the tracked flight's own parabola to the landing.
 
     The blob detector loses the ball mid-flight, a long way short of the
     ground. The landing is known -- marked on the green camera and
-    mapped into this frame -- so the gap between them is not a guess
-    about WHERE, only about HOW. And how is not a free choice: the ball
-    is in the air, so the arc has to be the one gravity draws.
+    mapped into this frame, or dragged there by the operator -- so the
+    gap between them is not a guess about WHERE, only about HOW. And
+    how is not a free choice: the ball is in the air, so the arc has to
+    be the one gravity draws, continuing the one already measured.
 
-    So measure it rather than invent it. Over the tracked flight, fit x
-    as a line in frame number and y as a quadratic; that is the same
-    shape the flight itself has, and the fit gives the ball's velocity
-    at the hand-off and the downward acceleration of this image.
+    MEASURED IN THE FLIGHT'S OWN FRAME, not in the screen's. Fit the
+    tracked points, take the velocity at the hand-off, and turn the
+    picture so that velocity points along one axis:
+
+        ALONG  the ball leaves at the speed it was measured at and
+               slows as it flies away from the camera, arriving at the
+               landing exactly when the clocks say it lands.
+        ACROSS the ball starts with no sideways speed at all -- across
+               is defined by where it was going -- so this is a pure
+               parabola, curvature alone, and its curvature is whatever
+               brings it to the landing.
+
+    Which means the arc LEAVES ALONG THE TRACK by construction: there
+    is nothing in the model that can put a corner at the hand-off, and
+    the whole shape is one parabola hung on the direction the ball was
+    already travelling. Turning the picture is also what makes it work
+    on shots that go up the frame rather than across it. Solving in
+    screen x, as this did, divides by a horizontal speed that is nearly
+    zero on exactly those shots -- and refuses outright whenever the
+    landing sits behind the ball in x, which is common enough on a
+    camera looking down the line, and every one of those refusals
+    dropped the tracer to a fallback curve.
 
     HOW LONG IS LEFT IS USUALLY NOT A GUESS AT ALL. Both cameras stamp
-    wall-clock, so when the operator has marked the landing frame on the
-    green we know the exact instant the ball came down, and we know the
-    exact instant of the last tracked point. `land_frame` is that
-    landing expressed in this video's own frame numbering, and S is
-    simply the difference. Nothing is inferred.
-
-    Without it, S has to be derived, and then it comes from the
-    HORIZONTAL fit. Both fits could answer -- the ballistic equation
-    a·S² + b·S + (y_a - ty) = 0 solves for the frames remaining -- but
-    `a` is a curvature, the term a noisy track measures worst, and its
-    error goes straight into the duration. Horizontal speed is a slope,
-    measured an order of magnitude better, and the target's x says how
-    far there is to go. So S = (tx - x_a) / vx, and the ballistic solve
-    is kept for the case x cannot answer: a flight near-vertical in
-    this view, where x barely changes and dividing by it is dividing by
-    noise.
-
-    A WRONG S IS WHAT MAKES THE LINE TURN. The curve has to reach the
-    target whatever S says, so an S that is too small forces it there
-    in too few frames -- and a parabola asked to do that stops looking
-    like a flight and starts looking like a hairpin. Which is exactly
-    what a derived S produced on a shot whose target sat almost
-    straight up-frame from the last tracked point: a small Δx over a
-    healthy vx reads as "nearly there already".
-
-    The vertical is then the parabola that leaves at the measured slope
-    and arrives at the marked landing when the ball gets there. It joins
-    the tracked flight without a kink because it inherits its slope, and
-    it ends on the landing because it is built to.
+    wall-clock, so when the landing frame is known we know the exact
+    instant the ball came down, and the exact instant of the last
+    tracked point; S is the difference. Failing that, the distance to
+    the landing over the measured speed.
 
     Returns [(frame, x, y), ...] not including the starting point, or
-    None when the measurement cannot support it. The caller falls back
-    to a plain curve then, because a smooth wrong arc is better than a
-    confident wrong one.
+    None when the measurement cannot support it -- a landing BEHIND the
+    ball along its own direction of travel, mostly, which is not an
+    extension of anything. The caller draws an arc through it instead.
     """
     import numpy as np
 
@@ -3246,16 +3240,25 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=12.0,
         return None
     try:
         cy = np.polyfit(t, [float(p[2]) for p in win], 2)
-        cx = np.polyfit(t, [float(p[1]) for p in win], 1)
+        cx = np.polyfit(t, [float(p[1]) for p in win], 2)
     except Exception:  # noqa: BLE001
         return None
-    a, b = float(cy[0]), float(cy[1])
-    vx0 = float(cx[0])
-    # Leave from the FITTED position at the hand-off, not the raw last
-    # detection. That point carries the same jitter as every other one,
-    # and here it would be baked into a solve that runs for the rest of
-    # the flight.
-    x_a, y_a = float(cx[1]), float(cy[2])
+    # Leave from the FITTED position and the FITTED velocity at the
+    # hand-off, not from the raw last detection: that point carries the
+    # same jitter as every other one, and here it would be baked into a
+    # solve that runs for the rest of the flight.
+    x_a, y_a = float(cx[2]), float(cy[2])
+    vx0, vy0 = float(cx[1]), float(cy[1])
+    _v = math.hypot(vx0, vy0)
+    if _v < 0.4:
+        return None
+    ux, uy = vx0 / _v, vy0 / _v      # along the flight
+    nx, ny = -uy, ux                 # across it
+
+    # The landing, in the flight's frame.
+    dxt, dyt = tx - x_a, ty - y_a
+    du = dxt * ux + dyt * uy         # how far ahead it is
+    dv = dxt * nx + dyt * ny         # how far to the side
 
     _fps = float(fps or 30.0)
     _lo, _hi = 0.15 * _fps, max_sec * _fps
@@ -3263,137 +3266,158 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=12.0,
     # Pis stamp wall-clock, so when the landing frame is known the
     # flight time is arithmetic -- and the cap exists only to catch
     # nonsense. Eight seconds caught a real one: a tee shot 252 frames
-    # in the air at 30fps came to 8.4s, was refused, and fell through
-    # to the shapeless curve. That is the "bezier · 251 frames" on
-    # screen.
+    # in the air at 30fps came to 8.4s and was refused.
     if land_frame is not None:
         _hi = max(_hi, 20.0 * _fps)
 
-    # THE MEASURED ANSWER FIRST. Two clocks, both stamped by the Pis, so
-    # this is arithmetic rather than inference.
     S = None
     if land_frame is not None:
         _s = float(land_frame) - float(f_a)
         if _lo <= _s <= _hi:
             S = _s
-
-    # x is the clock, when x is a working clock. It has to carry a real
-    # share of the motion, and the target has to be ahead of us on it.
-    _speed = float(np.median(np.hypot(np.diff([float(p[1]) for p in win]),
-                                      np.diff([float(p[2]) for p in win]))))
-    if S is None and abs(vx0) > 1e-3 and abs(vx0) >= 0.25 * max(_speed, 1e-6):
-        # x can answer, so x's answer stands. An implausible one is a
-        # REFUSAL, not a reason to go and ask the vertical instead: if
-        # the horizontal says the ball needs a minute to reach that
-        # target, the target is wrong, and a second opinion that likes
-        # it is how a bad calibration gets drawn confidently.
-        _s = (tx - x_a) / vx0
-        if not (_lo <= _s <= _hi):
-            return None
-        S = _s
     if S is None:
-        # x barely moves -- near-vertical in this view, so dividing by
-        # it is dividing by noise. The vertical can still time it.
-        # y grows DOWNWARD in an image, so a ball under gravity has
-        # a > 0; a flat or upward fit has no curvature to measure.
-        if a <= 1e-6:
-            return None
-        disc = b * b - 4.0 * a * (y_a - ty)
-        if disc < 0:
-            # The arc tops out above the landing and never gets down to
-            # it. The measurement disagrees with the marked landing;
-            # believing it anyway draws a line that stops in the air.
-            return None
-        _s = (-b + math.sqrt(disc)) / (2.0 * a)
-        if not (_lo <= _s <= _hi):
-            return None
-        S = _s
-
-    # The vertical parabola: leaves at the measured slope, arrives at
-    # the marked landing at S. Its curvature is whatever those two
-    # facts require -- and when the fit and the landing agree, that is
-    # the measured gravity.
-    qy = (ty - y_a - b * S) / (S * S)
-    # Still falling, or the ball would be rising into the ground. That
-    # means the landing mark or the calibration is wrong, and a
-    # confident arc drawn from it would hide the error.
-    if qy <= 0.0:
+        # NO CLOCK, so the duration has to be derived, and best from the
+        # thing measured best. Horizontal speed is a slope over the
+        # whole track and the target's x says how far there is to go,
+        # so x is the clock whenever x carries a real share of the
+        # motion -- and then ITS ANSWER STANDS. An implausible one is a
+        # REFUSAL, not a reason to go asking something else: if the
+        # horizontal says the ball needs a minute to reach that target,
+        # the target is wrong, and a second opinion that likes it is
+        # how a bad calibration gets drawn confidently.
+        if abs(vx0) > 1e-3 and abs(vx0) >= 0.25 * _v:
+            _s = (tx - x_a) / vx0
+            if not (_lo <= _s <= _hi):
+                return None
+            S = _s
+        else:
+            # x cannot time it -- a shot going straight up the frame --
+            # so dividing by it would be dividing by noise. The
+            # distance along the flight over the speed along it, and
+            # failing that the vertical: the ball is on its way UP past
+            # a landing barely above it, so the distance left is tiny
+            # and the time left is not.
+            for _s in (du / _v if du > 1.0 else None,
+                       _vertical_time(cy, y_a, ty)):
+                if _s is not None and _lo <= _s <= _hi:
+                    S = _s
+                    break
+    if S is None:
         return None
-    # HORIZONTAL IS A DECELERATION, NOT A PARABOLA. A ball flying away
-    # from the camera covers fewer pixels every frame -- its image speed
-    # decays toward zero as it approaches the green. Over a long tail
-    # that decay is severe: at 3.2 px/frame for 70 frames the ball would
-    # cross 224px, and the target is 80px away.
-    #
-    # A quadratic asked to absorb that has to bend so hard it TURNS
-    # AROUND partway and comes back, which is the hairpin. So model it
-    # as a decay to the target instead:
-    #
-    #     x(s) = tx + (x_a - tx)·(1 - s/S)^k
-    #
-    # which starts at x_a, ends exactly on tx, is monotone for any k > 0
-    # -- so it cannot reverse, by construction rather than by a guard --
-    # and matches the measured launch speed when k = vx0·S / (tx - x_a).
-    #
-    # The quadratic stays for the case k is not positive: the measured
-    # horizontal velocity pointing away from the target, which means the
-    # track or the mapping is wrong and there is nothing sensible to
-    # decay toward.
-    _dxt = tx - x_a
-    _k = (vx0 * S / _dxt) if abs(_dxt) > 1e-6 else 0.0
-    _use_decay = _k > 0.05
-    qx = (tx - x_a - vx0 * S) / (S * S)
 
     n = int(round(S))
     if n < 2:
         return None
 
-    # THE ARC MAY NOT DOUBLE BACK -- HORIZONTALLY. A golf ball travels
-    # one way across the frame until it lands, and a quadratic fitted to
-    # a noisy window has no such scruples, so that much is worth
-    # guarding.
+    # ALONG: leaves at the measured speed and reaches the landing at S.
+    # A ball in the air is a quadratic here too -- gravity has a
+    # component along the flight as well as across it -- so this is the
+    # physical model and on an ordinary shot it is exact:
     #
-    # VERTICALLY IT MUST BE FREE TO TURN OVER: that is what a flight
-    # does. Guarding the full direction vector -- which this did --
-    # killed the descent on every shot whose landing sits ABOVE the last
-    # tracked point in frame, which is most of them, because a landing
-    # 100 yards out is up near the horizon while the ball was last seen
-    # climbing through the middle of the picture. The line rose, reached
-    # apex, and stopped dead.
-    _dirx = 1.0 if tx >= x_a else -1.0
+    #     a(s) = v·s + qa·s²,  qa = (du - v·S) / S²
+    #
+    # It is allowed to turn over. On a steep shot seen from behind the
+    # ball really does climb away and come back down the same line, and
+    # a model forbidden from doing that has to bend sideways instead.
+    qa = (du - _v * S) / (S * S)
+
+    # ACROSS: no initial speed by definition -- across is defined by
+    # where the ball was going -- so a pure parabola whose curvature is
+    # whatever reaches the landing.
+    #
+    # THE BALL MAY NOT RISE INTO THE GROUND. Gravity's component across
+    # the flight is `ux` (the across-axis is the flight turned a
+    # quarter turn, so straight down projects onto it by exactly that),
+    # so a falling arc has `dv` on the same side. A landing on the
+    # other side would draw a ball curving upward for the whole of its
+    # flight: the mark or the calibration is wrong, and a confident arc
+    # drawn from it would hide that.
+    if dv * ux < -1.0:
+        return None
+    qv = dv / (S * S)
+
+    # THE ARC MAY NOT DOUBLE BACK HORIZONTALLY. A golf ball travels one
+    # way across the frame until it lands; a fit over a noisy window
+    # has no such scruples, and a quadratic asked to absorb the
+    # perspective decay of a ball flying away bends so hard it comes
+    # back on itself. That is the hairpin, and it is a horizontal
+    # thing: vertically the arc MUST be free to turn over, which is
+    # what a flight does.
+    _dirx = 1.0 if (tx - x_a) >= 0 else -1.0
     _guard_x = abs(tx - x_a) > 4.0
 
+    # The decay alternative, for when the quadratic drags x backwards:
+    #
+    #     a(s) = du·(1 - (1 - s/S)^k),  k = v·S/du
+    #
+    # which starts at 0 with slope v, ends exactly on du, and is
+    # monotone for any k > 0 -- so it cannot reverse, by construction
+    # rather than by a guard.
+    _k = (_v * S) / du if abs(du) > 1e-6 else 0.0
+
     out = []
-    px = x_a
-    for i in range(1, n + 1):
-        s = float(i)
-        if _use_decay:
-            bx = tx + (x_a - tx) * ((1.0 - s / S) ** _k)
-        else:
-            bx = x_a + vx0 * s + qx * s * s
-        by = y_a + b * s + qy * s * s
-        if _guard_x and (bx - px) * _dirx < -0.5:
-            break
-        px = bx
+    for _model in ("quadratic", "decay"):
+        if _model == "decay" and not (0.05 < _k < 40.0):
+            return None
+        out, px, _bad = [], x_a, False
+        for i in range(1, n + 1):
+            s = float(i)
+            if _model == "decay":
+                # Clamped at zero because n is S ROUNDED: on a flight of
+                # 224.6 frames the last step is 225, the base goes
+                # slightly negative, and a negative base to a fractional
+                # power is a complex number in Python -- which surfaces
+                # later as a comparison between an int and a complex, a
+                # long way from here.
+                a_s = du * (1.0 - max(0.0, 1.0 - s / S) ** _k)
+            else:
+                a_s = _v * s + qa * s * s
+            v_s = qv * s * s
+            bx = x_a + ux * a_s + nx * v_s
+            by = y_a + uy * a_s + ny * v_s
+            if _guard_x and (bx - px) * _dirx < -0.5:
+                _bad = True
+                break
+            px = bx
         # OFF THE TOP IS NOT THE END OF THE FLIGHT. On a wedge from a
         # camera this close behind, the ball leaves the frame on the way
         # up, spends a second or two out of view, and comes back down to
-        # a green near the horizon. Breaking here ended the line at the
-        # frame edge and threw the whole descent away -- and when the
-        # exit came early enough to leave fewer than two points, the
-        # tail was refused outright and the shapeless fallback curve got
-        # drawn instead. That is what "bezier · 246 frames" meant.
-        #
-        # So skip what cannot be seen and keep going. The renderer
-        # already understands a gap in the points: it is the same
-        # off-the-top case the parametric fit and the descent cap both
-        # have exceptions for.
-        if not (0 <= bx < width and 0 <= by < height):
-            continue
-        out.append((f_a + i, int(round(bx)), int(round(by))))
-    if len(out) < 2:
+        # a green near the horizon. Skip what cannot be seen and keep
+        # going; the renderer already understands a gap in the points.
+            if not (0 <= bx < width and 0 <= by < height):
+                continue
+            out.append((f_a + i, int(round(bx)), int(round(by))))
+        if not _bad:
+            break
+    if _bad or len(out) < 2:
         return None
     return out
+
+
+def _vertical_time(cy, y_a, ty):
+    """Frames until the ball falls back to the landing's height.
+
+    From the vertical fit alone: y grows DOWNWARD in an image, so a ball
+    under gravity has a positive curvature and
+
+        a·S² + b·S + (y_a - ty) = 0
+
+    has two roots -- the ball passing that height on the way up, and
+    passing it again on the way down. The descending one is the answer;
+    the other is a moment the ball is about to have.
+
+    Returns None when the fit has no downward curvature to solve with,
+    or when the arc tops out above the landing and never gets down to
+    it -- which means the measurement disagrees with the mark, and
+    believing it anyway draws a line that stops in mid-air.
+    """
+    a, b = float(cy[0]), float(cy[1])
+    if a <= 1e-6:
+        return None
+    disc = b * b - 4.0 * a * (y_a - ty)
+    if disc < 0:
+        return None
+    return (-b + math.sqrt(disc)) / (2.0 * a)
 
 
 def _arc_tail(pts, target_xy, fps, width, height, land_frame=None):

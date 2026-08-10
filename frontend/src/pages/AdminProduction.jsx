@@ -770,100 +770,18 @@ function ClickToPlotModal({
       || (swing.target ? [swing.target.x, swing.target.y] : null);
     return e ? { x: Math.round(e[0]), y: Math.round(e[1]) } : null;
   });
-  const [lift, setLift] = useState(
-    () => Number(swing.tracer_apex_lift || 0));
-  // WHERE ALONG THE FLIGHT THE PEAK SITS, 0..1. 0.5 is the model's own
-  // curve; sliding the handle sideways moves the high point earlier or
-  // later without touching where the ball starts, where it lands, or
-  // how fast it crosses the frame.
-  const [apexAt, setApexAt] = useState(
-    () => Number(swing.tracer_apex_at || 0.5));
-  const [shapeBase] = useState(() => JSON.stringify([
-    swing.tracer_end || null, Number(swing.tracer_apex_lift || 0),
-    Number(swing.tracer_apex_at || 0.5),
-  ]));
-  const shapeChanged = JSON.stringify([
-    tracerEnd ? [tracerEnd.x, tracerEnd.y] : null, lift, apexAt,
-  ]) !== shapeBase;
-
-  // THE SHAPE IS APPLIED HERE, not asked for. The server returns the
-  // unshaped tail and this does the same two things the renderer does,
-  // so dragging the handle is instant and still exactly what will be
-  // drawn — one formula, mirrored, rather than a round trip per pixel.
-  // (mirrortest.py runs this and the Python on the same tail and
-  // requires them to agree to the pixel.)
-  function shapeTail(tail, l, at) {
-    // Mirrors _shape_tail in ai_tracer.py exactly — mirrortest.py runs
-    // the two against each other and requires them equal to the pixel.
-    // The hump off the straight line from the tail's start to its end
-    // is what gets edited; the progress ALONG that line is the ball's
-    // own timing and is never touched. Both are zero at the ends, so
-    // no setting can move either end or tilt the join with the tracked
-    // ball. Nothing is resampled: the crest is moved by multiplying
-    // the hump, not by reading it at a warped position.
-    const n = tail.length;
-    if (n < 3 || (!l && Math.abs(at - 0.5) < 1e-3)) return tail;
-    const a = Math.max(0.08, Math.min(0.92, at));
-    const c = (a - 0.5) * 3.0;
-    const ax = tail[0][0];
-    const ay = tail[0][1];
-    const dx = tail[n - 1][0] - ax;
-    const dy = tail[n - 1][1] - ay;
-    const L = Math.hypot(dx, dy);
-    if (L < 1e-6) return tail;
-    const lim = Math.max(20, 0.45 * L);
-    const lift = Math.max(-lim, Math.min(lim, l));
-    const ux = dx / L;
-    const uy = dy / L;
-    let nx = -uy;
-    let ny = ux;
-    if (ny > 0) { nx = -nx; ny = -ny; }
-    return tail.map((q, i) => {
-      const u = i / (n - 1);
-      const along = (q[0] - ax) * ux + (q[1] - ay) * uy;
-      const perp = (q[0] - ax) * nx + (q[1] - ay) * ny;
-      let h = perp + lift * Math.sin(Math.PI * u) ** 2;
-      h *= 1 + c * Math.sin(Math.PI * u) * (2 * u - 1);
-      return [
-        Math.floor(ax + ux * along + nx * h + 0.5),
-        Math.floor(ay + uy * along + ny * h + 0.5),
-      ];
-    });
-  }
-  const liftedTail = shapeTail(shape?.tail || [], lift, apexAt);
-  // ONLY THE PREDICTED PART IS DRAWN AS THE SHAPE. The tracked ball is
-  // already on screen as the solid green track, and drawing the line
-  // over it again reads as a double exposure rather than as one tracer.
-  // Dashed cyan starts exactly where the measurement stops, which is
-  // also where the editing starts.
-  const tracerPath = liftedTail;
-  // The high point of the drawn arc — where the apex handle sits.
-  const apexPt = liftedTail.length > 2
-    ? liftedTail.reduce((m, q) => (q[1] < m[1] ? q : m), liftedTail[0])
-    : null;
-  // Where the UNLIFTED arc peaks, and how much of a lift reaches that
-  // point. Dragging is mapped through these so the handle follows the
-  // pointer absolutely: deriving the lift from the last frame's
-  // position instead accumulates whatever the render missed, and the
-  // handle slides away from the cursor.
-  // Measured on the curve as SLID BUT NOT LIFTED, so the vertical drag
-  // is absolute against whatever the horizontal drag has already done.
-  const _bt = shapeTail(shape?.tail || [], 0, apexAt);
-  const baseApexIdx = _bt.length > 2
-    ? _bt.reduce((mi, q, i) => (q[1] < _bt[mi][1] ? i : mi), 0) : null;
-  const baseApexY = baseApexIdx != null ? _bt[baseApexIdx][1] : null;
-  // How much of a lift actually reaches that point — normally all of
-  // it, since the peak is where the half-sine is at its maximum, but
-  // not on a tail whose highest point is its own end.
-  const apexFactor = (() => {
-    if (baseApexIdx == null) return 1;
-    const u = baseApexIdx / Math.max(1, _bt.length - 1);
-    const a = Math.max(0.08, Math.min(0.92, apexAt));
-    const c = (a - 0.5) * 3.0;
-    const bump = Math.sin(Math.PI * u) ** 2;
-    const tilt = 1 + c * Math.sin(Math.PI * u) * (2 * u - 1);
-    return Math.max(0.25, bump * tilt);
-  })();
+  const [shapeBase] = useState(
+    () => JSON.stringify(swing.tracer_end || null));
+  const shapeChanged =
+    JSON.stringify(tracerEnd ? [tracerEnd.x, tracerEnd.y] : null)
+    !== shapeBase;
+  // ONE HANDLE. The curve is the tracked flight's own parabola carried
+  // on to where the ball finished, so the landing is the only thing
+  // there is to say about it: the direction it leaves at, how fast and
+  // how hard it falls were all measured off the MOG2 points and are
+  // not the operator's to invent. Dragging the end re-solves the whole
+  // arc, which is what the shot-tracer apps do.
+  const tracerPath = shape?.tail || [];
 
   async function fetchShape(end, force = false) {
     const at = end || tracerEnd;
@@ -879,7 +797,6 @@ function ClickToPlotModal({
         ball: ballAtRest || swing.ball || null,
         impact_frame: impactFrame ?? swing.impact_frame ?? null,
         end: [at.x, at.y],
-        apex_lift: 0,
         land_frame: swing.tracer_tail?.land_frame ?? null,
         width: frameW, height: frameH,
         fps: row.tee_fps || null,
@@ -1225,8 +1142,6 @@ function ClickToPlotModal({
           // at the picture the line is drawn on, which the target was
           // only ever a proxy for.
           target: tracerEnd || swing.target || null,
-          apex_lift: lift || 0,
-          apex_at: apexAt,
           render_window: hasWindow
             ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
             : null,
@@ -1247,8 +1162,6 @@ function ClickToPlotModal({
               // rather than reverting to the model's.
               ...(tracerEnd
                 ? { tracer_end: [tracerEnd.x, tracerEnd.y] } : {}),
-              tracer_apex_lift: lift || 0,
-              tracer_apex_at: apexAt,
               ...(landing
                 ? {
                     landing_frame: landing.frame,
@@ -1608,10 +1521,6 @@ function ClickToPlotModal({
                   {tracerEnd
                     ? `ends ${tracerEnd.x},${tracerEnd.y}`
                     : "no aim point"}
-                  {lift ? ` · lift ${lift > 0 ? "+" : ""}${Math.round(lift)}px`
-                        : ""}
-                  {Math.abs(apexAt - 0.5) > 0.01
-                    ? ` · peak ${Math.round(apexAt * 100)}%` : ""}
                 </span>
                 <button
                   type="button"
@@ -1620,11 +1529,9 @@ function ClickToPlotModal({
                   disabled={!shapeChanged}
                   onClick={() => {
                     const e = JSON.parse(shapeBase);
-                    setTracerEnd(e[0]
-                      ? { x: Math.round(e[0][0]), y: Math.round(e[0][1]) }
+                    setTracerEnd(e
+                      ? { x: Math.round(e[0]), y: Math.round(e[1]) }
                       : null);
-                    setLift(Number(e[1] || 0));
-                    setApexAt(Number(e[2] ?? 0.5));
                   }}
                   title="Put the arc back to the shape that was saved"
                 >
@@ -1721,54 +1628,18 @@ function ClickToPlotModal({
                 )}
                 ballXY={ballAtRest}
                 shape={tracerPath}
-                handles={[
-                  ...(tracerEnd ? [{
-                    id: "end", x: tracerEnd.x, y: tracerEnd.y,
-                    colour: "#f472b6",
-                    title: "Where the ball finishes IN THIS PICTURE. Drag "
-                      + "it and the arc re-solves to reach it — this is the "
-                      + "tee view only, and does not move the landing "
-                      + "marked on the green camera.",
-                  }] : []),
-                  ...(apexPt ? [{
-                    id: "apex", x: apexPt[0], y: apexPt[1],
-                    colour: "#fbbf24",
-                    title: "The high point of the flight. Up and down "
-                      + "makes the arc higher or flatter; left and right "
-                      + "moves where it peaks, earlier or later in the "
-                      + "flight. Both ends stay put and the curve stays a "
-                      + "natural arc.",
-                  }] : []),
-                ]}
+                handles={tracerEnd ? [{
+                  id: "end", x: tracerEnd.x, y: tracerEnd.y,
+                  colour: "#f472b6",
+                  title: "Where the ball finishes IN THIS PICTURE. Drag "
+                    + "it and the whole arc re-solves to reach it — the "
+                    + "same parabola the tracked ball is already on, "
+                    + "carried on to here. This is the tee view only, "
+                    + "and does not move the landing marked on the "
+                    + "green camera.",
+                }] : []}
                 onHandleDrag={(id, pt) => {
-                  if (id === "end") {
-                    // Live: the aim moves with the pointer and the
-                    // effect re-solves the tail behind it.
-                    setTracerEnd(pt);
-                  } else if (baseApexY != null) {
-                    // BOTH AXES, and both absolute: the handle goes
-                    // where the pointer is rather than accumulating
-                    // deltas, so it cannot drift away from the cursor.
-                    //
-                    // Sideways: the tail's x values are the ball's real
-                    // progress across the frame, so the nearest point
-                    // in x IS the position along the flight the pointer
-                    // is over.
-                    const xs = (shape?.tail || []).map((q) => q[0]);
-                    if (xs.length > 2) {
-                      let best = 0;
-                      for (let i = 1; i < xs.length; i += 1) {
-                        if (Math.abs(xs[i] - pt.x)
-                            < Math.abs(xs[best] - pt.x)) best = i;
-                      }
-                      setApexAt(Math.max(0.08, Math.min(0.92,
-                        best / (xs.length - 1))));
-                    }
-                    // Up and down: the lift that puts the peak under
-                    // the pointer, measured on the unlifted curve.
-                    setLift(Math.max(-400, Math.min(400,
-                      (baseApexY - pt.y) / apexFactor)));
-                  }
+                  if (id === "end") setTracerEnd(pt);
                 }}
                 onHandleDrop={() => fetchShape()}
                 note={shapeErr
@@ -1895,11 +1766,13 @@ function ClickToPlotModal({
               pink one is where the ball finishes IN THIS PICTURE (drag
               it and the arc re-solves to reach it; it is the tee view
               only and does not move the landing marked on the green
-              camera), and the amber one is the flight&apos;s high point
-              (drag up or down and both ends stay put while the curve
-              stays a natural arc). What you see is what the renderer
-              draws — the curve comes back from the same function that
-              draws the clip. Save &amp; close re-renders with it.
+              camera) — drag it and the whole arc re-solves to reach
+              it. What you see is what the renderer draws: the curve
+              comes back from the same function that draws the clip,
+              and it is the tracked ball&apos;s own parabola carried on
+              to the landing, so it leaves the green track without a
+              corner however far the end is dragged. Save &amp; close
+              re-renders with it.
             </p>
           )}
           {cam === "green" && (
