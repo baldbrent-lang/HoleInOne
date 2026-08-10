@@ -772,9 +772,16 @@ function ClickToPlotModal({
   });
   const [shapeBase] = useState(
     () => JSON.stringify(swing.tracer_end || null));
+  // A PREDICTED AIM POINT IS NOT AN EDIT. Opening the tab on a swing
+  // with no landing marked fills one in from the flight so there is an
+  // arc to look at and a handle to take hold of — but until the
+  // operator actually moves it, nothing has been decided, and Save must
+  // not light up as though it had.
+  const [endGuessed, setEndGuessed] = useState(false);
   const shapeChanged =
-    JSON.stringify(tracerEnd ? [tracerEnd.x, tracerEnd.y] : null)
-    !== shapeBase;
+    !endGuessed
+    && JSON.stringify(tracerEnd ? [tracerEnd.x, tracerEnd.y] : null)
+      !== shapeBase;
   // ONE HANDLE. The curve is the tracked flight's own parabola carried
   // on to where the ball finished, so the landing is the only thing
   // there is to say about it: the direction it leaves at, how fast and
@@ -785,7 +792,6 @@ function ClickToPlotModal({
 
   async function fetchShape(end, force = false) {
     const at = end || tracerEnd;
-    if (!at) { setShape(null); return; }
     try {
       setShapeErr(null);
       const out = await api.tracerShape(adminPassword, row.id, {
@@ -796,12 +802,20 @@ function ClickToPlotModal({
           (r) => r.found && r.x != null),
         ball: ballAtRest || swing.ball || null,
         impact_frame: impactFrame ?? swing.impact_frame ?? null,
-        end: [at.x, at.y],
+        // No aim point yet: the server guesses one off the flight and
+        // hands it back, so the tab opens on an arc rather than on an
+        // instruction to go and mark something somewhere else.
+        end: at ? [at.x, at.y] : null,
         land_frame: swing.tracer_tail?.land_frame ?? null,
         width: frameW, height: frameH,
         fps: row.tee_fps || null,
       });
       setShape(out);
+      if (!at && out?.predicted) {
+        setTracerEnd({ x: Math.round(out.predicted[0]),
+                       y: Math.round(out.predicted[1]) });
+        setEndGuessed(true);
+      }
       if (!out?.tail?.length && !force) {
         setShapeErr(out?.reason || "the model could not draw a tail here");
       }
@@ -1519,7 +1533,8 @@ function ClickToPlotModal({
               <>
                 <span className="tiny muted" style={{ whiteSpace: "nowrap" }}>
                   {tracerEnd
-                    ? `ends ${tracerEnd.x},${tracerEnd.y}`
+                    ? `${endGuessed ? "guessed" : "ends"} `
+                      + `${tracerEnd.x},${tracerEnd.y}`
                     : "no aim point"}
                 </span>
                 <button
@@ -1532,6 +1547,8 @@ function ClickToPlotModal({
                     setTracerEnd(e
                       ? { x: Math.round(e[0]), y: Math.round(e[1]) }
                       : null);
+                    setEndGuessed(false);
+                    if (!e) fetchShape();
                   }}
                   title="Put the arc back to the shape that was saved"
                 >
@@ -1639,15 +1656,20 @@ function ClickToPlotModal({
                     + "green camera.",
                 }] : []}
                 onHandleDrag={(id, pt) => {
-                  if (id === "end") setTracerEnd(pt);
+                  if (id !== "end") return;
+                  setTracerEnd(pt);
+                  setEndGuessed(false);
                 }}
                 onHandleDrop={() => fetchShape()}
                 note={shapeErr
                   || (tracerEnd
                     ? `${shape?.kind || "…"} · ${shape?.n || 0} frames of `
-                      + "flight — drag the pink end, or the amber high point"
-                    : "no aim point yet: mark the landing on the green "
-                      + "camera, or set a target in the wizard")}
+                      + "flight — "
+                      + (endGuessed
+                        ? "this landing is a GUESS off the flight itself; "
+                          + "drag the pink handle onto the real one"
+                        : "drag the pink handle to move where it lands")
+                    : "nothing tracked to work from on this swing")}
                 noteColour={shapeErr ? "#f59e0b" : "#67e8f9"}
               />
             ) : (
@@ -1762,12 +1784,16 @@ function ClickToPlotModal({
             <p style={{ margin: "0 0 6px" }}>
               <b>The tracer&apos;s line.</b> Solid green is the tracked
               ball — measured, and not editable here. The dashed cyan is
-              the model&apos;s continuation, and it has two handles: the
-              pink one is where the ball finishes IN THIS PICTURE (drag
-              it and the arc re-solves to reach it; it is the tee view
-              only and does not move the landing marked on the green
-              camera) — drag it and the whole arc re-solves to reach
-              it. What you see is what the renderer draws: the curve
+              the model&apos;s continuation, and it has one handle: the
+              pink one, where the ball finishes IN THIS PICTURE. Drag it
+              and the whole arc re-solves to reach it. It is the tee
+              view only and does not move the landing marked on the
+              green camera, and with no landing marked anywhere it
+              starts as a GUESS — the measured flight carried on to
+              where it comes back down to the height the ball was last
+              seen at — so there is always an arc to look at and
+              something to take hold of.
+              What you see is what the renderer draws: the curve
               comes back from the same function that draws the clip,
               and it is the tracked ball&apos;s own parabola carried on
               to the landing, so it leaves the green track without a

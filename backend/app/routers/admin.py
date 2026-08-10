@@ -7821,16 +7821,14 @@ def tracer_shape(
     Cheap: no video is opened and nothing is rendered. It is arithmetic
     over the track that is already in hand.
     """
-    from ..services.ai_tracer import _extend_to_target
+    from ..services.ai_tracer import _extend_to_target, predicted_landing
 
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
     _end = payload.get("end")
-    if not _end:
-        return {"tail": [], "kind": None, "reason": "no aim point"}
     try:
-        end_xy = (float(_end[0]), float(_end[1]))
+        end_xy = (float(_end[0]), float(_end[1])) if _end else None
         lift = max(-400.0, min(400.0, float(payload.get("apex_lift") or 0.0)))
         at = max(0.08, min(0.92, float(
             payload.get("apex_at") if payload.get("apex_at") is not None
@@ -7870,6 +7868,21 @@ def tracer_shape(
         _lf = int(_lf) if _lf is not None else None
     except (TypeError, ValueError):
         _lf = None
+    # NOTHING MARKED YET? GUESS, AND SAY SO. The editor has nothing to
+    # show and nothing to take hold of without an aim point, and the
+    # flight has already half-answered the question -- so continue the
+    # measured parabola to where the ball comes back down to the height
+    # it was last seen at. The operator drags it from there onto the
+    # real thing.
+    _guessed = None
+    if end_xy is None:
+        _guessed = predicted_landing(pts, _fps, _w, _h)
+        if _guessed is None:
+            return {"tail": [], "kind": None, "predicted": None,
+                    "reason": "not enough of the flight was tracked to "
+                              "guess where it came down"}
+        end_xy = _guessed
+
     tail, kind = _extend_to_target(pts, end_xy, _fps, _w, _h,
                                    land_frame=_lf, apex_lift=lift,
                                    apex_at=at)
@@ -7884,6 +7897,9 @@ def tracer_shape(
         "track": [[int(x), int(y)] for _f, x, y in pts],
         "apex_lift": lift,
         "apex_at": at,
+        # The point the caller did not give, when it did not give one.
+        "predicted": list(_guessed) if _guessed else None,
+        "end": [round(end_xy[0], 1), round(end_xy[1], 1)],
     }
 
 

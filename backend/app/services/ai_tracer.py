@@ -3175,6 +3175,67 @@ def _draw_dashed_tracer(
         )
 
 
+def predicted_landing(pts, fps, width, height, max_sec=12.0):
+    """Where the tracked flight would come down, with nothing marked.
+
+    A GUESS THE OPERATOR CAN DRAG, not an answer. The tracer editor is
+    useless without an aim point -- there is no arc to look at and
+    nothing to take hold of -- and "mark the landing on the green
+    camera first" is a trip to another screen to answer a question the
+    flight has already half-answered itself.
+
+    So continue the measured parabola until the ball comes back DOWN to
+    the height it was last seen at. That point is on the tracked
+    flight's own curve, which makes it the one guess that cannot look
+    wrong: the arc drawn to it is exactly the arc the measurement
+    implies, and the operator is adjusting a real flight rather than
+    correcting a fabrication. It is also roughly where a ball does
+    finish in this kind of picture -- out at the horizon, at about the
+    height it was climbing through when the tracker lost it.
+
+    Symmetric about the apex, so the time is 2·(time to the apex) from
+    the fit's own vertical: y climbs, turns over, and comes back.
+
+    Returns (x, y) or None when the track cannot support it -- too
+    short, or no downward curvature to turn the ball over with.
+    """
+    import numpy as np
+
+    if len(pts) < 6:
+        return None
+    f_a = pts[-1][0]
+    win = list(pts[-60:])
+    t = np.array([p[0] - f_a for p in win], dtype=float)
+    if t[-1] - t[0] < 8.0:
+        return None
+    try:
+        cy = np.polyfit(t, [float(p[2]) for p in win], 2)
+        cx = np.polyfit(t, [float(p[1]) for p in win], 1)
+    except Exception:  # noqa: BLE001
+        return None
+    a, b = float(cy[0]), float(cy[1])
+    vx0, x_a, y_a = float(cx[0]), float(cx[1]), float(cy[2])
+    # y grows DOWNWARD in an image, so a ball under gravity has a > 0
+    # and is still climbing while b < 0. Without both there is no
+    # turn-over to extrapolate.
+    if a <= 1e-6 or b >= 0.0:
+        return None
+    # Back to this height: a·S² + b·S = 0, so S = -b/a. (The apex is at
+    # half of that.)
+    S = -b / a
+    _fps = float(fps or 30.0)
+    if not (0.2 * _fps <= S <= max_sec * _fps):
+        return None
+    x = x_a + vx0 * S
+    y = y_a
+    # Kept on screen with a margin, because a handle off the edge of
+    # the picture cannot be dragged.
+    m = 24.0
+    x = max(m, min(float(width) - m, x))
+    y = max(m, min(float(height) - m, y))
+    return (round(x, 1), round(y, 1))
+
+
 def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=12.0,
                     land_frame=None):
     """Extend the tracked flight's own parabola to the landing.
