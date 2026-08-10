@@ -3175,7 +3175,7 @@ def _draw_dashed_tracer(
         )
 
 
-def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0,
+def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=12.0,
                     land_frame=None):
     """Fly the tracer from the last tracked point to the landing spot.
 
@@ -3259,6 +3259,15 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0,
 
     _fps = float(fps or 30.0)
     _lo, _hi = 0.15 * _fps, max_sec * _fps
+    # A MEASURED DURATION IS NOT A GUESS AND GETS A LONGER LEASH. Both
+    # Pis stamp wall-clock, so when the landing frame is known the
+    # flight time is arithmetic -- and the cap exists only to catch
+    # nonsense. Eight seconds caught a real one: a tee shot 252 frames
+    # in the air at 30fps came to 8.4s, was refused, and fell through
+    # to the shapeless curve. That is the "bezier · 251 frames" on
+    # screen.
+    if land_frame is not None:
+        _hi = max(_hi, 20.0 * _fps)
 
     # THE MEASURED ANSWER FIRST. Two clocks, both stamped by the Pis, so
     # this is arithmetic rather than inference.
@@ -3387,58 +3396,219 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0,
     return out
 
 
+def _arc_tail(pts, target_xy, fps, width, height, land_frame=None):
+    """A smooth arc from the last tracked point to the landing.
+
+    THE CONTINUATION IS NEVER ALLOWED A CORNER. What the MOG2 track
+    shows is the ball; the continuation is a drawing of the rest of the
+    same flight, so it has to leave the last tracked point along the
+    direction the ball was ALREADY travelling, arc over, and come down
+    on the landing. Anything that starts at an angle to the track reads
+    as two lines stuck together.
+
+    A CUBIC WITH BOTH ENDS AIMED, because the geometry cannot be relied
+    on to be convenient. The obvious constructions -- a parabola through
+    the chord, a quadratic with a control point along it -- can only
+    leave along the ball's direction while the landing is somewhere
+    ahead of it. It often is not: a marked landing can sit behind the
+    ball horizontally (a shot that turns over in this view, an aim point
+    dragged back across the frame), and every one of those drew the
+    corner in the screenshots. A cubic has a handle at each end:
+
+        P1 = A + v̂·d,   P2 = B - â·d
+
+    so it leaves along the measured velocity v̂ WHATEVER the landing
+    does, and arrives along â -- down and forward, the way a ball
+    arrives -- so the descent looks like a descent rather than a line
+    running into a dot. Both handles are a bounded fraction of the
+    distance, which is what stops a cubic looping.
+
+    Returns [(frame, x, y), ...] after the starting point, or None.
+    """
+    if not target_xy or len(pts) < 2:
+        return None
+    tx, ty = float(target_xy[0]), float(target_xy[1])
+    f_a, x_a, y_a = pts[-1][0], float(pts[-1][1]), float(pts[-1][2])
+
+    # The ball's velocity at the hand-off, over as long a lever arm as
+    # the track allows -- a two-point difference is jitter, not a
+    # direction, and this direction is the whole point.
+    win = list(pts[-12:])
+    if len(win) >= 4:
+        n_w = len(win)
+        t0 = float(win[0][0])
+        _ts = [float(q[0]) - t0 for q in win]
+        _tm = sum(_ts) / n_w
+        _den = sum((t - _tm) ** 2 for t in _ts) or 1.0
+        vx0 = sum((t - _tm) * float(q[1]) for t, q in zip(_ts, win)) / _den
+        vy0 = sum((t - _tm) * float(q[2]) for t, q in zip(_ts, win)) / _den
+    else:
+        vx0 = float(pts[-1][1]) - float(pts[-2][1])
+        vy0 = float(pts[-1][2]) - float(pts[-2][2])
+    _v = math.hypot(vx0, vy0)
+    if _v < 1e-6:
+        return None
+    vux, vuy = vx0 / _v, vy0 / _v
+
+    L = math.hypot(tx - x_a, ty - y_a)
+    if L < 8.0:
+        return None
+
+    _fps = float(fps or 30.0)
+    # HOW LONG IT IS IN THE AIR. The clocks first -- that is measured --
+    # then the time the ball's own speed says it needs, then a plain
+    # second and a half.
+    S = None
+    if land_frame is not None:
+        _s = float(land_frame) - float(f_a)
+        if 4.0 <= _s <= 20.0 * _fps:
+            S = _s
+    if S is None and _v > 0.05:
+        _s = L / _v
+        if 4.0 <= _s <= 20.0 * _fps:
+            S = _s
+    if S is None:
+        S = 1.5 * _fps
+    n = int(round(max(4.0, min(20.0 * _fps, S))))
+
+    # HOW A BALL ARRIVES: falling, still going the way it was going.
+    # Mostly down, with a little of the ball's own horizontal travel, so
+    # the last part of the arc drops onto the landing instead of sliding
+    # into it sideways.
+    # Mostly down, but carrying a good share of the direction the shot
+    # is actually travelling: a landing that arrives straight down turns
+    # the last part of the arc into a plunge, which is the one place a
+    # smooth curve still reads as bent.
+    _ax = (tx - x_a) / L * 0.9
+    _ay = (ty - y_a) / L * 0.9 + 1.0
+    _al = math.hypot(_ax, _ay) or 1.0
+    _ax, _ay = _ax / _al, _ay / _al
+
+    # HANDLE LENGTHS COME FROM THE FLIGHT, NOT FROM THE CHORD. A
+    # fraction of the distance to the landing looks reasonable and is
+    # wrong in the case that matters: when the landing sits close to
+    # where the ball was last seen but the clocks say it is eight
+    # seconds in the air, the ball goes a long way UP and comes back,
+    # and a handle scaled to a 74px chord drew a 25px stub over 250
+    # frames. Scale it by what the ball was doing -- its speed and the
+    # time it has left -- and cap it by the frame, which is the only
+    # thing that really bounds a drawing.
+    #
+    # HOW LONG each handle is decides how tightly the curve bends where
+    # they meet. About four tenths of the span each is the shape of a
+    # single natural arc; much longer and the two pull against each
+    # other into an S with a hard bend in the middle of it. The span
+    # here is not the chord but the greater of the chord and how far
+    # the ball would actually travel -- that is what lets the arc go
+    # up and come back when the landing sits close to where the ball
+    # was last seen.
+    _reach = 0.35 * _v * S
+    _span = max(L, min(_reach, 0.9 * max(width, height)))
+    d1 = max(12.0, min(0.45 * _span, 0.5 * max(width, height)))
+    d2 = max(12.0, min(0.30 * L + 0.55 * d1, 0.45 * max(width, height)))
+    p1x, p1y = x_a + vux * d1, y_a + vuy * d1
+    p2x, p2y = tx - _ax * d2, ty - _ay * d2
+
+    out = []
+    for i in range(1, n + 1):
+        # Eased so the ball slows as it goes away from the camera,
+        # rather than sliding along at a constant rate.
+        t = 1.0 - (1.0 - i / float(n)) ** 1.35
+        mt = 1.0 - t
+        bx = (mt ** 3) * x_a + 3 * (mt ** 2) * t * p1x \
+            + 3 * mt * (t ** 2) * p2x + (t ** 3) * tx
+        by = (mt ** 3) * y_a + 3 * (mt ** 2) * t * p1y \
+            + 3 * mt * (t ** 2) * p2y + (t ** 3) * ty
+        if not (0 <= bx < width and 0 <= by < height):
+            continue
+        out.append((f_a + i, int(round(bx)), int(round(by))))
+    if len(out) < 2:
+        return None
+    return out
+
+
 def _shape_tail(tail, lift=0.0, at=0.5):
     """Reshape a tail: how HIGH it goes, and WHERE it peaks.
 
     THE OPERATOR'S HAND ON THE ARC. The measured part of the flight is
     the tracked ball and is not up for negotiation; the tail is a model,
     and models are sometimes flat, or steep, or peak in the wrong place
-    in a way the eye can see and the maths cannot. Two numbers correct
-    that without opening the shape up to freehand drawing, and both
-    leave the ends pinned -- the ball where it was last seen, the
-    landing where it was marked.
+    in a way the eye can see and the maths cannot.
 
-    `at` (0..1) is WHERE ALONG THE TAIL THE HIGH POINT SITS. It works by
-    warping which part of the original curve is shown at each step: at
-    `at` the arc shows what used to be its middle, so the peak moves
-    there while the ends stay put and the horizontal progress -- which
-    is the ball's real speed across the frame -- is untouched. 0.5 is
-    the curve exactly as the model computed it.
+    WORKED PERPENDICULAR TO THE FLIGHT, not up and down the screen. The
+    curve is split into how far along the straight line from its start
+    to its end each point sits, and how far off that line it sits -- the
+    hump, which for any sensible arc is a single smooth rise and fall.
+    The along part is never touched: that is the ball's progress, and
+    its timing. Only the hump is edited.
 
-    `lift` (px) is HOW HIGH, applied as a half-sine over that same
-    warped parameter so its maximum lands on the peak wherever the peak
-    now is. The half-sine rather than a parabola because it is flat at
-    both ends: a lifted tail still leaves the ball along the direction
-    it was travelling instead of kinking upward at the handover.
-    Positive is higher on screen.
+        h(u) = (hump(u) + lift·sin²(πu)) · (1 + c·sin(πu)·(2u−1))
+
+    `lift` adds height. `c`, from `at`, tilts the hump -- damping the
+    early half and amplifying the late one, or the reverse -- which is
+    what moves the crest of the flight earlier or later.
+
+    NOTHING HERE IS RESAMPLED, and that is the point. An earlier version
+    slid the crest by reading the hump at a warped position, which meant
+    interpolating a polyline: every read landed between two points and
+    left a small slope discontinuity, invisible at a gentle setting and
+    a spike at a strong one. Multiplying leaves the curve as smooth as
+    it was.
+
+    NEITHER KNOB CAN TILT THE JOIN. The hump is zero at both ends, so
+    the multiplier cannot move those points however large it gets, and
+    the added bump is sin², which is zero in value AND slope at each
+    end. The continuation therefore still leaves the tracked ball along
+    the direction the ball was travelling, whatever the handle is set
+    to -- which is the whole reason the arc is built the way it is.
     """
     n = len(tail)
     if n < 3 or (not lift and abs(at - 0.5) < 1e-3):
         return tail
     a = max(0.08, min(0.92, float(at)))
-    ys = [float(p[2]) for p in tail]
+    c = (a - 0.5) * 3.0
+    ax, ay = float(tail[0][1]), float(tail[0][2])
+    dx, dy = float(tail[-1][1]) - ax, float(tail[-1][2]) - ay
+    L = math.hypot(dx, dy)
+    if L < 1e-6:
+        return tail
+    # A HUMP BIGGER THAN THE FLIGHT IS A LOOP. The handle is dragged in
+    # screen pixels and a flight can be short in them, so the limit has
+    # to come from the arc rather than from a constant.
+    _lim = max(20.0, 0.45 * L)
+    lift = max(-_lim, min(_lim, float(lift)))
+    ux, uy = dx / L, dy / L
+    # The perpendicular, chosen to point UP the screen so that a
+    # positive lift raises the arc whichever way the shot is going.
+    nx, ny = -uy, ux
+    if ny > 0:
+        nx, ny = -nx, -ny
 
-    def _warp(u):
-        # Monotone, g(0)=0, g(a)=0.5, g(1)=1 — so the middle of the
-        # original curve is what shows up at `a`.
-        return (0.5 * u / a) if u <= a else 0.5 + 0.5 * (u - a) / (1.0 - a)
+    # PARAMETERISED BY FRAME, not by position in the list. A tail is
+    # allowed to have holes -- the renderer skips the part of the flight
+    # that is above the top of the frame -- and treating the list as
+    # evenly spaced squeezes the parameter across the hole, which would
+    # put the crest in the wrong place on exactly the shots that leave
+    # the frame. Frames are the flight's own clock and have no hole.
+    _f0 = float(tail[0][0])
+    _fl = (float(tail[-1][0]) - _f0) or 1.0
 
     out = []
-    for i, (f, x, _y) in enumerate(tail):
-        u = i / float(n - 1)
-        g = _warp(u)
-        # The original height, sampled at the warped position.
-        pos = g * (n - 1)
-        lo = max(0, min(n - 1, int(math.floor(pos))))
-        hi = max(0, min(n - 1, lo + 1))
-        frac = pos - lo
-        y = ys[lo] + (ys[hi] - ys[lo]) * frac
+    for q in tail:
+        u = (float(q[0]) - _f0) / _fl
+        along = (float(q[1]) - ax) * ux + (float(q[2]) - ay) * uy
+        perp = (float(q[1]) - ax) * nx + (float(q[2]) - ay) * ny
+        h = perp + lift * (math.sin(math.pi * u) ** 2)
+        h *= 1.0 + c * math.sin(math.pi * u) * (2.0 * u - 1.0)
         # floor(v + 0.5), not round(): Python rounds a half to the
-        # nearest EVEN and JavaScript rounds it up, and the browser
-        # runs this same formula to show the operator what will be
-        # drawn. One pixel apart on a half is still two answers.
-        out.append((f, x, int(math.floor(
-            y - lift * math.sin(math.pi * g) + 0.5))))
+        # nearest EVEN and JavaScript rounds it up, and the browser runs
+        # this same formula to show the operator what will be drawn. One
+        # pixel apart on a half is still two answers.
+        out.append((
+            q[0],
+            int(math.floor(ax + ux * along + nx * h + 0.5)),
+            int(math.floor(ay + uy * along + ny * h + 0.5)),
+        ))
     return out
 
 
@@ -3447,11 +3617,24 @@ def _extend_to_target(pts, target_xy, fps, width, height,
                       apex_at=0.5):
     """Points continuing `pts` to `target_xy`, or [] if it cannot.
 
-    Tries the measured ballistic arc first (see _ballistic_tail) and
-    falls back to a plain quadratic Bézier that leaves along the ball's
-    current direction and bends to the target -- which looks right even
-    though nothing in it is measured, and is all a track too short or
-    too flat to fit can support.
+    Two ways to draw the rest of the flight, and both leave the last
+    tracked point along the direction the ball was already going --
+    there is no third way that draws a corner.
+
+    The measured arc first (see _ballistic_tail): x and y fitted over
+    the tracked flight, the duration taken from the two cameras' clocks,
+    the curvature whatever gets the ball to the marked landing in that
+    time. When the measurement cannot support it -- too short a track,
+    a landing the fitted horizontal says is behind us, a fit with no
+    downward curvature to solve with -- the arc through the chord
+    (_arc_tail) draws the same flight from the same velocity without
+    needing any of that to hold.
+
+    WHAT USED TO BE HERE was a quadratic Bezier with its control point
+    40% along the straight line to the target. It is what drew the hard
+    angle at the hand-off: a control point on the chord pulls the curve
+    off the ball's direction immediately, and the sharper the geometry
+    the sharper the corner.
 
     ONE FUNCTION BECAUSE THERE ARE TWO RENDER PATHS. The line is built
     either by interpolating the operator's own clicks or by sampling a
@@ -3464,36 +3647,14 @@ def _extend_to_target(pts, target_xy, fps, width, height,
         return [], None
     tail = _ballistic_tail(pts, target_xy, fps, width, height,
                            land_frame=land_frame)
-    if tail:
-        return _shape_tail(tail, apex_lift, apex_at), "ballistic"
-
-    f_last, x_a, y_a = pts[-1]
-    _, x_b, y_b = pts[-2]
-    tx_t, ty_t = float(target_xy[0]), float(target_xy[1])
-    dx, dy = float(x_a - x_b), float(y_a - y_b)
-    dlen = math.hypot(dx, dy) or 1.0
-    ux, uy = dx / dlen, dy / dlen
-    span = math.hypot(tx_t - x_a, ty_t - y_a)
-    cx = x_a + ux * span * 0.4
-    cy = y_a + uy * span * 0.4
-    # As long as the ball was actually in the air, when the two clocks
-    # can say. The 1.5s is only for when nothing else can.
-    steps = int(round(fps * 1.5)) if fps else 45
-    if land_frame is not None:
-        _n = int(round(float(land_frame) - float(f_last)))
-        if 3 <= _n <= int(round((fps or 30.0) * 8.0)):
-            steps = _n
-    out = []
-    for i in range(1, steps + 1):
-        t = i / float(steps)
-        mt = 1.0 - t
-        bx = int(round(mt * mt * x_a + 2 * mt * t * cx + t * t * tx_t))
-        by = int(round(mt * mt * y_a + 2 * mt * t * cy + t * t * ty_t))
-        if not (0 <= bx < width and 0 <= by < height):
-            break
-        out.append((f_last + i, bx, by))
-    return (_shape_tail(out, apex_lift, apex_at),
-            ("bezier" if out else None))
+    kind = "ballistic"
+    if not tail:
+        tail = _arc_tail(pts, target_xy, fps, width, height,
+                         land_frame=land_frame)
+        kind = "arc"
+    if not tail:
+        return [], None
+    return _shape_tail(tail, apex_lift, apex_at), kind
 
 
 def _clip_point_to_frame(ax, ay, bx, by, w, h):

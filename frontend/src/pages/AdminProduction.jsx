@@ -793,18 +793,41 @@ function ClickToPlotModal({
   // (mirrortest.py runs this and the Python on the same tail and
   // requires them to agree to the pixel.)
   function shapeTail(tail, l, at) {
+    // Mirrors _shape_tail in ai_tracer.py exactly — mirrortest.py runs
+    // the two against each other and requires them equal to the pixel.
+    // The hump off the straight line from the tail's start to its end
+    // is what gets edited; the progress ALONG that line is the ball's
+    // own timing and is never touched. Both are zero at the ends, so
+    // no setting can move either end or tilt the join with the tracked
+    // ball. Nothing is resampled: the crest is moved by multiplying
+    // the hump, not by reading it at a warped position.
     const n = tail.length;
     if (n < 3 || (!l && Math.abs(at - 0.5) < 1e-3)) return tail;
     const a = Math.max(0.08, Math.min(0.92, at));
-    const ys = tail.map((q) => q[1]);
+    const c = (a - 0.5) * 3.0;
+    const ax = tail[0][0];
+    const ay = tail[0][1];
+    const dx = tail[n - 1][0] - ax;
+    const dy = tail[n - 1][1] - ay;
+    const L = Math.hypot(dx, dy);
+    if (L < 1e-6) return tail;
+    const lim = Math.max(20, 0.45 * L);
+    const lift = Math.max(-lim, Math.min(lim, l));
+    const ux = dx / L;
+    const uy = dy / L;
+    let nx = -uy;
+    let ny = ux;
+    if (ny > 0) { nx = -nx; ny = -ny; }
     return tail.map((q, i) => {
       const u = i / (n - 1);
-      const g = u <= a ? (0.5 * u) / a : 0.5 + (0.5 * (u - a)) / (1 - a);
-      const pos = g * (n - 1);
-      const lo = Math.max(0, Math.min(n - 1, Math.floor(pos)));
-      const hi = Math.max(0, Math.min(n - 1, lo + 1));
-      const y = ys[lo] + (ys[hi] - ys[lo]) * (pos - lo);
-      return [q[0], Math.round(y - l * Math.sin(Math.PI * g))];
+      const along = (q[0] - ax) * ux + (q[1] - ay) * uy;
+      const perp = (q[0] - ax) * nx + (q[1] - ay) * ny;
+      let h = perp + lift * Math.sin(Math.PI * u) ** 2;
+      h *= 1 + c * Math.sin(Math.PI * u) * (2 * u - 1);
+      return [
+        Math.floor(ax + ux * along + nx * h + 0.5),
+        Math.floor(ay + uy * along + ny * h + 0.5),
+      ];
     });
   }
   const liftedTail = shapeTail(shape?.tail || [], lift, apexAt);
@@ -834,10 +857,12 @@ function ClickToPlotModal({
   // not on a tail whose highest point is its own end.
   const apexFactor = (() => {
     if (baseApexIdx == null) return 1;
+    const u = baseApexIdx / Math.max(1, _bt.length - 1);
     const a = Math.max(0.08, Math.min(0.92, apexAt));
-    const u = baseApexIdx / (_bt.length - 1);
-    const g = u <= a ? (0.5 * u) / a : 0.5 + (0.5 * (u - a)) / (1 - a);
-    return Math.max(0.25, Math.sin(Math.PI * g));
+    const c = (a - 0.5) * 3.0;
+    const bump = Math.sin(Math.PI * u) ** 2;
+    const tilt = 1 + c * Math.sin(Math.PI * u) * (2 * u - 1);
+    return Math.max(0.25, bump * tilt);
   })();
 
   async function fetchShape(end, force = false) {
