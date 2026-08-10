@@ -7874,13 +7874,42 @@ def tracer_shape(
     # measured parabola to where the ball comes back down to the height
     # it was last seen at. The operator drags it from there onto the
     # real thing.
-    _guessed = None
+    _guessed, _guess_from = None, None
     if end_xy is None:
-        _guessed = predicted_landing(pts, _fps, _w, _h)
+        # A CALIBRATED HOLE ALREADY KNOWS WHERE THE BALL IS GOING. The
+        # green camera's view maps into this one, so the flag -- or
+        # failing that the middle of what the green camera can see --
+        # is a real place on this hole rather than an extrapolation,
+        # and it is where the shot was aimed. That beats anything the
+        # flight alone can say, and on a pulled shot it is still the
+        # right neighbourhood to drag from.
+        try:
+            _c, _hole, _vm = _view_map_for(db, row)
+            if _vm:
+                _gs = _vm.get("green_size") or []
+                _spot = _vm.get("pin_green") or (
+                    [float(_gs[0]) / 2.0, float(_gs[1]) / 2.0]
+                    if len(_gs) >= 2 else None)
+                if _spot:
+                    _xy, _why = _map_landing_to_tee(
+                        db, row, _spot,
+                        green_size=_gs or None, tee_size=[_w, _h])
+                    if _xy:
+                        _guessed = (round(float(_xy[0]), 1),
+                                    round(float(_xy[1]), 1))
+                        _guess_from = ("the hole's flag" if _vm.get("pin_green")
+                                       else "the calibrated green")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("tracer-shape: no mapped guess for %s: %s",
+                      upload_id, exc)
+        # ...and when the hole is not calibrated, the flight itself.
+        if _guessed is None:
+            _guessed = predicted_landing(pts, _fps, _w, _h)
+            _guess_from = "the flight itself"
         if _guessed is None:
             return {"tail": [], "kind": None, "predicted": None,
-                    "reason": "not enough of the flight was tracked to "
-                              "guess where it came down"}
+                    "reason": "there is no tracked ball on this swing to "
+                              "work from"}
         end_xy = _guessed
 
     tail, kind = _extend_to_target(pts, end_xy, _fps, _w, _h,
@@ -7899,6 +7928,7 @@ def tracer_shape(
         "apex_at": at,
         # The point the caller did not give, when it did not give one.
         "predicted": list(_guessed) if _guessed else None,
+        "predicted_from": _guess_from,
         "end": [round(end_xy[0], 1), round(end_xy[1], 1)],
     }
 

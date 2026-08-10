@@ -1666,8 +1666,9 @@ function ClickToPlotModal({
                     ? `${shape?.kind || "…"} · ${shape?.n || 0} frames of `
                       + "flight — "
                       + (endGuessed
-                        ? "this landing is a GUESS off the flight itself; "
-                          + "drag the pink handle onto the real one"
+                        ? `this landing is a GUESS from ${
+                            shape?.predicted_from || "the flight"}; drag `
+                          + "the pink handle onto the real one"
                         : "drag the pink handle to move where it lands")
                     : "nothing tracked to work from on this swing")}
                 noteColour={shapeErr ? "#f59e0b" : "#67e8f9"}
