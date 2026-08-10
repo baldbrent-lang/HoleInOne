@@ -7353,6 +7353,16 @@ def render_tracer_fast(
     except (TypeError, ValueError):
         apex_lift = 0.0
     apex_lift = max(-400.0, min(400.0, apex_lift))
+    # ...and WHERE along the flight it peaks. 0.5 is the model's own
+    # curve, so a caller that says nothing gets exactly what it always
+    # got.
+    try:
+        apex_at = float(payload.get("apex_at")
+                        if payload.get("apex_at") is not None
+                        else saved.get("tracer_apex_at") or 0.5)
+    except (TypeError, ValueError):
+        apex_at = 0.5
+    apex_at = max(0.08, min(0.92, apex_at))
 
     # Output window: render ONLY the selected swing's frame span (from the
     # frontend), so a multi-swing / long source produces a short clip of
@@ -7375,6 +7385,7 @@ def render_tracer_fast(
         impact_frame_idx=impact_idx,
         target_xy=target_xy,
         apex_lift=apex_lift,
+        apex_at=apex_at,
         write_start=write_start,
         write_end=write_end,
         # Forward the manual flag — the renderer pins manual anchors
@@ -7821,6 +7832,9 @@ def tracer_shape(
     try:
         end_xy = (float(_end[0]), float(_end[1]))
         lift = max(-400.0, min(400.0, float(payload.get("apex_lift") or 0.0)))
+        at = max(0.08, min(0.92, float(
+            payload.get("apex_at") if payload.get("apex_at") is not None
+            else 0.5)))
     except (TypeError, ValueError, IndexError):
         raise HTTPException(400, "end must be [x, y] and apex_lift a number")
 
@@ -7857,7 +7871,8 @@ def tracer_shape(
     except (TypeError, ValueError):
         _lf = None
     tail, kind = _extend_to_target(pts, end_xy, _fps, _w, _h,
-                                   land_frame=_lf, apex_lift=lift)
+                                   land_frame=_lf, apex_lift=lift,
+                                   apex_at=at)
     # Subsampled the same way the renderer records it: the editor is
     # drawing a line, not animating one.
     step = max(1, len(tail) // 60)
@@ -7868,6 +7883,7 @@ def tracer_shape(
         "n": len(tail),
         "track": [[int(x), int(y)] for _f, x, y in pts],
         "apex_lift": lift,
+        "apex_at": at,
     }
 
 
@@ -14429,7 +14445,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # mapped landing once it has been dragged -- the operator
             # looking at the tee frame is a better judge of where the
             # ball finished in THIS picture than a homography is.
-            _apex_lift = 0.0
+            _apex_lift, _apex_at = 0.0, 0.5
             try:
                 _em_s = None
                 for _s in ((row.edit_metrics or {}).get("swings") or []):
@@ -14438,6 +14454,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         break
                 if _em_s:
                     _apex_lift = float(_em_s.get("tracer_apex_lift") or 0.0)
+                    _apex_at = float(_em_s.get("tracer_apex_at") or 0.5)
                     _end = _em_s.get("tracer_end")
                     if _end:
                         _target_xy = (float(_end[0]), float(_end[1]))
@@ -14449,7 +14466,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             except (TypeError, ValueError) as exc:
                 log.debug("d3 produce: swing %s tracer shape unusable: %s",
                           i, exc)
-                _apex_lift = 0.0
+                _apex_lift, _apex_at = 0.0, 0.5
 
             _green_track = None
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
@@ -14463,6 +14480,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 target_xy=_target_xy,
                 target_frame=_target_frame,
                 apex_lift=_apex_lift,
+                apex_at=_apex_at,
             )
             if not _rv.get("ok") or not _tee.exists():
                 raise RuntimeError(

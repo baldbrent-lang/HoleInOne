@@ -772,23 +772,42 @@ function ClickToPlotModal({
   });
   const [lift, setLift] = useState(
     () => Number(swing.tracer_apex_lift || 0));
+  // WHERE ALONG THE FLIGHT THE PEAK SITS, 0..1. 0.5 is the model's own
+  // curve; sliding the handle sideways moves the high point earlier or
+  // later without touching where the ball starts, where it lands, or
+  // how fast it crosses the frame.
+  const [apexAt, setApexAt] = useState(
+    () => Number(swing.tracer_apex_at || 0.5));
   const [shapeBase] = useState(() => JSON.stringify([
     swing.tracer_end || null, Number(swing.tracer_apex_lift || 0),
+    Number(swing.tracer_apex_at || 0.5),
   ]));
   const shapeChanged = JSON.stringify([
-    tracerEnd ? [tracerEnd.x, tracerEnd.y] : null, lift,
+    tracerEnd ? [tracerEnd.x, tracerEnd.y] : null, lift, apexAt,
   ]) !== shapeBase;
 
-  // THE LIFT IS APPLIED HERE, not asked for. The server returns the
-  // unlifted tail and this adds the same half-sine the renderer does,
-  // so dragging the apex is instant and still exactly what will be
+  // THE SHAPE IS APPLIED HERE, not asked for. The server returns the
+  // unshaped tail and this does the same two things the renderer does,
+  // so dragging the handle is instant and still exactly what will be
   // drawn — one formula, mirrored, rather than a round trip per pixel.
-  const liftedTail = (shape?.tail || []).map((q, i, arr) => (
-    arr.length < 3 ? q : [
-      q[0],
-      Math.round(q[1] - lift * Math.sin((Math.PI * i) / (arr.length - 1))),
-    ]
-  ));
+  // (mirrortest.py runs this and the Python on the same tail and
+  // requires them to agree to the pixel.)
+  function shapeTail(tail, l, at) {
+    const n = tail.length;
+    if (n < 3 || (!l && Math.abs(at - 0.5) < 1e-3)) return tail;
+    const a = Math.max(0.08, Math.min(0.92, at));
+    const ys = tail.map((q) => q[1]);
+    return tail.map((q, i) => {
+      const u = i / (n - 1);
+      const g = u <= a ? (0.5 * u) / a : 0.5 + (0.5 * (u - a)) / (1 - a);
+      const pos = g * (n - 1);
+      const lo = Math.max(0, Math.min(n - 1, Math.floor(pos)));
+      const hi = Math.max(0, Math.min(n - 1, lo + 1));
+      const y = ys[lo] + (ys[hi] - ys[lo]) * (pos - lo);
+      return [q[0], Math.round(y - l * Math.sin(Math.PI * g))];
+    });
+  }
+  const liftedTail = shapeTail(shape?.tail || [], lift, apexAt);
   // ONLY THE PREDICTED PART IS DRAWN AS THE SHAPE. The tracked ball is
   // already on screen as the solid green track, and drawing the line
   // over it again reads as a double exposure rather than as one tracer.
@@ -804,13 +823,22 @@ function ClickToPlotModal({
   // pointer absolutely: deriving the lift from the last frame's
   // position instead accumulates whatever the render missed, and the
   // handle slides away from the cursor.
-  const _bt = shape?.tail || [];
+  // Measured on the curve as SLID BUT NOT LIFTED, so the vertical drag
+  // is absolute against whatever the horizontal drag has already done.
+  const _bt = shapeTail(shape?.tail || [], 0, apexAt);
   const baseApexIdx = _bt.length > 2
     ? _bt.reduce((mi, q, i) => (q[1] < _bt[mi][1] ? i : mi), 0) : null;
   const baseApexY = baseApexIdx != null ? _bt[baseApexIdx][1] : null;
-  const apexFactor = baseApexIdx != null
-    ? Math.max(0.25, Math.sin((Math.PI * baseApexIdx) / (_bt.length - 1)))
-    : 1;
+  // How much of a lift actually reaches that point — normally all of
+  // it, since the peak is where the half-sine is at its maximum, but
+  // not on a tail whose highest point is its own end.
+  const apexFactor = (() => {
+    if (baseApexIdx == null) return 1;
+    const a = Math.max(0.08, Math.min(0.92, apexAt));
+    const u = baseApexIdx / (_bt.length - 1);
+    const g = u <= a ? (0.5 * u) / a : 0.5 + (0.5 * (u - a)) / (1 - a);
+    return Math.max(0.25, Math.sin(Math.PI * g));
+  })();
 
   async function fetchShape(end, force = false) {
     const at = end || tracerEnd;
@@ -1173,6 +1201,7 @@ function ClickToPlotModal({
           // only ever a proxy for.
           target: tracerEnd || swing.target || null,
           apex_lift: lift || 0,
+          apex_at: apexAt,
           render_window: hasWindow
             ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
             : null,
@@ -1194,6 +1223,7 @@ function ClickToPlotModal({
               ...(tracerEnd
                 ? { tracer_end: [tracerEnd.x, tracerEnd.y] } : {}),
               tracer_apex_lift: lift || 0,
+              tracer_apex_at: apexAt,
               ...(landing
                 ? {
                     landing_frame: landing.frame,
@@ -1555,6 +1585,8 @@ function ClickToPlotModal({
                     : "no aim point"}
                   {lift ? ` · lift ${lift > 0 ? "+" : ""}${Math.round(lift)}px`
                         : ""}
+                  {Math.abs(apexAt - 0.5) > 0.01
+                    ? ` · peak ${Math.round(apexAt * 100)}%` : ""}
                 </span>
                 <button
                   type="button"
@@ -1567,6 +1599,7 @@ function ClickToPlotModal({
                       ? { x: Math.round(e[0][0]), y: Math.round(e[0][1]) }
                       : null);
                     setLift(Number(e[1] || 0));
+                    setApexAt(Number(e[2] ?? 0.5));
                   }}
                   title="Put the arc back to the shape that was saved"
                 >
@@ -1673,11 +1706,13 @@ function ClickToPlotModal({
                       + "marked on the green camera.",
                   }] : []),
                   ...(apexPt ? [{
-                    id: "apex", x: apexPt[0], y: apexPt[1], axis: "y",
+                    id: "apex", x: apexPt[0], y: apexPt[1],
                     colour: "#fbbf24",
-                    title: "The high point of the flight. Drag up or down "
-                      + "to make the arc higher or flatter; both ends stay "
-                      + "put and the curve stays a natural parabola.",
+                    title: "The high point of the flight. Up and down "
+                      + "makes the arc higher or flatter; left and right "
+                      + "moves where it peaks, earlier or later in the "
+                      + "flight. Both ends stay put and the curve stays a "
+                      + "natural arc.",
                   }] : []),
                 ]}
                 onHandleDrag={(id, pt) => {
@@ -1686,10 +1721,26 @@ function ClickToPlotModal({
                     // effect re-solves the tail behind it.
                     setTracerEnd(pt);
                   } else if (baseApexY != null) {
-                    // Vertical only, and absolute: the lift is whatever
-                    // puts the arc's peak under the pointer, worked out
-                    // from the UNLIFTED curve, so the handle cannot
-                    // drift away from the cursor as it is dragged.
+                    // BOTH AXES, and both absolute: the handle goes
+                    // where the pointer is rather than accumulating
+                    // deltas, so it cannot drift away from the cursor.
+                    //
+                    // Sideways: the tail's x values are the ball's real
+                    // progress across the frame, so the nearest point
+                    // in x IS the position along the flight the pointer
+                    // is over.
+                    const xs = (shape?.tail || []).map((q) => q[0]);
+                    if (xs.length > 2) {
+                      let best = 0;
+                      for (let i = 1; i < xs.length; i += 1) {
+                        if (Math.abs(xs[i] - pt.x)
+                            < Math.abs(xs[best] - pt.x)) best = i;
+                      }
+                      setApexAt(Math.max(0.08, Math.min(0.92,
+                        best / (xs.length - 1))));
+                    }
+                    // Up and down: the lift that puts the peak under
+                    // the pointer, measured on the unlifted curve.
                     setLift(Math.max(-400, Math.min(400,
                       (baseApexY - pt.y) / apexFactor)));
                   }

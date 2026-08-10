@@ -3387,37 +3387,64 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=8.0,
     return out
 
 
-def _apex_lift(tail, lift):
-    """Pull the middle of a tail up or down, leaving its ends alone.
+def _shape_tail(tail, lift=0.0, at=0.5):
+    """Reshape a tail: how HIGH it goes, and WHERE it peaks.
 
     THE OPERATOR'S HAND ON THE ARC. The measured part of the flight is
     the tracked ball and is not up for negotiation; the tail is a model,
-    and models are sometimes flat or steep in a way the eye can see and
-    the maths cannot. This lets that be corrected without opening the
-    shape up to freehand drawing: a single number lifts the middle by a
-    half-sine, so both ends stay pinned -- the ball where it was last
-    seen, and the landing where it was marked -- and what is in between
-    stays one smooth arc. Positive is higher on screen.
+    and models are sometimes flat, or steep, or peak in the wrong place
+    in a way the eye can see and the maths cannot. Two numbers correct
+    that without opening the shape up to freehand drawing, and both
+    leave the ends pinned -- the ball where it was last seen, the
+    landing where it was marked.
 
-    The half-sine rather than a parabola on purpose: it leaves the
-    joins at both ends flat, so a lifted tail still leaves the ball
-    along the direction it was travelling instead of kinking upward at
-    the handover.
+    `at` (0..1) is WHERE ALONG THE TAIL THE HIGH POINT SITS. It works by
+    warping which part of the original curve is shown at each step: at
+    `at` the arc shows what used to be its middle, so the peak moves
+    there while the ends stay put and the horizontal progress -- which
+    is the ball's real speed across the frame -- is untouched. 0.5 is
+    the curve exactly as the model computed it.
+
+    `lift` (px) is HOW HIGH, applied as a half-sine over that same
+    warped parameter so its maximum lands on the peak wherever the peak
+    now is. The half-sine rather than a parabola because it is flat at
+    both ends: a lifted tail still leaves the ball along the direction
+    it was travelling instead of kinking upward at the handover.
+    Positive is higher on screen.
     """
-    if not tail or not lift:
-        return tail
     n = len(tail)
-    if n < 3:
+    if n < 3 or (not lift and abs(at - 0.5) < 1e-3):
         return tail
+    a = max(0.08, min(0.92, float(at)))
+    ys = [float(p[2]) for p in tail]
+
+    def _warp(u):
+        # Monotone, g(0)=0, g(a)=0.5, g(1)=1 — so the middle of the
+        # original curve is what shows up at `a`.
+        return (0.5 * u / a) if u <= a else 0.5 + 0.5 * (u - a) / (1.0 - a)
+
     out = []
-    for i, (f, x, y) in enumerate(tail):
+    for i, (f, x, _y) in enumerate(tail):
         u = i / float(n - 1)
-        out.append((f, x, int(round(y - lift * math.sin(math.pi * u)))))
+        g = _warp(u)
+        # The original height, sampled at the warped position.
+        pos = g * (n - 1)
+        lo = max(0, min(n - 1, int(math.floor(pos))))
+        hi = max(0, min(n - 1, lo + 1))
+        frac = pos - lo
+        y = ys[lo] + (ys[hi] - ys[lo]) * frac
+        # floor(v + 0.5), not round(): Python rounds a half to the
+        # nearest EVEN and JavaScript rounds it up, and the browser
+        # runs this same formula to show the operator what will be
+        # drawn. One pixel apart on a half is still two answers.
+        out.append((f, x, int(math.floor(
+            y - lift * math.sin(math.pi * g) + 0.5))))
     return out
 
 
 def _extend_to_target(pts, target_xy, fps, width, height,
-                      land_frame=None, apex_lift=0.0):
+                      land_frame=None, apex_lift=0.0,
+                      apex_at=0.5):
     """Points continuing `pts` to `target_xy`, or [] if it cannot.
 
     Tries the measured ballistic arc first (see _ballistic_tail) and
@@ -3438,7 +3465,7 @@ def _extend_to_target(pts, target_xy, fps, width, height,
     tail = _ballistic_tail(pts, target_xy, fps, width, height,
                            land_frame=land_frame)
     if tail:
-        return _apex_lift(tail, apex_lift), "ballistic"
+        return _shape_tail(tail, apex_lift, apex_at), "ballistic"
 
     f_last, x_a, y_a = pts[-1]
     _, x_b, y_b = pts[-2]
@@ -3465,7 +3492,8 @@ def _extend_to_target(pts, target_xy, fps, width, height,
         if not (0 <= bx < width and 0 <= by < height):
             break
         out.append((f_last + i, bx, by))
-    return _apex_lift(out, apex_lift), ("bezier" if out else None)
+    return (_shape_tail(out, apex_lift, apex_at),
+            ("bezier" if out else None))
 
 
 def _clip_point_to_frame(ax, ay, bx, by, w, h):
@@ -3571,6 +3599,7 @@ def render_tracer_video(
     write_end: int | None = None,
     rest_verified: bool = False,
     apex_lift: float = 0.0,
+    apex_at: float = 0.5,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
@@ -3926,7 +3955,7 @@ def render_tracer_video(
         # no target we simply stop at the last plotted point.
         _tail, _bt = _extend_to_target(
             pts, target_xy, fps, width, height, land_frame=target_frame,
-            apex_lift=apex_lift,
+            apex_lift=apex_lift, apex_at=apex_at,
         )
         if _tail:
             smoothed_points.extend(_tail)
@@ -3947,6 +3976,7 @@ def render_tracer_video(
                 "apex_y": int(min(p[2] for p in _tail)),
                 "end_xy": [int(_tail[-1][1]), int(_tail[-1][2])],
                 "apex_lift": round(float(apex_lift), 1),
+                "apex_at": round(float(apex_at), 3),
                 "points": [[int(x), int(y)] for _f, x, y
                            in _tail[::max(1, len(_tail) // 40)]]
                 + [[int(_tail[-1][1]), int(_tail[-1][2])]],
@@ -4175,6 +4205,7 @@ def render_tracer_video(
             _tail, _bt = _extend_to_target(
                 smoothed_points, target_xy, fps, width, height,
                 land_frame=target_frame, apex_lift=apex_lift,
+                apex_at=apex_at,
             )
             if _tail:
                 smoothed_points.extend(_tail)
@@ -4196,6 +4227,7 @@ def render_tracer_video(
                     "apex_y": int(min(p[2] for p in _tail)),
                     "end_xy": [int(_tail[-1][1]), int(_tail[-1][2])],
                     "apex_lift": round(float(apex_lift), 1),
+                    "apex_at": round(float(apex_at), 3),
                     # THE TAIL ITSELF, so the editor can show what was
                     # actually drawn rather than its own idea of it.
                     # Subsampled: a hundred-frame tail is a hundred
