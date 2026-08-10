@@ -7364,6 +7364,25 @@ def render_tracer_fast(
         apex_at = 0.5
     apex_at = max(0.08, min(0.92, apex_at))
 
+    # HOW LONG THE BALL IS IN THE AIR. The renderer times its
+    # continuation from the frame the ball lands on, and this is the
+    # operator's way of saying when that is on a swing whose landing
+    # was never marked on the green camera.
+    target_frame = None
+    try:
+        _fs = payload.get("flight_sec")
+        if _fs is None:
+            _fs = saved.get("tracer_flight_sec")
+        if _fs is not None:
+            _src_fps = float(probe_fps(src_path) or 0.0) or 30.0
+            target_frame = int(round(impact_idx
+                                     + max(0.5, min(20.0, float(_fs)))
+                                     * _src_fps))
+    except (TypeError, ValueError) as exc:
+        log.debug("render-tracer-fast: unusable flight_sec on %s: %s",
+                  upload_id, exc)
+        target_frame = None
+
     # Output window: render ONLY the selected swing's frame span (from the
     # frontend), so a multi-swing / long source produces a short clip of
     # just that swing instead of re-rendering the whole video.
@@ -7384,6 +7403,7 @@ def render_tracer_fast(
         ball_rest_xy_native=ball_xy,
         impact_frame_idx=impact_idx,
         target_xy=target_xy,
+        target_frame=target_frame,
         apex_lift=apex_lift,
         apex_at=apex_at,
         write_start=write_start,
@@ -7822,6 +7842,7 @@ def tracer_shape(
     over the track that is already in hand.
     """
     from ..services.ai_tracer import _extend_to_target, predicted_landing
+    from ..services.ai_tracer import flight_seconds_for_yardage
 
     row = db.get(LongVideoUpload, upload_id)
     if not row:
@@ -7868,6 +7889,40 @@ def tracer_shape(
         _lf = int(_lf) if _lf is not None else None
     except (TypeError, ValueError):
         _lf = None
+
+    # HOW LONG THE BALL IS IN THE AIR, which is what paces the drawn
+    # continuation. Measured when both cameras saw the shot -- the
+    # landing frame IS the answer, and nothing else gets a vote. The
+    # operator's own number next, then the hole's yardage through the
+    # carry-time table, so a swing with no green-side landing still
+    # gets a flight of a plausible length rather than whatever the
+    # model derives from a noisy fit.
+    _flight, _flight_from = None, None
+    _impact = payload.get("impact_frame")
+    if _lf is not None and _impact is not None and _fps > 0:
+        _flight = round((float(_lf) - float(_impact)) / _fps, 2)
+        _flight_from = "the two cameras' clocks"
+    else:
+        try:
+            _fs = payload.get("flight_sec")
+            _flight = float(_fs) if _fs is not None else None
+        except (TypeError, ValueError):
+            _flight = None
+        if _flight is not None:
+            _flight_from = "you"
+        else:
+            _hole = _hole_for_upload(db, row)
+            _course = db.get(Course, row.course_id) if row.course_id else None
+            _yards = None
+            if _course and _course.hole_yardages:
+                _yards = (_course.hole_yardages or {}).get(str(int(_hole)))
+            _flight = flight_seconds_for_yardage(_yards)
+            if _flight is not None:
+                _flight_from = f"hole {_hole} playing {int(float(_yards))}yd"
+        # A flight time and an impact frame make a landing frame, which
+        # is the one thing the renderer actually times from.
+        if _flight is not None and _impact is not None and _fps > 0:
+            _lf = int(round(float(_impact) + _flight * _fps))
     # NOTHING MARKED YET? GUESS, AND SAY SO. The editor has nothing to
     # show and nothing to take hold of without an aim point, and the
     # flight has already half-answered the question -- so continue the
@@ -7929,6 +7984,9 @@ def tracer_shape(
         # The point the caller did not give, when it did not give one.
         "predicted": list(_guessed) if _guessed else None,
         "predicted_from": _guess_from,
+        "flight_sec": _flight,
+        "flight_from": _flight_from,
+        "land_frame": _lf,
         "end": [round(end_xy[0], 1), round(end_xy[1], 1)],
     }
 
@@ -14501,6 +14559,18 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 if _em_s:
                     _apex_lift = float(_em_s.get("tracer_apex_lift") or 0.0)
                     _apex_at = float(_em_s.get("tracer_apex_at") or 0.5)
+                    # THE OPERATOR'S FLIGHT TIME, when the cameras did
+                    # not measure one. The landing frame from the green
+                    # clock always wins -- that is arithmetic, this is
+                    # a table -- so this only fills the gap.
+                    _fs = _em_s.get("tracer_flight_sec")
+                    if _target_frame is None and _fs and fps:
+                        _target_frame = int(round(
+                            launch_f + max(0.5, min(20.0, float(_fs))) * fps))
+                        log.info(
+                            "d3 produce: swing %s timing its tail from the "
+                            "operator's %.1fs flight -> tee frame %d",
+                            i, float(_fs), _target_frame)
                     _end = _em_s.get("tracer_end")
                     if _end:
                         _target_xy = (float(_end[0]), float(_end[1]))

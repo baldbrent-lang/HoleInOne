@@ -778,10 +778,22 @@ function ClickToPlotModal({
   // operator actually moves it, nothing has been decided, and Save must
   // not light up as though it had.
   const [endGuessed, setEndGuessed] = useState(false);
+  // HOW LONG THE BALL IS IN THE AIR, which is what paces the drawn
+  // continuation. Measured off the two cameras' clocks when the landing
+  // was marked on the green; otherwise the hole's yardage through the
+  // carry-time table, and editable either way — a 150-yard hole played
+  // into the wind is not a 150-yard shot.
+  const [flightSec, setFlightSec] = useState(
+    () => (swing.tracer_flight_sec != null
+      ? Number(swing.tracer_flight_sec) : null));
+  const [flightBase] = useState(
+    () => (swing.tracer_flight_sec != null
+      ? Number(swing.tracer_flight_sec) : null));
   const shapeChanged =
-    !endGuessed
-    && JSON.stringify(tracerEnd ? [tracerEnd.x, tracerEnd.y] : null)
-      !== shapeBase;
+    (!endGuessed
+     && JSON.stringify(tracerEnd ? [tracerEnd.x, tracerEnd.y] : null)
+       !== shapeBase)
+    || flightSec !== flightBase;
   // ONE HANDLE. The curve is the tracked flight's own parabola carried
   // on to where the ball finished, so the landing is the only thing
   // there is to say about it: the direction it leaves at, how fast and
@@ -806,11 +818,15 @@ function ClickToPlotModal({
         // hands it back, so the tab opens on an arc rather than on an
         // instruction to go and mark something somewhere else.
         end: at ? [at.x, at.y] : null,
+        flight_sec: flightSec,
         land_frame: swing.tracer_tail?.land_frame ?? null,
         width: frameW, height: frameH,
         fps: row.tee_fps || null,
       });
       setShape(out);
+      if (flightSec == null && out?.flight_sec != null) {
+        setFlightSec(out.flight_sec);
+      }
       if (!at && out?.predicted) {
         setTracerEnd({ x: Math.round(out.predicted[0]),
                        y: Math.round(out.predicted[1]) });
@@ -828,10 +844,16 @@ function ClickToPlotModal({
   // the tail is re-solved for the new end, which is the whole point of
   // dragging it.
   useEffect(() => {
-    if (cam !== "tracer") return;
-    fetchShape();
+    if (cam !== "tracer") return undefined;
+    // DEBOUNCED, because the things that change here change fast: a
+    // drag moves the aim point on every pointer event and typing a
+    // flight time moves it on every keystroke, and each of those was a
+    // round trip. A quarter of a second after the operator stops is
+    // still instant to them and is one request instead of forty.
+    const id = setTimeout(() => fetchShape(), 250);
+    return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cam, tracerEnd?.x, tracerEnd?.y, row.id]);
+  }, [cam, tracerEnd?.x, tracerEnd?.y, flightSec, row.id]);
 
   // ── THE OTHER CAMERA ──────────────────────────────────────────────
   // The tee picture answers "where did the tracer go". The green one
@@ -1156,6 +1178,7 @@ function ClickToPlotModal({
           // at the picture the line is drawn on, which the target was
           // only ever a proxy for.
           target: tracerEnd || swing.target || null,
+          flight_sec: flightSec,
           render_window: hasWindow
             ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
             : null,
@@ -1176,6 +1199,8 @@ function ClickToPlotModal({
               // rather than reverting to the model's.
               ...(tracerEnd
                 ? { tracer_end: [tracerEnd.x, tracerEnd.y] } : {}),
+              ...(flightSec != null
+                ? { tracer_flight_sec: flightSec } : {}),
               ...(landing
                 ? {
                     landing_frame: landing.frame,
@@ -1537,6 +1562,56 @@ function ClickToPlotModal({
                       + `${tracerEnd.x},${tracerEnd.y}`
                     : "no aim point"}
                 </span>
+                <span
+                  className="small"
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 4,
+                    whiteSpace: "nowrap",
+                  }}
+                  title={
+                    "How long the ball is in the air, which is what paces "
+                    + "the drawn continuation. Measured off the two "
+                    + "cameras' clocks when the landing is marked on the "
+                    + "green; otherwise from the hole's yardage. Change it "
+                    + "and the tracer re-times."
+                  }
+                >
+                  <span className="muted">flight</span>
+                  <button
+                    type="button"
+                    className="ghost small"
+                    style={{ width: "auto", padding: "0 6px" }}
+                    disabled={flightSec == null}
+                    onClick={() => setFlightSec(
+                      (v) => Math.max(0.5, Math.round((v - 0.2) * 10) / 10))}
+                  >
+                    −
+                  </button>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.5"
+                    max="20"
+                    value={flightSec ?? ""}
+                    onChange={(e) => {
+                      const n = parseFloat(e.target.value);
+                      setFlightSec(Number.isFinite(n)
+                        ? Math.max(0.5, Math.min(20, n)) : null);
+                    }}
+                    style={{ width: 62, textAlign: "center", padding: "1px 4px" }}
+                  />
+                  <span className="muted">s</span>
+                  <button
+                    type="button"
+                    className="ghost small"
+                    style={{ width: "auto", padding: "0 6px" }}
+                    disabled={flightSec == null}
+                    onClick={() => setFlightSec(
+                      (v) => Math.min(20, Math.round((v + 0.2) * 10) / 10))}
+                  >
+                    +
+                  </button>
+                </span>
                 <button
                   type="button"
                   className="ghost small"
@@ -1548,6 +1623,7 @@ function ClickToPlotModal({
                       ? { x: Math.round(e[0]), y: Math.round(e[1]) }
                       : null);
                     setEndGuessed(false);
+                    setFlightSec(flightBase);
                     if (!e) fetchShape();
                   }}
                   title="Put the arc back to the shape that was saved"
@@ -1670,6 +1746,8 @@ function ClickToPlotModal({
                             shape?.predicted_from || "the flight"}; drag `
                           + "the pink handle onto the real one"
                         : "drag the pink handle to move where it lands")
+                      + (shape?.flight_from
+                        ? ` · flight from ${shape.flight_from}` : "")
                     : "nothing tracked to work from on this swing")}
                 noteColour={shapeErr ? "#f59e0b" : "#67e8f9"}
               />

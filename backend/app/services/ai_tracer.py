@@ -3175,6 +3175,32 @@ def _draw_dashed_tracer(
         )
 
 
+def flight_seconds_for_yardage(yards):
+    """How long a carry of `yards` hangs in the air, in seconds.
+
+    From the carry-time table the operator works to:
+
+        200yd 6.2-6.8   175yd 5.6-6.1   150yd 5.0-5.4
+        125yd 4.3-4.7   100yd 3.6-4.0    75yd 2.9-3.3
+
+    Those midpoints sit on a straight line to within a twentieth of a
+    second -- 3.1s at 75 yards, rising 0.0272s per yard -- so that is
+    the whole model. It is a stand-in for a measurement: when the two
+    cameras have both seen the shot the flight time is arithmetic off
+    their clocks, and this is only for when they have not.
+
+    Clamped either side, because a hole yardage can be missing, wrong,
+    or a par 5.
+    """
+    try:
+        y = float(yards)
+    except (TypeError, ValueError):
+        return None
+    if y <= 0:
+        return None
+    return round(max(2.0, min(9.0, 3.1 + (y - 75.0) * 0.0272)), 2)
+
+
 def predicted_landing(pts, fps, width, height, max_sec=12.0,
                       nominal_sec=3.5):
     """Where the tracked flight would come down, with nothing marked.
