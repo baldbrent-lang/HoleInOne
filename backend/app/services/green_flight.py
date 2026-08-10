@@ -182,7 +182,7 @@ def find_path(video: Path, landing_frame: int, landing_xy, fps: float,
 
 
 def render_comet(src: Path, out: Path, points, first_frame: int,
-                 tail_frames: int = 8) -> bool:
+                 tail_frames: int = 15) -> bool:
     """Draw a comet along `points` onto `src`, writing `out`.
 
     `points` are in the SOURCE's frame numbering; `first_frame` is the
@@ -203,6 +203,12 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
     up in a soft mask so the edges fall off rather than ending in a hard
     line. The head is the wide end of that stroke, so there is no
     separate circle to see.
+
+    HOW LONG THE TAIL RUNS is a look rather than a measurement: it is
+    however many of the ball's recent positions the stroke is drawn
+    through. Fifteen frames is about a third of a second on this
+    camera — long enough to read as speed, short enough that it stays a
+    comet instead of a line drawn down the frame.
     """
     import cv2  # type: ignore
     import numpy as np  # type: ignore

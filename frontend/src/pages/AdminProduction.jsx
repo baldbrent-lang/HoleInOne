@@ -746,6 +746,109 @@ function ClickToPlotModal({
     ?? row.edit_metrics?.frame_height ?? row.tee_height ?? null;
   const bgUrl = swing.tracer_raw_motion_url || swing.mog2_overlay_url;
 
+  // WHICH VIEW IS UP: the tee's motion heat, the green camera, or the
+  // tracer's own line. Declared here because everything below keys off
+  // it — the frame that loads, the dots that are shown, what a click
+  // means.
+  const [cam, setCam] = useState("tee");
+
+  // ── THE TRACER ITSELF ─────────────────────────────────────────────
+  // A third view of the same swing: not the dots, but the LINE they
+  // produce. Two things about it are judgement rather than
+  // measurement — where the ball finished in this picture, and how
+  // high the arc goes — and both were previously only adjustable by
+  // producing a clip and looking at it. Here they are two handles.
+  //
+  // The curve drawn is the renderer's own: the server is asked for the
+  // tail rather than the browser modelling one, because two models
+  // would drift and the operator would end up shaping the wrong one.
+  const [shape, setShape] = useState(null);   // {tail, kind, track}
+  const [shapeErr, setShapeErr] = useState(null);
+  const [tracerEnd, setTracerEnd] = useState(() => {
+    const e = swing.tracer_end
+      || swing.tracer_tail?.target
+      || (swing.target ? [swing.target.x, swing.target.y] : null);
+    return e ? { x: Math.round(e[0]), y: Math.round(e[1]) } : null;
+  });
+  const [lift, setLift] = useState(
+    () => Number(swing.tracer_apex_lift || 0));
+  const [shapeBase] = useState(() => JSON.stringify([
+    swing.tracer_end || null, Number(swing.tracer_apex_lift || 0),
+  ]));
+  const shapeChanged = JSON.stringify([
+    tracerEnd ? [tracerEnd.x, tracerEnd.y] : null, lift,
+  ]) !== shapeBase;
+
+  // THE LIFT IS APPLIED HERE, not asked for. The server returns the
+  // unlifted tail and this adds the same half-sine the renderer does,
+  // so dragging the apex is instant and still exactly what will be
+  // drawn — one formula, mirrored, rather than a round trip per pixel.
+  const liftedTail = (shape?.tail || []).map((q, i, arr) => (
+    arr.length < 3 ? q : [
+      q[0],
+      Math.round(q[1] - lift * Math.sin((Math.PI * i) / (arr.length - 1))),
+    ]
+  ));
+  // ONLY THE PREDICTED PART IS DRAWN AS THE SHAPE. The tracked ball is
+  // already on screen as the solid green track, and drawing the line
+  // over it again reads as a double exposure rather than as one tracer.
+  // Dashed cyan starts exactly where the measurement stops, which is
+  // also where the editing starts.
+  const tracerPath = liftedTail;
+  // The high point of the drawn arc — where the apex handle sits.
+  const apexPt = liftedTail.length > 2
+    ? liftedTail.reduce((m, q) => (q[1] < m[1] ? q : m), liftedTail[0])
+    : null;
+  // Where the UNLIFTED arc peaks, and how much of a lift reaches that
+  // point. Dragging is mapped through these so the handle follows the
+  // pointer absolutely: deriving the lift from the last frame's
+  // position instead accumulates whatever the render missed, and the
+  // handle slides away from the cursor.
+  const _bt = shape?.tail || [];
+  const baseApexIdx = _bt.length > 2
+    ? _bt.reduce((mi, q, i) => (q[1] < _bt[mi][1] ? i : mi), 0) : null;
+  const baseApexY = baseApexIdx != null ? _bt[baseApexIdx][1] : null;
+  const apexFactor = baseApexIdx != null
+    ? Math.max(0.25, Math.sin((Math.PI * baseApexIdx) / (_bt.length - 1)))
+    : 1;
+
+  async function fetchShape(end, force = false) {
+    const at = end || tracerEnd;
+    if (!at) { setShape(null); return; }
+    try {
+      setShapeErr(null);
+      const out = await api.tracerShape(adminPassword, row.id, {
+        // The tail is anchored on the tracked ball, so it is sent
+        // rather than re-detected: this is the same track the map is
+        // showing and the same one Save will render from.
+        track_frames: (swing.ball_track_frames || []).filter(
+          (r) => r.found && r.x != null),
+        ball: ballAtRest || swing.ball || null,
+        impact_frame: impactFrame ?? swing.impact_frame ?? null,
+        end: [at.x, at.y],
+        apex_lift: 0,
+        land_frame: swing.tracer_tail?.land_frame ?? null,
+        width: frameW, height: frameH,
+        fps: row.tee_fps || null,
+      });
+      setShape(out);
+      if (!out?.tail?.length && !force) {
+        setShapeErr(out?.reason || "the model could not draw a tail here");
+      }
+    } catch (e) {
+      setShapeErr(e?.message || String(e));
+    }
+  }
+
+  // Asked for on entering the tab, and again whenever the aim moves —
+  // the tail is re-solved for the new end, which is the whole point of
+  // dragging it.
+  useEffect(() => {
+    if (cam !== "tracer") return;
+    fetchShape();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cam, tracerEnd?.x, tracerEnd?.y, row.id]);
+
   // ── THE OTHER CAMERA ──────────────────────────────────────────────
   // The tee picture answers "where did the tracer go". The green one
   // answers "where did it come down", and on this screen that is the
@@ -754,7 +857,6 @@ function ClickToPlotModal({
   // and a click means "it landed HERE" — the one mark the comet is
   // walked backwards from, so marking the landing and seeing the comet
   // are a single action rather than a trip through the wizard.
-  const [cam, setCam] = useState("tee");
   const [green, setGreen] = useState(null); // /frame payload + defaultEnd
   const [greenErr, setGreenErr] = useState(null);
   const [greenDots, setGreenDots] = useState([]);
@@ -1024,6 +1126,7 @@ function ClickToPlotModal({
     if (
       overrides.length === 0 && cleared.length === 0
       && !movedImpact && !movedBall && !greenChanged
+      && !shapeChanged
     ) {
       onClose();
       return;
@@ -1046,6 +1149,8 @@ function ClickToPlotModal({
     // wrong tracer.
     const teeChanged =
       overrides.length > 0 || cleared.length > 0 || movedImpact || movedBall
+      // A shaped arc IS a different tracer, so it has to be re-drawn.
+      || shapeChanged
       || !swing.tracer_url
       || row.edit_metrics?.tracer_url !== swing.tracer_url;
     const stage = (msg) => onBackground?.(msg);
@@ -1062,7 +1167,12 @@ function ClickToPlotModal({
           base_track_frames: swing.ball_track_frames || [],
           impact_frame: impactFrame ?? null,
           ball_at_rest: ballAtRest || null,
-          target: swing.target || null,
+          // THE ARC AS SHAPED. The aim point the operator dragged wins
+          // over the wizard's target — on this screen they are looking
+          // at the picture the line is drawn on, which the target was
+          // only ever a proxy for.
+          target: tracerEnd || swing.target || null,
+          apex_lift: lift || 0,
           render_window: hasWindow
             ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
             : null,
@@ -1079,6 +1189,11 @@ function ClickToPlotModal({
               // The landing, and the descent found from it. Kept on the
               // swing so a later produce and a later re-open both start
               // from what was marked here.
+              // Kept on the swing so a re-produce draws the same arc
+              // rather than reverting to the model's.
+              ...(tracerEnd
+                ? { tracer_end: [tracerEnd.x, tracerEnd.y] } : {}),
+              tracer_apex_lift: lift || 0,
               ...(landing
                 ? {
                     landing_frame: landing.frame,
@@ -1200,7 +1315,8 @@ function ClickToPlotModal({
       ballAtRest.y !== (swing.ball?.y ?? null));
   const nChanged =
     pendAdd.length + pendClear.length + (impactMoved ? 1 : 0)
-    + (ballMoved ? 1 : 0) + (greenChanged ? 1 : 0);
+    + (ballMoved ? 1 : 0) + (greenChanged ? 1 : 0)
+    + (shapeChanged ? 1 : 0);
   // The earliest point actually in the saved track — with a wrong impact
   // frame this is the honest answer to "when does the ball leave", so it
   // is offered as a one-click fix.
@@ -1255,7 +1371,10 @@ function ClickToPlotModal({
             <span className="muted">
               {" "}· #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
               {holeNumber}
-              {cam === "green"
+              {cam === "tracer"
+                ? " · the tracer's line"
+                  + (shape?.kind ? ` · ${shape.kind}` : "")
+                : cam === "green"
                 ? ` · green camera · ${greenDots.length} dots`
                   + (green?.frame != null ? ` · f${green.frame}` : "")
                 : ` · ${dots.length} dots`
@@ -1270,7 +1389,7 @@ function ClickToPlotModal({
               needs one click — the landing — and finds its own path
               back from it. */}
           <div className="row" style={{ gap: 4, alignItems: "center" }}>
-            {["tee", "green"].map((w) => (
+            {["tee", "tracer", "green"].map((w) => (
               <button
                 key={w}
                 type="button"
@@ -1281,12 +1400,14 @@ function ClickToPlotModal({
                 title={
                   w === "tee"
                     ? "The tee camera's motion heat — plot the tracer's ball points"
-                    : row.green_filename
-                      ? "The green camera at the end of the clip — click where the ball lands and the comet is found from there"
-                      : "This upload has no green video"
+                    : w === "tracer"
+                      ? "The line those points produce. Drag where it finishes, and drag its high point to raise or lower the arc."
+                      : row.green_filename
+                        ? "The green camera at the end of the clip — click where the ball lands and the comet is found from there"
+                        : "This upload has no green video"
                 }
               >
-                {w === "tee" ? "tee" : "☄ green"}
+                {w === "tee" ? "tee" : w === "tracer" ? "⌒ tracer" : "☄ green"}
               </button>
             ))}
           </div>
@@ -1309,7 +1430,7 @@ function ClickToPlotModal({
                 picture; on the green camera they are noise, and worse,
                 they are noise that wraps the toolbar onto three lines
                 and takes that height off the map. */}
-            {cam !== "green" && (
+            {cam === "tee" && (
             <>
             <span
               className="small"
@@ -1409,7 +1530,7 @@ function ClickToPlotModal({
             >
               Reset
             </button>
-            {cam !== "green" && (
+            {cam === "tee" && (
               <button
                 type="button"
                 className="ghost small"
@@ -1426,7 +1547,33 @@ function ClickToPlotModal({
                 saying why there is no path. In tee mode it is what the
                 last produce drew, which is otherwise only answerable by
                 watching the clip to the end. */}
-            {cam === "green" ? (
+            {cam === "tracer" ? (
+              <>
+                <span className="tiny muted" style={{ whiteSpace: "nowrap" }}>
+                  {tracerEnd
+                    ? `ends ${tracerEnd.x},${tracerEnd.y}`
+                    : "no aim point"}
+                  {lift ? ` · lift ${lift > 0 ? "+" : ""}${Math.round(lift)}px`
+                        : ""}
+                </span>
+                <button
+                  type="button"
+                  className="ghost small"
+                  style={{ width: "auto" }}
+                  disabled={!shapeChanged}
+                  onClick={() => {
+                    const e = JSON.parse(shapeBase);
+                    setTracerEnd(e[0]
+                      ? { x: Math.round(e[0][0]), y: Math.round(e[0][1]) }
+                      : null);
+                    setLift(Number(e[1] || 0));
+                  }}
+                  title="Put the arc back to the shape that was saved"
+                >
+                  Reset arc
+                </button>
+              </>
+            ) : cam === "green" ? (
               <>
                 <button
                   type="button"
@@ -1497,7 +1644,72 @@ function ClickToPlotModal({
           flex: 1, minHeight: 0, display: "flex",
           alignItems: "stretch", justifyContent: "center",
         }}>
-          {cam === "green" ? (
+          {cam === "tracer" ? (
+            bgUrl ? (
+              <PlotHeatCanvas
+                // THE SAME PICTURE AS THE TEE MAP, because the tracer
+                // is drawn on the tee camera and the motion heat is
+                // where its points came from. What changes is that the
+                // LINE is the subject: the dots step back to a faint
+                // layer and two handles appear on the curve.
+                bgUrl={bgUrl}
+                dots={[]}
+                denseDots={[]}
+                frameW={frameW}
+                frameH={frameH}
+                marks={{}}
+                track={(swing.ball_track_frames || []).filter(
+                  (r) => r.found && r.x != null && r.y != null,
+                )}
+                ballXY={ballAtRest}
+                shape={tracerPath}
+                handles={[
+                  ...(tracerEnd ? [{
+                    id: "end", x: tracerEnd.x, y: tracerEnd.y,
+                    colour: "#f472b6",
+                    title: "Where the ball finishes IN THIS PICTURE. Drag "
+                      + "it and the arc re-solves to reach it — this is the "
+                      + "tee view only, and does not move the landing "
+                      + "marked on the green camera.",
+                  }] : []),
+                  ...(apexPt ? [{
+                    id: "apex", x: apexPt[0], y: apexPt[1], axis: "y",
+                    colour: "#fbbf24",
+                    title: "The high point of the flight. Drag up or down "
+                      + "to make the arc higher or flatter; both ends stay "
+                      + "put and the curve stays a natural parabola.",
+                  }] : []),
+                ]}
+                onHandleDrag={(id, pt) => {
+                  if (id === "end") {
+                    // Live: the aim moves with the pointer and the
+                    // effect re-solves the tail behind it.
+                    setTracerEnd(pt);
+                  } else if (baseApexY != null) {
+                    // Vertical only, and absolute: the lift is whatever
+                    // puts the arc's peak under the pointer, worked out
+                    // from the UNLIFTED curve, so the handle cannot
+                    // drift away from the cursor as it is dragged.
+                    setLift(Math.max(-400, Math.min(400,
+                      (baseApexY - pt.y) / apexFactor)));
+                  }
+                }}
+                onHandleDrop={() => fetchShape()}
+                note={shapeErr
+                  || (tracerEnd
+                    ? `${shape?.kind || "…"} · ${shape?.n || 0} frames of `
+                      + "flight — drag the pink end, or the amber high point"
+                    : "no aim point yet: mark the landing on the green "
+                      + "camera, or set a target in the wizard")}
+                noteColour={shapeErr ? "#f59e0b" : "#67e8f9"}
+              />
+            ) : (
+              <div className="muted small" style={{ textAlign: "center", padding: 24 }}>
+                No motion heat saved for this swing — produce it once and
+                the tracer can be shaped here.
+              </div>
+            )
+          ) : cam === "green" ? (
             green?.image_url ? (
               <PlotHeatCanvas
                 bgUrl={green.image_url}
@@ -1599,6 +1811,21 @@ function ClickToPlotModal({
           How this map works (legend &amp; shortcuts)
         </summary>
         <div className="tiny muted" style={{ marginTop: 4 }}>
+          {cam === "tracer" && (
+            <p style={{ margin: "0 0 6px" }}>
+              <b>The tracer&apos;s line.</b> Solid green is the tracked
+              ball — measured, and not editable here. The dashed cyan is
+              the model&apos;s continuation, and it has two handles: the
+              pink one is where the ball finishes IN THIS PICTURE (drag
+              it and the arc re-solves to reach it; it is the tee view
+              only and does not move the landing marked on the green
+              camera), and the amber one is the flight&apos;s high point
+              (drag up or down and both ends stay put while the curve
+              stays a natural arc). What you see is what the renderer
+              draws — the curve comes back from the same function that
+              draws the clip. Save &amp; close re-renders with it.
+            </p>
+          )}
           {cam === "green" && (
             <p style={{ margin: "0 0 6px" }}>
               <b>Green camera.</b> The picture is the frame the produced
@@ -1632,7 +1859,7 @@ function ClickToPlotModal({
         </div>
         </details>
 
-        {cam !== "green" && Object.keys(marks).length > 0 && (
+        {cam === "tee" && Object.keys(marks).length > 0 && (
           <div
             className="tiny"
             style={{
@@ -6044,7 +6271,7 @@ const DENSE_DOT_ZOOM = 2.5;
 function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
   scanRegion, track, ballXY, placingBall, onPlaceBall, comet,
-  note, noteColour,
+  note, noteColour, shape, handles, onHandleDrag, onHandleDrop,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -6156,6 +6383,24 @@ function PlotHeatCanvas({
       setScanning(false);
     }
   }
+  // HANDLE DRAGGING. Measured against the scaled element itself, whose
+  // bounding rect already accounts for the zoom and the transform
+  // origin — deriving frame coordinates from the outer box instead is
+  // right at 1x and wrong everywhere else.
+  const stageRef = useRef(null);
+  const [dragId, setDragId] = useState(null);
+  function stageXY(e) {
+    const el = stageRef.current;
+    if (!el || !hasDims) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(frameW - 1,
+        Math.round(((e.clientX - r.left) / r.width) * frameW))),
+      y: Math.max(0, Math.min(frameH - 1,
+        Math.round(((e.clientY - r.top) / r.height) * frameH))),
+    };
+  }
+
   const zoomBtn = {
     background: "rgba(255,255,255,0.12)", color: "#fff",
     border: "1px solid rgba(255,255,255,0.3)", borderRadius: 4,
@@ -6221,11 +6466,12 @@ function PlotHeatCanvas({
               }
             : undefined
         }
+        ref={stageRef}
         style={{
           position: "absolute", inset: 0,
           transform: `scale(${zoom})`,
           transformOrigin: `${focus.x}% ${focus.y}%`,
-          transition: "transform 120ms ease",
+          transition: dragId ? "none" : "transform 120ms ease",
           cursor: placingBall ? "crosshair" : undefined,
         }}
       >
@@ -6350,6 +6596,78 @@ function PlotHeatCanvas({
             </text>
           </svg>
         )}
+
+        {/* THE TRACER'S OWN LINE, as the renderer would draw it: the
+            tracked ball solid, the modelled continuation dashed, so
+            what is measured and what is predicted are never confused
+            for one another. */}
+        {hasDims && (shape?.length || 0) > 1 && (
+          <svg
+            viewBox={`0 0 ${frameW} ${frameH}`}
+            preserveAspectRatio="none"
+            style={{
+              position: "absolute", inset: 0, width: "100%", height: "100%",
+              pointerEvents: "none",
+            }}
+          >
+            <polyline
+              points={shape.map((q) => `${q[0]},${q[1]}`).join(" ")}
+              fill="none"
+              stroke="#0b1220"
+              strokeOpacity={0.55}
+              strokeWidth={Math.max(5, frameW / 260)}
+              strokeLinecap="round"
+            />
+            <polyline
+              points={shape.map((q) => `${q[0]},${q[1]}`).join(" ")}
+              fill="none"
+              stroke="#67e8f9"
+              strokeWidth={Math.max(2.5, frameW / 500)}
+              strokeDasharray={`${Math.max(8, frameW / 90)} ${
+                Math.max(6, frameW / 130)}`}
+              strokeLinecap="round"
+            />
+          </svg>
+        )}
+        {hasDims && (handles || []).map((h) => (
+          <div
+            key={h.id}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setDragId(h.id);
+            }}
+            onPointerMove={(e) => {
+              if (dragId !== h.id) return;
+              const pt = stageXY(e);
+              if (pt) onHandleDrag?.(h.id, pt);
+            }}
+            onPointerUp={(e) => {
+              if (dragId !== h.id) return;
+              setDragId(null);
+              const pt = stageXY(e);
+              onHandleDrop?.(h.id, pt);
+            }}
+            title={h.title}
+            style={{
+              position: "absolute",
+              left: `${(h.x / frameW) * 100}%`,
+              top: `${(h.y / frameH) * 100}%`,
+              width: Math.max(26, 26 / zoom),
+              height: Math.max(26, 26 / zoom),
+              transform: "translate(-50%, -50%)",
+              borderRadius: "50%",
+              border: `2px solid ${h.colour || "#67e8f9"}`,
+              background: dragId === h.id
+                ? "rgba(103,232,249,0.55)"
+                : "rgba(103,232,249,0.18)",
+              boxShadow: "0 0 0 2px rgba(0,0,0,0.55)",
+              cursor: h.axis === "y" ? "ns-resize" : "move",
+              touchAction: "none",
+              zIndex: 8,
+            }}
+          />
+        ))}
 
         {/* BALL AT IMPACT — where the tracer line STARTS. Not a track
             point: the renderer anchors the fitted curve here, so it is

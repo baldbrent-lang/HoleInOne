@@ -551,6 +551,17 @@ export const api = {
       body: payload,
       adminPassword: key,
     }),
+  tracerShape: (key, uploadId, payload = {}) =>
+    // The polyline the tracer WOULD be drawn along for a given aim
+    // point and apex lift — the renderer's own function, so what the
+    // editor shows is what gets rendered. Arithmetic over a track
+    // already in hand: no video is opened.
+    request(`/api/admin/long-uploads/${uploadId}/tracer-shape`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+      timeoutMs: 30_000,
+    }),
   greenFlight: (key, uploadId, payload = {}) =>
     // The ball's chain of frames coming down on the green camera — the
     // same search produce runs before drawing its comet. Decodes about

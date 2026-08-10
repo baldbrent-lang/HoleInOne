@@ -7342,6 +7342,18 @@ def render_tracer_fast(
     except Exception:
         target_xy = None
 
+    # HOW HIGH THE OPERATOR PULLED THE ARC. The tail is a model and the
+    # eye sometimes sees it flat; this lifts its middle without moving
+    # either end. Zero means the model as computed, which is what every
+    # caller that does not send it gets.
+    try:
+        apex_lift = float(payload.get("apex_lift")
+                          if payload.get("apex_lift") is not None
+                          else saved.get("tracer_apex_lift") or 0.0)
+    except (TypeError, ValueError):
+        apex_lift = 0.0
+    apex_lift = max(-400.0, min(400.0, apex_lift))
+
     # Output window: render ONLY the selected swing's frame span (from the
     # frontend), so a multi-swing / long source produces a short clip of
     # just that swing instead of re-rendering the whole video.
@@ -7362,6 +7374,7 @@ def render_tracer_fast(
         ball_rest_xy_native=ball_xy,
         impact_frame_idx=impact_idx,
         target_xy=target_xy,
+        apex_lift=apex_lift,
         write_start=write_start,
         write_end=write_end,
         # Forward the manual flag — the renderer pins manual anchors
@@ -7772,6 +7785,90 @@ def save_hole_pin(
     return {"ok": True, "hole": hole, "pin_green": _vm.get("pin_green"),
             "pin_set_at": _vm.get("pin_set_at"), "tee_xy": xy,
             "reason": reason}
+
+
+@router.post("/long-uploads/{upload_id}/tracer-shape")
+def tracer_shape(
+    upload_id: int,
+    payload: dict = Body(default={}),
+    db: Session = Depends(get_db),
+):
+    """The polyline the tracer WOULD be drawn along, for an aim point
+    and an apex lift.
+
+    Body: {"track_frames", "ball", "impact_frame", "end": [x, y],
+           "apex_lift", "land_frame"}.
+
+    THE EDITOR HAS TO SHOW THE RENDERER'S CURVE, NOT ITS OWN. Dragging
+    an arc into shape is only worth doing if the shape that comes back
+    is the shape that gets drawn, and re-implementing the ballistic
+    tail in the browser would have guaranteed the opposite -- two
+    models, drifting apart, with the operator trusting the wrong one.
+    So the same function the renderer calls is called here, and the
+    browser only draws the answer.
+
+    Cheap: no video is opened and nothing is rendered. It is arithmetic
+    over the track that is already in hand.
+    """
+    from ..services.ai_tracer import _extend_to_target
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    _end = payload.get("end")
+    if not _end:
+        return {"tail": [], "kind": None, "reason": "no aim point"}
+    try:
+        end_xy = (float(_end[0]), float(_end[1]))
+        lift = max(-400.0, min(400.0, float(payload.get("apex_lift") or 0.0)))
+    except (TypeError, ValueError, IndexError):
+        raise HTTPException(400, "end must be [x, y] and apex_lift a number")
+
+    # The tracked ball, in the renderer's own (frame, x, y) shape. The
+    # rest position is where the line starts, so it leads.
+    pts = []
+    _ball = payload.get("ball")
+    _impact = payload.get("impact_frame")
+    try:
+        if _ball and _impact is not None:
+            pts.append((int(_impact), float(_ball[0] if not isinstance(
+                _ball, dict) else _ball["x"]),
+                float(_ball[1] if not isinstance(_ball, dict)
+                      else _ball["y"])))
+    except (KeyError, IndexError, TypeError, ValueError):
+        pass
+    for r in (payload.get("track_frames") or []):
+        try:
+            if r.get("found") and r.get("x") is not None:
+                pts.append((int(r["frame"]), float(r["x"]), float(r["y"])))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    pts.sort(key=lambda q: q[0])
+    if len(pts) < 2:
+        return {"tail": [], "kind": None,
+                "reason": "the tracer has fewer than two points to leave from"}
+
+    _w = int(payload.get("width") or row.tee_width or 1920)
+    _h = int(payload.get("height") or row.tee_height or 1080)
+    _fps = float(payload.get("fps") or row.tee_fps or 30.0)
+    _lf = payload.get("land_frame")
+    try:
+        _lf = int(_lf) if _lf is not None else None
+    except (TypeError, ValueError):
+        _lf = None
+    tail, kind = _extend_to_target(pts, end_xy, _fps, _w, _h,
+                                   land_frame=_lf, apex_lift=lift)
+    # Subsampled the same way the renderer records it: the editor is
+    # drawing a line, not animating one.
+    step = max(1, len(tail) // 60)
+    return {
+        "kind": kind,
+        "tail": [[int(x), int(y)] for _f, x, y in tail[::step]]
+               + ([[int(tail[-1][1]), int(tail[-1][2])]] if tail else []),
+        "n": len(tail),
+        "track": [[int(x), int(y)] for _f, x, y in pts],
+        "apex_lift": lift,
+    }
 
 
 @router.post("/long-uploads/{upload_id}/green-flight")
@@ -14326,6 +14423,34 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                     i, _target_frame, float(landing["sec"]), float(delta),
                 )
 
+            # THE ARC THE OPERATOR SHAPED, AND WHERE THEY AIMED IT.
+            # Both are per-swing overrides from the tracer editor. The
+            # aim point wins over the mapped landing because it IS the
+            # mapped landing once it has been dragged -- the operator
+            # looking at the tee frame is a better judge of where the
+            # ball finished in THIS picture than a homography is.
+            _apex_lift = 0.0
+            try:
+                _em_s = None
+                for _s in ((row.edit_metrics or {}).get("swings") or []):
+                    if isinstance(_s, dict) and int(_s.get("idx", -1)) == i:
+                        _em_s = _s
+                        break
+                if _em_s:
+                    _apex_lift = float(_em_s.get("tracer_apex_lift") or 0.0)
+                    _end = _em_s.get("tracer_end")
+                    if _end:
+                        _target_xy = (float(_end[0]), float(_end[1]))
+                        log.info(
+                            "d3 produce: swing %s aimed at the operator's "
+                            "own end (%.0f, %.0f), lift %.0fpx",
+                            i, _target_xy[0], _target_xy[1], _apex_lift,
+                        )
+            except (TypeError, ValueError) as exc:
+                log.debug("d3 produce: swing %s tracer shape unusable: %s",
+                          i, exc)
+                _apex_lift = 0.0
+
             _green_track = None
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
             _rv = render_tracer_video(
@@ -14337,6 +14462,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 rest_verified=True,
                 target_xy=_target_xy,
                 target_frame=_target_frame,
+                apex_lift=_apex_lift,
             )
             if not _rv.get("ok") or not _tee.exists():
                 raise RuntimeError(
