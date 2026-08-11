@@ -241,7 +241,21 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
     # is what makes the width and the brightness change SMOOTHLY down
     # the tail instead of in visible bands.
     _SUB = 8
-    _COLOUR = np.array([225.0, 245.0, 255.0])   # BGR: a touch warm-white
+    # THE SAME BLUE AS THE TEE TRACER, taken from the tracer itself
+    # rather than copied: one clip, one shot, one colour. The two
+    # halves used to disagree -- a broadcast-blue line on the tee and a
+    # warm-white streak on the green -- which reads as two graphics
+    # rather than one flight followed to the ground.
+    #
+    # Two of the tracer's three tones are used the way it uses them: the
+    # core blue through the tail, brightening to the pale-azure inner
+    # highlight where the stroke is densest, which is the head. So the
+    # comet has the tracer's own core-and-glow build rather than a flat
+    # fill of its colour.
+    from .ai_tracer import TRACER_CORE_BGR, TRACER_INNER_BGR
+
+    _CORE = np.array(TRACER_CORE_BGR, dtype=np.float32)
+    _HOT = np.array(TRACER_INNER_BGR, dtype=np.float32)
     idx = 0
     try:
         while True:
@@ -300,8 +314,11 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
                     roi = frame[y0:y1b, x0:x1b]
                     a = (mask[y0:y1b, x0:x1b].astype(np.float32)
                          / 255.0)[:, :, None]
+                    # Core blue where the stroke is thin, the hot pale
+                    # centre where it is dense: the tracer's own build.
+                    col = _CORE + (_HOT - _CORE) * (a ** 2)
                     roi[:] = np.clip(
-                        roi.astype(np.float32) * (1.0 - a) + _COLOUR * a,
+                        roi.astype(np.float32) * (1.0 - a) + col * a,
                         0, 255,
                     ).astype(np.uint8)
             vw.write(frame)
