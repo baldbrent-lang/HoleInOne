@@ -5168,6 +5168,226 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
 }
 
 /**
+ * The two swing detectors, side by side.
+ *
+ * The pipeline counts swings with POSE — a wrist-speed burst with the right
+ * spine bend. That detects a MOTION, so it cannot tell a swing from a
+ * practice swing, and it fires on a waggle.
+ *
+ * The other answer is the ball: it was on the tee, and then it was not.
+ * Nothing but a struck ball does that. This panel shows what each one found
+ * on this clip, where they agree, and what it cost — so the comparison can
+ * be made on real footage before either one replaces the other.
+ *
+ * Nothing here changes what gets produced.
+ */
+function SwingDetectPanel({ sd }) {
+  const [open, setOpen] = useState(false);
+  const [shot, setShot] = useState(null);
+  if (sd.error) {
+    return (
+      <div className="tiny" style={{ marginTop: 6, color: "var(--danger,#c0392b)" }}>
+        <b>Ball-departure detector:</b> failed — {sd.error}
+      </div>
+    );
+  }
+  const rows = sd.rows || [];
+  const c = sd.counts || {};
+  const secs = (sd.scan_sec || 0) + (sd.verify_sec || 0);
+  const pill = (v) =>
+    v === "both" ? "ok" : v === "ball only" ? "warn" : "warn";
+
+  return (
+    <div
+      className="tiny"
+      style={{
+        marginTop: 8, padding: "6px 8px", borderRadius: 6,
+        background: "var(--surface-2)", border: "1px solid var(--line)",
+      }}
+    >
+      <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
+        <b>Swing detection: pose vs the ball leaving</b>
+        <button className="btn tiny ghost" onClick={() => setOpen((v) => !v)}>
+          {open ? "hide detail" : "show detail"}
+        </button>
+      </div>
+      <div style={{ marginTop: 3 }}>
+        <span className="pill">{sd.n_pose} pose</span>{" "}
+        <span className="pill">{sd.n_ball} ball departure
+          {sd.n_ball === 1 ? "" : "s"}</span>{" "}
+        <span className={`pill ${sd.n_matched ? "ok" : "warn"}`}>
+          {sd.n_matched} agree
+        </span>{" "}
+        {sd.n_pose_only > 0 && (
+          <span className="pill warn">{sd.n_pose_only} pose only</span>
+        )}{" "}
+        {sd.n_ball_only > 0 && (
+          <span className="pill warn">{sd.n_ball_only} ball only</span>
+        )}
+        <span className="muted" style={{ marginLeft: 8 }}>
+          {secs.toFixed(2)}s ({sd.scan_sec}s to scan the clip,{" "}
+          {sd.verify_sec}s to pin the impact frames)
+        </span>
+      </div>
+      <div className="muted" style={{ marginTop: 3 }}>
+        {sd.reason}
+      </div>
+      <div className="muted" style={{ marginTop: 2 }}>
+        <b>Looking in:</b>{" "}
+        {sd.roi_source || "the whole frame"}
+        {sd.roi && (
+          <> — x {Math.round(sd.roi.x * 100)}% y {Math.round(sd.roi.y * 100)}%,{" "}
+            {Math.round(sd.roi.w * 100)}%×{Math.round(sd.roi.h * 100)}%</>
+        )}
+      </div>
+      {sd.roi_note && (
+        <div style={{ marginTop: 2, color: "var(--danger,#c0392b)" }}>
+          {sd.roi_note}
+        </div>
+      )}
+
+      {rows.length === 0 && (
+        <div className="muted" style={{ marginTop: 4 }}>
+          Neither detector found anything in this clip.
+        </div>
+      )}
+      {rows.length > 0 && (
+        <table style={{ width: "100%", marginTop: 6, borderCollapse: "collapse" }}>
+          <thead>
+            <tr className="muted" style={{ textAlign: "left" }}>
+              <th style={{ padding: "2px 4px" }}>at</th>
+              <th style={{ padding: "2px 4px" }}>found by</th>
+              <th style={{ padding: "2px 4px" }}>pose peak</th>
+              <th style={{ padding: "2px 4px" }}>ball left</th>
+              <th style={{ padding: "2px 4px" }}>impact frame</th>
+              <th style={{ padding: "2px 4px" }}>ball at</th>
+              <th style={{ padding: "2px 4px" }}>rest</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, k) => (
+              <tr key={k} style={{ borderTop: "1px solid var(--line)" }}>
+                <td style={{ padding: "2px 4px" }}>{r.t}s</td>
+                <td style={{ padding: "2px 4px" }}>
+                  <span className={`pill ${pill(r.verdict)}`}>{r.verdict}</span>
+                  {r.dt != null && (
+                    <span className="muted"> {r.dt}s apart</span>
+                  )}
+                </td>
+                <td style={{ padding: "2px 4px" }}>
+                  {r.pose ? (
+                    <>
+                      {r.pose.t}s
+                      {r.pose.gate_ok === false && (
+                        <span className="muted"> ({r.pose.gate})</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+                <td style={{ padding: "2px 4px" }}>
+                  {r.ball ? `${r.ball.t}s` : <span className="muted">—</span>}
+                </td>
+                <td style={{ padding: "2px 4px" }}>
+                  {!r.ball ? (
+                    <span className="muted">—</span>
+                  ) : r.ball.impact_frame != null ? (
+                    <>
+                      f{r.ball.impact_frame}
+                      {r.ball.image && (
+                        <button
+                          className="btn tiny ghost"
+                          style={{ marginLeft: 4 }}
+                          onClick={() => setShot(r.ball)}
+                        >
+                          strip
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <span
+                      className="pill warn"
+                      title={r.ball.verify_reason || ""}
+                    >
+                      not pinned
+                    </span>
+                  )}
+                </td>
+                <td style={{ padding: "2px 4px" }}>
+                  {r.ball ? `${r.ball.x},${r.ball.y}` : <span className="muted">—</span>}
+                </td>
+                <td style={{ padding: "2px 4px" }}>
+                  {r.ball?.rest_sec != null
+                    ? `${r.ball.rest_sec}s`
+                    : <span className="muted">—</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {open && (
+        <div className="muted" style={{ marginTop: 6 }}>
+          {/* Why it found nothing is a different question from how many it
+              found, and these four numbers are the only things that answer
+              it: no ball-like blob at all, plenty but none in the box,
+              plenty in the box but none that held still, or all of the
+              above and none of them ever left. */}
+          <div>
+            <b>Scan:</b> {c.n_cand_total ?? 0} ball-like blob
+            {c.n_cand_total === 1 ? "" : "s"} in the frame ·{" "}
+            {c.n_cand_in_roi ?? 0} inside the box · {c.n_tracks ?? 0} track
+            {c.n_tracks === 1 ? "" : "s"} · {c.n_rested ?? 0} held still for{" "}
+            {c.min_rest_sec ?? "?"}s · {c.n_raw_departures ?? 0} departure
+            {c.n_raw_departures === 1 ? "" : "s"} before merging ·{" "}
+            sampled at {Math.round(c.eff_hz || 0)}Hz over{" "}
+            {Math.round(c.duration_sec || 0)}s
+          </div>
+          {rows.filter((r) => r.ball).map((r, k) => (
+            <div key={k} style={{ marginTop: 3 }}>
+              <b>{r.ball.t}s:</b> {r.ball.verify_reason || "not checked"}
+              {r.ball.present_ratio_pre != null && (
+                <> · ball on the spot in{" "}
+                  {Math.round(r.ball.present_ratio_pre * 100)}% of the frames
+                  before impact</>
+              )}
+              {r.ball.snap_px != null && (
+                <> · snapped {r.ball.snap_px}px</>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {shot?.image && (
+        <div
+          onClick={() => setShot(null)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 1200, cursor: "zoom-out",
+            background: "rgba(0,0,0,0.82)", display: "flex",
+            alignItems: "center", justifyContent: "center", padding: 20,
+          }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: "96vw" }}>
+            <div className="tiny" style={{ color: "#fff", marginBottom: 6 }}>
+              Departure at {shot.t}s — each tile is the tee spot on one frame,
+              green while the ball is there, red once it is gone.
+            </div>
+            <img
+              src={shot.image}
+              alt="ball departure film-strip"
+              style={{ maxWidth: "96vw", maxHeight: "82vh", display: "block" }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * Debug3 report — the blob-and-track method. Where Debug2 reads the shape
  * the swing draws in a motion composite, this one never looks at a
  * composite: per-frame MOG2, drop the golfer, keep ball-sized blobs, link
@@ -5461,7 +5681,7 @@ function Debug3Modal({ state, onClose }) {
                 </div>
               )}
             </div>
-            {rep.rest_ball && (
+            {rep.rest_ball && !rep.swing_detect && (
               <div className="tiny muted" style={{ marginTop: 4 }}>
                 <b>Resting ball:</b> {rep.rest_ball.reason}
                 {(rep.rest_ball.departures || []).map((d, k) => (
@@ -5471,6 +5691,7 @@ function Debug3Modal({ state, onClose }) {
                 ))}
               </div>
             )}
+            {rep.swing_detect && <SwingDetectPanel sd={rep.swing_detect} />}
           </div>
         )}
 

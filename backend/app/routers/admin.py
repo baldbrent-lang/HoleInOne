@@ -13441,14 +13441,112 @@ def _debug2_run(row, src_path, db, progress=None):
 # leaves. When it fires it is the better answer, so Debug2 and Debug3 both
 # prefer it and keep the club arc as the fallback.
 
-def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
-    """Every resting-ball departure in this video, with the ROI used."""
-    out = {"deps": [], "roi": None, "reason": None}
+def _tee_box_roi_fractions(src_path, db, row) -> dict:
+    """Which box the ball scan is allowed to look in, and where it came from.
+
+    Two records can answer, and they are stored in DIFFERENT UNITS, which is
+    exactly the kind of thing that silently searches the wrong quarter of the
+    frame:
+
+      * Camera.tee_box_roi — NATIVE PIXELS of that camera's frames. Drawn for
+        the tee-side person detector, but it is the same box.
+      * Course.ball_roi — FRACTIONS of the frame, 0–1. Drawn on the old Debug
+        modal, once per course.
+
+    detect_swings_from_ball wants fractions, so the camera's box is converted
+    against this video's own frame size — and only after checking it actually
+    fits inside it, because a box drawn at one capture resolution is nonsense
+    at another. The camera wins when it has one: it is per-camera, and two
+    cameras on one course do not share a tee box.
+
+    Returns {roi, source, note} — `roi` None means search the whole frame.
+    """
+    out = {"roi": None, "source": None, "note": None}
+    course = None
     try:
         course = db.get(Course, row.course_id) if row.course_id else None
-        out["roi"] = course.ball_roi if course else None
     except Exception:  # noqa: BLE001
-        pass
+        course = None
+    course_roi = getattr(course, "ball_roi", None) if course else None
+
+    cam = cam_roi = None
+    try:
+        ev = (
+            db.get(CameraEvent, row.camera_event_id)
+            if getattr(row, "camera_event_id", None) else None
+        )
+        if ev is not None and ev.tee_camera_id:
+            cam = db.get(Camera, ev.tee_camera_id)
+            cam_roi = getattr(cam, "tee_box_roi", None) if cam else None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("tee-box ROI: camera lookup failed: %s", exc)
+
+    if cam_roi:
+        fw = fh = 0
+        try:
+            import cv2  # type: ignore
+
+            _c = cv2.VideoCapture(str(src_path))
+            fw = int(_c.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            fh = int(_c.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            _c.release()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("tee-box ROI: could not size the video: %s", exc)
+        _cname = getattr(cam, "name", None) or f"camera {getattr(cam, 'id', '?')}"
+        try:
+            x, y = float(cam_roi["x"]), float(cam_roi["y"])
+            w, h = float(cam_roi["w"]), float(cam_roi["h"])
+        except (KeyError, TypeError, ValueError):
+            x = y = w = h = -1.0
+        if x < 0:
+            out["note"] = f"{_cname} has a tee box that is not {{x,y,w,h}}"
+        elif not fw or not fh:
+            out["note"] = (
+                f"{_cname} has a tee box in pixels, but this video's size "
+                f"could not be read, so it could not be converted"
+            )
+        elif x + w > fw + 1 or y + h > fh + 1:
+            out["note"] = (
+                f"{_cname}'s tee box is {int(x)},{int(y)} {int(w)}×{int(h)}px, "
+                f"which does not fit this {fw}×{fh} video — it was drawn at "
+                f"another resolution, so it is being ignored"
+            )
+        else:
+            out["roi"] = {"x": x / fw, "y": y / fh, "w": w / fw, "h": h / fh}
+            out["source"] = f"the tee camera's tee box ({_cname})"
+            return out
+
+    if course_roi:
+        out["roi"] = course_roi
+        out["source"] = (
+            f"the course's tee-box ROI ({getattr(course, 'name', '')})".strip()
+        )
+    else:
+        out["note"] = (out["note"] + " · " if out["note"] else "") + (
+            "no tee-box ROI is set for this course — the scan is looking at "
+            "the WHOLE frame, so shoes, cups and sky glints all compete with "
+            "the ball"
+        )
+    return out
+
+
+def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
+    """Every resting-ball departure in this video, with the ROI used.
+
+    Returns {deps, roi, roi_source, roi_note, reason, counts} — `counts`
+    being the detector's own diagnostics, which are the difference between
+    "found nothing" and knowing WHY it found nothing: no white blob passed
+    the size/roundness filter at all, or plenty did but none inside the box,
+    or plenty inside the box but nothing held still long enough.
+    """
+    out = {
+        "deps": [], "roi": None, "roi_source": None, "roi_note": None,
+        "reason": None, "counts": {},
+    }
+    _r = _tee_box_roi_fractions(src_path, db, row)
+    out["roi"], out["roi_source"], out["roi_note"] = (
+        _r["roi"], _r["source"], _r["note"],
+    )
     dbg: dict = {}
     try:
         detect_swings_from_ball(src_path, fps=fps, roi=out["roi"], debug=dbg)
@@ -13456,9 +13554,40 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
         out["reason"] = f"departure detector crashed: {exc}"
         return out
     out["deps"] = list(dbg.get("departures") or [])
+    out["counts"] = {
+        k: dbg.get(k) for k in (
+            "n_cand_total", "n_cand_in_roi", "n_tracks", "n_rested",
+            "n_raw_departures", "eff_hz", "duration_sec", "min_rest_sec",
+        )
+    }
+    _c = out["counts"]
+    _why = None
+    if not out["deps"]:
+        if not _c.get("n_cand_total"):
+            _why = (
+                "no white, round, ball-sized blob anywhere in the frame — "
+                "the ball is not passing the brightness/size filter"
+            )
+        elif out["roi"] and not _c.get("n_cand_in_roi"):
+            _why = (
+                f"{_c['n_cand_total']} ball-like blob(s) found, but none "
+                f"inside the tee box — the box is in the wrong place"
+            )
+        elif not _c.get("n_rested"):
+            _why = (
+                f"{_c.get('n_tracks')} blob track(s), but none held still "
+                f"for {_c.get('min_rest_sec')}s — nothing was ever at rest"
+            )
+        elif _c.get("n_raw_departures"):
+            _why = (
+                f"{_c['n_raw_departures']} departure(s) found but merged "
+                f"away as too close together"
+            )
+        else:
+            _why = "balls rested, but none of them ever left"
     out["reason"] = dbg.get("reason") or (
         f"{len(out['deps'])} resting-ball departure(s)"
-        + (" (no tee-box ROI set for this course)" if not out["roi"] else "")
+        + (f" — {_why}" if _why else "")
     )
     return out
 
@@ -13476,6 +13605,141 @@ def _departure_for(deps: list, peak_t: float, tol_sec: float = 1.5):
         if dt <= tol_sec and (best is None or dt < best[0]):
             best = (dt, d)
     return (best[1], best[0]) if best else (None, None)
+
+
+def _clip_url_for(name: str | None) -> str | None:
+    """A browser URL for a file already written into CLIPS_DIR, or None."""
+    if not name:
+        return None
+    p = CLIPS_DIR / name
+    if not p.exists():
+        return None
+    return (
+        f"{settings.app_base_url}/uploads/clips/{p.name}"
+        f"?v={int(p.stat().st_mtime)}"
+    )
+
+
+def _swing_detect_compare(src_path, fps: float, rest: dict, cands: list,
+                          upload_id: int, tok: str, art_dir) -> dict:
+    """Both swing detectors, side by side, on the same clip.
+
+    The pipeline counts swings with POSE — a wrist-speed burst with the
+    right spine bend. That detects a MOTION, so it cannot tell a swing from
+    a practice swing, and it fires on a waggle and misses a swing the golfer
+    stands off-camera-side of.
+
+    The other answer is the ball itself: it sat on the tee, and then it did
+    not. Nothing but a struck ball does that, so a departure is a shot in a
+    way a motion burst never is — and it hands over the ball's position and
+    the impact frame for free, which pose has to go and measure separately.
+
+    Each coarse departure (the scan samples at 15Hz) is then refined to an
+    exact frame by watching the rest patch at full rate, which is the number
+    the tracer actually needs.
+
+    Nothing here changes what gets produced. It is laid out so the two can
+    be compared on real clips before either replaces the other.
+    """
+    from ..services.ai_tracer import verify_rest_and_impact
+
+    out = {
+        "roi": rest.get("roi"), "roi_source": rest.get("roi_source"),
+        "roi_note": rest.get("roi_note"), "reason": rest.get("reason"),
+        "counts": rest.get("counts") or {}, "rows": [],
+        "n_pose": len(cands), "n_ball": 0,
+        "n_matched": 0, "n_pose_only": 0, "n_ball_only": 0,
+        "verify_sec": 0.0,
+    }
+
+    # REFINE. The scan's `t` is a sample time, so it is only good to ~1/15s
+    # and it is the last frame the ball was SEEN, not the frame it left.
+    _t0 = time.perf_counter()
+    balls = []
+    for k, d in enumerate(rest.get("deps") or []):
+        try:
+            t = float(d.get("t") or 0.0)
+            x, y = float(d.get("x") or 0.0), float(d.get("y") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        b = {
+            "idx": k, "t": round(t, 2), "x": round(x), "y": round(y),
+            "rest_sec": d.get("rest_sec"), "frame": int(t * fps + 0.5),
+            "verified": None, "impact_frame": None, "impact_sec": None,
+            "verify_reason": None, "snap_px": None, "image": None,
+        }
+        try:
+            v = verify_rest_and_impact(
+                src_path, (x, y), b["frame"], fps,
+                debug_dir=art_dir,
+                debug_prefix=f"d3-{upload_id}-{tok}-balldep-{k}",
+            ) or {}
+        except Exception as exc:  # noqa: BLE001
+            v = {"reason": f"verify crashed: {exc}"}
+        b["verified"] = v.get("verified")
+        b["verify_reason"] = v.get("reason")
+        b["snap_px"] = v.get("snap_px")
+        b["present_ratio_pre"] = v.get("present_ratio_pre")
+        if v.get("rest_xy"):
+            b["x"], b["y"] = int(v["rest_xy"][0]), int(v["rest_xy"][1])
+        if v.get("impact_frame") is not None:
+            b["impact_frame"] = int(v["impact_frame"])
+            b["impact_sec"] = round(b["impact_frame"] / max(1e-6, fps), 2)
+        if v.get("image") and art_dir and (art_dir / v["image"]).exists():
+            b["image"] = _clip_url_for(v["image"])
+        balls.append(b)
+    out["verify_sec"] = round(time.perf_counter() - _t0, 2)
+    out["n_ball"] = len(balls)
+
+    # MATCH, nearest first, one-to-one. Generous tolerance on purpose: the
+    # pose peak is maximum wrist speed and the departure is when the ball is
+    # gone, and those are genuinely a few tenths apart.
+    TOL = 1.5
+    poses = [
+        {"idx": i, "t": round(float(c.get("peak_time_sec") or 0.0), 2),
+         "gate": c.get("gate_status") or "swing",
+         "gate_ok": bool(c.get("gate_ok", True))}
+        for i, c in enumerate(cands)
+    ]
+    pairs = sorted(
+        (
+            (abs(p["t"] - (b["impact_sec"] if b["impact_sec"] is not None
+                           else b["t"])), p["idx"], b["idx"])
+            for p in poses for b in balls
+        ),
+        key=lambda z: z[0],
+    )
+    took_p, took_b, match = set(), set(), {}
+    for dt, pi, bi in pairs:
+        if dt > TOL or pi in took_p or bi in took_b:
+            continue
+        took_p.add(pi)
+        took_b.add(bi)
+        match[pi] = (bi, round(dt, 2))
+
+    rows = []
+    for p in poses:
+        bi, dt = match.get(p["idx"], (None, None))
+        b = balls[bi] if bi is not None else None
+        rows.append({
+            "t": (b["impact_sec"] if b and b["impact_sec"] is not None
+                  else (b["t"] if b else p["t"])),
+            "verdict": "both" if b else "pose only",
+            "pose": p, "ball": b, "dt": dt,
+        })
+    for b in balls:
+        if b["idx"] not in took_b:
+            rows.append({
+                "t": (b["impact_sec"] if b["impact_sec"] is not None
+                      else b["t"]),
+                "verdict": "ball only", "pose": None, "ball": b, "dt": None,
+            })
+    rows.sort(key=lambda r: r["t"])
+    out["rows"] = rows
+    out["n_matched"] = len(match)
+    out["n_pose_only"] = len(poses) - len(match)
+    out["n_ball_only"] = len(balls) - len(match)
+    return out
 
 
 def _resolve_ball(entry: dict, rest: dict, peak_t: float, club: dict) -> None:
@@ -15134,11 +15398,30 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         _rest_ball_departures(src_path, fps, db, row)
         if debug_artifacts else {}
     )
-    _add("rest_ball", time.perf_counter() - _t0)
+    _scan_sec = time.perf_counter() - _t0
+    _add("rest_ball", _scan_sec)
     rep["rest_ball"] = {
         "reason": rest.get("reason"), "roi": rest.get("roi"),
         "departures": rest.get("deps"),
     }
+
+    # THE TWO DETECTORS, SIDE BY SIDE. Diagnostic only — nothing below
+    # reads it, and it is skipped on a plain Re-Produce because refining
+    # every departure costs a second or two per shot and no shipping
+    # decision depends on it yet.
+    if debug_artifacts:
+        if progress:
+            progress("Comparing pose against ball departures", 0, len(cands))
+        _t0 = time.perf_counter()
+        try:
+            rep["swing_detect"] = _swing_detect_compare(
+                src_path, fps, rest, cands, upload_id, tok, _art_dir,
+            )
+            rep["swing_detect"]["scan_sec"] = round(_scan_sec, 2)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("d3: swing-detect comparison failed: %s", exc)
+            rep["swing_detect"] = {"error": str(exc)}
+        _add("swing_detect", time.perf_counter() - _t0)
 
     n_flights = 0
     n_produced = 0
@@ -15609,8 +15892,9 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         float(st.get("seconds") or 0.0) for st in rep["stages"]
     )
     _overhead = {
-        k: _phase[k] for k in ("rest_ball", "launch", "rest_check_image",
-                               "draw_tracks", "draw_flight")
+        k: _phase[k] for k in ("rest_ball", "swing_detect", "launch",
+                               "rest_check_image", "draw_tracks",
+                               "draw_flight")
         if _phase.get(k)
     }
     rep["timing"] = {
