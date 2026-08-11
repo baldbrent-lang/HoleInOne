@@ -13554,6 +13554,11 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
         out["reason"] = f"departure detector crashed: {exc}"
         return out
     out["deps"] = list(dbg.get("departures") or [])
+    # Every white/round/ball-sized blob the scan saw, in native pixels,
+    # before the ROI gate. Only the swing test draws them, but they are
+    # the difference between "the box is wrong" and "the ball is not
+    # passing the brightness filter", so they travel with the counts.
+    out["sample_cands"] = list(dbg.get("sample_cands") or [])
     out["counts"] = {
         k: dbg.get(k) for k in (
             "n_cand_total", "n_cand_in_roi", "n_tracks", "n_rested",
@@ -13892,6 +13897,237 @@ def _json_safe(obj):
 @router.get("/long-uploads/{upload_id}/debug3/status")
 def debug3_status(upload_id: int):
     return _json_safe(_debugx_get("debug3", upload_id))
+
+
+# ── Swing test ─────────────────────────────────────────────────────────
+# Debug3 answers a dozen questions at once, which is the wrong shape when
+# only one of them is in doubt. This runs the ball-departure detector ALONE
+# and reports the three things that decide whether it works on a clip:
+#
+#   1. WHERE it looked — the tee-box ROI, drawn on a real frame of this
+#      video, with every ball-like blob the scan saw marked. A box in the
+#      wrong place and a ball that fails the brightness filter look
+#      identical in the numbers and completely different in the picture.
+#   2. WHETHER it found a ball — a blob that held still long enough to be
+#      a ball at rest, ringed on the frame where it was sitting.
+#   3. WHETHER that ball left, and on WHICH FRAME — the 15Hz scan gives a
+#      sample time, so each departure is re-watched at full frame rate to
+#      pin the exact frame, with the film-strip that shows the call.
+#
+# No pose, no MOG2, no produce: it reads the video, writes images, and
+# returns a report. Nothing downstream reads any of it.
+
+def _swing_test_run(row, src_path, db, progress=None) -> dict:
+    """The ball-departure detector on its own, with its work shown."""
+    import cv2  # type: ignore
+
+    from ..services.ai_tracer import verify_rest_and_impact
+
+    upload_id = row.id
+    tok = secrets.token_hex(3)
+    fps = float(probe_fps(src_path) or 0.0) or 30.0
+
+    if progress:
+        progress("Scanning the clip for a resting ball", 0, 0)
+    _t0 = time.perf_counter()
+    rest = _rest_ball_departures(src_path, fps, db, row)
+    scan_sec = round(time.perf_counter() - _t0, 2)
+
+    roi = rest.get("roi")
+    counts = rest.get("counts") or {}
+    deps = rest.get("deps") or []
+    cands = rest.get("sample_cands") or []
+
+    rep = {
+        "ok": True,
+        "upload_id": upload_id,
+        "fps": round(fps, 2),
+        "scan_sec": scan_sec,
+        "verify_sec": 0.0,
+        "duration_sec": counts.get("duration_sec"),
+        "sample_hz": counts.get("eff_hz"),
+        "min_rest_sec": counts.get("min_rest_sec"),
+        "roi": roi,
+        "roi_px": None,
+        "roi_source": rest.get("roi_source"),
+        "roi_note": rest.get("roi_note"),
+        "whole_frame": roi is None,
+        "counts": counts,
+        "n_cands_drawn": len(cands),
+        "reason": rest.get("reason"),
+        "area_image": None,
+        "frame_w": None,
+        "frame_h": None,
+        "departures": [],
+    }
+
+    # WHERE IT LOOKED. A frame a couple of seconds in (the very first frame
+    # of a clip is often a fade or an autoexposure ramp), the search box on
+    # it, and every candidate blob the scan accepted before the box gate.
+    if progress:
+        progress("Drawing the search area", 0, 0)
+    ref = None
+    try:
+        _c = cv2.VideoCapture(str(src_path))
+        _c.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * fps))
+        _ok, ref = _c.read()
+        if not _ok or ref is None:
+            _c.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            _ok, ref = _c.read()
+            ref = ref if _ok else None
+        _c.release()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("swing test: reference frame grab failed: %s", exc)
+        ref = None
+
+    if ref is not None:
+        fh, fw = ref.shape[:2]
+        rep["frame_w"], rep["frame_h"] = int(fw), int(fh)
+        area = ref.copy()
+        if roi:
+            x0 = int(float(roi.get("x", 0.0)) * fw)
+            y0 = int(float(roi.get("y", 0.0)) * fh)
+            x1 = int((float(roi.get("x", 0.0)) + float(roi.get("w", 1.0))) * fw)
+            y1 = int((float(roi.get("y", 0.0)) + float(roi.get("h", 1.0))) * fh)
+            rep["roi_px"] = {
+                "x": x0, "y": y0, "w": max(0, x1 - x0), "h": max(0, y1 - y0),
+            }
+            cv2.rectangle(area, (x0, y0), (x1, y1), (0, 140, 255), 3)
+            cv2.putText(
+                area, "ball search area", (x0, max(20, y0 - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 140, 255), 2, cv2.LINE_AA,
+            )
+        else:
+            cv2.rectangle(area, (2, 2), (fw - 3, fh - 3), (0, 140, 255), 4)
+            cv2.putText(
+                area, "no tee box set - searching the WHOLE frame", (12, 34),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 140, 255), 2, cv2.LINE_AA,
+            )
+        for cx, cy in cands:
+            cv2.circle(area, (int(cx), int(cy)), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        for di, d in enumerate(deps):
+            try:
+                dx, dy = int(d.get("x") or 0), int(d.get("y") or 0)
+            except (TypeError, ValueError):
+                continue
+            cv2.circle(area, (dx, dy), max(16, int(fh * 0.022)),
+                       (0, 255, 255), 3, cv2.LINE_AA)
+            cv2.putText(
+                area, f"ball {di + 1}", (dx + 18, dy - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA,
+            )
+        _name = f"swingtest-{upload_id}-{tok}-area.jpg"
+        try:
+            cv2.imwrite(str(CLIPS_DIR / _name), area,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            rep["area_image"] = _clip_url_for(_name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swing test: area image write failed: %s", exc)
+
+    # DID IT LEAVE, AND WHEN. The scan samples at ~15Hz and its `t` is the
+    # last frame the ball was SEEN, not the frame it went. Re-watch the
+    # rest patch at full rate to pin the exact frame.
+    if progress:
+        progress("Pinning the departure frame", 0, len(deps))
+    _t0 = time.perf_counter()
+    for k, d in enumerate(deps):
+        if progress:
+            progress("Pinning the departure frame", k, len(deps))
+        try:
+            t = float(d.get("t") or 0.0)
+            x, y = float(d.get("x") or 0.0), float(d.get("y") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        b = {
+            "idx": k,
+            "t_sec": round(t, 2),
+            "frame": int(t * fps + 0.5),
+            "x": int(round(x)), "y": int(round(y)),
+            "rest_sec": d.get("rest_sec"),
+            "departed": None,
+            "impact_frame": None,
+            "impact_sec": None,
+            "verify_reason": None,
+            "snap_px": None,
+            "strip_image": None,
+            "rest_image": None,
+        }
+        try:
+            v = verify_rest_and_impact(
+                src_path, (x, y), b["frame"], fps,
+                debug_dir=CLIPS_DIR,
+                debug_prefix=f"swingtest-{upload_id}-{tok}-dep{k}",
+            ) or {}
+        except Exception as exc:  # noqa: BLE001
+            v = {"reason": f"departure check crashed: {exc}"}
+        b["departed"] = v.get("verified")
+        b["verify_reason"] = v.get("reason")
+        b["snap_px"] = v.get("snap_px")
+        if v.get("rest_xy"):
+            b["x"], b["y"] = int(v["rest_xy"][0]), int(v["rest_xy"][1])
+        if v.get("impact_frame") is not None:
+            b["impact_frame"] = int(v["impact_frame"])
+            b["impact_sec"] = round(b["impact_frame"] / max(1e-6, fps), 2)
+        if v.get("image"):
+            b["strip_image"] = _clip_url_for(v["image"])
+
+        # The ball where it was sitting, ringed — "it found a ball" is a
+        # claim that should be checkable by looking.
+        try:
+            _rest_dur = float(d.get("rest_sec") or 1.0)
+            snap_t = max(0.0, t - min(max(_rest_dur / 2.0, 0.3), 1.5))
+            _c = cv2.VideoCapture(str(src_path))
+            _c.set(cv2.CAP_PROP_POS_FRAMES, int(snap_t * fps))
+            _ok, fr = _c.read()
+            _c.release()
+            if _ok and fr is not None:
+                rad = max(14, int(round(fr.shape[0] * 0.02)))
+                cv2.circle(fr, (b["x"], b["y"]), rad, (0, 255, 255), 3, cv2.LINE_AA)
+                cv2.circle(fr, (b["x"], b["y"]), 2, (0, 0, 255), -1, cv2.LINE_AA)
+                cv2.putText(
+                    fr, f"ball {k + 1} at rest, f{int(snap_t * fps)}",
+                    (max(6, b["x"] - 90), max(24, b["y"] - rad - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA,
+                )
+                _rname = f"swingtest-{upload_id}-{tok}-rest{k}.jpg"
+                cv2.imwrite(str(CLIPS_DIR / _rname), fr,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                b["rest_image"] = _clip_url_for(_rname)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swing test: rest still failed: %s", exc)
+
+        rep["departures"].append(b)
+    rep["verify_sec"] = round(time.perf_counter() - _t0, 2)
+
+    # One sentence, so the panel does not have to be read to be understood.
+    n_conf = sum(1 for b in rep["departures"] if b["departed"])
+    if not deps:
+        rep["found_ball"] = bool(counts.get("n_rested"))
+        rep["verdict"] = (
+            "No ball departure found — " + (rep["reason"] or "no reason given")
+        )
+    else:
+        rep["found_ball"] = True
+        rep["verdict"] = (
+            f"{len(deps)} ball departure(s); {n_conf} confirmed frame-by-frame"
+        )
+    log.info(
+        "swing test upload=%s: %s (scan %.1fs, verify %.1fs)",
+        upload_id, rep["verdict"], scan_sec, rep["verify_sec"],
+    )
+    return rep
+
+
+@router.post("/long-uploads/{upload_id}/swing-test")
+def swing_test(upload_id: int):
+    """Start the ball-departure test. Poll /swing-test/status for the work."""
+    return _debugx_start("swingtest", upload_id, _swing_test_run)
+
+
+@router.get("/long-uploads/{upload_id}/swing-test/status")
+def swing_test_status(upload_id: int):
+    # Same nan guard as Debug3: the report carries detector floats.
+    return _json_safe(_debugx_get("swingtest", upload_id))
 
 
 

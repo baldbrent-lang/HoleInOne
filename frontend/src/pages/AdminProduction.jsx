@@ -5388,6 +5388,177 @@ export function SwingDetectPanel({ sd }) {
 }
 
 /**
+ * Swing test — one question, isolated: did a ball sit somewhere in this
+ * clip and then leave?
+ *
+ * Three answers, in the order they can fail: WHERE it looked (the tee-box
+ * search area on a real frame, with every ball-like blob it saw), WHETHER
+ * it found a ball (a blob that held still, ringed where it sat), and
+ * WHETHER that ball left and on WHICH FRAME (the 15Hz scan re-watched at
+ * full rate, with the film-strip that shows the call).
+ */
+function SwingTestModal({ state, onClose }) {
+  if (!state) return null;
+  const rep = state.report;
+  const deps = rep?.departures || [];
+  const c = rep?.counts || {};
+  const Img = ({ url, cap }) =>
+    url ? (
+      <figure style={{ margin: "8px 0" }}>
+        <a href={url} target="_blank" rel="noreferrer">
+          <img src={url} alt={cap} style={{ width: "100%", borderRadius: 6 }} />
+        </a>
+        <figcaption className="tiny muted" style={{ marginTop: 4 }}>{cap}</figcaption>
+      </figure>
+    ) : null;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)",
+        display: "flex", alignItems: "flex-start", justifyContent: "center",
+        zIndex: 1000, padding: 16, overflow: "auto",
+      }}
+    >
+      <div
+        className="card"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 1100, width: "100%", margin: 0 }}
+      >
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <b>⛳ Swing test — upload #{state.uploadId}</b>
+          <button type="button" className="ghost small"
+            style={{ width: "auto" }} onClick={onClose}>
+            Close ✕
+          </button>
+        </div>
+
+        {state.running && (
+          <div style={{ marginTop: 10 }}>
+            <div className="small">
+              <span
+                className="shimmer"
+                style={{
+                  display: "inline-block", width: 12, height: 12,
+                  borderRadius: "50%", marginRight: 8,
+                  verticalAlign: "middle",
+                }}
+              />
+              Running{state.stage ? ` — ${state.stage}` : ""}
+              {state.total ? ` (${state.done}/${state.total})` : ""}. The scan
+              reads the whole clip at 15Hz, then each departure is re-watched
+              frame by frame.
+            </div>
+          </div>
+        )}
+        {state.error && (
+          <div className="err-text small" style={{ marginTop: 8 }}>
+            {state.error}
+          </div>
+        )}
+
+        {rep && (
+          <div style={{ marginTop: 12 }}>
+            <div
+              className="small"
+              style={{
+                padding: "8px 10px", borderRadius: 6, marginBottom: 10,
+                background: deps.length ? "rgba(0,160,80,0.14)" : "rgba(200,120,0,0.16)",
+              }}
+            >
+              <b>{rep.verdict}</b>
+              <div className="tiny muted" style={{ marginTop: 3 }}>
+                {rep.duration_sec != null && <>{rep.duration_sec}s clip · </>}
+                {rep.fps} fps · scanned at {Math.round(rep.sample_hz || 0)}Hz ·
+                {" "}scan {rep.scan_sec}s + frame check {rep.verify_sec}s
+              </div>
+            </div>
+
+            {/* 1. WHERE IT LOOKED */}
+            <h4 style={{ margin: "12px 0 4px" }}>1 · Where it looked</h4>
+            <div className="tiny muted">
+              {rep.whole_frame ? (
+                <>
+                  No tee box is set, so the search area is the{" "}
+                  <b>whole frame</b> — shoes, cups and sky glints all compete
+                  with the ball.
+                </>
+              ) : (
+                <>
+                  Search area from <b>{rep.roi_source || "an ROI"}</b>
+                  {rep.roi_px && (
+                    <> — {rep.roi_px.w}×{rep.roi_px.h}px at {rep.roi_px.x},{rep.roi_px.y}</>
+                  )}
+                  {rep.frame_w ? <> of a {rep.frame_w}×{rep.frame_h} frame</> : null}.
+                </>
+              )}
+              {rep.roi_note && <div style={{ marginTop: 3 }}>{rep.roi_note}</div>}
+            </div>
+            <Img
+              url={rep.area_image}
+              cap="Orange = the ball search area. Green dots = every white, round, ball-sized blob the scan accepted (before the box gate). Yellow ring = a ball that rested here and then left."
+            />
+
+            {/* 2. WHAT IT FOUND */}
+            <h4 style={{ margin: "12px 0 4px" }}>2 · What it found</h4>
+            <div className="small" style={{ marginBottom: 6 }}>
+              {c.n_cand_total ?? 0} ball-like blob(s) in the frame ·{" "}
+              {c.n_cand_in_roi ?? 0} inside the search area ·{" "}
+              {c.n_tracks ?? 0} tracked ·{" "}
+              <b>{c.n_rested ?? 0}</b> held still for {c.min_rest_sec}s ·{" "}
+              <b>{deps.length}</b> departure(s)
+            </div>
+            {!deps.length && (
+              <div className="tiny muted">{rep.reason}</div>
+            )}
+
+            {/* 3. DID IT LEAVE, AND WHEN */}
+            {deps.length > 0 && (
+              <>
+                <h4 style={{ margin: "14px 0 4px" }}>3 · Did it leave, and when</h4>
+                {deps.map((b) => (
+                  <div
+                    key={b.idx}
+                    className="card"
+                    style={{ margin: "8px 0", padding: 10 }}
+                  >
+                    <div className="row" style={{ justifyContent: "space-between" }}>
+                      <b>Ball {b.idx + 1} — rested {b.rest_sec}s at ({b.x}, {b.y})</b>
+                      <span className={b.departed ? "pill ok" : "pill warn"}>
+                        {b.departed
+                          ? `left on frame ${b.impact_frame} (${b.impact_sec}s)`
+                          : "departure not confirmed"}
+                      </span>
+                    </div>
+                    <div className="tiny muted" style={{ marginTop: 4 }}>
+                      Scan put it at frame {b.frame} ({b.t_sec}s), good to about
+                      a 15th of a second and marking the last frame the ball was
+                      SEEN.{" "}
+                      {b.departed
+                        ? `The frame-by-frame check pins the disappearance at frame ${b.impact_frame}.`
+                        : "The frame-by-frame check could not confirm it."}
+                      {b.snap_px != null && <> Rest position snapped {b.snap_px}px.</>}
+                      {b.verify_reason && <> — {b.verify_reason}</>}
+                    </div>
+                    <Img url={b.rest_image} cap={`Ball ${b.idx + 1} where it sat, before the strike.`} />
+                    <Img
+                      url={b.strip_image}
+                      cap="Frame by frame at the rest spot. Green = ball present, red = gone, yellow box = the frame it disappeared."
+                    />
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Debug3 report — the blob-and-track method. Where Debug2 reads the shape
  * the swing draws in a motion composite, this one never looks at a
  * composite: per-frame MOG2, drop the golfer, keep ball-sized blobs, link
@@ -10424,6 +10595,8 @@ export default function AdminProduction() {
   const [d2, setD2] = useState(null);
   // Debug3 report — same deal: images on disk, no swing data touched.
   const [d3, setD3] = useState(null);
+  // Swing test — the ball-departure detector alone. Read-only as well.
+  const [swingTest, setSwingTest] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -10445,7 +10618,9 @@ export default function AdminProduction() {
   // restarting the run from scratch each time.
   function pollDebugX(kind, uploadId, setter) {
     const statusCall =
-      kind === "debug3" ? api.debug3Status : api.debug2Status;
+      kind === "debug3" ? api.debug3Status
+        : kind === "swingtest" ? api.swingTestStatus
+          : api.debug2Status;
     const tick = async () => {
       try {
         const st = await statusCall(adminPassword, uploadId);
@@ -10499,6 +10674,23 @@ export default function AdminProduction() {
       pollDebugX("debug3", row.id, setD3);
     } catch (e) {
       setD3({
+        running: false, uploadId: row.id, report: null, error: e.message,
+      });
+      setBusyId((cur) => (cur === row.id ? null : cur));
+    }
+  }
+
+  // The ball question on its own: where did it look, did it find a ball,
+  // did that ball leave, and on which frame. No pose, no produce.
+  async function handleSwingTest(row) {
+    setSwingTest({ running: true, uploadId: row.id, report: null, error: null });
+    busySinceRef.current = Date.now();
+    setBusyId(row.id);
+    try {
+      await api.swingTest(adminPassword, row.id);
+      pollDebugX("swingtest", row.id, setSwingTest);
+    } catch (e) {
+      setSwingTest({
         running: false, uploadId: row.id, report: null, error: e.message,
       });
       setBusyId((cur) => (cur === row.id ? null : cur));
@@ -11442,6 +11634,15 @@ export default function AdminProduction() {
                     🧿 Debug3
                   </button>
                 )}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
+                    onClick={() => handleSwingTest(row)}
+                        title="Dev: the ball-departure detector alone — where it looked, whether it found a ball, and the exact frame that ball left."
+                  >
+                    ⛳ Swing test
+                  </button>
+                )}
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
@@ -11611,6 +11812,9 @@ export default function AdminProduction() {
 
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
       {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
+      {swingTest && (
+        <SwingTestModal state={swingTest} onClose={() => setSwingTest(null)} />
+      )}
 
       <ConfirmDialog
         open={!!confirmBox}

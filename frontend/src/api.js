@@ -623,6 +623,20 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}/debug3/status`, {
       adminPassword: key,
     }),
+
+  // Swing test — the ball-departure detector on its own. Same
+  // start-then-poll shape as Debug2/Debug3, for the same proxy-timeout
+  // reason.
+  swingTest: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/swing-test`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+
+  swingTestStatus: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/swing-test/status`, {
+      adminPassword: key,
+    }),
   emailStatus: (key) =>
     request("/api/admin/email-status", { adminPassword: key }),
   emailSendTemplates: (key, to) =>
