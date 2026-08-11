@@ -119,13 +119,19 @@ def render_left_panel(
 
     player_text = (player_name or "Brent Baldwin").upper()
     course_text = course_name or ""
-    par_value = 3 if par is None else int(par)
-    yards_value = int(yardage) if yardage is not None else 101
+    # WHAT IS NOT KNOWN IS NOT PRINTED. These used to fall back to
+    # "PAR 3" and "101 YDS", and 101 is the number that shipped to
+    # players on every hole whose yardage nobody had entered -- it
+    # looks like a measurement and cannot be told from one. A hole with
+    # no yardage on the course record now simply says HOLE 4 · PAR 3,
+    # and the log says which hole to go and fill in.
     info_parts = []
     if hole_number is not None:
         info_parts.append(f"HOLE {int(hole_number)}")
-    info_parts.append(f"PAR {par_value}")
-    info_parts.append(f"{yards_value} YDS")
+    if par is not None:
+        info_parts.append(f"PAR {int(par)}")
+    if yardage is not None:
+        info_parts.append(f"{int(yardage)} YDS")
     info_text = "  ·  ".join(info_parts)
 
     pad_x = 18
@@ -295,7 +301,11 @@ def render_target_sign(yardage: int | None, pole_height: int = 130) -> Image.Ima
     if not HAS_PIL:
         return None
 
-    yards = int(yardage) if yardage is not None else 0
+    # No yardage, no stake: a sign reading "0 YDS" is worse than no
+    # sign, and the caller already knows to skip it.
+    if yardage is None:
+        return None
+    yards = int(yardage)
 
     sign_w = 168
     header_h = 32

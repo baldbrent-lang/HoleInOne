@@ -994,20 +994,20 @@ def make_clip_vertical(
         if clip.participant_id:
             _p = db.get(Participant, clip.participant_id)
             _pname = _p.name if _p else None
-        _yardage = 101
-        if _course and _course.hole_yardages:
-            try:
-                _ry = _course.hole_yardages.get(str(int(clip.hole_number)))
-                if _ry is not None:
-                    _yardage = int(_ry)
-            except (TypeError, ValueError):
-                pass
+        # What the course says about this hole -- its par and its
+        # yardage -- or None where it does not say. See hole_facts:
+        # a number nobody set must not be printed as though it were
+        # measured.
+        _cname, _par, _yardage, _note = hole_facts(
+            db, _course, clip.hole_number)
+        if _note:
+            log.warning("clip %s vertical overlay: %s", clip_id, _note)
         apply_intro_overlay_inplace(
             out_path,
             player_name=_pname or "Brent Baldwin",
-            course_name=_course.name if _course else "",
+            course_name=_cname,
             hole_number=int(clip.hole_number),
-            par=3,
+            par=_par,
             yardage=_yardage,
         )
     except Exception as exc:  # noqa: BLE001
@@ -3031,16 +3031,12 @@ def _process_long_upload_segments(
             return
         course = _course_for_intro
         course_name = course.name if course and course.name else ""
-        # Default yardage when this hole isn't in course.hole_yardages
-        # (e.g. fresh course setup or a newly added hole).
-        yardage = 101
-        if course and course.hole_yardages:
-            raw_y = course.hole_yardages.get(str(int(clip.hole_number)))
-            try:
-                if raw_y is not None:
-                    yardage = int(raw_y)
-            except (TypeError, ValueError):
-                pass
+        # What the course says about this hole -- its par and its
+        # yardage -- or None where it does not say. A number nobody set
+        # must not be printed as though it were measured.
+        _cname, par, yardage, _note = hole_facts(db, course, clip.hole_number)
+        if _note:
+            log.warning("clip %s overlay: %s", clip.id, _note)
         # Preserve a CLEAN pre-overlay copy first — vertical re-renders
         # (and any future format) crop/pan the frame, so they must start
         # from footage without the landscape panels baked in.
@@ -3061,10 +3057,7 @@ def _process_long_upload_segments(
                 player_name=(participant.name if participant else "Brent Baldwin"),
                 course_name=course_name,
                 hole_number=int(clip.hole_number),
-                # GolfReelz is a par-3 challenge product; every hole is
-                # treated as par 3 regardless of the course's par3_holes
-                # list.
-                par=3,
+                par=par,
                 yardage=yardage,
             )
         except Exception as exc:  # pragma: no cover
@@ -3085,23 +3078,19 @@ def _process_long_upload_segments(
             return
         course = _course_for_intro
         course_name = course.name if course and course.name else ""
-        yardage = 101
-        if course and course.hole_yardages:
-            raw_y = course.hole_yardages.get(str(int(clip.hole_number)))
-            try:
-                if raw_y is not None:
-                    yardage = int(raw_y)
-            except (TypeError, ValueError):
-                pass
+        _cname, _par, yardage, _note = hole_facts(db, course,
+                                                  clip.hole_number)
+        if _note:
+            log.warning("clip %s vertical overlay: %s", clip.id, _note)
         try:
             if apply_intro_overlay_inplace(
                 fpath,
                 player_name=(
                     participant.name if participant else "Brent Baldwin"
                 ),
-                course_name=course_name,
+                course_name=_cname or course_name,
                 hole_number=int(clip.hole_number),
-                par=3,
+                par=_par,
                 yardage=yardage,
             ):
                 clip.vertical_url = (
@@ -7611,6 +7600,64 @@ def _hole_for_upload(db, row) -> int:
     return 1
 
 
+def hole_facts(db, course, hole):
+    """What the course says about this hole: (name, par, yardage, note).
+
+    ONE PLACE, because there were five, and each of them separately
+    defaulted the yardage to 101 and the par to 3. A course knows its
+    own holes -- `par3_holes` and `hole_yardages` are set on the course
+    record and the camera knows which hole it is pointed at -- so the
+    only reason a clip ever carried 101 yards is that nobody asked.
+
+    UNKNOWN IS RETURNED AS None, NOT AS A PLAUSIBLE NUMBER. A missing
+    yardage printed as "101 YDS" is worse than no yardage at all: it
+    looks like a measurement, it ships to the player, and nobody can
+    tell it from a real one. The overlay leaves out what it is not
+    given, and `note` says what is missing so the operator can fix the
+    course rather than the clip.
+
+    PAR IS 3 BECAUSE THE PRODUCT IS. GolfReelz films par-3 challenges;
+    a camera is bolted to a par 3 and every clip it makes is of one. So
+    par is not looked up, it is asserted -- but the course's par-3 list
+    is still consulted, and a hole missing from a list that has entries
+    produces a NOTE. That is a camera pointed at a hole the course does
+    not think is a par 3, which is worth telling the operator even
+    though the overlay is right either way.
+    """
+    name = (course.name if course and course.name else "")
+    par, yards, notes = 3, None, []
+    try:
+        _h = int(hole)
+    except (TypeError, ValueError):
+        return name, par, None, "no hole number"
+
+    _p3 = list(getattr(course, "par3_holes", None) or []) if course else []
+    if not course:
+        notes.append("this upload is not attached to a course")
+    elif _p3:
+        try:
+            if _h not in [int(x) for x in _p3]:
+                notes.append(
+                    f"hole {_h} is not in {name or 'the course'}'s par-3 "
+                    f"list {sorted(int(x) for x in _p3)} — the camera and "
+                    f"the course disagree")
+        except (TypeError, ValueError):
+            notes.append(f"{name or 'the course'} has an unreadable par-3 "
+                         f"list")
+
+    _hy = (getattr(course, "hole_yardages", None) or {}) if course else {}
+    _raw = _hy.get(str(_h), _hy.get(_h))
+    try:
+        if _raw is not None:
+            yards = int(_raw)
+    except (TypeError, ValueError):
+        yards = None
+    if yards is None and course:
+        notes.append(f"hole {_h} has no yardage set on "
+                     f"{name or 'the course'}")
+    return name, par, yards, ("; ".join(notes) or None)
+
+
 def _view_map_for(db, row):
     """(course, hole, view_map). The mapping keyed by hole on the course.
 
@@ -8435,24 +8482,31 @@ def finalize_wizard_video(
                     )
 
     course = db.get(Course, row.course_id) if row.course_id else None
-    course_name = course.name if course else ""
-    hole_number = int(payload.get("hole_number") or 1)
-    # yardage: prefer an explicit operator override → otherwise the
-    # course's hole_yardages entry → otherwise 101.
+    # THE HOLE IS THE CAMERA'S, when the caller does not say. A camera
+    # is bolted to one par 3 and its events carry that hole all the way
+    # through; defaulting to 1 put every manual finalize on hole 1.
+    try:
+        hole_number = int(payload.get("hole_number")
+                          or _hole_for_upload(db, row))
+    except (TypeError, ValueError):
+        hole_number = _hole_for_upload(db, row)
+    # yardage: an explicit operator override, else what the course says
+    # about this hole, else nothing at all -- the plate leaves out what
+    # it is not given.
     yardage_override = payload.get("yardage")
     try:
         yardage = int(yardage_override) if yardage_override is not None else None
     except (TypeError, ValueError):
         yardage = None
+    # What the course says about this hole -- its par and its yardage --
+    # or None where it does not say. A number nobody set must not be
+    # printed as though it were measured.
+    course_name, par, _course_yards, _note = hole_facts(db, course,
+                                                        hole_number)
     if yardage is None:
-        yardage = 101
-        if course and course.hole_yardages:
-            raw_y = course.hole_yardages.get(str(hole_number))
-            try:
-                if raw_y is not None:
-                    yardage = int(raw_y)
-            except (TypeError, ValueError):
-                pass
+        yardage = _course_yards
+    if _note:
+        log.warning("finalize %s: %s", upload_id, _note)
     player_name = payload.get("player_name") or "Brent Baldwin"
 
     # Target pixel for the 'TO HOLE / N YDS' stake overlay. Pulled
@@ -8561,7 +8615,7 @@ def finalize_wizard_video(
             player_name=player_name,
             course_name=course_name,
             hole_number=hole_number,
-            par=3,
+            par=par,
             yardage=yardage,
             target_xy=target_xy,
         )
@@ -14684,22 +14738,25 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             participant = match_clip(db, clip)
 
             # ── graphics ──────────────────────────────────────────
-            _yardage = 101
-            if course and course.hole_yardages:
-                try:
-                    _ry = course.hole_yardages.get(str(int(_hole)))
-                    if _ry is not None:
-                        _yardage = int(_ry)
-                except (TypeError, ValueError):
-                    pass
+            # What the course says about this hole -- its par and its
+            # yardage -- or None where it does not say. A number nobody
+            # set must not be printed as though it were measured, and
+            # the note is the operator's cue to fix the COURSE rather
+            # than the clip.
+            _cname, _par, _yardage, _note = hole_facts(db, course, _hole)
+            if _note:
+                log.warning("d3 produce: swing %s: %s", i, _note)
+                rep.setdefault("warnings", [])
+                if _note not in rep["warnings"]:
+                    rep["warnings"].append(_note)
             apply_intro_overlay_inplace(
                 final,
                 player_name=(
                     participant.name if participant else "Brent Baldwin"
                 ),
-                course_name=(course.name if course and course.name else ""),
+                course_name=_cname,
                 hole_number=int(_hole),
-                par=3,
+                par=_par,
                 yardage=_yardage,
             )
 
@@ -15446,6 +15503,14 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
                     f"+{D3_POST_TRACER_SEC}s tail, then the cut to green"
                 ) if _fp["ok"] else (_fp.get("error") or "produce failed"),
             }
+            # What the course could not tell us, said where it will be
+            # read: a missing yardage is a two-second fix on the Courses
+            # page and an invisible one in a log file.
+            if rep.get("warnings"):
+                rep["produced"]["detail"] = (
+                    (rep["produced"].get("detail") or "")
+                    + " — NOTE: " + "; ".join(rep["warnings"])
+                )
         except Exception as exc:  # noqa: BLE001
             log.warning("debug3: produce failed for %s: %s", upload_id, exc)
             rep["produced"] = {"ok": False, "error": f"{exc}"}
