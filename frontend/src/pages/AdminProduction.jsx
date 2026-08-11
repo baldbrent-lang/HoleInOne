@@ -5181,7 +5181,7 @@ function FlagMarker({ x, y, frameW, frameH, editable, onPointerDown }) {
  *
  * Nothing here changes what gets produced.
  */
-function SwingDetectPanel({ sd }) {
+export function SwingDetectPanel({ sd }) {
   const [open, setOpen] = useState(false);
   const [shot, setShot] = useState(null);
   if (sd.error) {
@@ -5462,6 +5462,22 @@ function Debug3Modal({ state, onClose }) {
 
         {rep?.stages?.length > 0 && (
           <div style={{ marginTop: 12 }}>
+            {/* First thing in the report, above the stage list: it is the
+                question the stages cannot answer — how many swings are in
+                this clip — and it is what someone opens Debug3 to check. */}
+            {rep.swing_detect ? (
+              <SwingDetectPanel sd={rep.swing_detect} />
+            ) : (
+              /* A report from before this existed has no swing_detect and
+                 would just render nothing — which is indistinguishable
+                 from the panel being broken. Say which it is. */
+              <div className="tiny muted" style={{ marginBottom: 8 }}>
+                <b>Swing detection comparison:</b> not in this report — it
+                was produced before the ball-departure detector was added,
+                or by a plain Re-Produce, which skips it. Run{" "}
+                <b>Debug3</b> again to get it.
+              </div>
+            )}
             {rep.stages.map((st) => (
               <div key={st.n} className="small"
                 style={{
@@ -5691,7 +5707,6 @@ function Debug3Modal({ state, onClose }) {
                 ))}
               </div>
             )}
-            {rep.swing_detect && <SwingDetectPanel sd={rep.swing_detect} />}
           </div>
         )}
 
