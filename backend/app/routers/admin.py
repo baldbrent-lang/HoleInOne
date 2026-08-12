@@ -15102,6 +15102,70 @@ def _guess_landing_tee(db, row, tee_size, short_frac: float = 0.12):
     return [float(xy[0]), float(xy[1])], src
 
 
+def _green_view_in_tee(db, row, tee_size):
+    """The green camera's field of view, as a polygon in TEE pixels.
+
+    Its four corners mapped through the same homography that maps a
+    landing. Anything inside this polygon is somewhere the green camera
+    can see.
+    """
+    try:
+        _c, _hole, vm = _view_map_for(db, row)
+        gs = (vm or {}).get("green_size") or []
+        if not vm or len(gs) < 2:
+            return None
+        w, h = float(gs[0]), float(gs[1])
+        poly = []
+        for cx, cy in ((0.0, 0.0), (w, 0.0), (w, h), (0.0, h)):
+            xy, _why = _map_landing_to_tee(db, row, [cx, cy],
+                                           green_size=gs, tee_size=tee_size)
+            if not xy:
+                return None
+            poly.append((float(xy[0]), float(xy[1])))
+        return poly
+    except Exception as exc:  # noqa: BLE001
+        log.debug("green view polygon failed: %s", exc)
+        return None
+
+
+def _outside_green_view(landing, from_xy, poly, margin_frac: float = 0.04):
+    """Walk a landing back toward the tee until it is out of the green
+    camera's sight.
+
+    THE GREEN CAMERA NOT SEEING IT LAND IS EVIDENCE, not an absence of
+    evidence. If the ball had come down inside that camera's view it
+    would have been caught by the descent pass, which watched every frame
+    of the window. So an assumed landing inside the polygon contradicts
+    what is already known, and a tracer drawn to it would finish on a
+    patch of ground the footage proves the ball did not reach.
+
+    Returns (xy, moved) -- moved says whether the constraint bit.
+    """
+    if not landing or not poly or not from_xy:
+        return landing, False
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+
+        cnt = np.array([[int(round(px)), int(round(py))] for px, py in poly],
+                       dtype=np.int32)
+        pt = (float(landing[0]), float(landing[1]))
+        if cv2.pointPolygonTest(cnt, pt, False) < 0:
+            return landing, False          # already outside; nothing to do
+        cur = list(landing)
+        for _ in range(24):                # walk back in 4% steps
+            cur = [cur[0] + (float(from_xy[0]) - cur[0]) * margin_frac,
+                   cur[1] + (float(from_xy[1]) - cur[1]) * margin_frac]
+            if cv2.pointPolygonTest(cnt, (cur[0], cur[1]), False) < 0:
+                # One more step so it is clear of the boundary, not on it.
+                return [cur[0] + (float(from_xy[0]) - cur[0]) * margin_frac,
+                        cur[1] + (float(from_xy[1]) - cur[1]) * margin_frac], True
+        return cur, True
+    except Exception as exc:  # noqa: BLE001
+        log.debug("outside-green-view walk failed: %s", exc)
+        return landing, False
+
+
 def _pull_short(landing, from_xy, frac: float = 0.12):
     """Move a landing back toward the tee by `frac` of the way.
 
@@ -15200,6 +15264,14 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
                                        list(_fsz) if _fsz else None)
         if _xy:
             _xy = _pull_short(_xy, (float(b["x"]), float(b["y"])))
+            _assumed_landing = None
+            # AND IT DID NOT LAND WHERE THAT CAMERA WAS LOOKING. The
+            # descent pass watched every frame of the window and saw
+            # nothing, so anywhere inside the green camera's view is
+            # somewhere the ball demonstrably did not come down.
+            _poly = _green_view_in_tee(db, row, list(_fsz) if _fsz else None)
+            _xy, _moved = _outside_green_view(
+                _xy, (float(b["x"]), float(b["y"])), _poly)
             _p2_override = _xy
             _assumed_landing = [int(round(_xy[0])), int(round(_xy[1]))]
             # FIVE SECONDS OF FLIGHT. A 200-yard shot to a par 3 hangs
@@ -15211,7 +15283,11 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
             _assumed_reason = (
                 f"no landing on the green camera — assumed one at "
                 f"{_assumed_landing[0]},{_assumed_landing[1]} from "
-                f"{_why}, pulled short, over a {_flight_sec:.0f}s flight"
+                f"{_why}, pulled short"
+                + (", and back until it is outside that camera's view, "
+                   "which the footage proves the ball did not reach"
+                   if _moved else "")
+                + f", over a {_flight_sec:.0f}s flight"
             )
         else:
             _assumed_reason = (
