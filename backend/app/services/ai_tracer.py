@@ -7601,6 +7601,44 @@ def detect_swings_from_ai_ball(
     return segments
 
 
+def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
+                   min_grass: float = 0.5, max_white: float = 0.25) -> bool:
+    """Is this A SMALL WHITE BALL ON GREEN GRASS, or part of a person?
+
+    That sentence is the whole specification, and the second half of it
+    does work the first half cannot. Size and roundness describe the blob
+    alone, so they cannot tell a ball from the bright toe of a shoe or a
+    sunlit patch of knee -- those are ball-sized and ball-shaped in their
+    own right. What separates them is what SURROUNDS them: a ball has
+    grass on every side, a toe has more shoe, a knee has more leg.
+
+    Samples the ring between 1.8x and 3.2x the blob's radius and asks for
+    two things: mostly grass, and not mostly more white. Skipped at the
+    crop edge, where there is no ring to read.
+    """
+    h, w = mask.shape[:2]
+    r_out = 3.2 * rad
+    x0, x1 = max(0, int(cx - r_out)), min(w, int(cx + r_out) + 1)
+    y0, y1 = max(0, int(cy - r_out)), min(h, int(cy + r_out) + 1)
+    if x1 - x0 < 3 or y1 - y0 < 3:
+        return True  # at the crop edge, no evidence either way
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    ring = (d2 >= (1.8 * rad) ** 2) & (d2 <= r_out ** 2)
+    n = int(ring.sum())
+    if n <= 0:
+        return True
+    if (float(((mask[y0:y1, x0:x1] > 0) & ring).sum()) / n) > max_white:
+        return False
+    # Grass: green hue with real saturation. Wide, because turf runs from
+    # sunlit yellow-green to dark shade, but nothing on a person is here.
+    sub = hsv[y0:y1, x0:x1]
+    grass = (
+        (sub[:, :, 0] >= 25) & (sub[:, :, 0] <= 95) & (sub[:, :, 1] >= 60)
+    )
+    return (float((grass & ring).sum()) / n) >= min_grass
+
+
 def detect_swings_from_ball(
     input_path: Path,
     fps: float | None = None,
@@ -7611,7 +7649,11 @@ def detect_swings_from_ball(
     before_sec: float = 3.5,
     after_sec: float = 5.0,
     white_v_min: int = 170,
-    white_s_max: int = 90,
+    # A golf ball is ACHROMATIC -- measured S~5. Sunlit skin is S~68, so
+    # the old ceiling of 90 admitted bare legs and arms as "white", which
+    # is how a knee got ringed as a ball. 60 keeps the ball with an order
+    # of magnitude to spare and excludes skin outright.
+    white_s_max: int = 60,
     # Size is expressed in NATIVE PIXELS now, not as a fraction of a
     # working frame whose resolution the caller cannot see. See the size
     # limits in the loop below.
@@ -7671,6 +7713,7 @@ def detect_swings_from_ball(
     n_cand_in_roi = 0  # ... that also fell inside the ROI
     n_drop_shape = 0   # white + right size, but not ball-SHAPED (shoes)
     n_drop_size = 0    # white + ball-shaped, but not the pinned ball size
+    n_drop_touch = 0   # ball-like, but not surrounded by grass (skin/shoe)
     sample_cands: list[tuple[int, int]] = []  # native positions, for diagnostics
     r_lo = r_hi = None  # the accepted radius window, in native px
     try:
@@ -7759,7 +7802,9 @@ def detect_swings_from_ball(
             if expect_radius_px:
                 r_lo, r_hi = 0.6 * expect_radius_px, 1.7 * expect_radius_px
             else:
-                r_lo, r_hi = max(1.2, 0.0012 * h), 0.010 * h
+                # 0.006*h is a ~6.5px radius at 1080p -- 13px across,
+                # already generous for a ball and well under a shoe.
+                r_lo, r_hi = max(1.2, 0.0012 * h), 0.006 * h
 
             cands: list[tuple[float, float, float]] = []
             for c in cnts:
@@ -7789,6 +7834,10 @@ def detect_swings_from_ball(
                 # 0.785). An L-shaped or hollow blob does not.
                 if (a / float(_bw * _bh)) < extent_min:
                     n_drop_shape += 1
+                    continue
+                # ON GRASS, or a bright bit of a person?
+                if not _sits_on_grass(hsv, mask, cx, cy, rad):
+                    n_drop_touch += 1
                     continue
                 nx, ny = ox + cx / scale, oy + cy / scale
                 n_cand_total += 1
@@ -7901,6 +7950,7 @@ def detect_swings_from_ball(
                 # ball away as the wrong shape".
                 "n_drop_shape": n_drop_shape,
                 "n_drop_size": n_drop_size,
+                "n_drop_touch": n_drop_touch,
                 "expect_radius_px": expect_radius_px,
                 "accept_radius_px": (
                     [round(r_lo, 2), round(r_hi, 2)]
