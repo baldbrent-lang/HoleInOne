@@ -7726,8 +7726,17 @@ def detect_swings_from_ball(
     input_path: Path,
     fps: float | None = None,
     sample_hz: float = 15.0,
-    min_rest_sec: float = 0.8,
+    # A TEED BALL SITS. Measured on real clips: the ball rests 11.9s and
+    # 26.7s before it is struck, while the false positives -- a shoe on a
+    # walking golfer, a bare leg, a tee marker the golfer briefly stood in
+    # front of -- rest 1.1s to 1.7s. The gap is an order of magnitude, so
+    # this is the cheapest discriminator available and it needs no new
+    # machinery.
+    min_rest_sec: float = 2.0,
     occlusion_tol_sec: float = 1.5,
+    # How long the spot must stay empty for the departure to count as a
+    # strike rather than a brief occlusion.
+    return_window_sec: float = 2.5,
     min_separation_sec: float = 4.0,
     before_sec: float = 3.5,
     after_sec: float = 5.0,
@@ -8080,6 +8089,35 @@ def detect_swings_from_ball(
                 {"x": cx, "y": cy, "first_t": t, "last_t": t, "hits": 1, "alive": True}
             )
 
+    # IT LEFT AND IT DID NOT COME BACK.
+    #
+    # A struck ball is gone for good. Everything else that "departs" is
+    # really just briefly hidden: a tee marker the golfer walked in front
+    # of is still sitting there ten frames later, and its track only died
+    # because nothing matched it for a moment. Checking the spot AFTER
+    # the departure separates the two with no new detection work -- the
+    # samples are already in hand.
+    _returned = 0
+    _permanent: list[tuple[float, float, float, float]] = []
+    for d in departures:
+        t_dep, dx, dy, _rest = d
+        # A WINDOW, not the rest of the clip. The golfer re-tees in the
+        # same footprint a few seconds later, and that second ball is a
+        # new shot, not the first one coming back. What is being excluded
+        # is the thing that reappears almost immediately -- a marker the
+        # golfer stepped in front of, back in view within a second.
+        came_back = any(
+            ((cx - dx) ** 2 + (cy - dy) ** 2) ** 0.5 < tol
+            for t, cands in samples
+            if t_dep + 0.3 < t <= t_dep + return_window_sec
+            for cx, cy, _r in cands
+        )
+        if came_back:
+            _returned += 1
+            continue
+        _permanent.append(d)
+    departures = _permanent
+
     departures.sort(key=lambda d: d[0])
     kept: list[tuple[float, float, float, float]] = []
     for d in departures:
@@ -8120,6 +8158,7 @@ def detect_swings_from_ball(
                 "duration_sec": float(duration),
                 "n_departures": len(kept),
                 "n_raw_departures": len(departures),
+                "n_returned": _returned,
                 # Diagnostics — where detection fell down when nothing is found:
                 #   n_cand_total 0  -> ball not passing white/size filter
                 #   in_roi 0        -> ball outside the drawn box
