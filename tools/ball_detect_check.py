@@ -49,7 +49,12 @@ AI_TRACER = ROOT / "backend" / "app" / "services" / "ai_tracer.py"
 # ~4px of radius; at 720p -- which is what the cameras actually shoot --
 # it is ~2px, and at that size cv2.contourArea undercounts the blob by a
 # third and every area-ratio test rejects a correctly-found ball.
-RESOLUTIONS = ((1920, 1080, 4), (1280, 720, 2))
+# (width, height, drawn ball radius). The last one is the real case: a
+# 720p camera at tee distance renders the ball about THREE PIXELS across,
+# whose thresholded core is a 3x3 square. minEnclosingCircle calls that a
+# radius of 1.0 and no shape can be measured from nine pixels -- so the
+# crop is upscaled before anything is measured.
+RESOLUTIONS = ((1920, 1080, 4), (1280, 720, 2), (1280, 720, 1))
 FPS = 30.0
 BALL_XY, BALL_R = (1200, 600), 4        # 8px across
 SHOE_XY, SHOE_WH = (1000, 640), (15, 6)  # 30x12 white shoe
@@ -124,12 +129,14 @@ def build_clip(path: Path, W: int, H: int, ball_r: int, k: float) -> float:
 def run_one(ai, td: Path, W: int, H: int, ball_r: int) -> list[str]:
     """One resolution, end to end. Returns a list of failures."""
     k = W / 1920.0
-    clip = td / f"synthetic_{W}x{H}.mp4"
+    clip = td / f"synthetic_{W}x{H}_r{ball_r}.mp4"
     depart_at = build_clip(clip, W, H, ball_r, k)
     dbg: dict = {}
     segs = ai.detect_swings_from_ball(clip, fps=FPS, roi=ROI, debug=dbg)
 
-    print(f"\n=== {W}x{H}, ball radius {ball_r}px, struck at {depart_at:.1f}s")
+    print(f"\n=== {W}x{H}, ball {2 * ball_r + 1}px across, "
+          f"struck at {depart_at:.1f}s")
+    print(f"  crop upscaled by       : {dbg.get('work_scale')}x")
     print(f"  accepted radius window : {dbg.get('accept_radius_px')} px")
     print(f"  candidates in box      : {dbg.get('n_cand_in_roi')}")
     print(f"  rejected wrong size    : {dbg.get('n_drop_size')}")

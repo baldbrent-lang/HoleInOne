@@ -7602,7 +7602,8 @@ def detect_swings_from_ai_ball(
 
 
 def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
-                   min_grass: float = 0.5, max_white: float = 0.25) -> bool:
+                   min_grass: float = 0.5, max_white: float = 0.25,
+                   max_skin: float = 0.12) -> bool:
     """Is this A SMALL WHITE BALL ON GREEN GRASS, or part of a person?
 
     That sentence is the whole specification, and the second half of it
@@ -7630,9 +7631,21 @@ def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
         return True
     if (float(((mask[y0:y1, x0:x1] > 0) & ring).sum()) / n) > max_white:
         return False
-    # Grass: green hue with real saturation. Wide, because turf runs from
-    # sunlit yellow-green to dark shade, but nothing on a person is here.
     sub = hsv[y0:y1, x0:x1]
+    # SKIN NEARBY IS DISQUALIFYING, and it is asked separately from
+    # "is there grass". A specular highlight on a sunlit knee is
+    # ball-white and ball-sized, and when it sits near the EDGE of the
+    # leg its ring is mostly grass -- so counting grass alone lets it
+    # through. Skin has a narrow hue and real saturation, and none of it
+    # belongs anywhere near a ball at rest.
+    skin = (
+        (sub[:, :, 0] <= 25) & (sub[:, :, 1] >= 40) & (sub[:, :, 2] >= 90)
+    )
+    if (float((skin & ring).sum()) / n) > max_skin:
+        return False
+    # Grass: green hue with real saturation. Wide, because turf runs from
+    # sunlit yellow-green to dark shade. This is what catches a lit toe
+    # on a shoe -- not skin, but not grass either.
     grass = (
         (sub[:, :, 0] >= 25) & (sub[:, :, 0] <= 95) & (sub[:, :, 1] >= 60)
     )
@@ -7763,7 +7776,39 @@ def detect_swings_from_ball(
                 if rx1 - rx0 < 8 or ry1 - ry0 < 8:
                     rx0, ry0, rx1, ry1 = 0, 0, w, h
                 work = frame[ry0:ry1, rx0:rx1]
-                scale, ox, oy = 1.0, rx0, ry0
+                ox, oy = rx0, ry0
+                # UPSCALE THE CROP. At 720p a ball is 3-4px across and
+                # its thresholded core is a 3x3 square: minEnclosingCircle
+                # calls that a radius of 1.0, which is under any sane
+                # floor, and no shape can be measured from nine pixels.
+                # There is no threshold that fixes this -- the geometry
+                # is simply not there at that scale.
+                #
+                # Enlarging the crop puts it back. Cubic interpolation
+                # spreads the ball across enough pixels to have a radius
+                # and a shape again, and because the box is a small part
+                # of a frame this costs almost nothing -- a 222x88 box at
+                # 3x is 666x264, far less than the full frame it replaced.
+                # Everything downstream divides by `scale`, so the
+                # numbers stay in native pixels.
+                # Only when the ball is genuinely too small to measure.
+                # Enlarging a frame that did not need it buys nothing and
+                # costs the artefacts below.
+                _want_r = (
+                    expect_radius_px if expect_radius_px else 0.0025 * h
+                )
+                scale = 1.0
+                if _want_r < 2.5:
+                    scale = float(min(4.0, 4.0 / max(0.5, _want_r)))
+                    # LINEAR, not CUBIC. Cubic overshoots at a hard edge,
+                    # and the overshoot along a sunlit leg against grass
+                    # is exactly a bright, low-saturation pixel -- it
+                    # MANUFACTURES white blobs where the picture had a
+                    # boundary. Linear cannot overshoot.
+                    work = cv2.resize(
+                        work, None, fx=scale, fy=scale,
+                        interpolation=cv2.INTER_LINEAR,
+                    )
             else:
                 # No box: the whole frame, but only down to 720 tall.
                 # 360 was small enough to erase the thing being looked
@@ -7804,7 +7849,7 @@ def detect_swings_from_ball(
             else:
                 # 0.006*h is a ~6.5px radius at 1080p -- 13px across,
                 # already generous for a ball and well under a shoe.
-                r_lo, r_hi = max(1.2, 0.0012 * h), 0.006 * h
+                r_lo, r_hi = max(0.8, 0.0010 * h), 0.006 * h
 
             cands: list[tuple[float, float, float]] = []
             for c in cnts:
@@ -7827,11 +7872,13 @@ def detect_swings_from_ball(
                 ))
                 if a <= 0:
                     continue
-                # A BALL IS AS WIDE AS IT IS TALL. A shoe is not. This
-                # one holds at any size -- three pixels by one is not a
-                # ball however few pixels there are -- so it is asked
-                # first and always.
-                if max(_bw, _bh) / float(min(_bw, _bh)) > aspect_max:
+                # A BALL IS AS WIDE AS IT IS TALL. A shoe is not. Asked
+                # of anything with enough pixels to have an aspect at
+                # all: on a 2x1 blob the ratio is 2.0 no matter what the
+                # blob is, so below that it rejects balls, not shoes.
+                if rad >= 1.5 and (
+                    max(_bw, _bh) / float(min(_bw, _bh)) > aspect_max
+                ):
                     n_drop_shape += 1
                     continue
                 # ROUNDNESS AND FILL ARE ONLY ASKED OF BLOBS BIG ENOUGH
@@ -7972,6 +8019,7 @@ def detect_swings_from_ball(
                     if r_lo is not None else None
                 ),
                 "native_scan": bool(roi),
+                "work_scale": round(float(scale), 2) if r_lo is not None else None,
                 "n_tracks": len(tracks),
                 "n_rested": n_rested,
                 "min_rest_sec": float(min_rest_sec),
