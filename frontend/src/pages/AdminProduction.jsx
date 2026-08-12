@@ -5842,43 +5842,113 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                       cap="Frame by frame at the rest spot. Green = ball present, red = gone, yellow box = the frame it disappeared."
                     />
 
-                    {/* Debug3's stage 4, run only over the flight window:
-                        the 3 seconds after impact. Anywhere else in the
-                        clip there is no ball in the air to find. */}
-                    {b.mog2 && (
+                    {/* Debug3's stages 4, 5 and 6, from one MOG2 pass over
+                        the 3 seconds after impact -- the only stretch of
+                        the clip with a ball in the air. */}
+                    {b.stages && !b.stages.error && (
                       <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--line)" }}>
-                        <div className="tiny upper muted" style={{ marginBottom: 4 }}>
-                          MOG2 + component + area filter · frames {b.mog2.f0}–{b.mog2.f1}
-                          {" "}(3s after impact){b.mog2.seconds != null && <> · {b.mog2.seconds}s</>}
+                        <div className="tiny upper muted" style={{ marginBottom: 6 }}>
+                          Flight pipeline · frames{" "}
+                          {b.stages.window ? b.stages.window.join("–") : "?"} (3s after impact)
+                          {b.stages.seconds != null && <> · {b.stages.seconds}s</>}
                         </div>
-                        <div className="tiny muted" style={{ marginBottom: 6 }}>
-                          Big blobs become a golfer mask; only ball-sized off-body
-                          blobs survive.
+
+                        <div className="small"><b>4 · MOG2 + component + area filter</b></div>
+                        <div className="tiny muted">
+                          Big blobs become a golfer mask; only ball-sized off-body blobs survive.
                         </div>
-                        {b.mog2.stats && (
-                          <div className="small" style={{ marginBottom: 6 }}>
-                            {b.mog2.stats.frames ?? 0} frames ·{" "}
-                            {b.mog2.stats.components ?? 0} components ·{" "}
-                            {b.mog2.stats.golfer ?? 0} golfer-sized ·{" "}
-                            {b.mog2.stats.on_golfer ?? 0} on the golfer ·{" "}
-                            {b.mog2.stats.too_small ?? 0} too small ·{" "}
-                            {b.mog2.stats.too_big ?? 0} too big ·{" "}
-                            <b>{b.mog2.stats.kept ?? b.mog2.n_dets ?? 0} kept</b>
+                        {b.stages.detect?.stats && (
+                          <div className="small" style={{ margin: "4px 0 2px" }}>
+                            {b.stages.detect.stats.components ?? 0} components ·{" "}
+                            {b.stages.detect.stats.on_golfer ?? 0} on the golfer ·{" "}
+                            {b.stages.detect.stats.too_big ?? 0} too big ·{" "}
+                            <b>{b.stages.detect.stats.kept ?? 0} kept</b>
                           </div>
                         )}
-                        {b.mog2.reason && (
-                          <div className="tiny muted" style={{ marginBottom: 6 }}>
-                            {b.mog2.reason}
+                        <Img url={b.stages.detect?.frame_image}
+                          cap="One frame: red = golfer mask (excluded), green = ball-sized blobs kept." />
+                        <Img url={b.stages.detect?.dets_image}
+                          cap="Every kept detection, coloured by time — blue early, orange late." />
+
+                        <div className="small" style={{ marginTop: 10 }}>
+                          <b>5 · Nearest-neighbour tracking</b>{" "}
+                          <span className="muted">— {b.stages.tracks?.n ?? 0} tracks built</span>
+                        </div>
+                        <div className="tiny muted">
+                          Constant-velocity prediction with a gate that widens on a missed frame.
+                        </div>
+                        <Img url={b.stages.tracks?.image}
+                          cap="The tracks it linked. One object should yield one track." />
+
+                        <div className="small" style={{ marginTop: 10 }}>
+                          <b>6 · RANSAC parabola + flight tests</b>{" "}
+                          <span className={b.stages.flight?.ok ? "pill ok" : "pill warn"}>
+                            {b.stages.flight?.ok ? "flight found" : "no flight"}
+                          </span>
+                        </div>
+                        <div className="tiny muted">
+                          x linear in t, y quadratic; must rise and must point back at the ball.
+                        </div>
+                        {b.stages.flight?.ok && (
+                          <div className="small" style={{ margin: "4px 0 2px" }}>
+                            {b.stages.flight.n_inliers} inliers ·{" "}
+                            {b.stages.flight.rms_px}px rms ·{" "}
+                            {b.stages.flight.n_points} tracer points · launch f
+                            {b.stages.flight.launch_frame}
                           </div>
                         )}
-                        <Img
-                          url={b.mog2.frame_image}
-                          cap="One frame: red = golfer mask (excluded), green = ball-sized blobs kept."
-                        />
-                        <Img
-                          url={b.mog2.dets_image}
-                          cap="Every kept detection across the 3s window, coloured by time — blue early, orange late. A flight reads as a coherent ramp; noise does not."
-                        />
+                        {b.stages.flight?.reason && (
+                          <div className="tiny muted" style={{ marginBottom: 4 }}>
+                            {b.stages.flight.reason}
+                          </div>
+                        )}
+                        <Img url={b.stages.flight?.image}
+                          cap="The fitted flight over the frame it was measured on." />
+
+                        {/* Why each candidate track was accepted or thrown
+                            out -- the answer to "there was clearly a ball,
+                            why no flight?" */}
+                        {b.stages.flight?.tried?.length > 0 && (
+                          <details style={{ marginTop: 6 }}>
+                            <summary className="tiny muted" style={{ cursor: "pointer" }}>
+                              Candidate tracks and their verdicts
+                            </summary>
+                            <div style={{ overflowX: "auto" }}>
+                              <table className="tiny" style={{ borderCollapse: "collapse", marginTop: 6 }}>
+                                <thead><tr style={{ textAlign: "left" }}>
+                                  <th style={{ paddingRight: 10 }}>frames</th>
+                                  <th style={{ paddingRight: 10 }}>from → to</th>
+                                  <th style={{ paddingRight: 10 }}>rise</th>
+                                  <th style={{ paddingRight: 10 }}>inliers</th>
+                                  <th style={{ paddingRight: 10 }}>rms</th>
+                                  <th>verdict</th>
+                                </tr></thead>
+                                <tbody>
+                                  {b.stages.flight.tried.map((t, ti) => (
+                                    <tr key={ti} style={{
+                                      color: String(t.verdict || "").startsWith("accepted")
+                                        ? "var(--ok, #2a8)" : undefined,
+                                    }}>
+                                      <td style={{ paddingRight: 10 }}>{t.frames?.join("–")}</td>
+                                      <td style={{ paddingRight: 10 }}>
+                                        {t.from?.join(",")} → {t.to?.join(",")}
+                                      </td>
+                                      <td style={{ paddingRight: 10 }}>{t.rise_px}px</td>
+                                      <td style={{ paddingRight: 10 }}>{t.n_inliers}</td>
+                                      <td style={{ paddingRight: 10 }}>{t.rms_px}</td>
+                                      <td>{t.verdict}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    )}
+                    {b.stages?.error && (
+                      <div className="err-text tiny" style={{ marginTop: 8 }}>
+                        Flight stages failed: {b.stages.error}
                       </div>
                     )}
                   </div>

@@ -14317,38 +14317,85 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("swing test: rest still failed: %s", exc)
 
-        # STAGE 4, the one Debug3 calls "MOG2 + component + area filter":
-        # per-frame background subtraction, big blobs become a golfer mask,
-        # and only ball-sized off-body blobs survive. Run ONLY over the 3
-        # seconds after impact -- that is where the ball in flight is, and
-        # the whole clip would be MOG2 over thousands of frames to look at
-        # the part where nothing is moving.
+        # STAGES 4, 5 and 6, from ONE pass: MOG2 + component + area
+        # filter, nearest-neighbour tracking, then the RANSAC parabola and
+        # its flight tests. find_flight IS the pipeline produce runs, so
+        # calling it rather than re-assembling the stages means the panel
+        # shows what actually happens rather than a lookalike -- and one
+        # MOG2 pass serves all three instead of three passes.
+        #
+        # Windowed to the 3 seconds after impact. That is where a ball in
+        # flight is; the rest of the clip is frames with nothing struck.
         if b["impact_frame"] is not None:
             try:
                 from ..services import debug3 as _d3
 
-                _f0 = int(b["impact_frame"])
-                _f1 = _f0 + int(round(3.0 * fps))
                 _t1 = time.perf_counter()
-                _det = _d3.detect_ball_blobs(
-                    src_path, _f0, _f1,
+                _ff = _d3.find_flight(
+                    src_path, fps,
+                    impact_frame=int(b["impact_frame"]),
+                    frame_w=(_wh[0] if _wh else None),
+                    frame_h=(_wh[1] if _wh else None),
+                    rest_ball={"xy": [b["x"], b["y"]]},
+                    ball_locked=True,
+                    win_post=int(round(3.0 * fps)),
                     debug_dir=CLIPS_DIR,
-                    debug_prefix=f"swingtest-{upload_id}-{tok}-mog2-{k}",
+                    debug_prefix=f"swingtest-{upload_id}-{tok}-fl{k}",
                 ) or {}
+                _fd = _ff.get("debug") or {}
+                _det = _fd.get("detect") or {}
                 _imgs = _det.get("images") or {}
-                b["mog2"] = {
-                    "ok": bool(_det.get("ok")),
-                    "reason": _det.get("reason"),
-                    "stats": _det.get("stats") or {},
-                    "n_dets": len(_det.get("dets") or []),
-                    "f0": _f0, "f1": _f1,
+                b["stages"] = {
                     "seconds": round(time.perf_counter() - _t1, 2),
-                    "frame_image": _clip_url_for(_imgs.get("frame")),
-                    "dets_image": _clip_url_for(_imgs.get("dets")),
+                    "window": _fd.get("window"),
+                    "timing": _fd.get("timing"),
+                    # 4 — MOG2 + component + area filter
+                    "detect": {
+                        "stats": _det.get("stats") or {},
+                        "reason": _det.get("reason"),
+                        "frame_image": _clip_url_for(_imgs.get("frame")),
+                        "dets_image": _clip_url_for(_imgs.get("dets")),
+                    },
+                    # 5 — nearest-neighbour tracking
+                    "tracks": {
+                        "n": _fd.get("n_tracks"),
+                        "preview": (_fd.get("tracks_preview") or [])[:8],
+                        "image": _clip_url_for(_fd.get("tracks_image")),
+                    },
+                    # 6 — RANSAC parabola + flight tests
+                    "flight": {
+                        "ok": bool(_ff.get("ok")),
+                        "reason": _ff.get("reason") or (_fd.get("flight") or {}).get("reason"),
+                        # Every candidate track with its verdict, which is
+                        # 40+ entries of full detail. The panel needs the
+                        # accepted one and enough of the rejected to see
+                        # WHY, not the whole pool.
+                        "tried": [
+                            {k2: _t.get(k2) for k2 in (
+                                "idx", "frames", "from", "to", "n_points",
+                                "n_inliers", "rms_px", "rise_px", "span_px",
+                                "verdict", "score",
+                            )}
+                            for _t in sorted(
+                                ((_fd.get("flight") or {}).get("tried") or []),
+                                key=lambda z: (
+                                    0 if str(z.get("verdict", "")).startswith("accepted") else 1,
+                                    -(z.get("score") or 0),
+                                    -(z.get("n_inliers") or 0),
+                                ),
+                            )[:8]
+                        ],
+                        "n_inliers": (_fd.get("flight") or {}).get("n_inliers"),
+                        "rms_px": (_fd.get("flight") or {}).get("rms_px"),
+                        "aim_px": (_fd.get("flight") or {}).get("aim_px"),
+                        "n_points": len(_ff.get("points") or []),
+                        "launch_frame": _ff.get("launch_frame"),
+                        "image": _clip_url_for(_fd.get("flight_image")),
+                    },
                 }
             except Exception as exc:  # noqa: BLE001
-                log.warning("swing test: MOG2 stage failed: %s", exc)
-                b["mog2"] = {"ok": False, "reason": f"failed: {exc}"}
+                log.warning("swing test: flight stages failed: %s", exc)
+                b["stages"] = {"error": str(exc)}
 
         rep["departures"].append(b)
     rep["verify_sec"] = round(time.perf_counter() - _t0, 2)

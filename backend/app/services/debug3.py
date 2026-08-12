@@ -837,6 +837,7 @@ def find_flight(
     ball_side: str | None = None,
     rest_ball: dict | None = None,
     ball_locked: bool = False,
+    win_post: int | None = None,
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -885,7 +886,13 @@ def find_flight(
             f_lo, f_hi = 0, (n_frames - 1 if n_frames else 400)
         else:
             f_lo = max(0, int(impact_frame) - WIN_PRE)
-            f_hi = int(impact_frame) + WIN_POST
+            # WIN_POST is the flight window produce uses. A caller that
+            # wants a different one (the swing test asks for 3 seconds,
+            # which is 150 frames at 50fps rather than 100) says so
+            # rather than editing a constant that produce also reads.
+            f_hi = int(impact_frame) + int(
+                WIN_POST if win_post is None else win_post
+            )
         dbg["window"] = [f_lo, f_hi]
         dbg["r_px"] = round(r, 1)
 
