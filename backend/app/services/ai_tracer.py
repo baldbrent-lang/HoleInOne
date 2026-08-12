@@ -7602,7 +7602,7 @@ def detect_swings_from_ai_ball(
 
 
 def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
-                   min_grass: float = 0.6, max_white: float = 0.25,
+                   min_grass: float = 0.8, max_white: float = 0.25,
                    max_skin: float = 0.12) -> bool:
     """Is this A SMALL WHITE BALL ON GREEN GRASS, or part of a person?
 
@@ -7643,11 +7643,21 @@ def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
     )
     if (float((skin & ring).sum()) / n) > max_skin:
         return False
-    # Grass: green hue with real saturation. Wide, because turf runs from
-    # sunlit yellow-green to dark shade. This is what catches a lit toe
-    # on a shoe -- not skin, but not grass either.
+    # Grass is identified by HUE. Measured on real tee footage, the ring
+    # around a ball is 100% green by hue -- and only 7% of it clears a
+    # saturation floor of 60, because real turf on an overcast day sits
+    # at S 43-63 (median 54), not the vivid green of a colour picker.
+    # That floor rejected the ball on every frame of every clip.
+    #
+    # The S floor is kept only to exclude grey and white, which have no
+    # hue worth trusting, and is set far below anything turf does.
+    #
+    # The BAR is high (80%) because a real ball's ring measures 100%
+    # grass, so there is room, and because the thing it has to exclude --
+    # a lit toe on a shoe -- is only distinguishable by how much of its
+    # surroundings is NOT grass.
     grass = (
-        (sub[:, :, 0] >= 25) & (sub[:, :, 0] <= 95) & (sub[:, :, 1] >= 60)
+        (sub[:, :, 0] >= 25) & (sub[:, :, 0] <= 95) & (sub[:, :, 1] >= 25)
     )
     return (float((grass & ring).sum()) / n) >= min_grass
 
