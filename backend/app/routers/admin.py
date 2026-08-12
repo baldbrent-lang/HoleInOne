@@ -7695,7 +7695,10 @@ def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
                       f"this hole is aimed")
     try:
         x, y = float(spot[0]), float(spot[1])
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError, KeyError):
+        # KeyError belongs here: a caller passing {"x":..,"y":..} -- which
+        # is how the rest of this file spells a point -- raises KeyError(0)
+        # whose whole message is "0", and it escaped as that.
         return None, "the landing spot is not an [x, y] pair"
     pt = gc.map_to_tee(vm, x, y, green_size, tee_size)
     if pt is None:
@@ -14606,39 +14609,55 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
                 # curve cannot be drawn.
                 _g = b.get("green") or {}
                 if _ff.get("points") and _g.get("landing_xy"):
-                    _lxy, _lwhy = _map_landing_to_tee(
-                        db, row,
-                        {"x": _g["landing_xy"][0], "y": _g["landing_xy"][1]},
-                        green_size=_g.get("frame_size"),
-                        tee_size=list(_wh) if _wh else None,
-                    )
-                    if _lxy:
-                        _bez = _d3.bezier_continuation(
-                            _ff["points"], (_lxy[0], _lxy[1]),
-                        ) or {}
+                    # ITS OWN NET. This runs inside the stages try, so a
+                    # throw here used to replace four working stages with
+                    # an error string -- the panel reported "flight stages
+                    # failed" for stages that had already succeeded.
+                    try:
+                        _lxy, _lwhy = _map_landing_to_tee(
+                            db, row, list(_g["landing_xy"]),
+                            green_size=_g.get("frame_size"),
+                            tee_size=list(_wh) if _wh else None,
+                        )
+                        if _lxy:
+                            _bez = _d3.bezier_continuation(
+                                _ff["points"], (_lxy[0], _lxy[1]),
+                            ) or {}
+                            b["bezier"] = {
+                                k2: _bez.get(k2) for k2 in (
+                                    "ok", "p0", "p1", "p2", "apex",
+                                    "ctrl_px", "direction", "n_dir_used",
+                                    "n_stalled_dropped", "reason")
+                            }
+                            _fc = (_fd.get("flight_image")
+                                   or (_det.get("images") or {}).get("dets"))
+                            if (_bez.get("ok") and _fc
+                                    and (CLIPS_DIR / _fc).exists()):
+                                _bn = f"swingtest-{upload_id}-{tok}-bez{k}.jpg"
+                                if _d3.draw_bezier_continuation(
+                                    CLIPS_DIR / _fc, CLIPS_DIR / _bn,
+                                    _ff["points"], _bez,
+                                    "MEASURED flight (solid) -> PROJECTED "
+                                    "continuation (dashed) -> landing from "
+                                    "the green camera",
+                                ):
+                                    b["bezier"]["image"] = _clip_url_for(_bn)
+                        else:
+                            b["bezier"] = {"ok": False, "reason": _lwhy}
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("swing test: continuation failed: %s",
+                                    exc, exc_info=True)
                         b["bezier"] = {
-                            k2: _bez.get(k2) for k2 in (
-                                "ok", "p0", "p1", "p2", "apex", "ctrl_px",
-                                "direction", "n_dir_used",
-                                "n_stalled_dropped", "reason")
+                            "ok": False,
+                            "reason": f"{type(exc).__name__}: {exc}",
                         }
-                        _fc = (_fd.get("flight_image")
-                               or (_det.get("images") or {}).get("dets"))
-                        if _bez.get("ok") and _fc and (CLIPS_DIR / _fc).exists():
-                            _bn = f"swingtest-{upload_id}-{tok}-bez{k}.jpg"
-                            if _d3.draw_bezier_continuation(
-                                CLIPS_DIR / _fc, CLIPS_DIR / _bn,
-                                _ff["points"], _bez,
-                                "MEASURED flight (solid) -> PROJECTED "
-                                "continuation (dashed) -> landing from the "
-                                "green camera",
-                            ):
-                                b["bezier"]["image"] = _clip_url_for(_bn)
-                    else:
-                        b["bezier"] = {"ok": False, "reason": _lwhy}
             except Exception as exc:  # noqa: BLE001
-                log.warning("swing test: flight stages failed: %s", exc)
-                b["stages"] = {"error": str(exc)}
+                log.warning("swing test: flight stages failed: %s", exc,
+                            exc_info=True)
+                # The TYPE as well as the message: a bare str(exc) on a
+                # KeyError(0) is the single character "0", which is what
+                # this reported and is no use to anybody.
+                b["stages"] = {"error": f"{type(exc).__name__}: {exc}"}
             _phase["tee_flight"] = _phase.get("tee_flight", 0.0) + float(
                 (b.get("stages") or {}).get("seconds") or 0.0)
 
