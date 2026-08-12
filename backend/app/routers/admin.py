@@ -15097,12 +15097,13 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
         raise HTTPException(400, "that departure has no confirmed impact frame")
     green = b.get("green") or {}
     cut = green.get("cut") or {}
-    if not cut:
-        raise HTTPException(
-            400,
-            "no landing on the green camera, so there is nothing to cut to — "
-            + (green.get("reason") or "the green stage found no descent"),
-        )
+    # NO GREEN LANDING IS NOT A REASON NOT TO PRODUCE. The ball missed
+    # the green, or flew past it, or went somewhere that camera cannot
+    # see -- and that is a shot worth a clip like any other. Without a
+    # landing there is nothing to cut TO, so the clip is tee-only and the
+    # tracer follows the ball's OWN fitted flight to an assumed landing
+    # rather than stopping dead where MOG2 lost it.
+    _tee_only = not cut
 
     storage.ensure_local(CLIPS_DIR, row.tee_filename)
     src = _local_tee(row)
@@ -15128,8 +15129,33 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     # looks like it failed. The Bezier already knows the rest of the
     # arc; it only lacks frame numbers, so its samples are spread over
     # the frames between the last measurement and the cut.
+    _assumed_landing = None
+    _assumed_reason = None
+    if _tee_only:
+        # No P2 to bend toward, so follow the measurement's own model:
+        # x at a constant rate, y a parabola -- the same one the RANSAC
+        # fit used -- until the ball is back down to the height it was
+        # struck from.
+        _fsz = _frame_size(src)
+        _ex = _d3.extrapolate_flight(
+            [{"frame": q["frame"], "x": q["x"], "y": q["y"]} for q in _pts],
+            int(_fsz[1]) if _fsz else 720, fps,
+        ) or {}
+        _assumed_reason = _ex.get("reason")
+        if _ex.get("ok"):
+            _assumed_landing = _ex.get("landing_xy")
+            _seen = {q["frame"] for q in _pts}
+            for _q in _ex["points"]:
+                if _q["frame"] in _seen:
+                    continue
+                _seen.add(_q["frame"])
+                _pts.append({"found": True, "projected": True,
+                             "frame": int(_q["frame"]),
+                             "x": int(_q["x"]), "y": int(_q["y"])})
+            _pts.sort(key=lambda q: q["frame"])
+
     _bez = b.get("bezier") or {}
-    if _bez.get("ok") and _bez.get("p0") and _pts:
+    if not _tee_only and _bez.get("ok") and _bez.get("p0") and _pts:
         # CARRY THE LINE ON, AT THE SPEED IT WAS GOING.
         #
         # The measured points stop where MOG2 lost the ball -- off the
@@ -15198,6 +15224,38 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
         raise HTTPException(500, f"tracer render failed: {exc}")
     if not traced.exists() or traced.stat().st_size == 0:
         raise HTTPException(500, "tracer render produced an empty file")
+
+    if _tee_only:
+        # Run the clip a beat past where the ball is projected to come
+        # down, so the tracer finishes on screen.
+        _last_f = _pts[-1]["frame"] if _pts else int(impact)
+        tee_from = max(0.0, float(impact) / fps - 2.5)
+        tee_to = float(_last_f) / fps + 1.0
+        out = CLIPS_DIR / f"swingtest-{upload_id}-produced.mp4"
+        if not cut_segment(traced, out, tee_from, tee_to):
+            raise HTTPException(500, "the tee-only cut failed")
+        course = db.get(Course, row.course_id) if row.course_id else None
+        hole = _hole_for_upload(db, row)
+        cname, par, yards, _note = hole_facts(db, course, hole)
+        try:
+            apply_intro_overlay_inplace(
+                out, player_name=None, course_name=cname,
+                hole_number=hole, par=par, yardage=yards,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swing-test produce: overlay failed: %s", exc)
+        log.info("swing-test produce (tee only) upload=%s tee[%.2f-%.2f] -> %s",
+                 upload_id, tee_from, tee_to, out.name)
+        return {
+            "ok": True, "url": _clip_url_for(out.name), "tee_only": True,
+            "tee_window_sec": [round(tee_from, 2), round(tee_to, 2)],
+            "green_window_sec": None,
+            "assumed_landing": _assumed_landing,
+            "reason": _assumed_reason
+                or "no landing on the green camera — tee-only clip",
+            "impact_frame": int(impact), "n_flight_points": len(_pts),
+            "hole": hole, "course": cname,
+        }
 
     # THE GREEN HALF, as a comet over the cut window.
     green_path = _local_green(row)

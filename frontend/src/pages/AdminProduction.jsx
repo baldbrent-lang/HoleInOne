@@ -5661,7 +5661,13 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                     where it was. It is an action, so it carries its own
                     button and reports what it built. */}
                 {(() => {
-                  const dep = (rep.departures || []).find((d) => d.green?.cut);
+                  // A missed green is still a shot worth a clip: produce
+                  // needs a confirmed impact, not a landing. Without one
+                  // the clip is tee-only and the tracer runs on to an
+                  // assumed landing.
+                  const dep = (rep.departures || []).find((d) => d.green?.cut)
+                    || (rep.departures || []).find((d) => d.impact_frame != null);
+                  const teeOnly = dep && !dep.green?.cut;
                   return (
                     <div className="small"
                       style={{
@@ -5674,8 +5680,10 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                       <div style={{ flex: 1 }}>
                         <b>Produce</b>
                         <div className="tiny muted">
-                          tee tracer → cut to the green camera 1s before the ball
-                          lands → 3s of green → the usual graphics
+                          {teeOnly
+                            ? "no landing on the green camera — tee-only, tracer carried on to an assumed landing"
+                            : "tee tracer → cut to the green camera 1s before the ball lands → 3s of green"}
+                          {" "}→ the usual graphics
                         </div>
                         {produced?.url && (
                           <div className="tiny" style={{ marginTop: 3 }}>
@@ -5686,6 +5694,9 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                             {produced.green_window_sec?.join("–")}s
                             {produced.n_flight_points != null && (
                               <> · {produced.n_flight_points} tracer points</>
+                            )}
+                            {produced.assumed_landing && (
+                              <> · assumed landing {produced.assumed_landing.join(", ")}</>
                             )}
                           </div>
                         )}
@@ -5701,12 +5712,15 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                           disabled={!dep || producing}
                           title={dep
                             ? "Build the clip this analysis describes"
-                            : "Needs a departure with a landing on the green camera"}
+                            : "Needs a departure with a confirmed impact frame"}
                           onClick={() => produce(dep?.idx ?? 0)}>
                           {producing ? "Producing…" : "🎬 Produce"}
                         </button>
                         <div className="tiny muted" style={{ marginTop: 2 }}>
-                          {produced?.url ? "built" : dep ? "ready" : "no landing to cut to"}
+                          {produced?.url
+                            ? (produced.tee_only ? "built · tee only" : "built")
+                            : dep ? (teeOnly ? "ready · tee only" : "ready")
+                              : "no confirmed impact"}
                         </div>
                       </div>
                     </div>

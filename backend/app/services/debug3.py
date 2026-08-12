@@ -1004,6 +1004,90 @@ def draw_bezier_continuation(canvas_path: Path, out_path: Path,
         return False
 
 
+def extrapolate_flight(points: list, frame_h: int, fps: float,
+                       max_sec: float = 4.0, n_fit: int = 8) -> dict:
+    """Carry the flight on with no landing to aim at.
+
+    When the green camera never saw the ball -- missed the green, flew
+    long, out of that camera's view entirely -- there is no P2 and the
+    Bezier has nothing to bend toward. The ball still went somewhere, and
+    the measurement itself says where: x moves at a constant rate and y
+    is a parabola, which is the same model the RANSAC fit already uses.
+    Continue those and the line follows the shot instead of stopping dead
+    where MOG2 lost it.
+
+    The landing is ASSUMED, not measured, and is reported as such: the
+    curve runs until the ball returns to the height it was struck from
+    (the ground line at that distance), or until max_sec is up, whichever
+    comes first.
+
+    Returns {ok, points, landing_xy, landing_frame, reason}. Never raises.
+    """
+    out = {"ok": False, "points": [], "landing_xy": None,
+           "landing_frame": None, "reason": None}
+    pts = [p for p in (points or []) if p is not None]
+    if len(pts) < 3:
+        out["reason"] = "fewer than three measured points to fit"
+        return out
+    # Drop a stalled tail first, for the same reason the Bezier does: a
+    # ball clipped by the frame border stops moving and a fit over that
+    # reads as a ball hanging in the air.
+    while len(pts) > 3:
+        a, b = pts[-2], pts[-1]
+        if abs(float(b["x"]) - float(a["x"])) <= 2.0 and \
+           abs(float(b["y"]) - float(a["y"])) <= 2.0:
+            pts = pts[:-1]
+            continue
+        break
+    tail = pts[-max(3, int(n_fit)):]
+    f0 = float(tail[0]["frame"])
+    tt = [float(q["frame"]) - f0 for q in tail]
+    xx = [float(q["x"]) for q in tail]
+    yy = [float(q["y"]) for q in tail]
+    try:
+        if not HAS_CV:      # this module gates cv2 and numpy together
+            out["reason"] = "numpy not installed"
+            return out
+        mx = np.polyfit(tt, xx, 1)          # x linear in t
+        my = np.polyfit(tt, yy, 2)          # y quadratic
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"could not fit the flight: {exc}"
+        return out
+    if my[0] <= 0:
+        # Curving upward forever: no descent to follow, so nothing to say
+        # about where it came down.
+        out["reason"] = "the fitted flight never turns over — nothing to extend"
+        return out
+
+    y_ground = float(pts[0]["y"])           # the height it was struck from
+    f_last = int(tail[-1]["frame"])
+    n_max = int(max(1, round(float(max_sec) * float(fps or 30.0))))
+    res = []
+    for i in range(1, n_max + 1):
+        f = f_last + i
+        t = float(f) - f0
+        x = float(np.polyval(mx, t))
+        y = float(np.polyval(my, t))
+        res.append({"frame": int(f), "x": int(round(x)), "y": int(round(y))})
+        if y >= y_ground:                   # back down to where it started
+            break
+    if not res:
+        out["reason"] = "nothing to extend"
+        return out
+    out.update({
+        "ok": True, "points": res,
+        "landing_xy": [res[-1]["x"], res[-1]["y"]],
+        "landing_frame": res[-1]["frame"],
+        "reason": (
+            f"no landing seen on the green camera — carried the fitted "
+            f"flight on for {len(res)} frame(s) to an ASSUMED landing at "
+            f"({res[-1]['x']},{res[-1]['y']})"
+            + ("" if res[-1]["y"] >= y_ground else ", still airborne when the extension ran out")
+        ),
+    })
+    return out
+
+
 # ── stage E: RANSAC parabola ───────────────────────────────────────────
 
 def ransac_parabola(
@@ -2436,7 +2520,7 @@ __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "find_flight", "detect_ball_blobs", "draw_flight",
-    "follow_to_rest", "draw_ball_path", "bezier_continuation", "draw_bezier_continuation",
+    "follow_to_rest", "draw_ball_path", "bezier_continuation", "extrapolate_flight", "draw_bezier_continuation",
     "draw_tracks", "select_preview_tracks", "TRACK_COLORS", "TRACKS_DRAWN",
     "pick_flight",
     "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",
