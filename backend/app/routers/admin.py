@@ -14660,6 +14660,16 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
                         "rms_px": (_fd.get("flight") or {}).get("rms_px"),
                         "aim_px": (_fd.get("flight") or {}).get("aim_px"),
                         "n_points": len(_ff.get("points") or []),
+                        # The points themselves, because producing the
+                        # clip re-draws this exact flight and re-running
+                        # the whole pipeline to recover twenty numbers
+                        # would be absurd. A fitted flight is a few dozen
+                        # points, so this is cheap to carry.
+                        "points": [
+                            {"frame": int(q["frame"]), "x": int(q["x"]),
+                             "y": int(q["y"])}
+                            for q in (_ff.get("points") or [])
+                        ],
                         "launch_frame": _ff.get("launch_frame"),
                         "image": _clip_url_for(_fd.get("flight_image")),
                     },
@@ -15039,6 +15049,130 @@ def diagnose_ball(upload_id: int, payload: dict, db: Session = Depends(get_db)):
         "accept_radius_px": (dbg.get("accept_radius_px")),
         "frame_size": list(wh),
         "probe": probe,
+    }
+
+
+@router.post("/long-uploads/{upload_id}/swing-test/produce")
+def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
+                       db: Session = Depends(get_db)):
+    """Build the clip the swing test just described: tee tracer, cut to
+    the green camera one second of REAL TIME before the ball lands, three
+    seconds of green, then the same graphics every other clip gets.
+
+    payload: {"departure": 0} — which departure to produce, if the clip
+    holds more than one.
+
+    Everything here is measured rather than assumed: the impact frame
+    from the spot walk, the flight from the tee pipeline, the landing
+    from the green camera, and the cut from the two cameras' wall clocks.
+    The one number that is a choice is the second before landing, which
+    is what makes the switch land while the ball is still in the air.
+    """
+    from ..services.ai_tracer import render_tracer_video
+    from ..services import debug3 as _d3
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row or not row.tee_filename:
+        raise HTTPException(404, "upload not found or has no tee video")
+    st = (_debugx_get("swingtest", upload_id) or {}).get("report") or {}
+    deps = st.get("departures") or []
+    if not deps:
+        raise HTTPException(400, "run the swing test first — no departure to produce")
+    try:
+        b = deps[int((payload or {}).get("departure") or 0)]
+    except (IndexError, ValueError, TypeError):
+        raise HTTPException(400, "no such departure on this upload")
+
+    impact = b.get("impact_frame")
+    if impact is None:
+        raise HTTPException(400, "that departure has no confirmed impact frame")
+    green = b.get("green") or {}
+    cut = green.get("cut") or {}
+    if not cut:
+        raise HTTPException(
+            400,
+            "no landing on the green camera, so there is nothing to cut to — "
+            + (green.get("reason") or "the green stage found no descent"),
+        )
+
+    storage.ensure_local(CLIPS_DIR, row.tee_filename)
+    src = _local_tee(row)
+    fps = float(probe_fps(src) or 0.0) or 30.0
+
+    # THE TEE HALF. The tracer is the measured flight; where the Bezier
+    # carried it on to the landing, those points are drawn too, so the
+    # line does not simply stop where MOG2 lost the ball.
+    _stg = (b.get("stages") or {})
+    # render_tracer_video reads a per-frame record and SKIPS anything
+    # without found=True -- pass the points bare and it draws one of
+    # them, which reads as the tracer having failed rather than as the
+    # caller having used the wrong shape.
+    _pts = [
+        {"found": True, "frame": int(q["frame"]),
+         "x": int(q["x"]), "y": int(q["y"])}
+        for q in ((_stg.get("flight") or {}).get("points") or [])
+    ]
+    if not _pts:
+        raise HTTPException(400, "no fitted flight on the tee camera to draw")
+    traced = CLIPS_DIR / f"swingtest-{upload_id}-produce-tee.mp4"
+    try:
+        render_tracer_video(
+            src, traced, (float(b["x"]), float(b["y"])), int(impact), _pts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("swing-test produce: tracer render failed: %s", exc,
+                    exc_info=True)
+        raise HTTPException(500, f"tracer render failed: {exc}")
+    if not traced.exists() or traced.stat().st_size == 0:
+        raise HTTPException(500, "tracer render produced an empty file")
+
+    # THE GREEN HALF, as a comet over the cut window.
+    green_path = _local_green(row)
+    g0 = float(cut["at_green_sec"])
+    g1 = g0 + float(cut.get("green_hold_sec") or 3.0)
+    _seg = _finalize_green_comet(upload_id, 0, green_path, g0, g1, {})
+    if _seg:
+        g_src, g_from, g_to = _seg
+    else:
+        g_src, g_from, g_to = green_path, g0, g1
+
+    # The tee half runs from a little before impact to the cut.
+    tee_from = max(0.0, float(impact) / fps - 2.5)
+    tee_to = float(cut["at_tee_sec"])
+    if tee_to <= tee_from + 0.2:
+        raise HTTPException(
+            400,
+            f"the cut ({tee_to:.2f}s) is not after the swing ({tee_from:.2f}s)"
+            " — check the camera offset",
+        )
+
+    out = CLIPS_DIR / f"swingtest-{upload_id}-produced.mp4"
+    if not concat_two_clips(traced, tee_from, tee_to, g_src, g_from, g_to, out):
+        raise HTTPException(500, "the tee→green stitch failed")
+
+    # THE GRAPHICS, the same call every other produced clip makes.
+    course = db.get(Course, row.course_id) if row.course_id else None
+    hole = _hole_for_upload(db, row)
+    cname, par, yards, _note = hole_facts(db, course, hole)
+    try:
+        apply_intro_overlay_inplace(
+            out, player_name=None, course_name=cname,
+            hole_number=hole, par=par, yardage=yards,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("swing-test produce: overlay failed: %s", exc)
+
+    log.info(
+        "swing-test produce upload=%s tee[%.2f-%.2f] green[%.2f-%.2f] -> %s",
+        upload_id, tee_from, tee_to, g_from, g_to, out.name,
+    )
+    return {
+        "ok": True, "url": _clip_url_for(out.name),
+        "tee_window_sec": [round(tee_from, 2), round(tee_to, 2)],
+        "green_window_sec": [round(g_from, 2), round(g_to, 2)],
+        "cut_at": cut.get("at"), "landing_at": green.get("landing_at"),
+        "impact_frame": int(impact), "n_flight_points": len(_pts),
+        "hole": hole, "course": cname,
     }
 
 

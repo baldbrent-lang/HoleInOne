@@ -647,6 +647,15 @@ export const api = {
       adminPassword: key,
     }),
 
+  // Build the clip the swing test described: tee tracer, cut to green
+  // 1s before the landing, 3s of green, then the usual graphics.
+  swingTestProduce: (key, uploadId, departure = 0) =>
+    request(`/api/admin/long-uploads/${uploadId}/swing-test/produce`, {
+      method: "POST",
+      body: { departure },
+      adminPassword: key,
+    }),
+
   // Why was the ball at this pixel not found? Runs the real gates and
   // names the one that rejected it.
   diagnoseBall: (key, uploadId, { x, y }) =>

@@ -5416,6 +5416,9 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
   const [calibrating, setCalibrating] = useState(false);
   const [calibrated, setCalibrated] = useState(null);  // measured px
   const [diag, setDiag] = useState(null);              // why-not-found
+  const [producing, setProducing] = useState(false);
+  const [produced, setProduced] = useState(null);
+  const [produceErr, setProduceErr] = useState(null);
   const [dragFrom, setDragFrom] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -5481,6 +5484,19 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
   // A click does BOTH: measures the ball for calibration, and asks the
   // detector why it did not find one there. The second is the useful
   // half when the panel says it found nothing.
+  async function produce(idx) {
+    setProducing(true);
+    setProduceErr(null);
+    setProduced(null);
+    try {
+      setProduced(await api.swingTestProduce(adminPassword, state.uploadId, idx));
+    } catch (e) {
+      setProduceErr(e.message);
+    } finally {
+      setProducing(false);
+    }
+  }
+
   async function calibrate(p) {
     setCalibrating(true);
     setSaveErr(null);
@@ -6008,6 +6024,33 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                                   <span className="muted">
                                     {" "}· at rest {b.green.rest_after_impact}s after impact
                                   </span>
+                                )}
+                              </div>
+                            )}
+                            {b.green.cut && (
+                              <div style={{ marginTop: 6 }}>
+                                <button type="button" className="small"
+                                  style={{ width: "auto" }}
+                                  disabled={producing}
+                                  onClick={() => produce(b.idx)}>
+                                  {producing ? "Producing…" : "🎬 Produce this swing"}
+                                </button>
+                                {produced?.url && (
+                                  <div className="tiny" style={{ marginTop: 4 }}>
+                                    <a href={produced.url} target="_blank" rel="noreferrer">
+                                      produced clip
+                                    </a>
+                                    {" "}— tee {produced.tee_window_sec?.join("–")}s
+                                    {" "}+ green {produced.green_window_sec?.join("–")}s
+                                    {produced.n_flight_points != null && (
+                                      <> · {produced.n_flight_points} tracer points</>
+                                    )}
+                                  </div>
+                                )}
+                                {produceErr && (
+                                  <div className="err-text tiny" style={{ marginTop: 4 }}>
+                                    {produceErr}
+                                  </div>
                                 )}
                               </div>
                             )}
