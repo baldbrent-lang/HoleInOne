@@ -11087,8 +11087,12 @@ def _ball_debug_and_ref(src_path: Path, tee_fps: float, upload_id: int, roi):
             x1 = int((float(roi.get("x", 0)) + float(roi.get("w", 1))) * frame_w)
             y1 = int((float(roi.get("y", 0)) + float(roi.get("h", 1))) * frame_h)
             cv2.rectangle(diag, (x0, y0), (x1, y1), (0, 140, 255), 3)
-        for cx, cy in (ball_debug.get("sample_cands") or []):
-            cv2.circle(diag, (int(cx), int(cy)), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        # sample_cands carries an in-box flag as a third element now; this
+        # older overlay does not use it, so unpack loosely rather than
+        # raising on a tuple that grew.
+        for _sc in (ball_debug.get("sample_cands") or []):
+            cv2.circle(diag, (int(_sc[0]), int(_sc[1])), 5, (0, 255, 0), -1,
+                       cv2.LINE_AA)
         dname = f"debug-balldiag-{upload_id}-{secrets.token_hex(4)}.jpg"
         cv2.imwrite(str(CLIPS_DIR / dname), diag, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         diag_url = _url(dname)
@@ -13720,6 +13724,16 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
                 f"{_c.get('n_tracks')} blob track(s), but none held still "
                 f"for {_c.get('min_rest_sec')}s — nothing was ever at rest"
             )
+            # Most of what was found fell outside the drawn box: that is
+            # the likelier problem than the rest test, and it has a
+            # one-drag fix.
+            _out = (_c.get("n_cand_total") or 0) - (_c.get("n_cand_in_roi") or 0)
+            if _out > (_c.get("n_cand_in_roi") or 0):
+                _why += (
+                    f". {_out} of {_c['n_cand_total']} ball-like blob(s) were "
+                    f"OUTSIDE the box (red circles below) — if the ball is one "
+                    f"of them, drag a wider box and re-run"
+                )
         elif _c.get("n_raw_departures"):
             _why = (
                 f"{_c['n_raw_departures']} departure(s) found but merged "
@@ -14147,8 +14161,28 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
                 area, "no tee box set - searching the WHOLE frame", (12, 34),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 140, 255), 2, cv2.LINE_AA,
             )
-        for cx, cy in cands:
-            cv2.circle(area, (int(cx), int(cy)), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        # GREEN = a ball-like blob the box accepted. RED = one the box
+        # THREW AWAY. A ball a few pixels outside a hand-drawn box is the
+        # most likely single reason for "found nothing", and it is
+        # invisible if every candidate is drawn the same colour.
+        _n_out = 0
+        for _c in cands:
+            cx, cy = _c[0], _c[1]
+            _inside = bool(_c[2]) if len(_c) > 2 else True
+            if _inside:
+                cv2.circle(area, (int(cx), int(cy)), 5, (0, 255, 0), -1, cv2.LINE_AA)
+            else:
+                _n_out += 1
+                cv2.circle(area, (int(cx), int(cy)), 6, (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.line(area, (int(cx) - 9, int(cy)), (int(cx) + 9, int(cy)),
+                         (0, 0, 255), 1, cv2.LINE_AA)
+        if _n_out:
+            cv2.putText(
+                area,
+                f"{_n_out} ball-like blob(s) OUTSIDE the box - widen it if one is the ball",
+                (12, fh - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (0, 0, 255), 2, cv2.LINE_AA,
+            )
         # What size it is hunting for, drawn to scale in the corner. A
         # number in a panel is hard to sanity-check; a circle next to the
         # real ball is not.

@@ -7734,7 +7734,11 @@ def detect_swings_from_ball(
     n_drop_shape = 0   # white + right size, but not ball-SHAPED (shoes)
     n_drop_size = 0    # white + ball-shaped, but not the pinned ball size
     n_drop_touch = 0   # ball-like, but not surrounded by grass (skin/shoe)
-    sample_cands: list[tuple[int, int]] = []  # native positions, for diagnostics
+    # (x, y, inside_box) in native px, for the diagnostic overlay. The
+    # flag is the whole point: a ball sitting just OUTSIDE the drawn box
+    # and a ball that failed a filter are the same "not found" in the
+    # counts and completely different problems.
+    sample_cands: list[tuple[int, int, int]] = []
     r_lo = r_hi = None  # the accepted radius window, in native px
     try:
         src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -7933,17 +7937,20 @@ def detect_swings_from_ball(
                     continue
                 nx, ny = ox + cx / scale, oy + cy / scale
                 n_cand_total += 1
-                if len(sample_cands) < 400:
-                    sample_cands.append((int(nx), int(ny)))
-                # The crop above already IS the box, but a box drawn with
-                # margin can still hand back something just outside it.
+                # The crop above already IS the box, but it is taken with
+                # a margin, so it can still hand back something just
+                # outside -- which is exactly the interesting case.
+                _in_box = True
                 if roi:
                     bx0 = float(roi.get("x", 0.0)) * w
                     by0 = float(roi.get("y", 0.0)) * h
                     bx1 = bx0 + float(roi.get("w", 1.0)) * w
                     by1 = by0 + float(roi.get("h", 1.0)) * h
-                    if not (bx0 <= nx <= bx1 and by0 <= ny <= by1):
-                        continue
+                    _in_box = (bx0 <= nx <= bx1 and by0 <= ny <= by1)
+                if len(sample_cands) < 400:
+                    sample_cands.append((int(nx), int(ny), int(_in_box)))
+                if not _in_box:
+                    continue
                 n_cand_in_roi += 1
                 cands.append((nx, ny, rn))
             samples.append((t, cands))
