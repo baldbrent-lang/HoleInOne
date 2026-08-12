@@ -5397,6 +5397,18 @@ export function SwingDetectPanel({ sd }) {
  * WHETHER that ball left and on WHICH FRAME (the 15Hz scan re-watched at
  * full rate, with the film-strip that shows the call).
  */
+// An ISO instant as a readable wall clock. The cameras are synced on real
+// time, so real time is what the panel has to show -- seconds-into-the-clip
+// look identical for two files that started seconds apart.
+function clockOf(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    + `.${p(d.getMilliseconds(), 3)}`;
+}
+
 function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
   // Hooks before the early return: this component re-renders on every
   // poll tick, and a conditional hook order would blow up mid-run.
@@ -5941,23 +5953,34 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                             padding: "8px 10px", borderRadius: 6, margin: "6px 0",
                             background: "rgba(0,160,80,0.14)",
                           }}>
+                            {/* REAL CLOCK TIME. Seconds-into-the-clip is the
+                                wrong unit for checking sync: two files that
+                                start at different instants both begin at 0.0s,
+                                so the numbers agree while the moments do not.
+                                The wall clock is what the cameras are aligned
+                                to, so it is what is shown. */}
                             <div className="tiny muted" style={{ marginBottom: 3 }}>
                               IMPACT · tee frame <b>{b.impact_frame}</b>
-                              {b.green.impact_sec_tee != null && <> · <b>{b.green.impact_sec_tee}s</b> (tee clock)</>}
+                              {b.green.impact_at
+                                ? <> · <b>{clockOf(b.green.impact_at)}</b></>
+                                : (b.green.impact_sec_tee != null
+                                   && <> · {b.green.impact_sec_tee}s into the tee clip</>)}
                             </div>
                             <div>
                               <span style={{ color: "var(--danger, #c0392b)" }}>●</span>{" "}
                               <b>LANDED</b> · green frame <b>{b.green.landing_frame}</b>
-                              {b.green.landing_sec != null && <> · {b.green.landing_sec}s green</>}
-                              {b.green.landing_sec_tee != null && <> = <b>{b.green.landing_sec_tee}s</b> tee</>}
+                              {b.green.landing_at
+                                ? <> · <b>{clockOf(b.green.landing_at)}</b></>
+                                : (b.green.landing_sec != null && <> · {b.green.landing_sec}s into the green clip</>)}
                               {b.green.landing_xy && <> · at <b>{b.green.landing_xy.join(", ")}</b></>}
                             </div>
                             {b.green.rest_frame != null && (
                               <div style={{ marginTop: 3 }}>
                                 <span style={{ color: "var(--emerald-700, #16a34a)" }}>●</span>{" "}
                                 <b>AT REST</b> · green frame <b>{b.green.rest_frame}</b>
-                                {b.green.rest_sec != null && <> · {b.green.rest_sec}s green</>}
-                                {b.green.rest_sec_tee != null && <> = <b>{b.green.rest_sec_tee}s</b> tee</>}
+                                {b.green.rest_at
+                                  ? <> · <b>{clockOf(b.green.rest_at)}</b></>
+                                  : (b.green.rest_sec != null && <> · {b.green.rest_sec}s into the green clip</>)}
                                 {b.green.rest_xy && <> · at <b>{b.green.rest_xy.join(", ")}</b></>}
                               </div>
                             )}
@@ -5985,6 +6008,27 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                                   <span className="muted">
                                     {" "}· at rest {b.green.rest_after_impact}s after impact
                                   </span>
+                                )}
+                              </div>
+                            )}
+                            {b.green.cut && (
+                              <div className="tiny" style={{
+                                marginTop: 5, paddingTop: 5,
+                                borderTop: "1px solid rgba(0,0,0,0.12)",
+                              }}>
+                                <b>PRODUCTION CUT</b> — switch to the green camera
+                                1s before the ball lands, hold it 3s:
+                                <div style={{ marginTop: 2 }}>
+                                  cut at <b>{b.green.cut.at ? clockOf(b.green.cut.at) : `${b.green.cut.at_green_sec}s green`}</b>
+                                  {" "}· tee clip {b.green.cut.at_tee_sec}s
+                                  {" "}· green clip {b.green.cut.at_green_sec}s
+                                  {" "}→ {b.green.cut.green_window_sec?.[1]}s
+                                </div>
+                                {!b.green.green_started_at && (
+                                  <div className="muted" style={{ marginTop: 2 }}>
+                                    no camera clocks on this upload — the cut is
+                                    computed with the offset assumed zero
+                                  </div>
                                 )}
                               </div>
                             )}

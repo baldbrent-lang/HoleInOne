@@ -14106,7 +14106,9 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
            "rest_sec": None, "ground_path": [], "follow_reason": None,
            "landing_sec_tee": None, "rest_sec_tee": None,
            "landing_after_impact": None, "rest_after_impact": None,
-           "impact_sec_tee": None, "frame_size": None, "seconds": None}
+           "impact_sec_tee": None, "frame_size": None, "seconds": None,
+           "impact_at": None, "landing_at": None, "rest_at": None,
+           "tee_started_at": None, "green_started_at": None, "cut": None}
     if not getattr(row, "green_filename", None):
         out["reason"] = "this upload has no green-camera video"
         return out
@@ -14124,12 +14126,43 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
             out["reason"] = "could not read a frame rate for both cameras"
             return out
         delta, delta_src = _d3_green_delta_sec(db, row)
+        # THE WALL CLOCKS. Seconds-into-the-clip is the wrong unit to
+        # check sync in: two clips that start at different instants both
+        # begin at 0.0s, so the numbers agree while the moments do not.
+        # The cameras stamp when they started recording, so every event
+        # can be reported as the real time it happened -- which is the
+        # thing the two cameras are actually being aligned to.
+        _t0_tee = _t0_green = None
+        try:
+            if getattr(row, "camera_event_id", None):
+                _ev = db.get(CameraEvent, row.camera_event_id)
+                if _ev is not None:
+                    _t0_tee = _ev.tee_recording_started_at
+                    _t0_green = _ev.green_recording_started_at
+        except Exception as exc:  # noqa: BLE001
+            log.debug("swing test: camera clocks unavailable: %s", exc)
+        out["tee_started_at"] = _t0_tee.isoformat() if _t0_tee else None
+        out["green_started_at"] = _t0_green.isoformat() if _t0_green else None
+
+        def _wall(sec_into_green):
+            """The real time an instant in the GREEN clip happened."""
+            if _t0_green is None or sec_into_green is None:
+                return None
+            return (_t0_green + timedelta(seconds=float(sec_into_green))
+                    ).isoformat(timespec="milliseconds")
+
+        def _wall_tee(sec_into_tee):
+            if _t0_tee is None or sec_into_tee is None:
+                return None
+            return (_t0_tee + timedelta(seconds=float(sec_into_tee))
+                    ).isoformat(timespec="milliseconds")
         t_tee = float(impact_frame) / tee_fps
         t_green = t_tee - float(delta)
         g0 = max(0, int(round((t_green + after_sec) * green_fps)))
         g1 = max(g0 + 1, int(round((t_green + until_sec) * green_fps)))
         out.update({
             "impact_sec_tee": round(float(impact_frame) / tee_fps, 2),
+            "impact_at": _wall_tee(float(impact_frame) / tee_fps),
             "delta_sec": round(float(delta), 3), "delta_source": delta_src,
             "green_fps": round(green_fps, 2), "window": [g0, g1],
             "window_sec": [round(t_green + after_sec, 2),
@@ -14206,6 +14239,38 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
                 out[f"{_k2}_sec_tee"] = round(_sec_g + float(delta), 2)
                 out[f"{_k2}_after_impact"] = round(
                     _sec_g + float(delta) - (float(impact_frame) / tee_fps), 2)
+                out[f"{_k2}_at"] = _wall(_sec_g)          # real clock time
+            # THE CUT, in every unit the production path needs.
+            #
+            # The switch is one second of REAL TIME before the ball lands,
+            # and the green half runs three seconds from there. Those two
+            # instants are the same moment in both cameras, but a
+            # different number of seconds into each file, because the
+            # files start at different instants -- which is the whole
+            # reason this is computed from wall clocks rather than frame
+            # numbers.
+            #
+            # finalize_wizard_video takes cut_sec and end_sec in TEE-LOCAL
+            # seconds (the tracer is segment-relative, so it adds seg_off
+            # back itself) and derives the green window from cut + Δ, so
+            # the green side needs no separate number -- it only has to be
+            # three seconds long, which end_sec = cut_sec + 3 gives.
+            if out.get("landing_sec") is not None:
+                _cut_g = max(0.0, float(out["landing_sec"]) - 1.0)
+                _cut_tee = _cut_g + float(delta)
+                out["cut"] = {
+                    "before_landing_sec": 1.0,
+                    "green_hold_sec": 3.0,
+                    "at_green_sec": round(_cut_g, 2),
+                    "at_tee_sec": round(_cut_tee, 2),
+                    "at": _wall(_cut_g),
+                    "green_window_sec": [round(_cut_g, 2), round(_cut_g + 3.0, 2)],
+                    "green_window_at": [_wall(_cut_g), _wall(_cut_g + 3.0)],
+                    # what finalize_wizard_video wants, before seg_off
+                    "finalize_cut_sec_source": round(_cut_tee, 2),
+                    "finalize_end_sec_source": round(_cut_tee + 3.0, 2),
+                }
+
             _pc = _imgs.get("dets")
             if _pc and (CLIPS_DIR / _pc).exists():
                 _pn = f"swingtest-{upload_id}-{tok}-green{k}-path.jpg"

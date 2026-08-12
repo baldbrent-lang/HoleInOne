@@ -841,7 +841,7 @@ def draw_ball_path(canvas_path: Path, out_path: Path, descent: list,
 
 
 def bezier_continuation(points: list, landing_xy, n_dir: int = 6,
-                        ctrl_frac: float = 0.40, ctrl_min: float = 40.0,
+                        ctrl_frac: float = 0.60, ctrl_min: float = 160.0,
                         ctrl_max: float = 250.0, n_samples: int = 60) -> dict:
     """Carry the measured flight on to a known landing, as one parabola.
 
@@ -859,9 +859,15 @@ def bezier_continuation(points: list, landing_xy, n_dir: int = 6,
     degree error, which is tens of pixels wrong by the landing. A
     least-squares fit over the last several points averages the jitter out.
 
-    P1 sits along that direction at 40% of the distance to the landing
-    (clamped), which is what keeps the curve going the way the ball was
-    going before it bends. Placing P1 anywhere off that ray would make the
+    P1 sits along that direction at 60% of the distance to the landing
+    (clamped, floor 160px), which is what keeps the curve going the way
+    the ball was going before it bends. The control distance IS the apex
+    height: push P1 further along the launch ray and the ball climbs
+    further before turning over. 40% with a 40px floor left the apex
+    sitting almost on top of P0 whenever the landing mapped close to the
+    last measured point, which on a shot that exits the top of frame is
+    most of the time -- the curve turned over immediately instead of
+    arcing. Placing P1 anywhere off that ray would make the
     tracer turn immediately, which reads as wrong even when the endpoints
     are right.
 
