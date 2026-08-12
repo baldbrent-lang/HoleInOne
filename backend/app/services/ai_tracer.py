@@ -5273,6 +5273,15 @@ def verify_rest_and_impact(
     debug_dir: Path | None = None,
     debug_prefix: str = "anchorchk",
     window_sec: float = 1.0,
+    # HOW FAR FORWARD TO WATCH. The window used to be symmetric, which
+    # spent half its frames before the ball could possibly have gone: the
+    # scan's estimate is the LAST FRAME THE BALL WAS SEEN, so the strike
+    # is at or after it, never before. And the estimate can be early by
+    # more than a second -- the ball flickers out of detection while the
+    # golfer stands over it, the track ends there, and the real strike
+    # comes several seconds later. Watching only +1s reported "the ball
+    # never left" for shots that plainly did.
+    forward_sec: float = 4.0,
 ) -> dict:
     """Pixel-verify and TIGHTEN the two anchors the tracers lean on —
     no API calls, one sequential decode of ~2s of video.
@@ -5332,7 +5341,7 @@ def verify_rest_and_impact(
             return out
         ccx, ccy = cx0 - x0, cy0 - y0  # claimed centre, crop coords
         f_lo = max(0, imp - int(round(float(window_sec) * fps)))
-        f_hi = imp + int(round(float(window_sec) * fps))
+        f_hi = imp + int(round(float(forward_sec) * fps))
         crops: dict[int, "np.ndarray"] = {}
         cap.set(cv2.CAP_PROP_POS_FRAMES, f_lo)
         for f in range(f_lo, f_hi + 1):
@@ -5432,9 +5441,11 @@ def verify_rest_and_impact(
             if dep is None:
                 out["verified"] = False
                 out["reason"] = (
-                    "ball never left the rest spot within ±1s of the "
-                    "estimated impact (practice swing, or impact estimate "
-                    "far off)"
+                    f"ball never left the rest spot in the "
+                    f"{window_sec:.0f}s before / {forward_sec:.0f}s after "
+                    f"the estimated impact (practice swing, a ball that "
+                    f"was picked up rather than struck, or an estimate "
+                    f"further out than this window)"
                 )
             else:
                 out["verified"] = True
