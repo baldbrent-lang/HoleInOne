@@ -14068,6 +14068,125 @@ def debug3_status(upload_id: int):
 # No pose, no MOG2, no produce: it reads the video, writes images, and
 # returns a report. Nothing downstream reads any of it.
 
+def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
+                   upload_id: int, tok: str, k: int,
+                   after_sec: float = 4.0, until_sec: float = 8.0) -> dict:
+    """The ball coming DOWN, on the green camera.
+
+    A struck ball leaves the tee frame in about a second and is in the air
+    for several more. Four to eight seconds after impact it is descending
+    into the green camera's view, and that camera is a far easier picture
+    than the tee: no golfer, no club, no shoes, and nothing else moving
+    except the flag. If a descent exists it should stand out.
+
+    THE TWO CAMERAS DO NOT SHARE A CLOCK, and this is the part that
+    silently produces a window of the wrong four seconds. Both files start
+    whenever their camera started, so the window is computed in REAL TIME
+    and converted into green frames through the measured offset:
+
+        tee_time   = impact_frame / tee_fps
+        green_time = tee_time - delta          (delta from the camera event)
+        green_f0   = (green_time + after_sec) * green_fps
+
+    green_fps is read from the green file rather than assumed equal to the
+    tee's, because the two cameras are not required to match. The source of
+    the offset is returned so the panel can say whether sync was MEASURED
+    or ASSUMED -- a window that is visibly wrong then points at the offset
+    rather than at this code.
+    """
+    out = {"ok": False, "reason": None, "delta_sec": None,
+           "delta_source": None, "window": None, "window_sec": None,
+           "green_fps": None, "stats": {}, "n_tracks": 0, "descents": [],
+           "frame_image": None, "dets_image": None, "tracks_image": None,
+           "seconds": None}
+    if not getattr(row, "green_filename", None):
+        out["reason"] = "this upload has no green-camera video"
+        return out
+    green_path = _local_green(row)
+    if not green_path or not green_path.exists():
+        out["reason"] = "the green video is missing on disk"
+        return out
+
+    _t0 = time.perf_counter()
+    try:
+        from ..services import debug3 as _d3
+
+        green_fps = float(probe_fps(green_path) or 0.0)
+        if green_fps <= 0 or tee_fps <= 0:
+            out["reason"] = "could not read a frame rate for both cameras"
+            return out
+        delta, delta_src = _d3_green_delta_sec(db, row)
+        t_tee = float(impact_frame) / tee_fps
+        t_green = t_tee - float(delta)
+        g0 = max(0, int(round((t_green + after_sec) * green_fps)))
+        g1 = max(g0 + 1, int(round((t_green + until_sec) * green_fps)))
+        out.update({
+            "delta_sec": round(float(delta), 3), "delta_source": delta_src,
+            "green_fps": round(green_fps, 2), "window": [g0, g1],
+            "window_sec": [round(t_green + after_sec, 2),
+                           round(t_green + until_sec, 2)],
+        })
+
+        _wh = _frame_size(green_path)
+        det = _d3.detect_ball_blobs(
+            green_path, g0, g1,
+            debug_dir=CLIPS_DIR,
+            debug_prefix=f"swingtest-{upload_id}-{tok}-green{k}",
+        ) or {}
+        out["stats"] = det.get("stats") or {}
+        _imgs = det.get("images") or {}
+        out["frame_image"] = _clip_url_for(_imgs.get("frame"))
+        out["dets_image"] = _clip_url_for(_imgs.get("dets"))
+        if not det.get("dets"):
+            out["reason"] = det.get("reason") or "no ball-sized blobs in the window"
+            out["seconds"] = round(time.perf_counter() - _t0, 2)
+            return out
+
+        r = max(6.0, 0.012 * float((_wh[1] if _wh else 720)))
+        tracks = _d3.build_tracks(det["dets"], r) or []
+        out["n_tracks"] = len(tracks)
+
+        # A DESCENT FALLS. build_tracks reports rise_px as first_y minus
+        # last_y, so a ball coming down is NEGATIVE, and the tee-side
+        # preview picker -- which favours whatever rises most -- would
+        # rank the one track being looked for last. Sorted by how far it
+        # fell, then by how long it was seen.
+        _fall = sorted(
+            (t for t in tracks if t.get("rise_px", 0) < 0),
+            key=lambda t: (t["rise_px"], -len(t["points"])),
+        )
+        out["descents"] = [
+            {"frames": [t["points"][0]["frame"], t["points"][-1]["frame"]],
+             "from": [t["points"][0]["x"], t["points"][0]["y"]],
+             "to": [t["points"][-1]["x"], t["points"][-1]["y"]],
+             "n_points": len(t["points"]),
+             "fall_px": abs(t["rise_px"]), "span_px": t["span_px"]}
+            for t in _fall[:6]
+        ]
+        _canvas = _imgs.get("dets")
+        if _canvas and (CLIPS_DIR / _canvas).exists() and _fall:
+            _tn = f"swingtest-{upload_id}-{tok}-green{k}-tracks.jpg"
+            if _d3.draw_tracks(
+                CLIPS_DIR / _canvas, CLIPS_DIR / _tn, _fall[:6],
+                f"DESCENT CANDIDATES on the green camera: {len(_fall)} of "
+                f"{len(tracks)} tracks fall. Hollow ring = first frame, "
+                f"filled dot = last. A ball coming down is a long, clean, "
+                f"steadily falling line; the flag and the wind are not.",
+            ):
+                out["tracks_image"] = _clip_url_for(_tn)
+        out["ok"] = bool(_fall)
+        if not _fall:
+            out["reason"] = (
+                f"{len(tracks)} track(s) built but none of them fall — "
+                f"nothing here is descending"
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("swing test: green descent failed: %s", exc)
+        out["reason"] = f"failed: {exc}"
+    out["seconds"] = round(time.perf_counter() - _t0, 2)
+    return out
+
+
 def _swing_test_run(row, src_path, db, progress=None) -> dict:
     """The ball-departure detector on its own, with its work shown."""
     import cv2  # type: ignore
@@ -14319,6 +14438,14 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
                 b["rest_image"] = _clip_url_for(_rname)
         except Exception as exc:  # noqa: BLE001
             log.warning("swing test: rest still failed: %s", exc)
+
+        # THE GREEN CAMERA FIRST. The tee stages below watch the ball
+        # leave; this watches it arrive, 4-8s later on the other camera.
+        if b["impact_frame"] is not None:
+            b["green"] = _green_descent(
+                db, row, src_path, fps, int(b["impact_frame"]),
+                upload_id, tok, k,
+            )
 
         # STAGES 4, 5 and 6, from ONE pass: MOG2 + component + area
         # filter, nearest-neighbour tracking, then the RANSAC parabola and

@@ -5842,6 +5842,76 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                       cap="Frame by frame at the rest spot. Green = ball present, red = gone, yellow box = the frame it disappeared."
                     />
 
+                    {/* THE GREEN CAMERA. The tee stages watch the ball
+                        leave; this watches it arrive on the other camera,
+                        4-8s later, where the picture is far quieter. */}
+                    {b.green && (
+                      <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--line)" }}>
+                        <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                          Green camera · descent
+                          {b.green.window && <> · frames {b.green.window.join("–")}</>}
+                          {b.green.seconds != null && <> · {b.green.seconds}s</>}
+                        </div>
+                        <div className="tiny muted" style={{ marginBottom: 6 }}>
+                          4–8s after impact, in real time. Tee impact f{b.impact_frame} →
+                          {b.green.window_sec && <> green {b.green.window_sec[0]}–{b.green.window_sec[1]}s</>}
+                          {b.green.green_fps && <> at {b.green.green_fps}fps</>}
+                          {b.green.delta_sec != null && (
+                            <> · offset {b.green.delta_sec}s{" "}
+                              <b className={b.green.delta_source === "camera_event" ? "" : "err-text"}>
+                                ({b.green.delta_source === "camera_event"
+                                  ? "measured from the camera clocks"
+                                  : b.green.delta_source === "edit_metrics"
+                                    ? "from a saved offset"
+                                    : "ASSUMED ZERO — the two files are treated as starting together"})
+                              </b>
+                            </>
+                          )}
+                        </div>
+                        {b.green.stats?.frames != null && (
+                          <div className="small" style={{ marginBottom: 4 }}>
+                            {b.green.stats.components ?? 0} components ·{" "}
+                            <b>{b.green.stats.kept ?? 0} kept</b> ·{" "}
+                            {b.green.n_tracks ?? 0} tracks ·{" "}
+                            <b>{b.green.descents?.length ?? 0} descending</b>
+                          </div>
+                        )}
+                        {b.green.reason && (
+                          <div className="tiny muted" style={{ marginBottom: 6 }}>{b.green.reason}</div>
+                        )}
+                        <Img url={b.green.frame_image}
+                          cap="One green-camera frame: red = masked, green = ball-sized blobs kept." />
+                        <Img url={b.green.dets_image}
+                          cap="Every detection in the 4–8s window, coloured by time — blue early, orange late." />
+                        <Img url={b.green.tracks_image}
+                          cap="Descent candidates. Hollow ring = first frame, filled dot = last." />
+                        {b.green.descents?.length > 0 && (
+                          <div style={{ overflowX: "auto" }}>
+                            <table className="tiny" style={{ borderCollapse: "collapse", marginTop: 4 }}>
+                              <thead><tr style={{ textAlign: "left" }}>
+                                <th style={{ paddingRight: 10 }}>frames</th>
+                                <th style={{ paddingRight: 10 }}>from → to</th>
+                                <th style={{ paddingRight: 10 }}>fell</th>
+                                <th style={{ paddingRight: 10 }}>span</th>
+                                <th>points</th>
+                              </tr></thead>
+                              <tbody>
+                                {b.green.descents.map((d, di) => (
+                                  <tr key={di}>
+                                    <td style={{ paddingRight: 10 }}>{d.frames?.join("–")}</td>
+                                    <td style={{ paddingRight: 10 }}>{d.from?.join(",")} → {d.to?.join(",")}</td>
+                                    <td style={{ paddingRight: 10 }}>{d.fall_px}px</td>
+                                    <td style={{ paddingRight: 10 }}>{d.span_px}px</td>
+                                    <td>{d.n_points}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {/* Debug3's stages 4, 5 and 6, from one MOG2 pass over
                         the 3 seconds after impact -- the only stretch of
                         the clip with a ball in the air. */}
