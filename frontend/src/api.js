@@ -646,6 +646,15 @@ export const api = {
       body: { hole, day, roi },
       adminPassword: key,
     }),
+
+  // Measure how big a ball is on this hole, from a click on one. Per
+  // hole, not per day: the ball moves, the camera does not.
+  calibrateBall: (key, uploadId, { x, y }) =>
+    request(`/api/admin/long-uploads/${uploadId}/calibrate-ball`, {
+      method: "POST",
+      body: { x, y },
+      adminPassword: key,
+    }),
   emailStatus: (key) =>
     request("/api/admin/email-status", { adminPassword: key }),
   emailSendTemplates: (key, to) =>

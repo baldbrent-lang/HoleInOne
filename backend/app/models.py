@@ -96,6 +96,22 @@ class Course(Base):
     # right last week. Days older than ~30 are pruned on write; this is
     # an operating record, not a history.
     tee_boxes: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # How big a golf ball IS, in this hole's camera, as a fraction of
+    # frame height:
+    #
+    #   {"3": {"r_frac": 0.0031, "measured_px": 3.4, "frame_h": 1080,
+    #          "set_at": iso}}
+    #
+    # PER HOLE, NOT PER DAY, and never per clip: the ball moves — every
+    # golfer tees it up somewhere else in the hitting area — but its
+    # apparent SIZE is fixed by camera geometry, which does not change
+    # when the tee markers do. So this is calibrated once per hole and
+    # then holds, while tee_boxes above is redrawn each morning.
+    #
+    # Stored as a fraction of frame height rather than pixels so the
+    # number survives a camera that starts shooting at another
+    # resolution.
+    ball_sizes: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     # The green camera's view mapped onto the tee camera's, PER HOLE:
     #
     #   {"1": {"points": [{"green": [x,y], "tee": [x,y]}, ...],   # >=4

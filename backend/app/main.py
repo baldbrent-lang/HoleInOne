@@ -99,6 +99,10 @@ def _migrate() -> None:
             # Per-hole, per-day ball search areas. Left NULL: no box for
             # a hole/day simply falls back the way it did before.
             statements.append("ALTER TABLE courses ADD COLUMN tee_boxes JSON")
+        if "ball_sizes" not in course_cols:
+            # Calibrated ball radius per hole. NULL falls back to the
+            # size-agnostic filters, exactly as before.
+            statements.append("ALTER TABLE courses ADD COLUMN ball_sizes JSON")
         # tee-sheet integration fields. Added to the model but historically
         # missing from this migrator, which 500'd every GET /courses on
         # prod (SELECT of a column that didn't exist). Backfill the

@@ -7739,14 +7739,25 @@ def detect_swings_from_ball(
                 if (a / float(_bw * _bh)) < extent_min:
                     n_drop_shape += 1
                     continue
-                # KNOWN BALL SIZE. For a fixed camera watching a fixed
-                # hitting area the ball's apparent radius barely varies,
-                # so when the operator has pinned it we accept only that
-                # size and a shoe is excluded by arithmetic before any of
-                # the shape tests matter.
+                # KNOWN BALL SIZE — the strong one.
+                #
+                # The ball MOVES: every golfer tees it somewhere else in
+                # the hitting area, so its position tells us nothing. Its
+                # SIZE tells us everything. The camera does not move and
+                # the hitting area is a few yards deep, so a ball is very
+                # nearly the same number of pixels across in every clip
+                # this camera will ever shoot, while a shoe is several
+                # times that. Once the radius has been calibrated for this
+                # hole, a shoe is excluded by arithmetic — before any of
+                # the shape tests above have to be right.
+                #
+                # The window is deliberately narrow (0.6x-1.7x). The whole
+                # value here is that the ball's size is nearly constant;
+                # a generous tolerance throws that away and lets the shoe
+                # back in.
                 if expect_radius_px:
                     _rn = rad / scale  # native px
-                    if not (0.5 * expect_radius_px <= _rn <= 2.0 * expect_radius_px):
+                    if not (0.6 * expect_radius_px <= _rn <= 1.7 * expect_radius_px):
                         n_drop_size += 1
                         continue
                 nx, ny = cx / scale, cy / scale  # native-pixel centroid
@@ -7877,227 +7888,6 @@ def detect_swings_from_ball(
                 ],
             }
         )
-    return segments
-
-
-def detect_departures_at_anchor(
-    input_path: Path,
-    anchor_xy: tuple[float, float],
-    fps: float | None = None,
-    sample_hz: float = 15.0,
-    min_rest_sec: float = 0.8,
-    occlusion_tol_sec: float = 1.5,
-    min_separation_sec: float = 4.0,
-    before_sec: float = 3.5,
-    after_sec: float = 5.0,
-    white_v_min: int = 170,
-    white_s_max: int = 90,
-    debug: dict | None = None,
-) -> list[dict]:
-    """Departures at a PINNED ball position — no search, so nothing to
-    confuse for a ball.
-
-    The scanning detector has to answer "is there a ball anywhere in this
-    box?" on every frame, and every white thing in the box gets a vote.
-    That is how a shoe wins: it is the same white, it holds as still as a
-    ball at address, and it is only distinguishable by size and shape,
-    which are a few pixels' worth of evidence at working resolution.
-
-    When the operator has clicked the ball for this hole today, the
-    question collapses to "is the ball still on ITS SPOT?" — asked of one
-    small patch at FULL native resolution. Shoes are not considered
-    because nothing outside the patch is ever looked at, and the patch is
-    a couple of ball-widths across. It is also cheaper than the scan: the
-    same decode, but the per-sample work is a thumbnail-sized threshold
-    instead of a full-frame HSV pass and contour hunt.
-
-    The ball's radius is MEASURED at the anchor on the first samples that
-    show it rather than assumed, which is what makes the presence test
-    tight without anyone typing a number.
-
-    Returns the same segment shape as detect_swings_from_ball. Empty plus
-    a debug reason on any failure; never raises.
-    """
-    if debug is not None:
-        debug.update({"reason": None, "method": "ball_anchor"})
-    if not HAS_CV or not HAS_NP:
-        if debug is not None:
-            debug["reason"] = "opencv or numpy not installed"
-        return []
-
-    cap = cv2.VideoCapture(str(input_path))
-    if not cap.isOpened():
-        if debug is not None:
-            debug["reason"] = "could not open video"
-        return []
-
-    ax, ay = float(anchor_xy[0]), float(anchor_xy[1])
-    samples: list[tuple[float, bool, tuple[float, float] | None]] = []
-    r0: float | None = None
-    n_seen = 0
-    try:
-        src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        if src_fps <= 0:
-            src_fps = 30.0
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        if not w or not h:
-            if debug is not None:
-                debug["reason"] = "could not read the video's frame size"
-            return []
-        # The patch: wide enough that a click a few pixels off still has
-        # the ball in view, tight enough that the golfer's shoes are
-        # outside it when they address the ball.
-        m = max(14, int(round(0.030 * h)))
-        x0, x1 = max(0, int(ax - m)), min(w, int(ax + m + 1))
-        y0, y1 = max(0, int(ay - m)), min(h, int(ay + m + 1))
-        if x1 - x0 < 8 or y1 - y0 < 8:
-            if debug is not None:
-                debug["reason"] = "the pinned ball is at the frame edge"
-            return []
-        step = max(1, int(round(src_fps / sample_hz)))
-        eff_hz = src_fps / step
-        # A guess only until the ball is actually measured below.
-        r_guess = max(1.5, 0.0035 * h)
-        idx = -1
-        while True:
-            idx += 1
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                break
-            if idx % step != 0:
-                continue
-            t = idx / src_fps
-            hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(
-                hsv, (0, 0, int(white_v_min)), (179, int(white_s_max), 255)
-            )
-            cnts, _ = cv2.findContours(
-                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-            want = r0 if r0 else r_guess
-            best = None
-            bestd = float(m)
-            for c in cnts:
-                (cx, cy), rad = cv2.minEnclosingCircle(c)
-                if rad < 0.5 * want or rad > 2.2 * want:
-                    continue
-                _bx, _by, _bw, _bh = cv2.boundingRect(c)
-                if _bw <= 0 or _bh <= 0:
-                    continue
-                if max(_bw, _bh) / float(min(_bw, _bh)) > 1.8:
-                    continue
-                d = ((cx + x0 - ax) ** 2 + (cy + y0 - ay) ** 2) ** 0.5
-                if d < bestd:
-                    bestd, best = d, (cx + x0, cy + y0, rad)
-            if best is not None:
-                n_seen += 1
-                # Lock the radius to the real ball once, on the first
-                # clean sighting, then hold it for the rest of the clip.
-                if r0 is None and n_seen >= 2:
-                    r0 = float(best[2])
-                samples.append((t, True, (best[0], best[1])))
-            else:
-                samples.append((t, False, None))
-    finally:
-        cap.release()
-
-    if not samples:
-        if debug is not None and not debug.get("reason"):
-            debug["reason"] = "no usable frames"
-        return []
-
-    # Presence timeline -> departures. A run of sightings is the ball at
-    # rest; it has DEPARTED when it goes missing for longer than the
-    # club can plausibly be covering it.
-    duration = samples[-1][0]
-    departures: list[tuple[float, float, float, float]] = []
-    first_t = last_t = None
-    last_xy = (ax, ay)
-    for t, present, xy in samples:
-        if present:
-            if first_t is None:
-                first_t = t
-            last_t = t
-            last_xy = xy or last_xy
-        elif last_t is not None and (t - last_t) >= occlusion_tol_sec:
-            rest_dur = last_t - (first_t if first_t is not None else last_t)
-            if rest_dur >= min_rest_sec:
-                departures.append((last_t, last_xy[0], last_xy[1], rest_dur))
-            first_t = last_t = None
-
-    kept: list[tuple[float, float, float, float]] = []
-    for d in departures:
-        if kept and d[0] - kept[-1][0] < min_separation_sec:
-            if d[3] > kept[-1][3]:
-                kept[-1] = d
-            continue
-        kept.append(d)
-
-    segments: list[dict] = []
-    for t_dep, x, y, rest_dur in kept:
-        conf = "high" if rest_dur >= 1.5 else ("medium" if rest_dur >= 0.8 else "low")
-        segments.append(
-            {
-                "peak_time_sec": float(t_dep),
-                "start_sec": float(max(0.0, t_dep - before_sec)),
-                "end_sec": float(min(duration, t_dep + after_sec)),
-                "confidence": conf,
-                "ball_x": float(x),
-                "ball_y": float(y),
-                "rest_sec": round(float(rest_dur), 2),
-            }
-        )
-
-    present_ratio = n_seen / float(len(samples)) if samples else 0.0
-    log.info(
-        "ai_tracer: detect_departures_at_anchor — %d departures at "
-        "(%.0f,%.0f), ball seen in %.0f%% of samples, r=%.1fpx",
-        len(kept), ax, ay, 100.0 * present_ratio, r0 or 0.0,
-    )
-    if debug is not None:
-        debug.update(
-            {
-                "eff_hz": float(eff_hz),
-                "duration_sec": float(duration),
-                "n_departures": len(kept),
-                "n_raw_departures": len(departures),
-                "n_samples": len(samples),
-                "n_present": n_seen,
-                "present_ratio": round(present_ratio, 3),
-                "ball_radius_px": round(float(r0), 1) if r0 else None,
-                "anchor": [round(ax), round(ay)],
-                "patch_px": [x1 - x0, y1 - y0],
-                "min_rest_sec": float(min_rest_sec),
-                "departures": [
-                    {
-                        "t": round(float(t), 2),
-                        "x": round(float(x)),
-                        "y": round(float(y)),
-                        "rest_sec": round(float(rd), 2),
-                    }
-                    for t, x, y, rd in kept
-                ],
-            }
-        )
-        if not kept:
-            if n_seen == 0:
-                debug["reason"] = (
-                    "the ball was never seen at the pinned spot — the click "
-                    "is in the wrong place, or the ball is not there in this "
-                    "clip"
-                )
-            elif present_ratio > 0.95:
-                debug["reason"] = (
-                    "the ball sat at the pinned spot for the whole clip and "
-                    "never left"
-                )
-            else:
-                debug["reason"] = (
-                    f"the ball was at the pinned spot in {100 * present_ratio:.0f}% "
-                    f"of samples but never went missing for the "
-                    f"{occlusion_tol_sec}s that counts as struck"
-                )
     return segments
 
 
