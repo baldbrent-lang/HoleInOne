@@ -8541,7 +8541,7 @@ def finalize_wizard_video(
             try:
                 import cv2  # type: ignore
 
-                _cap_src = cv2.VideoCapture(str(src_path))
+                _cap_src = cv2.VideoCapture(str(tee_src))
                 try:
                     src_w_native = (
                         int(_cap_src.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or None
@@ -14086,6 +14086,9 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
     _t0 = time.perf_counter()
     rest = _rest_ball_departures(src_path, fps, db, row)
     scan_sec = round(time.perf_counter() - _t0, 2)
+    # Frame size, carried out of the scan (which already read it) so the
+    # flight stages below do not have to open the video again.
+    _wh = rest.get("frame_size") or _frame_size(src_path)
 
     roi = rest.get("roi")
     counts = rest.get("counts") or {}
