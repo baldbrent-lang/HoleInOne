@@ -5941,17 +5941,31 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                             padding: "8px 10px", borderRadius: 6, margin: "6px 0",
                             background: "rgba(0,160,80,0.14)",
                           }}>
-                            <b>Landed f{b.green.landing_frame}</b>
-                            {b.green.landing_sec != null && <> ({b.green.landing_sec}s)</>}
-                            {b.green.landing_xy && <> at {b.green.landing_xy.join(", ")}</>}
+                            <div>
+                              <span style={{ color: "var(--danger, #c0392b)" }}>●</span>{" "}
+                              <b>LANDED</b> · frame <b>{b.green.landing_frame}</b>
+                              {b.green.landing_sec != null && <> ({b.green.landing_sec}s)</>}
+                              {b.green.landing_xy && <> · at <b>{b.green.landing_xy.join(", ")}</b></>}
+                            </div>
                             {b.green.rest_frame != null && (
-                              <> · <b>came to rest f{b.green.rest_frame}</b>
+                              <div style={{ marginTop: 3 }}>
+                                <span style={{ color: "var(--emerald-700, #16a34a)" }}>●</span>{" "}
+                                <b>AT REST</b> · frame <b>{b.green.rest_frame}</b>
                                 {b.green.rest_sec != null && <> ({b.green.rest_sec}s)</>}
-                                {b.green.rest_xy && <> at {b.green.rest_xy.join(", ")}</>}
-                                {b.green.ground_path?.length > 0 && (
-                                  <> · {b.green.ground_path.length} frames of bounce and roll</>
+                                {b.green.rest_xy && <> · at <b>{b.green.rest_xy.join(", ")}</b></>}
+                              </div>
+                            )}
+                            {b.green.ground_path?.length > 0 && (
+                              <div className="tiny muted" style={{ marginTop: 3 }}>
+                                {b.green.ground_path.length} frames of bounce and roll between them
+                                {b.green.landing_xy && b.green.rest_xy && (
+                                  <> · travelled{" "}
+                                    {Math.round(Math.hypot(
+                                      b.green.rest_xy[0] - b.green.landing_xy[0],
+                                      b.green.rest_xy[1] - b.green.landing_xy[1],
+                                    ))}px after pitching</>
                                 )}
-                              </>
+                              </div>
                             )}
                           </div>
                         )}

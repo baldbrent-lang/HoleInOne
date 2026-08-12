@@ -14195,8 +14195,15 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
                 if _d3.draw_ball_path(
                     CLIPS_DIR / _pc, CLIPS_DIR / _pn,
                     _fall[0]["points"], _follow,
-                    f"DESCENT (orange) -> LANDING f{out['landing_frame']} "
-                    f"-> BOUNCE / ROLL (yellow) -> REST f{out['rest_frame']}",
+                    (
+                        f"DESCENT (orange) -> LANDING f{out['landing_frame']}"
+                        + (f" at {out['landing_xy'][0]},{out['landing_xy'][1]}"
+                           if out.get("landing_xy") else "")
+                        + " -> BOUNCE / ROLL (yellow) -> REST f"
+                        + f"{out['rest_frame']}"
+                        + (f" at {out['rest_xy'][0]},{out['rest_xy'][1]}"
+                           if out.get("rest_xy") else "")
+                    ),
                 ):
                     out["path_image"] = _clip_url_for(_pn)
 

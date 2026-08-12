@@ -789,27 +789,48 @@ def draw_ball_path(canvas_path: Path, out_path: Path, descent: list,
         if img is None:
             return False
         pts = [(int(p["x"]), int(p["y"])) for p in (descent or [])]
-        for a, b in zip(pts, pts[1:]):
-            cv2.line(img, a, b, (0, 160, 255), 2, cv2.LINE_AA)  # BGR orange
         gp = [(int(p["x"]), int(p["y"])) for p in (follow.get("path") or [])
               if p.get("phase") == "ground"]
+        for a, b in zip(pts, pts[1:]):
+            cv2.line(img, a, b, (0, 160, 255), 2, cv2.LINE_AA)  # BGR orange
+        # JOIN THE TWO. The descent track ends on the last frame the ball
+        # was seen falling and the ground path starts on the first frame
+        # it was seen after -- between them is the frame it was actually
+        # landing on, and leaving that segment undrawn puts a gap exactly
+        # where the eye is looking for the pitch mark.
+        if pts and gp:
+            cv2.line(img, pts[-1], gp[0], (0, 160, 255), 2, cv2.LINE_AA)
         for a, b in zip(gp, gp[1:]):
             cv2.line(img, a, b, (0, 215, 255), 2, cv2.LINE_AA)
         for q in gp:
             cv2.circle(img, q, 3, (0, 215, 255), -1, cv2.LINE_AA)
-        if follow.get("landing_xy"):
-            lx, ly = int(follow["landing_xy"][0]), int(follow["landing_xy"][1])
+
+        # LANDING and REST, each with its frame. They can be a few dozen
+        # pixels apart -- a ball that pitches and stops, which is most of
+        # what lands in sand -- so the second label is pushed clear rather
+        # than written over the first.
+        _lxy = follow.get("landing_xy")
+        _rxy = follow.get("rest_xy")
+        if _lxy:
+            lx, ly = int(_lxy[0]), int(_lxy[1])
             cv2.drawMarker(img, (lx, ly), (0, 0, 255), cv2.MARKER_CROSS, 26, 3)
             cv2.circle(img, (lx, ly), 15, (0, 0, 255), 2, cv2.LINE_AA)
-            cv2.putText(img, f"LANDING f{follow.get('landing_frame')}",
-                        (lx + 20, ly - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (0, 0, 255), 2, cv2.LINE_AA)
-        if follow.get("rest_xy"):
-            rx, ry = int(follow["rest_xy"][0]), int(follow["rest_xy"][1])
+            _lt = f"LANDING f{follow.get('landing_frame')}"
+            cv2.putText(img, _lt, (lx + 20, ly - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(img, _lt, (lx + 20, ly - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+        if _rxy:
+            rx, ry = int(_rxy[0]), int(_rxy[1])
             cv2.circle(img, (rx, ry), 13, (0, 255, 0), 2, cv2.LINE_AA)
-            cv2.putText(img, f"REST f{follow.get('rest_frame')}",
-                        (rx + 18, ry + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (0, 255, 0), 2, cv2.LINE_AA)
+            _dy = 30
+            if _lxy and abs(rx - int(_lxy[0])) < 190 and abs(ry - int(_lxy[1])) < 30:
+                _dy = 52  # the landing label is right there; drop below it
+            _rt = f"REST f{follow.get('rest_frame')}"
+            cv2.putText(img, _rt, (rx + 18, ry + _dy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(img, _rt, (rx + 18, ry + _dy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2, cv2.LINE_AA)
         if caption:
             _label(img, caption)
         cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
