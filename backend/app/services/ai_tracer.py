@@ -7602,7 +7602,7 @@ def detect_swings_from_ai_ball(
 
 
 def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
-                   min_grass: float = 0.5, max_white: float = 0.25,
+                   min_grass: float = 0.6, max_white: float = 0.25,
                    max_skin: float = 0.12) -> bool:
     """Is this A SMALL WHITE BALL ON GREEN GRASS, or part of a person?
 
@@ -7661,12 +7661,19 @@ def detect_swings_from_ball(
     min_separation_sec: float = 4.0,
     before_sec: float = 3.5,
     after_sec: float = 5.0,
-    white_v_min: int = 170,
-    # A golf ball is ACHROMATIC -- measured S~5. Sunlit skin is S~68, so
-    # the old ceiling of 90 admitted bare legs and arms as "white", which
-    # is how a knee got ringed as a ball. 60 keeps the ball with an order
-    # of magnitude to spare and excludes skin outright.
-    white_s_max: int = 60,
+    # A FLOOR, not the test. Only rules out genuinely dark pixels; the
+    # discrimination is done by tophat_min below, which is relative to
+    # the surroundings and so does not care what the light is doing.
+    white_v_min: int = 80,
+    # A golf ball is ACHROMATIC -- measured S~5 in every light. Sunlit
+    # skin is S~68. 85 is loose enough for a ball picking up a green cast
+    # off the grass, and skin is dealt with precisely by the hue test in
+    # _sits_on_grass rather than bluntly here.
+    white_s_max: int = 85,
+    # How much brighter than its surroundings a ball has to be. Measured
+    # response for a real 3px ball is 78-155 across the whole range of
+    # daylight, so 40 is a wide margin under the worst case.
+    tophat_min: int = 40,
     # Size is expressed in NATIVE PIXELS now, not as a fraction of a
     # working frame whose resolution the caller cannot see. See the size
     # limits in the loop below.
@@ -7746,6 +7753,18 @@ def detect_swings_from_ball(
             t = idx / src_fps
             h, w = frame.shape[:2]
             frame_shape = (h, w)
+            # SIZE LIMITS IN REAL PIXELS, not as a fraction of whatever
+            # the working frame happens to be. When the hole has been
+            # calibrated this is the measured ball and a narrow window
+            # around it; otherwise it is a generous range derived from
+            # the frame height, which still excludes a shoe.
+            if expect_radius_px:
+                r_lo, r_hi = 0.6 * expect_radius_px, 1.7 * expect_radius_px
+            else:
+                # 0.006*h is a ~6.5px radius at 1080p -- 13px across,
+                # already generous for a ball and well under a shoe.
+                r_lo, r_hi = max(0.8, 0.0010 * h), 0.006 * h
+
 
             # WORK AT NATIVE RESOLUTION INSIDE THE BOX.
             #
@@ -7824,9 +7843,32 @@ def detect_swings_from_ball(
                 ox = oy = 0
 
             hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(
-                hsv, (0, 0, int(white_v_min)), (179, int(white_s_max), 255)
+            # BRIGHTER THAN THE GRASS AROUND IT, not brighter than a
+            # number. An absolute V floor encodes the lighting of
+            # whatever clip it was tuned on: measured on a 3px ball, V is
+            # 245 in sun, 192 under cloud, 158 late in the day and 128 in
+            # shade. A floor of 170 therefore deletes the ball outright
+            # for half the golfing day -- not as a rejection anyone can
+            # see in the counts, but by never entering the mask at all.
+            #
+            # A white top-hat asks the question that survives the light:
+            # how much brighter is this than its immediate surroundings.
+            # On the same four frames it answers 155/114/96/78 -- always
+            # decisive. And because the opening keeps anything LARGER
+            # than the kernel, a shoe is flattened by the same operation
+            # that keeps the ball, so it suppresses big bright objects
+            # for free.
+            _ks = int(max(7, min(41, round(6.0 * max(1.0, r_hi * scale)))))
+            _ks |= 1  # odd
+            _th = cv2.morphologyEx(
+                hsv[:, :, 2], cv2.MORPH_TOPHAT,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ks, _ks)),
             )
+            mask = (
+                (_th >= int(tophat_min))
+                & (hsv[:, :, 1] <= int(white_s_max))
+                & (hsv[:, :, 2] >= int(white_v_min))
+            ).astype(np.uint8) * 255
             # Denoise WITHOUT eating the ball: at native resolution a ball
             # is several pixels across, so a 3x3 open removes speckle and
             # leaves the ball. It is skipped entirely on a downscaled
@@ -7838,18 +7880,6 @@ def detect_swings_from_ball(
             cnts, _ = cv2.findContours(
                 mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
-
-            # SIZE LIMITS IN REAL PIXELS, not as a fraction of whatever
-            # the working frame happens to be. When the hole has been
-            # calibrated this is the measured ball and a narrow window
-            # around it; otherwise it is a generous range derived from
-            # the frame height, which still excludes a shoe.
-            if expect_radius_px:
-                r_lo, r_hi = 0.6 * expect_radius_px, 1.7 * expect_radius_px
-            else:
-                # 0.006*h is a ~6.5px radius at 1080p -- 13px across,
-                # already generous for a ball and well under a shoe.
-                r_lo, r_hi = max(0.8, 0.0010 * h), 0.006 * h
 
             cands: list[tuple[float, float, float]] = []
             for c in cnts:

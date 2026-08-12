@@ -55,6 +55,19 @@ AI_TRACER = ROOT / "backend" / "app" / "services" / "ai_tracer.py"
 # radius of 1.0 and no shape can be measured from nine pixels -- so the
 # crop is upscaled before anything is measured.
 RESOLUTIONS = ((1920, 1080, 4), (1280, 720, 2), (1280, 720, 1))
+# ...and the light. This is the other axis the check was blind to: every
+# case was shot in bright sun, where the ball is V=245. Late in the day
+# it is V=158 and in shade V=128, and an absolute brightness floor
+# deletes it there without ever reporting a rejection. Ball and grass
+# both dim together -- what stays constant is the CONTRAST between them.
+LIGHTING = {
+    "bright sun": ((240, 245, 245), (40, 90, 55), (235, 240, 240),
+                   (150, 175, 205), (120, 125, 125)),
+    "late day":   ((158, 165, 160), (28, 62, 38), (155, 160, 160),
+                   (100, 118, 138), (80, 84, 84)),
+    "shade":      ((128, 134, 130), (22, 50, 30), (125, 130, 130),
+                   (82, 96, 112), (64, 68, 68)),
+}
 FPS = 30.0
 BALL_XY, BALL_R = (1200, 600), 4        # 8px across
 SHOE_XY, SHOE_WH = (1000, 640), (15, 6)  # 30x12 white shoe
@@ -88,7 +101,8 @@ def scaled(xy, k):
     return (int(xy[0] * k), int(xy[1] * k))
 
 
-def build_clip(path: Path, W: int, H: int, ball_r: int, k: float) -> float:
+def build_clip(path: Path, W: int, H: int, ball_r: int, k: float,
+               light: str = "bright sun") -> float:
     """A ball that rests then is struck, and people who later walk off."""
     vw = cv2.VideoWriter(
         str(path), cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H)
@@ -98,43 +112,45 @@ def build_clip(path: Path, W: int, H: int, ball_r: int, k: float) -> float:
         raise SystemExit(2)
     n_rest = int(REST_SEC * FPS)
     n_people = int(PEOPLE_SEC * FPS)
+    C_BALL, C_GRASS, C_WHITE, C_SKIN, C_DARK = LIGHTING[light]
     S = lambda xy: scaled(xy, k)
     SW = lambda wh: (max(1, int(wh[0] * k)), max(1, int(wh[1] * k)))
     for i in range(int(TOTAL_SEC * FPS)):
         f = np.zeros((H, W, 3), np.uint8)
-        f[:] = (40, 90, 55)  # grass
+        f[:] = C_GRASS
         # A little noise so the clip is not unrealistically clean.
         cv2.randn(noise := np.zeros((H, W, 3), np.int16), 0, 6)
         f = np.clip(f.astype(np.int16) + noise, 0, 255).astype(np.uint8)
         if i < n_people:
-            cv2.ellipse(f, S(SHOE_XY), SW(SHOE_WH), 0, 0, 360, (235, 240, 240), -1)
+            cv2.ellipse(f, S(SHOE_XY), SW(SHOE_WH), 0, 0, 360, C_WHITE, -1)
             # sunlit skin: bright, but it has a hue -- S~68 vs the ball's ~5
-            cv2.ellipse(f, S(SKIN_XY), SW(SKIN_WH), 0, 0, 360, (150, 175, 205), -1)
+            cv2.ellipse(f, S(SKIN_XY), SW(SKIN_WH), 0, 0, 360, C_SKIN, -1)
             # a ball-sized toe that is part of a bigger white shoe
-            cv2.ellipse(f, S(TOE_BODY[0]), SW(TOE_BODY[1]), 0, 0, 360, (235, 240, 240), -1)
-            cv2.circle(f, S(TOE_XY), max(1, int(TOE_R * k)), (238, 243, 243), -1, cv2.LINE_AA)
+            cv2.ellipse(f, S(TOE_BODY[0]), SW(TOE_BODY[1]), 0, 0, 360, C_WHITE, -1)
+            cv2.circle(f, S(TOE_XY), max(1, int(TOE_R * k)), C_WHITE, -1, cv2.LINE_AA)
             # a bare leg with a ball-white, ball-sized sunlit spot on it
-            cv2.ellipse(f, S(LEG_XY), SW(LEG_WH), 0, 0, 360, (150, 175, 205), -1)
-            cv2.circle(f, S(KNEE_HL), max(1, int(KNEE_R * k)), (238, 242, 244), -1, cv2.LINE_AA)
+            cv2.ellipse(f, S(LEG_XY), SW(LEG_WH), 0, 0, 360, C_SKIN, -1)
+            cv2.circle(f, S(KNEE_HL), max(1, int(KNEE_R * k)), C_BALL, -1, cv2.LINE_AA)
             # a shaded shoe (too dark to be "white") with one lit toe patch
-            cv2.ellipse(f, S(DARKSHOE_XY), SW(DARKSHOE_WH), 0, 0, 360, (120, 125, 125), -1)
-            cv2.circle(f, S(LITTOE_XY), max(1, int(LITTOE_R * k)), (240, 244, 244), -1, cv2.LINE_AA)
+            cv2.ellipse(f, S(DARKSHOE_XY), SW(DARKSHOE_WH), 0, 0, 360, C_DARK, -1)
+            cv2.circle(f, S(LITTOE_XY), max(1, int(LITTOE_R * k)), C_BALL, -1, cv2.LINE_AA)
         if i < n_rest:
-            cv2.circle(f, S(BALL_XY), ball_r, (240, 245, 245), -1, cv2.LINE_AA)
+            cv2.circle(f, S(BALL_XY), ball_r, C_BALL, -1, cv2.LINE_AA)
         vw.write(f)
     vw.release()
     return n_rest / FPS
 
 
-def run_one(ai, td: Path, W: int, H: int, ball_r: int) -> list[str]:
-    """One resolution, end to end. Returns a list of failures."""
+def run_one(ai, td: Path, W: int, H: int, ball_r: int,
+            light: str = "bright sun") -> list[str]:
+    """One resolution and lighting, end to end. Returns any failures."""
     k = W / 1920.0
-    clip = td / f"synthetic_{W}x{H}_r{ball_r}.mp4"
-    depart_at = build_clip(clip, W, H, ball_r, k)
+    clip = td / f"synthetic_{W}x{H}_r{ball_r}_{light.replace(' ', '')}.mp4"
+    depart_at = build_clip(clip, W, H, ball_r, k, light)
     dbg: dict = {}
     segs = ai.detect_swings_from_ball(clip, fps=FPS, roi=ROI, debug=dbg)
 
-    print(f"\n=== {W}x{H}, ball {2 * ball_r + 1}px across, "
+    print(f"\n=== {W}x{H}, ball {2 * ball_r + 1}px across, {light}, "
           f"struck at {depart_at:.1f}s")
     print(f"  crop upscaled by       : {dbg.get('work_scale')}x")
     print(f"  accepted radius window : {dbg.get('accept_radius_px')} px")
@@ -161,16 +177,17 @@ def run_one(ai, td: Path, W: int, H: int, ball_r: int) -> list[str]:
         )
         if decoy:
             fails.append(
-                f"{W}x{H}: reported the {decoy} at ({at[0]:.0f},{at[1]:.0f})"
+                f"{W}x{H} {light}: reported the {decoy} at "
+                f"({at[0]:.0f},{at[1]:.0f})"
             )
         elif abs(at[0] - ball[0]) > tol or abs(at[1] - ball[1]) > tol:
             fails.append(
-                f"{W}x{H}: departure at ({at[0]:.0f},{at[1]:.0f}) is not the "
+                f"{W}x{H} {light}: departure at ({at[0]:.0f},{at[1]:.0f}) not the "
                 f"ball at {ball}"
             )
         elif abs(s["peak_time_sec"] - depart_at) > 0.5:
             fails.append(
-                f"{W}x{H}: departure timed at {s['peak_time_sec']:.2f}s, "
+                f"{W}x{H} {light}: departure timed at {s['peak_time_sec']:.2f}s, "
                 f"expected ~{depart_at:.2f}s"
             )
     return fails
@@ -185,15 +202,17 @@ def main() -> int:
     fails = []
     with tempfile.TemporaryDirectory() as td:
         for W, H, ball_r in RESOLUTIONS:
-            fails += run_one(ai, Path(td), W, H, ball_r)
+            for light in LIGHTING:
+                fails += run_one(ai, Path(td), W, H, ball_r, light)
 
     print()
     if fails:
         for f in fails:
             print(f"FAIL: {f}")
         return 1
-    print("PASS: at every resolution, found the ball, timed the departure, "
-          "and ignored all 5 decoys.")
+    print(f"PASS: {len(RESOLUTIONS) * len(LIGHTING)} cases -- every "
+          "resolution x lighting: found the ball, timed the departure, "
+          "ignored all 5 decoys.")
     return 0
 
 
