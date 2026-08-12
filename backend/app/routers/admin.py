@@ -14287,6 +14287,39 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("swing test: rest still failed: %s", exc)
 
+        # STAGE 4, the one Debug3 calls "MOG2 + component + area filter":
+        # per-frame background subtraction, big blobs become a golfer mask,
+        # and only ball-sized off-body blobs survive. Run ONLY over the 3
+        # seconds after impact -- that is where the ball in flight is, and
+        # the whole clip would be MOG2 over thousands of frames to look at
+        # the part where nothing is moving.
+        if b["impact_frame"] is not None:
+            try:
+                from ..services import debug3 as _d3
+
+                _f0 = int(b["impact_frame"])
+                _f1 = _f0 + int(round(3.0 * fps))
+                _t1 = time.perf_counter()
+                _det = _d3.detect_ball_blobs(
+                    src_path, _f0, _f1,
+                    debug_dir=CLIPS_DIR,
+                    debug_prefix=f"swingtest-{upload_id}-{tok}-mog2-{k}",
+                ) or {}
+                _imgs = _det.get("images") or {}
+                b["mog2"] = {
+                    "ok": bool(_det.get("ok")),
+                    "reason": _det.get("reason"),
+                    "stats": _det.get("stats") or {},
+                    "n_dets": len(_det.get("dets") or []),
+                    "f0": _f0, "f1": _f1,
+                    "seconds": round(time.perf_counter() - _t1, 2),
+                    "frame_image": _clip_url_for(_imgs.get("frame")),
+                    "dets_image": _clip_url_for(_imgs.get("dets")),
+                }
+            except Exception as exc:  # noqa: BLE001
+                log.warning("swing test: MOG2 stage failed: %s", exc)
+                b["mog2"] = {"ok": False, "reason": f"failed: {exc}"}
+
         rep["departures"].append(b)
     rep["verify_sec"] = round(time.perf_counter() - _t0, 2)
 

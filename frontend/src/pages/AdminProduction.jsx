@@ -5828,6 +5828,46 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                       url={b.strip_image}
                       cap="Frame by frame at the rest spot. Green = ball present, red = gone, yellow box = the frame it disappeared."
                     />
+
+                    {/* Debug3's stage 4, run only over the flight window:
+                        the 3 seconds after impact. Anywhere else in the
+                        clip there is no ball in the air to find. */}
+                    {b.mog2 && (
+                      <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--line)" }}>
+                        <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                          MOG2 + component + area filter · frames {b.mog2.f0}–{b.mog2.f1}
+                          {" "}(3s after impact){b.mog2.seconds != null && <> · {b.mog2.seconds}s</>}
+                        </div>
+                        <div className="tiny muted" style={{ marginBottom: 6 }}>
+                          Big blobs become a golfer mask; only ball-sized off-body
+                          blobs survive.
+                        </div>
+                        {b.mog2.stats && (
+                          <div className="small" style={{ marginBottom: 6 }}>
+                            {b.mog2.stats.frames ?? 0} frames ·{" "}
+                            {b.mog2.stats.components ?? 0} components ·{" "}
+                            {b.mog2.stats.golfer ?? 0} golfer-sized ·{" "}
+                            {b.mog2.stats.on_golfer ?? 0} on the golfer ·{" "}
+                            {b.mog2.stats.too_small ?? 0} too small ·{" "}
+                            {b.mog2.stats.too_big ?? 0} too big ·{" "}
+                            <b>{b.mog2.stats.kept ?? b.mog2.n_dets ?? 0} kept</b>
+                          </div>
+                        )}
+                        {b.mog2.reason && (
+                          <div className="tiny muted" style={{ marginBottom: 6 }}>
+                            {b.mog2.reason}
+                          </div>
+                        )}
+                        <Img
+                          url={b.mog2.frame_image}
+                          cap="One frame: red = golfer mask (excluded), green = ball-sized blobs kept."
+                        />
+                        <Img
+                          url={b.mog2.dets_image}
+                          cap="Every kept detection across the 3s window, coloured by time — blue early, orange late. A flight reads as a coherent ramp; noise does not."
+                        />
+                      </div>
+                    )}
                   </div>
                 ))}
               </>
