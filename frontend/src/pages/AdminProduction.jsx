@@ -5401,6 +5401,7 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
   // Hooks before the early return: this component re-renders on every
   // poll tick, and a conditional hook order would blow up mid-run.
   const [draft, setDraft] = useState(null);      // {x,y,w,h} fractions
+  const [ball, setBall] = useState(null);        // {x,y} fractions
   const [dragFrom, setDragFrom] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -5411,6 +5412,14 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
   const deps = rep?.departures || [];
   const c = rep?.counts || {};
   const canSaveBox = !!(rep?.course_id && rep?.hole && rep?.day);
+  const anchored = rep?.method === "anchor";
+
+  // Show the pin that is already saved for this hole/day, so a re-run
+  // opens with it in place instead of looking unset.
+  const savedAnchor = rep?.ball_anchor;
+  useEffect(() => {
+    if (savedAnchor) setBall({ x: savedAnchor.x, y: savedAnchor.y });
+  }, [savedAnchor?.x, savedAnchor?.y]);
 
   // Pointer position as a fraction of the displayed image, clamped so a
   // drag that leaves the picture still yields a box inside the frame.
@@ -5442,21 +5451,35 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
       h: Math.abs(p.y - dragFrom.y),
     });
   }
-  function onUp() {
+  function onUp(e) {
     setDragFrom(null);
-    // A click rather than a drag: treat as "no box", not a 0x0 one.
+    // DRAG sets the search box, CLICK pins the ball. A 0x0 "box" is
+    // what a click looks like to a drag handler, and pinning the ball
+    // is the more useful of the two anyway: it turns the detector from
+    // a search (which shoes keep winning) into a check on one spot.
+    setDraft((d) => {
+      if (d && d.w > 0.01 && d.h > 0.01) return d;
+      const p = e ? frac(e) : null;
+      if (p) setBall(p);
+      return null;
+    });
+  }
+
+  function onCancel() {
+    setDragFrom(null);
     setDraft((d) => (d && d.w > 0.01 && d.h > 0.01 ? d : null));
   }
 
-  async function saveBox(roi) {
+  async function save(patch) {
     setSaving(true);
     setSaveErr(null);
     try {
       await api.setTeeBox(adminPassword, rep.course_id, {
-        hole: rep.hole, day: rep.day, roi,
+        hole: rep.hole, day: rep.day, ...patch,
       });
       setSaved(true);
-      if (!roi) setDraft(null);
+      if (patch.roi === null) setDraft(null);
+      if (patch.ball === null) setBall(null);
     } catch (e) {
       setSaveErr(e.message);
     } finally {
@@ -5574,7 +5597,10 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                   onMouseDown={canSaveBox ? onDown : undefined}
                   onMouseMove={canSaveBox ? onMove : undefined}
                   onMouseUp={canSaveBox ? onUp : undefined}
-                  onMouseLeave={canSaveBox ? onUp : undefined}
+                  // Leaving the picture ABANDONS the gesture: routing this to
+                  // onUp would read the exit point as a click and pin a ball
+                  // on the frame edge.
+                  onMouseLeave={canSaveBox ? onCancel : undefined}
                 >
                   <img
                     ref={imgRef}
@@ -5595,55 +5621,84 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                       }}
                     />
                   )}
+                  {ball && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: `${ball.x * 100}%`, top: `${ball.y * 100}%`,
+                        width: 22, height: 22, marginLeft: -11, marginTop: -11,
+                        border: "2px solid #ffe000", borderRadius: "50%",
+                        boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
+                        pointerEvents: "none",
+                      }}
+                    />
+                  )}
                 </div>
                 <figcaption className="tiny muted" style={{ marginTop: 4 }}>
                   Orange = the search area actually used for this run. Green
                   dots = every white, round, ball-sized blob the scan accepted
                   (before the box gate). Yellow ring = a ball that rested here
                   and then left.
-                  {canSaveBox && <> <b>Drag on the picture</b> to set the box for hole {rep.hole} on {rep.day}.</>}
+                  {canSaveBox && (
+                    <> <b>Click the ball</b> to pin it, or <b>drag</b> to set a
+                    search box, for hole {rep.hole} on {rep.day}.</>
+                  )}
                 </figcaption>
               </figure>
             )}
 
             {canSaveBox && (
-              <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 4 }}>
-                <button
-                  type="button"
-                  className="small"
-                  style={{ width: "auto" }}
-                  disabled={!draft || saving}
-                  onClick={() => saveBox(draft)}
-                >
-                  {saving ? "Saving…" : `Save as hole ${rep.hole}'s box for ${rep.day}`}
-                </button>
-                {draft && (
-                  <button type="button" className="ghost small"
-                    style={{ width: "auto" }} onClick={() => setDraft(null)}>
-                    Discard
+              <>
+                <div className="tiny muted" style={{ marginBottom: 6 }}>
+                  Pinning the ball is the strong one: the detector stops
+                  hunting for a ball-shaped blob and just watches that spot at
+                  full resolution, so a white shoe two feet away is never the
+                  answer. A box only narrows the hunt.
+                </div>
+                <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <button
+                    type="button" className="small" style={{ width: "auto" }}
+                    disabled={!ball || saving}
+                    onClick={() => save({ ball })}
+                  >
+                    {saving ? "Saving…" : `Pin ball for hole ${rep.hole} · ${rep.day}`}
                   </button>
-                )}
-                {saved && onRerun && (
-                  <button type="button" className="small" style={{ width: "auto" }}
-                    onClick={() => onRerun(state.uploadId)}>
-                    Re-run swing test →
+                  <button
+                    type="button" className="secondary small" style={{ width: "auto" }}
+                    disabled={!draft || saving}
+                    onClick={() => save({ roi: draft })}
+                  >
+                    Save search box
                   </button>
-                )}
-                <button
-                  type="button" className="ghost small"
-                  style={{ width: "auto", marginLeft: "auto" }}
-                  disabled={saving}
-                  onClick={() => saveBox(null)}
-                  title={`Remove the saved box for hole ${rep.hole} on ${rep.day}`}
-                >
-                  Clear this day&apos;s box
-                </button>
-              </div>
+                  {(draft || ball) && (
+                    <button type="button" className="ghost small"
+                      style={{ width: "auto" }}
+                      onClick={() => { setDraft(null); setBall(null); }}>
+                      Discard
+                    </button>
+                  )}
+                  {saved && onRerun && (
+                    <button type="button" className="small" style={{ width: "auto" }}
+                      onClick={() => onRerun(state.uploadId)}>
+                      Re-run swing test →
+                    </button>
+                  )}
+                  <button
+                    type="button" className="ghost small"
+                    style={{ width: "auto", marginLeft: "auto" }}
+                    disabled={saving}
+                    onClick={() => save({ roi: null, ball: null })}
+                    title={`Forget the pinned ball and box for hole ${rep.hole} on ${rep.day}`}
+                  >
+                    Clear this day
+                  </button>
+                </div>
+              </>
             )}
             {saved && (
               <div className="tiny" style={{ color: "var(--ok, #2a8)", marginTop: 4 }}>
-                Saved. Every clip of hole {rep.hole} on {rep.day} will use this
-                box — no re-drawing per video.
+                Saved. Every clip of hole {rep.hole} on {rep.day} uses it — set
+                once, not per video.
               </div>
             )}
             {saveErr && (
@@ -5652,13 +5707,27 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
 
             {/* 2. WHAT IT FOUND */}
             <h4 style={{ margin: "12px 0 4px" }}>2 · What it found</h4>
-            <div className="small" style={{ marginBottom: 6 }}>
-              {c.n_cand_total ?? 0} ball-like blob(s) in the frame ·{" "}
-              {c.n_cand_in_roi ?? 0} inside the search area ·{" "}
-              {c.n_tracks ?? 0} tracked ·{" "}
-              <b>{c.n_rested ?? 0}</b> held still for {c.min_rest_sec}s ·{" "}
-              <b>{deps.length}</b> departure(s)
-            </div>
+            {anchored ? (
+              <div className="small" style={{ marginBottom: 6 }}>
+                Watched the pinned spot, no search. Ball present in{" "}
+                <b>{Math.round((c.present_ratio ?? 0) * 100)}%</b> of{" "}
+                {c.n_samples ?? 0} samples
+                {c.ball_radius_px != null && <> · measured radius {c.ball_radius_px}px</>}
+                {" "}· <b>{deps.length}</b> departure(s)
+              </div>
+            ) : (
+              <div className="small" style={{ marginBottom: 6 }}>
+                {c.n_cand_total ?? 0} ball-like blob(s) in the frame ·{" "}
+                {c.n_cand_in_roi ?? 0} inside the search area ·{" "}
+                {c.n_tracks ?? 0} tracked ·{" "}
+                <b>{c.n_rested ?? 0}</b> held still for {c.min_rest_sec}s ·{" "}
+                <b>{deps.length}</b> departure(s)
+                {c.n_drop_shape > 0 && (
+                  <> · {c.n_drop_shape} white blob(s) rejected as the wrong
+                  shape for a ball (shoes)</>
+                )}
+              </div>
+            )}
             {!deps.length && (
               <div className="tiny muted">{rep.reason}</div>
             )}

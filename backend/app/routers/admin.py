@@ -111,6 +111,7 @@ from ..services.ai_tracer import (
     detect_swings_from_audio,
     detect_swings_from_motion,
     detect_swings_from_ball,
+    detect_departures_at_anchor,
     detect_swings_from_ai_ball,
     classify_swing_shot,
     find_resting_ball,
@@ -13441,6 +13442,21 @@ def _debug2_run(row, src_path, db, progress=None):
 # leaves. When it fires it is the better answer, so Debug2 and Debug3 both
 # prefer it and keep the club arc as the fallback.
 
+def _frame_size(src_path):
+    """(w, h) of a video in native pixels, or None."""
+    try:
+        import cv2  # type: ignore
+
+        _c = cv2.VideoCapture(str(src_path))
+        w = int(_c.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(_c.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        _c.release()
+        return (w, h) if w and h else None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("frame size read failed: %s", exc)
+        return None
+
+
 def _upload_day(row) -> str:
     """The day key for this upload: YYYY-MM-DD of its capture time.
 
@@ -13463,19 +13479,30 @@ def _upload_day(row) -> str:
 
 
 def _daily_tee_box(db, course, hole: int, day: str):
-    """That hole's box for that day, as fractions, or None."""
+    """That hole's entry for that day: {roi, ball} — either may be None.
+
+    `roi` narrows the search. `ball` REPLACES it: a pinned ball position
+    (fractions of the frame) means the detector stops searching for a
+    ball-like blob and just watches that spot, which is the only way to
+    be sure a white shoe two feet away is never the answer.
+    """
+    out = {"roi": None, "ball": None}
     try:
         by_hole = (getattr(course, "tee_boxes", None) or {}).get(str(int(hole)))
-        box = (by_hole or {}).get(day)
-        if not box:
-            return None
-        return {
-            "x": float(box["x"]), "y": float(box["y"]),
-            "w": float(box["w"]), "h": float(box["h"]),
-        }
+        entry = (by_hole or {}).get(day)
+        if not entry:
+            return out
+        if all(k in entry for k in ("x", "y", "w", "h")):
+            out["roi"] = {
+                "x": float(entry["x"]), "y": float(entry["y"]),
+                "w": float(entry["w"]), "h": float(entry["h"]),
+            }
+        _b = entry.get("ball")
+        if _b and "x" in _b and "y" in _b:
+            out["ball"] = {"x": float(_b["x"]), "y": float(_b["y"])}
     except (KeyError, TypeError, ValueError) as exc:
         log.debug("daily tee box read failed (hole=%s day=%s): %s", hole, day, exc)
-        return None
+    return out
 
 
 def _tee_box_roi_fractions(src_path, db, row) -> dict:
@@ -13503,7 +13530,8 @@ def _tee_box_roi_fractions(src_path, db, row) -> dict:
 
     Returns {roi, source, note} — `roi` None means search the whole frame.
     """
-    out = {"roi": None, "source": None, "note": None, "hole": None, "day": None}
+    out = {"roi": None, "source": None, "note": None, "hole": None,
+           "day": None, "ball": None}
     course = None
     try:
         course = db.get(Course, row.course_id) if row.course_id else None
@@ -13516,9 +13544,13 @@ def _tee_box_roi_fractions(src_path, db, row) -> dict:
     hole = _hole_for_upload(db, row)
     out["hole"], out["day"] = hole, day
     daily = _daily_tee_box(db, course, hole, day) if course else None
-    if daily:
-        out["roi"] = daily
-        out["source"] = f"hole {hole}'s box for {day}"
+    if daily and (daily.get("roi") or daily.get("ball")):
+        out["roi"] = daily.get("roi")
+        out["ball"] = daily.get("ball")
+        out["source"] = (
+            f"hole {hole}'s pinned ball for {day}" if daily.get("ball")
+            else f"hole {hole}'s box for {day}"
+        )
         return out
 
     course_roi = getattr(course, "ball_roi", None) if course else None
@@ -13616,9 +13648,29 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
     # The hole/day this clip files under, carried out so the swing test
     # can offer to save a box against it.
     out["hole"], out["day"] = _r.get("hole"), _r.get("day")
+    out["ball"] = _r.get("ball")
     dbg: dict = {}
+    # A PINNED BALL BEATS A SEARCH. When the operator has clicked the ball
+    # for this hole today, watch that spot at native resolution instead of
+    # asking every white blob in the box whether it is a ball — which is
+    # the question a shoe keeps answering yes to.
+    _ball = out.get("ball")
+    out["method"] = "anchor" if _ball else "scan"
     try:
-        detect_swings_from_ball(src_path, fps=fps, roi=out["roi"], debug=dbg)
+        if _ball:
+            _wh = _frame_size(src_path)
+            if not _wh:
+                out["reason"] = "could not read the video's frame size"
+                return out
+            detect_departures_at_anchor(
+                src_path,
+                (float(_ball["x"]) * _wh[0], float(_ball["y"]) * _wh[1]),
+                fps=fps, debug=dbg,
+            )
+        else:
+            detect_swings_from_ball(
+                src_path, fps=fps, roi=out["roi"], debug=dbg,
+            )
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"departure detector crashed: {exc}"
         return out
@@ -13632,15 +13684,28 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
         k: dbg.get(k) for k in (
             "n_cand_total", "n_cand_in_roi", "n_tracks", "n_rested",
             "n_raw_departures", "eff_hz", "duration_sec", "min_rest_sec",
+            # scan path: what the shape tests threw away (shoes)
+            "n_drop_shape", "n_drop_size",
+            # anchor path: how often the ball was actually on its spot
+            "n_samples", "n_present", "present_ratio", "ball_radius_px",
         )
     }
     _c = out["counts"]
     _why = None
-    if not out["deps"]:
+    # The four-way "why nothing" below reads the SCAN's counters. On the
+    # anchor path they are all None and the detector has already written
+    # a reason of its own, so leave it alone.
+    if not out["deps"] and out["method"] == "scan":
         if not _c.get("n_cand_total"):
             _why = (
                 "no white, round, ball-sized blob anywhere in the frame — "
                 "the ball is not passing the brightness/size filter"
+                + (
+                    f" ({_c['n_drop_shape']} white blob(s) WERE found and "
+                    f"thrown out as the wrong shape for a ball — if one of "
+                    f"those was the ball, click it below)"
+                    if _c.get("n_drop_shape") else ""
+                )
             )
         elif out["roi"] and not _c.get("n_cand_in_roi"):
             _why = (
@@ -14023,6 +14088,8 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         "min_rest_sec": counts.get("min_rest_sec"),
         "roi": roi,
         "roi_px": None,
+        "ball_anchor": rest.get("ball"),
+        "method": rest.get("method"),
         "roi_source": rest.get("roi_source"),
         "roi_note": rest.get("roi_note"),
         "whole_frame": roi is None,
@@ -14079,6 +14146,20 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             )
         for cx, cy in cands:
             cv2.circle(area, (int(cx), int(cy)), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        # The pinned ball, if there is one — a crosshair rather than a
+        # filled dot so the ball itself stays visible underneath it.
+        _anchor = rest.get("ball")
+        if _anchor:
+            _px = int(float(_anchor["x"]) * fw)
+            _py = int(float(_anchor["y"]) * fh)
+            _s = max(10, int(fh * 0.012))
+            cv2.line(area, (_px - _s, _py), (_px + _s, _py), (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.line(area, (_px, _py - _s), (_px, _py + _s), (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.circle(area, (_px, _py), _s, (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(
+                area, "pinned ball", (_px + _s + 4, _py - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA,
+            )
         for di, d in enumerate(deps):
             try:
                 dx, dy = int(d.get("x") or 0), int(d.get("y") or 0)
@@ -14220,10 +14301,13 @@ def set_daily_tee_box(course_id: int, payload: dict, db: Session = Depends(get_d
 
     boxes = dict(course.tee_boxes or {})
     by_day = dict(boxes.get(hole) or {})
+    entry = dict(by_day.get(day) or {})
     roi = (payload or {}).get("roi")
-    if roi is None:
-        by_day.pop(day, None)
-    else:
+    ball = (payload or {}).get("ball")
+    _clear_roi = "roi" in (payload or {}) and roi is None
+    _clear_ball = "ball" in (payload or {}) and ball is None
+
+    if roi is not None:
         try:
             x = max(0.0, min(1.0, float(roi["x"])))
             y = max(0.0, min(1.0, float(roi["y"])))
@@ -14231,10 +14315,30 @@ def set_daily_tee_box(course_id: int, payload: dict, db: Session = Depends(get_d
             h = max(0.01, min(1.0 - y, float(roi["h"])))
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "roi must be {x,y,w,h} fractions")
-        by_day[day] = {
-            "x": x, "y": y, "w": w, "h": h,
-            "set_at": _utcnow_naive().isoformat(),
-        }
+        entry.update({"x": x, "y": y, "w": w, "h": h})
+    elif _clear_roi:
+        for _k in ("x", "y", "w", "h"):
+            entry.pop(_k, None)
+
+    # The pinned ball. One click, and the detector stops searching: it
+    # watches this spot instead, which is the only thing that reliably
+    # keeps a white shoe from being the answer.
+    if ball is not None:
+        try:
+            entry["ball"] = {
+                "x": max(0.0, min(1.0, float(ball["x"]))),
+                "y": max(0.0, min(1.0, float(ball["y"]))),
+            }
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "ball must be {x,y} fractions")
+    elif _clear_ball:
+        entry.pop("ball", None)
+
+    if entry:
+        entry["set_at"] = _utcnow_naive().isoformat()
+        by_day[day] = entry
+    else:
+        by_day.pop(day, None)
 
     # An operating record, not a history: keep a month so a re-run of an
     # older clip still finds its box, drop the rest.
@@ -14249,7 +14353,7 @@ def set_daily_tee_box(course_id: int, payload: dict, db: Session = Depends(get_d
     course.tee_boxes = boxes or None
     db.commit()
     return {"ok": True, "hole": int(hole), "day": day,
-            "roi": by_day.get(day)}
+            "entry": by_day.get(day)}
 
 
 @router.post("/long-uploads/{upload_id}/swing-test")
