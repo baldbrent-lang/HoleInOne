@@ -840,6 +840,164 @@ def draw_ball_path(canvas_path: Path, out_path: Path, descent: list,
         return False
 
 
+def bezier_continuation(points: list, landing_xy, n_dir: int = 6,
+                        ctrl_frac: float = 0.40, ctrl_min: float = 40.0,
+                        ctrl_max: float = 250.0, n_samples: int = 60) -> dict:
+    """Carry the measured flight on to a known landing, as one parabola.
+
+    MOG2 gives the first part of the flight and then loses the ball --
+    against trees, against sky, or simply off the top of the frame. The
+    landing is known from the OTHER camera. What is missing is the middle,
+    and a quadratic Bezier is exactly the right tool because a quadratic
+    Bezier IS a parabola: it leaves P0 along the direction the ball was
+    already travelling, rises to an apex, and comes down to P2.
+
+    THE DIRECTION COMES FROM A REGRESSION, NOT THE LAST TWO POINTS. At
+    50fps a MOG2 centroid jitters a couple of pixels frame to frame, and
+    a tangent taken from two points multiplies that jitter by the hundreds
+    of pixels being projected -- a 2px wobble over a 20px step is a 6
+    degree error, which is tens of pixels wrong by the landing. A
+    least-squares fit over the last several points averages the jitter out.
+
+    P1 sits along that direction at 40% of the distance to the landing
+    (clamped), which is what keeps the curve going the way the ball was
+    going before it bends. Placing P1 anywhere off that ray would make the
+    tracer turn immediately, which reads as wrong even when the endpoints
+    are right.
+
+    Returns {ok, p0, p1, p2, apex, curve, direction, ctrl_px, reason}.
+    Never raises. Screen space only -- no attempt at 3D, which needs
+    depth, launch conditions and lens geometry that are not available and
+    buys nothing for a tracer that only has to look right.
+    """
+    out = {"ok": False, "p0": None, "p1": None, "p2": None, "apex": None,
+           "curve": [], "direction": None, "ctrl_px": None, "reason": None,
+           "n_dir_used": 0, "n_stalled_dropped": 0}
+    pts = [p for p in (points or []) if p is not None]
+    if len(pts) < 2:
+        out["reason"] = "fewer than two measured points to extend from"
+        return out
+    if not landing_xy:
+        out["reason"] = "no landing point to aim at"
+        return out
+
+    # THE LAST RELIABLE POINT IS NOT THE LAST POINT. Measured on a real
+    # flight: the ball rises cleanly for twelve frames and then sits at
+    # (1064,15) -- the top edge -- for eight more, because the blob is
+    # clipped by the border and its centroid stops moving. A regression
+    # over that tail reads a stationary ball and refuses to extend at all.
+    # Trailing points that do not move are dropped before anything else.
+    _stall = 0
+    while len(pts) - _stall > 2:
+        a, b = pts[-1 - _stall - 1], pts[-1 - _stall]
+        if abs(float(b["x"]) - float(a["x"])) <= 2.0 and \
+           abs(float(b["y"]) - float(a["y"])) <= 2.0:
+            _stall += 1
+            continue
+        break
+    if _stall:
+        pts = pts[:len(pts) - _stall]
+    out["n_stalled_dropped"] = _stall
+    if len(pts) < 2:
+        out["reason"] = "nothing left to extend from once stalled points are dropped"
+        return out
+
+    tail = pts[-max(2, int(n_dir)):]
+    out["n_dir_used"] = len(tail)
+    n = len(tail)
+    # Least squares of FRAME -> x and FRAME -> y. Against the index it
+    # would treat a three-frame gap as one step and bend the tangent
+    # toward whatever came after it.
+    _i = [float(q.get("frame", j)) for j, q in enumerate(tail)]
+    _mi = sum(_i) / n
+    _den = sum((v - _mi) ** 2 for v in _i) or 1.0
+    dx = sum((_i[j] - _mi) * float(tail[j]["x"]) for j in range(n)) / _den
+    dy = sum((_i[j] - _mi) * float(tail[j]["y"]) for j in range(n)) / _den
+    mag = (dx * dx + dy * dy) ** 0.5
+    if mag < 1e-6:
+        out["reason"] = "the measured points do not move — no direction to carry on"
+        return out
+    ux, uy = dx / mag, dy / mag
+
+    p0 = (float(pts[-1]["x"]), float(pts[-1]["y"]))
+    p2 = (float(landing_xy[0]), float(landing_xy[1]))
+    dist = ((p2[0] - p0[0]) ** 2 + (p2[1] - p0[1]) ** 2) ** 0.5
+    if dist < 1.0:
+        out["reason"] = "the last measured point is already at the landing"
+        return out
+    k = max(ctrl_min, min(ctrl_max, dist * float(ctrl_frac)))
+    p1 = (p0[0] + ux * k, p0[1] + uy * k)
+
+    curve = []
+    for j in range(int(n_samples) + 1):
+        t = j / float(n_samples)
+        w0, w1, w2 = (1 - t) ** 2, 2 * (1 - t) * t, t * t
+        curve.append((
+            int(round(w0 * p0[0] + w1 * p1[0] + w2 * p2[0])),
+            int(round(w0 * p0[1] + w1 * p1[1] + w2 * p2[1])),
+        ))
+    apex = min(curve, key=lambda q: q[1])   # smallest y = highest point
+    out.update({
+        "ok": True,
+        "p0": [int(round(p0[0])), int(round(p0[1]))],
+        "p1": [int(round(p1[0])), int(round(p1[1]))],
+        "p2": [int(round(p2[0])), int(round(p2[1]))],
+        "apex": [int(apex[0]), int(apex[1])],
+        "curve": curve, "ctrl_px": round(k, 1),
+        "direction": [round(ux, 4), round(uy, 4)],
+        "reason": (
+            f"carried on from the last {len(tail)} measured point(s)"
+            + (f" ({_stall} stalled at the frame edge dropped)" if _stall else "")
+            + f", heading ({ux:.2f},{uy:.2f}), control {k:.0f}px along that "
+            f"line, apex ({apex[0]},{apex[1]})"
+        ),
+    })
+    return out
+
+
+def draw_bezier_continuation(canvas_path: Path, out_path: Path,
+                             points: list, bez: dict,
+                             caption: str = "") -> bool:
+    """Measured flight solid, projected continuation dashed.
+
+    The distinction is the point: one half is where the ball was seen,
+    the other is where it must have gone. Drawing them alike would make a
+    projection look like a measurement.
+    """
+    if not HAS_CV:
+        return False
+    try:
+        img = cv2.imread(str(canvas_path))
+        if img is None:
+            return False
+        mp = [(int(p["x"]), int(p["y"])) for p in (points or [])]
+        for a, b in zip(mp, mp[1:]):
+            cv2.line(img, a, b, (255, 220, 0), 3, cv2.LINE_AA)   # measured
+        for q in mp:
+            cv2.circle(img, q, 3, (255, 220, 0), -1, cv2.LINE_AA)
+        curve = bez.get("curve") or []
+        for j in range(0, max(0, len(curve) - 1), 2):            # dashed
+            cv2.line(img, curve[j], curve[j + 1], (0, 90, 255), 3, cv2.LINE_AA)
+        for nm, key, col in (("P0", "p0", (255, 220, 0)),
+                             ("apex", "apex", (0, 200, 255)),
+                             ("P2 landing", "p2", (0, 0, 255))):
+            q = bez.get(key)
+            if not q:
+                continue
+            qq = (int(q[0]), int(q[1]))
+            cv2.circle(img, qq, 8, col, 2, cv2.LINE_AA)
+            for _c, _t in ((( 0, 0, 0), 4), (col, 2)):
+                cv2.putText(img, nm, (qq[0] + 12, qq[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, _c, _t, cv2.LINE_AA)
+        if caption:
+            _label(img, caption)
+        cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3 draw_bezier_continuation failed: %s", exc)
+        return False
+
+
 # ── stage E: RANSAC parabola ───────────────────────────────────────────
 
 def ransac_parabola(
@@ -2272,7 +2430,7 @@ __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "find_flight", "detect_ball_blobs", "draw_flight",
-    "follow_to_rest", "draw_ball_path",
+    "follow_to_rest", "draw_ball_path", "bezier_continuation", "draw_bezier_continuation",
     "draw_tracks", "select_preview_tracks", "TRACK_COLORS", "TRACKS_DRAWN",
     "pick_flight",
     "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",

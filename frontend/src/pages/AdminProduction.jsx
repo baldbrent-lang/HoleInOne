@@ -5941,18 +5941,51 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                             padding: "8px 10px", borderRadius: 6, margin: "6px 0",
                             background: "rgba(0,160,80,0.14)",
                           }}>
+                            <div className="tiny muted" style={{ marginBottom: 3 }}>
+                              IMPACT · tee frame <b>{b.impact_frame}</b>
+                              {b.green.impact_sec_tee != null && <> · <b>{b.green.impact_sec_tee}s</b> (tee clock)</>}
+                            </div>
                             <div>
                               <span style={{ color: "var(--danger, #c0392b)" }}>●</span>{" "}
-                              <b>LANDED</b> · frame <b>{b.green.landing_frame}</b>
-                              {b.green.landing_sec != null && <> ({b.green.landing_sec}s)</>}
+                              <b>LANDED</b> · green frame <b>{b.green.landing_frame}</b>
+                              {b.green.landing_sec != null && <> · {b.green.landing_sec}s green</>}
+                              {b.green.landing_sec_tee != null && <> = <b>{b.green.landing_sec_tee}s</b> tee</>}
                               {b.green.landing_xy && <> · at <b>{b.green.landing_xy.join(", ")}</b></>}
                             </div>
                             {b.green.rest_frame != null && (
                               <div style={{ marginTop: 3 }}>
                                 <span style={{ color: "var(--emerald-700, #16a34a)" }}>●</span>{" "}
-                                <b>AT REST</b> · frame <b>{b.green.rest_frame}</b>
-                                {b.green.rest_sec != null && <> ({b.green.rest_sec}s)</>}
+                                <b>AT REST</b> · green frame <b>{b.green.rest_frame}</b>
+                                {b.green.rest_sec != null && <> · {b.green.rest_sec}s green</>}
+                                {b.green.rest_sec_tee != null && <> = <b>{b.green.rest_sec_tee}s</b> tee</>}
                                 {b.green.rest_xy && <> · at <b>{b.green.rest_xy.join(", ")}</b></>}
+                              </div>
+                            )}
+                            {/* THE SYNC CHECK. Flight time is landing minus
+                                impact in ONE timeline. A golf shot hangs
+                                4-8s; anything outside that is the camera
+                                offset, not the detector. */}
+                            {b.green.landing_after_impact != null && (
+                              <div style={{
+                                marginTop: 4, paddingTop: 4,
+                                borderTop: "1px solid rgba(0,0,0,0.12)",
+                              }}>
+                                <b>Hang time {b.green.landing_after_impact}s</b>
+                                {" "}
+                                <span className={
+                                  b.green.landing_after_impact >= 2
+                                  && b.green.landing_after_impact <= 10
+                                    ? "pill ok" : "pill err"}>
+                                  {b.green.landing_after_impact >= 2
+                                   && b.green.landing_after_impact <= 10
+                                    ? "plausible"
+                                    : "IMPLAUSIBLE — check the camera offset"}
+                                </span>
+                                {b.green.rest_after_impact != null && (
+                                  <span className="muted">
+                                    {" "}· at rest {b.green.rest_after_impact}s after impact
+                                  </span>
+                                )}
                               </div>
                             )}
                             {b.green.ground_path?.length > 0 && (
@@ -6065,6 +6098,44 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                         )}
                         <Img url={b.stages.flight?.image}
                           cap="The fitted flight over the frame it was measured on." />
+
+                        {/* The measured flight carried on to the landing the
+                            green camera found. */}
+                        {b.bezier && (
+                          <div style={{ marginTop: 8 }}>
+                            <div className="small">
+                              <b>Continuation to the landing</b>{" "}
+                              <span className={b.bezier.ok ? "pill ok" : "pill warn"}>
+                                {b.bezier.ok ? "projected" : "not projected"}
+                              </span>
+                            </div>
+                            <div className="tiny muted">
+                              A quadratic Bézier is a parabola: it leaves the last
+                              measured point along the direction the ball was already
+                              travelling, rises to an apex, and comes down to the
+                              landing. Direction is a regression over the last several
+                              points, not the final two — at 50fps a centroid jitters a
+                              couple of pixels, and two points multiply that across the
+                              whole projection.
+                            </div>
+                            {b.bezier.reason && (
+                              <div className="tiny muted" style={{ marginTop: 3 }}>
+                                {b.bezier.reason}
+                              </div>
+                            )}
+                            {b.bezier.ok && (
+                              <div className="small" style={{ marginTop: 3 }}>
+                                P0 {b.bezier.p0?.join(",")} → apex {b.bezier.apex?.join(",")}
+                                {" "}→ P2 {b.bezier.p2?.join(",")} · control {b.bezier.ctrl_px}px
+                                {b.bezier.n_stalled_dropped > 0 && (
+                                  <> · {b.bezier.n_stalled_dropped} stalled point(s) at the frame edge dropped</>
+                                )}
+                              </div>
+                            )}
+                            <Img url={b.bezier.image}
+                              cap="Solid = measured flight. Dashed = projected continuation. The two are drawn differently on purpose: one is where the ball was seen, the other is where it must have gone." />
+                          </div>
+                        )}
 
                         {/* Why each candidate track was accepted or thrown
                             out -- the answer to "there was clearly a ball,
