@@ -7733,6 +7733,171 @@ def _gate_ball_blob(c, mask, hsv, scale: float, r_lo: float, r_hi: float,
     return True, None, meas
 
 
+def find_departures_at_spot(
+    input_path: Path,
+    rest_xy: tuple[float, float],
+    fps: float,
+    min_present_sec: float = 1.0,
+    min_gone_sec: float = 0.4,
+    ball_r_px: float | None = None,
+    debug: dict | None = None,
+) -> list[dict]:
+    """Every frame the ball leaves THIS spot, from one pass at full rate.
+
+    The scan that finds WHERE the ball is answers WHEN it left very
+    badly, and the two failures are different in kind. Acquisition can
+    afford to be picky -- it only has to succeed on some frames to locate
+    the ball. Departure cannot: the moment the ball flickers out of the
+    picky detector for longer than the occlusion tolerance, the track
+    dies and that instant is reported as the strike. Measured on a real
+    clip, that put the departure 914 frames -- eighteen seconds -- before
+    the actual one, and no size of search window around a number that
+    wrong will find the right answer.
+
+    So once the position is known, stop asking whether the thing there
+    looks like a ball. It IS the ball; the only question is whether it is
+    still there. This walks the whole clip watching one small patch and
+    asks that question and nothing else, which is both far more robust
+    and cheaper than the scan -- a 40px patch instead of a full frame.
+
+    Presence is a top-hat: brighter than its immediate surroundings,
+    which holds whatever the light does. A departure is a run of
+    presence at least min_present_sec long followed by min_gone_sec of
+    absence. Every departure in the clip is returned, because a golfer
+    re-tees in the same footprint and each of those is a shot.
+
+    Returns [{frame, sec, rest_sec}]. Never raises.
+    """
+    out: list[dict] = []
+    if debug is not None:
+        debug.update({"reason": None, "method": "spot_walk"})
+    if not HAS_CV or not HAS_NP:
+        if debug is not None:
+            debug["reason"] = "opencv or numpy not installed"
+        return out
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        if debug is not None:
+            debug["reason"] = "could not open video"
+        return out
+    try:
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
+        if not w or not h:
+            if debug is not None:
+                debug["reason"] = "could not read the frame size"
+            return out
+        r = float(ball_r_px or max(2.0, 0.0035 * h))
+        # Big enough that the ball stays inside it if the rest position is
+        # a few pixels off, small enough that the golfer's shoes are not.
+        m = max(12, int(round(8.0 * r)))
+        cx, cy = float(rest_xy[0]), float(rest_xy[1])
+        x0, x1 = max(0, int(cx - m)), min(w, int(cx + m + 1))
+        y0, y1 = max(0, int(cy - m)), min(h, int(cy + m + 1))
+        if x1 - x0 < 6 or y1 - y0 < 6:
+            if debug is not None:
+                debug["reason"] = "the rest spot is at the frame edge"
+            return out
+        pcx, pcy = cx - x0, cy - y0
+        ker = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (int(max(5, min(31, round(6 * r)))) | 1,) * 2,
+        )
+        # Only the middle of the patch counts: a bright thing at the edge
+        # is the club, a shoe, or the next ball, not this one.
+        yy, xx = np.ogrid[0:y1 - y0, 0:x1 - x0]
+        core = ((xx - pcx) ** 2 + (yy - pcy) ** 2) <= (max(3.0, 2.0 * r)) ** 2
+
+        peaks: list[int] = []
+        while True:
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            g = cv2.cvtColor(fr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+            th = cv2.morphologyEx(g, cv2.MORPH_TOPHAT, ker)
+            peaks.append(int(th[core].max()))
+    finally:
+        cap.release()
+
+    if not peaks:
+        if debug is not None and not debug.get("reason"):
+            debug["reason"] = "no frames read"
+        return out
+
+    # THE THRESHOLD IS MEASURED AT THIS SPOT, NOT CHOSEN.
+    #
+    # Measured on a real clip: the ball reads 105 while it sits, 12-28 the
+    # instant it is struck, and then 49-52 for the rest of the clip --
+    # a shadow edge, a divot, the tee. A fixed floor of 30 called that
+    # residue "ball present" 13 frames after the strike, the gap was too
+    # short to count, and the departure was lost. No fixed number
+    # separates 105 from 52 on one clip and works on the next, because
+    # both values move with the light and the turf.
+    #
+    # Otsu splits this spot's own two states -- ball there, ball not --
+    # wherever they happen to fall. The absolute floor only guards a clip
+    # where the ball never appears at all, so there are no two states to
+    # find and Otsu would invent a split in the noise.
+    _v = np.array(peaks, dtype=np.uint8).reshape(-1, 1)
+    _otsu, _ = cv2.threshold(_v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thr = max(float(_otsu), 25.0)
+    present = [p >= thr for p in peaks]
+
+    need_on = max(1, int(round(min_present_sec * fps)))
+    need_off = max(2, int(round(min_gone_sec * fps)))
+    n = len(present)
+    run_start = None
+    i = 0
+    while i < n:
+        if present[i]:
+            if run_start is None:
+                run_start = i
+            i += 1
+            continue
+        # a gap: how long?
+        j = i
+        while j < n and not present[j]:
+            j += 1
+        gap = j - i
+        if run_start is not None and (i - run_start) >= need_on and gap >= need_off:
+            out.append({
+                "frame": int(i),
+                "sec": round(i / fps, 3),
+                "rest_sec": round((i - run_start) / fps, 2),
+            })
+        if gap >= need_off:
+            run_start = None
+        i = j
+
+    if debug is not None:
+        debug.update({
+            "n_frames": n,
+            "n_present": int(sum(present)),
+            "present_ratio": round(sum(present) / float(n), 3),
+            "patch_px": [x1 - x0, y1 - y0],
+            "present_threshold": round(float(thr), 1),
+            "peak_when_present": (
+                int(np.median([p for p in peaks if p >= thr]))
+                if any(p >= thr for p in peaks) else None
+            ),
+            "ball_r_px": round(r, 2),
+            "departures": out,
+        })
+        if not out:
+            debug["reason"] = (
+                "the ball was seen at this spot in "
+                f"{100.0 * sum(present) / n:.0f}% of frames but never went "
+                f"missing for {min_gone_sec}s after sitting for "
+                f"{min_present_sec}s"
+            )
+    log.info(
+        "ai_tracer: find_departures_at_spot (%.0f,%.0f) -> %d departure(s) "
+        "over %d frames", cx, cy, len(out), len(present),
+    )
+    return out
+
+
 def detect_swings_from_ball(
     input_path: Path,
     fps: float | None = None,

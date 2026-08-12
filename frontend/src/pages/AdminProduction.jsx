@@ -5813,10 +5813,23 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                           : "departure not confirmed"}
                       </span>
                     </div>
+                    {b.spot_departures && (
+                      <div className="tiny muted" style={{ marginTop: 4 }}>
+                        <b>Watched this spot across the whole clip</b> at full
+                        rate: {b.spot_departures.length} departure(s)
+                        {b.spot_peak != null && (
+                          <> · ball reads {b.spot_peak} against a measured
+                          threshold of {b.spot_threshold}</>
+                        )}
+                        {b.spot_departures.length > 0 && (
+                          <> — {b.spot_departures.map((d) => `f${d.frame} (sat ${d.rest_sec}s)`).join(", ")}</>
+                        )}
+                        {b.spot_reason && <> — {b.spot_reason}</>}
+                      </div>
+                    )}
                     <div className="tiny muted" style={{ marginTop: 4 }}>
-                      Scan put it at frame {b.frame} ({b.t_sec}s), good to about
-                      a 15th of a second and marking the last frame the ball was
-                      SEEN.{" "}
+                      Departure frame {b.frame} ({b.t_sec}s), taken from the
+                      spot walk rather than the scan.{" "}
                       {b.departed
                         ? `The frame-by-frame check pins the disappearance at frame ${b.impact_frame}.`
                         : "The frame-by-frame check could not confirm it."}

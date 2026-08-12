@@ -14072,7 +14072,10 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
     """The ball-departure detector on its own, with its work shown."""
     import cv2  # type: ignore
 
-    from ..services.ai_tracer import verify_rest_and_impact
+    from ..services.ai_tracer import (
+        find_departures_at_spot,
+        verify_rest_and_impact,
+    )
 
     upload_id = row.id
     tok = secrets.token_hex(3)
@@ -14243,6 +14246,33 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             "strip_image": None,
             "rest_image": None,
         }
+        # WHERE comes from the scan; WHEN does not. The scan reports the
+        # last frame its picky detector saw the ball, and when the ball
+        # flickers out of that detector while the golfer stands over it,
+        # the track ends there -- measured 914 frames, eighteen seconds,
+        # before the real strike. So the position is taken from the scan
+        # and the frame is found by walking the whole clip at that spot,
+        # which asks only "is it still there" and is both more reliable
+        # and cheaper than the scan that produced the position.
+        _walk: dict = {}
+        try:
+            _spot = find_departures_at_spot(
+                src_path, (x, y), fps, debug=_walk,
+            ) or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swing test: spot walk failed: %s", exc)
+            _spot = []
+        b["spot_departures"] = _spot
+        b["spot_reason"] = _walk.get("reason")
+        b["spot_threshold"] = _walk.get("present_threshold")
+        b["spot_peak"] = _walk.get("peak_when_present")
+        # The teed ball is the one that SAT there. A shorter run at the
+        # same spot is the next ball being placed, or the club passing.
+        _best = max(_spot, key=lambda d: d["rest_sec"]) if _spot else None
+        if _best:
+            b["frame"] = int(_best["frame"])
+            b["t_sec"] = round(float(_best["sec"]), 2)
+            b["rest_sec"] = _best["rest_sec"]
         try:
             v = verify_rest_and_impact(
                 src_path, (x, y), b["frame"], fps,
