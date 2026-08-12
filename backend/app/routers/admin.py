@@ -14465,6 +14465,97 @@ def calibrate_ball_size(upload_id: int, payload: dict,
     }
 
 
+@router.post("/long-uploads/{upload_id}/diagnose-ball")
+def diagnose_ball(upload_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Why was the ball AT THIS PIXEL not found? payload {"x","y"} fractions.
+
+    Four rounds of this were spent inferring, from screenshots, facts the
+    server already had. "It found nothing" is the same sentence whether
+    the ball never passed the brightness threshold, was thrown out as the
+    wrong size, or fell a few pixels outside the box -- and those have
+    completely different fixes.
+
+    So the operator clicks the ball they can see, and the detector
+    follows the blob nearest that click through the SAME gates every
+    other blob goes through -- _gate_ball_blob, not a re-implementation
+    of it -- and reports which gate turned it away, on how many frames,
+    with the measurements. If nothing survives thresholding there at all,
+    it reports the raw pixel instead: hue, saturation, value and the
+    top-hat response, which is what decides whether it is a candidate in
+    the first place.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row or not row.tee_filename:
+        raise HTTPException(404, "upload not found or has no tee video")
+    try:
+        fx = max(0.0, min(1.0, float((payload or {})["x"])))
+        fy = max(0.0, min(1.0, float((payload or {})["y"])))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "x and y must be fractions of the frame")
+
+    storage.ensure_local(CLIPS_DIR, row.tee_filename)
+    src_path = _local_tee(row)
+    if not src_path.exists():
+        raise HTTPException(404, "tee source missing on disk")
+    wh = _frame_size(src_path)
+    if not wh:
+        raise HTTPException(422, "could not read the video's frame size")
+    fps = float(probe_fps(src_path) or 0.0) or 30.0
+
+    _r = _tee_box_roi_fractions(src_path, db, row)
+    course = db.get(Course, row.course_id) if row.course_id else None
+    expect_r = _ball_radius_px(course, _r.get("hole"), wh[1])
+
+    dbg: dict = {}
+    detect_swings_from_ball(
+        src_path, fps=fps, roi=_r.get("roi"), expect_radius_px=expect_r,
+        probe_xy=(fx * wh[0], fy * wh[1]), debug=dbg,
+    )
+    probe = dbg.get("probe") or {}
+
+    # One sentence naming the gate, because that is the whole point.
+    rejected = probe.get("rejected_by") or {}
+    n_frames = probe.get("n_frames") or 0
+    if probe.get("n_accepted"):
+        verdict = (
+            f"A ball-like blob WAS accepted here on "
+            f"{probe['n_accepted']} of {n_frames} frames — detection is "
+            f"working at this spot, so the problem is downstream: it did "
+            f"not hold still long enough, or it never left"
+        )
+    elif rejected:
+        _worst = max(rejected.items(), key=lambda kv: kv[1])
+        verdict = (
+            f"Found a blob here on {sum(rejected.values())} of {n_frames} "
+            f"frames and rejected it every time — most often: {_worst[0]} "
+            f"({_worst[1]} frames)"
+        )
+    elif probe.get("pixel"):
+        _p = probe["pixel"][0]
+        verdict = (
+            f"Nothing survived thresholding here on any of {n_frames} "
+            f"frames. The pixel reads V={_p['v']} S={_p['s']} with a "
+            f"top-hat response of {_p['tophat']} — it is not bright "
+            f"enough relative to the grass around it to become a "
+            f"candidate at all"
+        )
+    else:
+        verdict = (
+            f"Nothing at all at that point across {n_frames} frames — "
+            f"the click may be off the ball, or outside the search box"
+        )
+
+    return {
+        "ok": True, "verdict": verdict,
+        "hole": _r.get("hole"), "day": _r.get("day"),
+        "roi": _r.get("roi"), "roi_source": _r.get("source"),
+        "expect_radius_px": round(expect_r, 2) if expect_r else None,
+        "accept_radius_px": (dbg.get("accept_radius_px")),
+        "frame_size": list(wh),
+        "probe": probe,
+    }
+
+
 @router.post("/long-uploads/{upload_id}/swing-test")
 def swing_test(upload_id: int):
     """Start the ball-departure test. Poll /swing-test/status for the work."""

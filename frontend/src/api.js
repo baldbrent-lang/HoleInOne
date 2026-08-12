@@ -647,6 +647,15 @@ export const api = {
       adminPassword: key,
     }),
 
+  // Why was the ball at this pixel not found? Runs the real gates and
+  // names the one that rejected it.
+  diagnoseBall: (key, uploadId, { x, y }) =>
+    request(`/api/admin/long-uploads/${uploadId}/diagnose-ball`, {
+      method: "POST",
+      body: { x, y },
+      adminPassword: key,
+    }),
+
   // Measure how big a ball is on this hole, from a click on one. Per
   // hole, not per day: the ball moves, the camera does not.
   calibrateBall: (key, uploadId, { x, y }) =>

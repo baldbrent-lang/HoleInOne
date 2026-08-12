@@ -7652,6 +7652,66 @@ def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
     return (float((grass & ring).sum()) / n) >= min_grass
 
 
+def _gate_ball_blob(c, mask, hsv, scale: float, r_lo: float, r_hi: float,
+                    circularity_min: float, aspect_max: float,
+                    extent_min: float):
+    """Every test a blob must pass to be a ball, in one place.
+
+    Returns (ok, reason, meas). ONE implementation, because the swing
+    test's "why was my ball rejected?" probe runs this same function: a
+    diagnosis that re-implements the gates it is explaining drifts away
+    from them and then confidently reports the wrong answer.
+    """
+    (cx, cy), rad = cv2.minEnclosingCircle(c)
+    rn = rad / scale  # native px
+    bx, by, bw, bh = cv2.boundingRect(c)
+    meas = {
+        "x_work": float(cx), "y_work": float(cy),
+        "radius_native_px": round(float(rn), 2),
+        "box_px": [int(bw), int(bh)],
+    }
+    if bw <= 0 or bh <= 0:
+        return False, "degenerate", meas
+    # COUNT THE PIXELS. cv2.contourArea measures the polygon through the
+    # CENTRES of the boundary pixels, so it undercounts small blobs badly
+    # -- a 13-pixel ball comes back as 8.0. At 720p a ball is ~2px of
+    # radius, which is exactly where that error lives.
+    a = float(cv2.countNonZero(mask[by:by + bh, bx:bx + bw]))
+    aspect = max(bw, bh) / float(min(bw, bh))
+    meas.update({
+        "pixels": int(a),
+        "aspect": round(float(aspect), 2),
+        "extent": round(float(a / float(bw * bh)), 2) if bw * bh else None,
+        "circularity": (
+            round(float(a / (np.pi * rad * rad)), 2) if rad > 0 else None
+        ),
+    })
+    if a <= 0:
+        return False, "empty", meas
+    if rn < r_lo:
+        return False, "too small", meas
+    if rn > r_hi:
+        return False, "too big", meas
+    # A BALL IS AS WIDE AS IT IS TALL. A shoe is not. Asked only of blobs
+    # with enough pixels to have an aspect: on a 2x1 blob the ratio is
+    # 2.0 whatever the blob is, so below that it rejects balls, not shoes.
+    if rad >= 1.5 and aspect > aspect_max:
+        return False, "not square (elongated)", meas
+    # ROUNDNESS AND FILL ARE ONLY ASKED OF BLOBS BIG ENOUGH TO HAVE A
+    # SHAPE. Below ~3px of radius a ball is a dozen pixels on a square
+    # grid: it cannot be round, and demanding it throws away a
+    # correctly-detected ball.
+    if rad >= 3.0:
+        circ_area = np.pi * rad * rad
+        if circ_area <= 0 or (a / circ_area) < circularity_min:
+            return False, "not round", meas
+        if (a / float(bw * bh)) < extent_min:
+            return False, "does not fill its box", meas
+    if not _sits_on_grass(hsv, mask, cx, cy, rad):
+        return False, "not surrounded by grass", meas
+    return True, None, meas
+
+
 def detect_swings_from_ball(
     input_path: Path,
     fps: float | None = None,
@@ -7683,6 +7743,11 @@ def detect_swings_from_ball(
     expect_radius_px: float | None = None,
     stationary_tol_frac: float = 0.018,
     roi: dict | None = None,
+    # Ask "why was the ball at THIS pixel not found?" -- native px. The
+    # blob nearest it is followed through the same gates every other blob
+    # goes through, and the gate that turned it away is counted.
+    probe_xy: tuple[float, float] | None = None,
+    probe_radius_px: float = 25.0,
     debug: dict | None = None,
 ) -> list[dict]:
     """Find swings by tracking a resting white ball that suddenly departs.
@@ -7740,6 +7805,10 @@ def detect_swings_from_ball(
     # counts and completely different problems.
     sample_cands: list[tuple[int, int, int]] = []
     r_lo = r_hi = None  # the accepted radius window, in native px
+    probe = {
+        "n_frames": 0, "n_no_blob": 0, "n_accepted": 0,
+        "rejected_by": {}, "samples": [], "pixel": [],
+    }
     try:
         src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if src_fps <= 0:
@@ -7886,56 +7955,32 @@ def detect_swings_from_ball(
             )
 
             cands: list[tuple[float, float, float]] = []
+            _probe_best = None  # (dist, ok, reason, meas) nearest the probe
             for c in cnts:
-                (cx, cy), rad = cv2.minEnclosingCircle(c)
-                rn = rad / scale  # native px
-                if rn < r_lo or rn > r_hi:
-                    n_drop_size += 1
-                    continue
-                _bx, _by, _bw, _bh = cv2.boundingRect(c)
-                if _bw <= 0 or _bh <= 0:
-                    continue
-                # COUNT THE PIXELS. cv2.contourArea measures the polygon
-                # through the CENTRES of the boundary pixels, so it
-                # undercounts small blobs badly -- a 13-pixel ball comes
-                # back as 8.0, and every area ratio built on it is wrong
-                # by a third. At 720p a ball is ~2px of radius, which is
-                # exactly where that error lives.
-                a = float(cv2.countNonZero(
-                    mask[_by:_by + _bh, _bx:_bx + _bw]
-                ))
-                if a <= 0:
-                    continue
-                # A BALL IS AS WIDE AS IT IS TALL. A shoe is not. Asked
-                # of anything with enough pixels to have an aspect at
-                # all: on a 2x1 blob the ratio is 2.0 no matter what the
-                # blob is, so below that it rejects balls, not shoes.
-                if rad >= 1.5 and (
-                    max(_bw, _bh) / float(min(_bw, _bh)) > aspect_max
-                ):
-                    n_drop_shape += 1
-                    continue
-                # ROUNDNESS AND FILL ARE ONLY ASKED OF BLOBS BIG ENOUGH
-                # TO HAVE A SHAPE. Below ~3px of radius a ball is a
-                # dozen pixels on a square grid: it cannot be round, and
-                # demanding that it be is how a correctly-detected ball
-                # gets thrown away as "the wrong shape". Size, aspect and
-                # the grass around it still have to hold.
-                if rad >= 3.0:
-                    circ_area = np.pi * rad * rad
-                    if circ_area <= 0 or (a / circ_area) < circularity_min:
+                ok, why, meas = _gate_ball_blob(
+                    c, mask, hsv, scale, r_lo, r_hi,
+                    circularity_min, aspect_max, extent_min,
+                )
+                nx = ox + meas["x_work"] / scale
+                ny = oy + meas["y_work"] / scale
+                # THE PROBE. When the operator has clicked a ball and
+                # asked why it was not found, follow the blob nearest
+                # that click through the very same gates, and report
+                # which one turned it away.
+                if probe_xy is not None:
+                    _d = ((nx - probe_xy[0]) ** 2 + (ny - probe_xy[1]) ** 2) ** 0.5
+                    if _d <= probe_radius_px and (
+                        _probe_best is None or _d < _probe_best[0]
+                    ):
+                        _probe_best = (_d, ok, why, meas)
+                if not ok:
+                    if why in ("too small", "too big"):
+                        n_drop_size += 1
+                    elif why == "not surrounded by grass":
+                        n_drop_touch += 1
+                    elif why not in ("degenerate", "empty"):
                         n_drop_shape += 1
-                        continue
-                    # ... and it FILLS its box the way a disc does
-                    # (pi/4 = 0.785). An L-shaped or hollow blob does not.
-                    if (a / float(_bw * _bh)) < extent_min:
-                        n_drop_shape += 1
-                        continue
-                # ON GRASS, or a bright bit of a person?
-                if not _sits_on_grass(hsv, mask, cx, cy, rad):
-                    n_drop_touch += 1
                     continue
-                nx, ny = ox + cx / scale, oy + cy / scale
                 n_cand_total += 1
                 # The crop above already IS the box, but it is taken with
                 # a margin, so it can still hand back something just
@@ -7952,7 +7997,34 @@ def detect_swings_from_ball(
                 if not _in_box:
                     continue
                 n_cand_in_roi += 1
-                cands.append((nx, ny, rn))
+                cands.append((nx, ny, meas["radius_native_px"]))
+            if probe_xy is not None:
+                probe["n_frames"] += 1
+                if _probe_best is None:
+                    # Nothing survived thresholding there at all -- so
+                    # report what the PIXELS are, which is the only thing
+                    # left to look at.
+                    probe["n_no_blob"] += 1
+                    _px = int((probe_xy[0] - ox) * scale), int((probe_xy[1] - oy) * scale)
+                    if 0 <= _px[1] < hsv.shape[0] and 0 <= _px[0] < hsv.shape[1]:
+                        _h, _s_, _v = hsv[_px[1], _px[0]]
+                        probe["pixel"].append(
+                            {"h": int(_h), "s": int(_s_), "v": int(_v),
+                             "tophat": int(_th[_px[1], _px[0]])}
+                        )
+                else:
+                    _d, ok, why, meas = _probe_best
+                    if ok:
+                        probe["n_accepted"] += 1
+                    else:
+                        probe["rejected_by"][why] = (
+                            probe["rejected_by"].get(why, 0) + 1
+                        )
+                    if len(probe["samples"]) < 8:
+                        probe["samples"].append(
+                            dict(meas, t=round(t, 2), accepted=bool(ok),
+                                 reason=why, dist_px=round(float(_d), 1))
+                        )
             samples.append((t, cands))
     finally:
         cap.release()
@@ -8056,6 +8128,7 @@ def detect_swings_from_ball(
                     if r_lo is not None else None
                 ),
                 "native_scan": bool(roi),
+                "probe": probe if probe_xy is not None else None,
                 "work_scale": round(float(scale), 2) if r_lo is not None else None,
                 "n_tracks": len(tracks),
                 "n_rested": n_rested,

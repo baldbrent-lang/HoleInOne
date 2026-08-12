@@ -5403,6 +5403,7 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
   const [draft, setDraft] = useState(null);      // {x,y,w,h} fractions
   const [calibrating, setCalibrating] = useState(false);
   const [calibrated, setCalibrated] = useState(null);  // measured px
+  const [diag, setDiag] = useState(null);              // why-not-found
   const [dragFrom, setDragFrom] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -5465,16 +5466,25 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
     setDraft((d) => (d && d.w > 0.01 && d.h > 0.01 ? d : null));
   }
 
+  // A click does BOTH: measures the ball for calibration, and asks the
+  // detector why it did not find one there. The second is the useful
+  // half when the panel says it found nothing.
   async function calibrate(p) {
     setCalibrating(true);
     setSaveErr(null);
     setCalibrated(null);
+    setDiag(null);
     try {
       const r = await api.calibrateBall(adminPassword, state.uploadId, p);
       setCalibrated(r);
       setSaved(true);
     } catch (e) {
       setSaveErr(e.message);
+    }
+    try {
+      setDiag(await api.diagnoseBall(adminPassword, state.uploadId, p));
+    } catch (e) {
+      setDiag({ verdict: `Diagnosis failed: ${e.message}` });
     } finally {
       setCalibrating(false);
     }
@@ -5692,6 +5702,37 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                   )}
                   {calibrating && <> Measuring…</>}
                 </div>
+                {diag && (
+                  <div className="small" style={{
+                    marginBottom: 8, padding: "8px 10px", borderRadius: 6,
+                    background: "rgba(120,120,120,0.12)",
+                  }}>
+                    <b>Why it did not find a ball there:</b> {diag.verdict}
+                    {diag.probe?.samples?.length > 0 && (
+                      <div className="tiny muted" style={{ marginTop: 6 }}>
+                        {diag.probe.samples.slice(0, 4).map((sm, i) => (
+                          <div key={i}>
+                            t={sm.t}s · radius {sm.radius_native_px}px ·
+                            {" "}{sm.pixels}px · box {sm.box_px?.join("×")} ·
+                            {" "}aspect {sm.aspect} · extent {sm.extent} ·{" "}
+                            {sm.accepted ? "accepted" : `rejected: ${sm.reason}`}
+                          </div>
+                        ))}
+                        {diag.accept_radius_px && (
+                          <div>accepted radius window:{" "}
+                            {diag.accept_radius_px[0]}–{diag.accept_radius_px[1]}px</div>
+                        )}
+                      </div>
+                    )}
+                    {diag.probe?.pixel?.length > 0 && (
+                      <div className="tiny muted" style={{ marginTop: 6 }}>
+                        pixel there: {diag.probe.pixel.slice(0, 3).map((px, i) => (
+                          <span key={i}>V={px.v} S={px.s} top-hat={px.tophat}{" "}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <button
                     type="button" className="secondary small" style={{ width: "auto" }}
