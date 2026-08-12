@@ -15129,20 +15129,63 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     # arc; it only lacks frame numbers, so its samples are spread over
     # the frames between the last measurement and the cut.
     _bez = b.get("bezier") or {}
-    _curve = _bez.get("curve") or []
-    if _bez.get("ok") and _curve and _pts:
+    if _bez.get("ok") and _bez.get("p0") and _pts:
+        # CARRY THE LINE ON, AT THE SPEED IT WAS GOING.
+        #
+        # The measured points stop where MOG2 lost the ball -- off the
+        # top of the frame -- and a tracer that stops there looks like it
+        # failed rather than like the ball leaving.
+        #
+        # The join has to be smooth, and sampling the curve uniformly is
+        # what made it visibly jump: the measured half moves about 18px a
+        # frame, and the remaining arc is short in PIXELS but long in
+        # TIME -- four seconds of a ball flying away from the camera,
+        # which perspective compresses into very little screen distance.
+        # Spread uniformly, the projection crawls at about 1px a frame and
+        # the tracer changes speed at the seam.
+        #
+        # So it leaves at the speed it arrived and eases down: an
+        # ease-out on the Bezier parameter, with one point per frame
+        # rather than per sample, which is also what stops the line
+        # stuttering. It reaches the landing at the moment the green
+        # camera saw it land -- the arrival time is measured, not chosen.
+        _p0, _p1, _p2 = _bez["p0"], _bez["p1"], _bez["p2"]
         _f_last = _pts[-1]["frame"]
-        _f_cut = int(float(cut["at_tee_sec"]) * fps)
-        _span = max(1, _f_cut - _f_last)
-        _seen = {q["frame"] for q in _pts}
-        for _j, (_cx, _cy) in enumerate(_curve):
-            _f = _f_last + int(round(_span * (_j + 1) / float(len(_curve))))
-            if _f in _seen:
-                continue
-            _seen.add(_f)
-            _pts.append({"found": True, "frame": _f,
-                         "x": int(_cx), "y": int(_cy), "projected": True})
-        _pts.sort(key=lambda q: q["frame"])
+        _land_tee = green.get("landing_sec_tee")
+        _f_end = (int(float(_land_tee) * fps) if _land_tee is not None
+                  else int(float(cut["at_tee_sec"]) * fps))
+        _span = _f_end - _f_last
+        if _span > 1:
+            # THE EASING EXPONENT IS SOLVED FOR, NOT PICKED. Near t=0 the
+            # curve's speed is |2(P1-P0)| per unit t, and t ~ p*u for
+            # t = 1-(1-u)^p, so the first projected step is
+            # 2|P1-P0| * p/span. Setting that equal to the speed the
+            # measured half was travelling gives p directly. A fixed
+            # exponent cannot do this: the right value depends on how fast
+            # the ball was going and how much arc is left, which differ
+            # per shot.
+            _mv = 8.0
+            if len(_pts) >= 3:
+                _a, _b2 = _pts[-3], _pts[-1]
+                _df = max(1, _b2["frame"] - _a["frame"])
+                _mv = (((_b2["x"] - _a["x"]) ** 2
+                        + (_b2["y"] - _a["y"]) ** 2) ** 0.5) / _df
+            _ctrl = max(1.0, ((_p1[0] - _p0[0]) ** 2
+                              + (_p1[1] - _p0[1]) ** 2) ** 0.5)
+            _pw = max(1.0, min(12.0, _mv * _span / (2.0 * _ctrl)))
+            _seen = {q["frame"] for q in _pts}
+            for _f in range(_f_last + 1, _f_end + 1):
+                if _f in _seen:
+                    continue
+                _u = (_f - _f_last) / float(_span)
+                _t = 1.0 - (1.0 - _u) ** _pw    # leaves at the measured speed
+                _w0, _w1, _w2 = (1 - _t) ** 2, 2 * (1 - _t) * _t, _t * _t
+                _pts.append({
+                    "found": True, "frame": _f, "projected": True,
+                    "x": int(round(_w0 * _p0[0] + _w1 * _p1[0] + _w2 * _p2[0])),
+                    "y": int(round(_w0 * _p0[1] + _w1 * _p1[1] + _w2 * _p2[1])),
+                })
+            _pts.sort(key=lambda q: q["frame"])
 
     traced = CLIPS_DIR / f"swingtest-{upload_id}-produce-tee.mp4"
     try:
@@ -15165,9 +15208,23 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     # which is exactly what the first produced clip showed. The descent
     # is already measured, so pass it rather than making find_path
     # rediscover it.
+    # ...AND ALL THE WAY TO REST. The descent track stops on the last
+    # frame the ball was seen falling, which is before it touches down --
+    # so a comet drawn from that alone finishes in mid-air at the edge of
+    # the green, short of the landing. The bounce and roll are already
+    # followed, so the comet gets the whole path: down, into the pitch
+    # mark, and through to where it stopped.
     _comet_payload = {}
-    if green.get("descent_path"):
-        _comet_payload["green_track"] = green["descent_path"]
+    _track = list(green.get("descent_path") or [])
+    _seen_f = {q["frame"] for q in _track}
+    for q in (green.get("ground_path") or []):
+        if q.get("frame") not in _seen_f:
+            _seen_f.add(q["frame"])
+            _track.append({"frame": int(q["frame"]), "x": int(q["x"]),
+                           "y": int(q["y"])})
+    _track.sort(key=lambda q: q["frame"])
+    if _track:
+        _comet_payload["green_track"] = _track
     elif green.get("landing_frame") is not None and green.get("landing_xy"):
         _comet_payload = {
             "landing_frame": green["landing_frame"],
