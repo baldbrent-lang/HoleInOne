@@ -5885,6 +5885,35 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                           cap="Every detection in the 4–8s window, coloured by time — blue early, orange late." />
                         <Img url={b.green.tracks_image}
                           cap="Descent candidates. Hollow ring = first frame, filled dot = last." />
+
+                        {/* Where it pitched and where it finished, which is
+                            the part a viewer actually cares about. */}
+                        {b.green.landing_frame != null && (
+                          <div className="small" style={{
+                            padding: "8px 10px", borderRadius: 6, margin: "6px 0",
+                            background: "rgba(0,160,80,0.14)",
+                          }}>
+                            <b>Landed f{b.green.landing_frame}</b>
+                            {b.green.landing_sec != null && <> ({b.green.landing_sec}s)</>}
+                            {b.green.landing_xy && <> at {b.green.landing_xy.join(", ")}</>}
+                            {b.green.rest_frame != null && (
+                              <> · <b>came to rest f{b.green.rest_frame}</b>
+                                {b.green.rest_sec != null && <> ({b.green.rest_sec}s)</>}
+                                {b.green.rest_xy && <> at {b.green.rest_xy.join(", ")}</>}
+                                {b.green.ground_path?.length > 0 && (
+                                  <> · {b.green.ground_path.length} frames of bounce and roll</>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
+                        {b.green.follow_reason && b.green.landing_frame == null && (
+                          <div className="tiny muted" style={{ marginBottom: 4 }}>
+                            {b.green.follow_reason}
+                          </div>
+                        )}
+                        <Img url={b.green.path_image}
+                          cap="Orange = descent, red cross = landing, yellow = bounce and roll, green ring = at rest. Rest is where the detections stop: MOG2 sees motion, so a settled ball produces nothing." />
                         {b.green.descents?.length > 0 && (
                           <div style={{ overflowX: "auto" }}>
                             <table className="tiny" style={{ borderCollapse: "collapse", marginTop: 4 }}>

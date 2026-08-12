@@ -14098,6 +14098,9 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
            "delta_source": None, "window": None, "window_sec": None,
            "green_fps": None, "stats": {}, "n_tracks": 0, "descents": [],
            "frame_image": None, "dets_image": None, "tracks_image": None,
+           "path_image": None, "landing_frame": None, "landing_xy": None,
+           "landing_sec": None, "rest_frame": None, "rest_xy": None,
+           "rest_sec": None, "ground_path": [], "follow_reason": None,
            "seconds": None}
     if not getattr(row, "green_filename", None):
         out["reason"] = "this upload has no green-camera video"
@@ -14163,6 +14166,40 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
              "fall_px": abs(t["rise_px"]), "span_px": t["span_px"]}
             for t in _fall[:6]
         ]
+        # FOLLOW IT THROUGH THE GROUND. The descent track stops at impact
+        # because a parabola and a bounce are different objects to a
+        # tracker, but the pitch mark, the kick and the finish are all
+        # still in the same detections.
+        if _fall:
+            _follow = _d3.follow_to_rest(
+                det.get("dets") or [], _fall[0]["points"], green_fps,
+            ) or {}
+            out["landing_frame"] = _follow.get("landing_frame")
+            out["landing_xy"] = _follow.get("landing_xy")
+            out["rest_frame"] = _follow.get("rest_frame")
+            out["rest_xy"] = _follow.get("rest_xy")
+            out["ground_path"] = [
+                p for p in (_follow.get("path") or [])
+                if p.get("phase") == "ground"
+            ]
+            out["follow_reason"] = _follow.get("reason")
+            if out["landing_frame"] is not None:
+                out["landing_sec"] = round(
+                    float(out["landing_frame"]) / green_fps, 2)
+            if out["rest_frame"] is not None:
+                out["rest_sec"] = round(
+                    float(out["rest_frame"]) / green_fps, 2)
+            _pc = _imgs.get("dets")
+            if _pc and (CLIPS_DIR / _pc).exists():
+                _pn = f"swingtest-{upload_id}-{tok}-green{k}-path.jpg"
+                if _d3.draw_ball_path(
+                    CLIPS_DIR / _pc, CLIPS_DIR / _pn,
+                    _fall[0]["points"], _follow,
+                    f"DESCENT (orange) -> LANDING f{out['landing_frame']} "
+                    f"-> BOUNCE / ROLL (yellow) -> REST f{out['rest_frame']}",
+                ):
+                    out["path_image"] = _clip_url_for(_pn)
+
         _canvas = _imgs.get("dets")
         if _canvas and (CLIPS_DIR / _canvas).exists() and _fall:
             _tn = f"swingtest-{upload_id}-{tok}-green{k}-tracks.jpg"

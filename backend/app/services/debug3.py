@@ -646,6 +646,179 @@ def build_tracks(
     return tracks
 
 
+def follow_to_rest(
+    dets: list,
+    seed: list,
+    fps: float,
+    gate_min_px: float = 22.0,
+    gate_k: float = 2.5,
+    max_gap_frames: int = 10,
+    rest_frames: int = 15,
+    still_px: float = 8.0,
+) -> dict:
+    """Follow the ball from the end of its descent through the ground.
+
+    The descent track stops the moment the ball hits, because a parabola
+    and a bounce are different objects to a tracker. What happens next is
+    the part a viewer actually cares about -- where it pitched, how it
+    kicked, where it finished -- and it is all still there in the same
+    per-frame detections.
+
+    THE BALL COMING TO REST IS THE DETECTIONS STOPPING. These come from
+    MOG2, which sees motion, so a ball that has settled produces nothing
+    at all. That is not a gap to be tolerated, it is the answer: after
+    rest_frames with nothing inside the gate, the ball is at rest where
+    it was last seen.
+
+    The gate scales with how fast the ball is actually going -- a first
+    bounce moves 40px a frame and a ball trickling to a stop moves one --
+    with a floor so a slow roll is not lost to detector jitter. Prediction
+    is deliberately NOT ballistic: the whole point is that the ground has
+    stopped obeying the parabola.
+
+    Returns {path, landing_frame, landing_xy, rest_frame, rest_xy,
+    n_gaps, reason}. Never raises.
+    """
+    out = {"path": [], "landing_frame": None, "landing_xy": None,
+           "rest_frame": None, "rest_xy": None, "n_gaps": 0, "reason": None}
+    if not seed or len(seed) < 2:
+        out["reason"] = "no descent to follow from"
+        return out
+
+    by_frame: dict[int, list] = {}
+    for d in dets or []:
+        by_frame.setdefault(int(d["frame"]), []).append(d)
+
+    # How fast it was falling when it arrived, which is the yardstick for
+    # deciding it has landed.
+    _p0, _p1 = seed[-2], seed[-1]
+    _df = max(1, int(_p1["frame"]) - int(_p0["frame"]))
+    vy_descent = (float(_p1["y"]) - float(_p0["y"])) / _df
+    vx = (float(_p1["x"]) - float(_p0["x"])) / _df
+    vy = vy_descent
+
+    x, y = float(_p1["x"]), float(_p1["y"])
+    f = int(_p1["frame"])
+    last_seen = f
+    path = [{"frame": f, "x": int(round(x)), "y": int(round(y)),
+             "phase": "descent"}]
+    last_frames = sorted(by_frame) or [f]
+    f_end = last_frames[-1]
+
+    while f < f_end:
+        f += 1
+        gap = f - last_seen
+        speed = max(1.0, (vx * vx + vy * vy) ** 0.5)
+        # The gate grows with the gap -- a ball missed for three frames
+        # has had three frames to travel -- but only so far. Ungapped, it
+        # reaches whatever it likes: measured on a real clip, a ten-frame
+        # gap opened the gate to 220px and the track jumped 190px UPWARD
+        # onto unrelated noise, inventing a roll that never happened out
+        # of a ball that had already stopped.
+        gate = max(gate_min_px, gate_k * speed) * min(max(1, gap), 3)
+        best, bestd = None, gate
+        for d in by_frame.get(f, []):
+            dd = ((float(d["x"]) - x) ** 2 + (float(d["y"]) - y) ** 2) ** 0.5
+            if dd < bestd:
+                bestd, best = dd, d
+        if best is None:
+            if gap >= rest_frames:
+                break
+            continue
+        # ...and a ball can also come to rest while still producing
+        # detections -- sand settling around it, a shadow shifting. If
+        # the followed point has not gone anywhere for rest_frames, it is
+        # at rest whatever the detector keeps reporting.
+        _recent = [q for q in path if f - q["frame"] < rest_frames]
+        if len(_recent) >= rest_frames // 2:
+            _sx = max(q["x"] for q in _recent) - min(q["x"] for q in _recent)
+            _sy = max(q["y"] for q in _recent) - min(q["y"] for q in _recent)
+            if max(_sx, _sy) <= still_px:
+                last_seen = _recent[0]["frame"]
+                x, y = float(_recent[0]["x"]), float(_recent[0]["y"])
+                break
+        nx, ny = float(best["x"]), float(best["y"])
+        _dt = max(1, f - last_seen)
+        vx, vy = (nx - x) / _dt, (ny - y) / _dt
+        # LANDED when it stops falling like it was falling. The ground
+        # does not have to bounce it back up -- into sand it simply stops
+        # -- so the test is a collapse in the rate of fall, not a reversal.
+        if out["landing_frame"] is None and vy < 0.5 * vy_descent:
+            out["landing_frame"] = int(f)
+            out["landing_xy"] = [int(round(nx)), int(round(ny))]
+        if _dt > 1:
+            out["n_gaps"] += 1
+        x, y = nx, ny
+        last_seen = f
+        path.append({
+            "frame": int(f), "x": int(round(x)), "y": int(round(y)),
+            "phase": ("descent" if out["landing_frame"] is None
+                      else "ground"),
+        })
+
+    out["path"] = path
+    out["rest_frame"] = int(last_seen)
+    out["rest_xy"] = [int(round(x)), int(round(y))]
+    _n_ground = sum(1 for p in path if p["phase"] == "ground")
+    if out["landing_frame"] is None:
+        out["reason"] = (
+            "never stopped falling inside the window — the ball left the "
+            "frame, or the window ends before it lands"
+        )
+    else:
+        out["reason"] = (
+            f"landed f{out['landing_frame']} at "
+            f"{out['landing_xy'][0]},{out['landing_xy'][1]}; followed "
+            f"{_n_ground} frame(s) of bounce and roll to rest at f"
+            f"{out['rest_frame']} ({out['rest_xy'][0]},{out['rest_xy'][1]})"
+        )
+    return out
+
+
+def draw_ball_path(canvas_path: Path, out_path: Path, descent: list,
+                   follow: dict, caption: str = "") -> bool:
+    """Descent, landing, bounce/roll and rest, on one picture.
+
+    The numbers are checkable in a table; where the ball pitched and where
+    it finished are only checkable by looking.
+    """
+    if not HAS_CV:
+        return False
+    try:
+        img = cv2.imread(str(canvas_path))
+        if img is None:
+            return False
+        pts = [(int(p["x"]), int(p["y"])) for p in (descent or [])]
+        for a, b in zip(pts, pts[1:]):
+            cv2.line(img, a, b, (0, 160, 255), 2, cv2.LINE_AA)  # BGR orange
+        gp = [(int(p["x"]), int(p["y"])) for p in (follow.get("path") or [])
+              if p.get("phase") == "ground"]
+        for a, b in zip(gp, gp[1:]):
+            cv2.line(img, a, b, (0, 215, 255), 2, cv2.LINE_AA)
+        for q in gp:
+            cv2.circle(img, q, 3, (0, 215, 255), -1, cv2.LINE_AA)
+        if follow.get("landing_xy"):
+            lx, ly = int(follow["landing_xy"][0]), int(follow["landing_xy"][1])
+            cv2.drawMarker(img, (lx, ly), (0, 0, 255), cv2.MARKER_CROSS, 26, 3)
+            cv2.circle(img, (lx, ly), 15, (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.putText(img, f"LANDING f{follow.get('landing_frame')}",
+                        (lx + 20, ly - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 0, 255), 2, cv2.LINE_AA)
+        if follow.get("rest_xy"):
+            rx, ry = int(follow["rest_xy"][0]), int(follow["rest_xy"][1])
+            cv2.circle(img, (rx, ry), 13, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(img, f"REST f{follow.get('rest_frame')}",
+                        (rx + 18, ry + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (0, 255, 0), 2, cv2.LINE_AA)
+        if caption:
+            _label(img, caption)
+        cv2.imwrite(str(out_path), img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug3 draw_ball_path failed: %s", exc)
+        return False
+
+
 # ── stage E: RANSAC parabola ───────────────────────────────────────────
 
 def ransac_parabola(
@@ -2078,6 +2251,7 @@ __all__ = [
     "BALL_AREA_MIN", "BALL_AREA_STRICT", "ball_area_cap", "body_box_from_pose",
     "MIN_KEPT_FOR_TRACKING", "WIN_POST", "WIN_PRE",
     "build_tracks", "find_flight", "detect_ball_blobs", "draw_flight",
+    "follow_to_rest", "draw_ball_path",
     "draw_tracks", "select_preview_tracks", "TRACK_COLORS", "TRACKS_DRAWN",
     "pick_flight",
     "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",
