@@ -14103,7 +14103,8 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
            "frame_image": None, "dets_image": None, "tracks_image": None,
            "path_image": None, "landing_frame": None, "landing_xy": None,
            "landing_sec": None, "rest_frame": None, "rest_xy": None,
-           "rest_sec": None, "ground_path": [], "follow_reason": None,
+           "rest_sec": None, "ground_path": [], "descent_path": [],
+           "follow_reason": None,
            "landing_sec_tee": None, "rest_sec_tee": None,
            "landing_after_impact": None, "rest_after_impact": None,
            "impact_sec_tee": None, "frame_size": None, "seconds": None,
@@ -14218,6 +14219,10 @@ def _green_descent(db, row, src_path, tee_fps: float, impact_frame: int,
             out["landing_xy"] = _follow.get("landing_xy")
             out["rest_frame"] = _follow.get("rest_frame")
             out["rest_xy"] = _follow.get("rest_xy")
+            out["descent_path"] = [
+                {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"])}
+                for q in (_fall[0]["points"] or [])
+            ]
             out["ground_path"] = [
                 p for p in (_follow.get("path") or [])
                 if p.get("phase") == "ground"
@@ -14702,7 +14707,11 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
                                 k2: _bez.get(k2) for k2 in (
                                     "ok", "p0", "p1", "p2", "apex",
                                     "ctrl_px", "direction", "n_dir_used",
-                                    "n_stalled_dropped", "reason")
+                                    "n_stalled_dropped", "reason",
+                                    # the samples themselves: producing
+                                    # re-draws this curve, and 60 points
+                                    # is cheaper to carry than to refit
+                                    "curve")
                             }
                             _fc = (_fd.get("flight_image")
                                    or (_det.get("images") or {}).get("dets"))
@@ -15114,6 +15123,27 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     ]
     if not _pts:
         raise HTTPException(400, "no fitted flight on the tee camera to draw")
+    # CARRY THE LINE ON. The measured points stop where MOG2 lost the
+    # ball -- off the top of the frame -- and a tracer that stops there
+    # looks like it failed. The Bezier already knows the rest of the
+    # arc; it only lacks frame numbers, so its samples are spread over
+    # the frames between the last measurement and the cut.
+    _bez = b.get("bezier") or {}
+    _curve = _bez.get("curve") or []
+    if _bez.get("ok") and _curve and _pts:
+        _f_last = _pts[-1]["frame"]
+        _f_cut = int(float(cut["at_tee_sec"]) * fps)
+        _span = max(1, _f_cut - _f_last)
+        _seen = {q["frame"] for q in _pts}
+        for _j, (_cx, _cy) in enumerate(_curve):
+            _f = _f_last + int(round(_span * (_j + 1) / float(len(_curve))))
+            if _f in _seen:
+                continue
+            _seen.add(_f)
+            _pts.append({"found": True, "frame": _f,
+                         "x": int(_cx), "y": int(_cy), "projected": True})
+        _pts.sort(key=lambda q: q["frame"])
+
     traced = CLIPS_DIR / f"swingtest-{upload_id}-produce-tee.mp4"
     try:
         render_tracer_video(
@@ -15130,7 +15160,21 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     green_path = _local_green(row)
     g0 = float(cut["at_green_sec"])
     g1 = g0 + float(cut.get("green_hold_sec") or 3.0)
-    _seg = _finalize_green_comet(upload_id, 0, green_path, g0, g1, {})
+    # THE COMET NEEDS THE TRACK. Handed an empty payload this returns
+    # None on its first line and the green half is the raw camera --
+    # which is exactly what the first produced clip showed. The descent
+    # is already measured, so pass it rather than making find_path
+    # rediscover it.
+    _comet_payload = {}
+    if green.get("descent_path"):
+        _comet_payload["green_track"] = green["descent_path"]
+    elif green.get("landing_frame") is not None and green.get("landing_xy"):
+        _comet_payload = {
+            "landing_frame": green["landing_frame"],
+            "landing_spot": green["landing_xy"],
+        }
+    _seg = _finalize_green_comet(upload_id, 0, green_path, g0, g1,
+                                 _comet_payload)
     if _seg:
         g_src, g_from, g_to = _seg
     else:
