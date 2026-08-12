@@ -5581,6 +5581,54 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
               </div>
             </div>
 
+            {/* TIME PER STEP, the same shape Debug3 reports: which step
+                cost the run is not guessable from the source, and it is
+                what decides where an optimisation is worth anything. */}
+            {rep.steps?.length > 0 && (
+              <div style={{ marginBottom: 14 }}>
+                <div className="tiny upper muted" style={{ marginBottom: 4 }}>
+                  Time per step · {rep.total_sec}s total
+                </div>
+                {rep.steps.map((st) => (
+                  <div key={st.n} className="small"
+                    style={{
+                      display: "flex", gap: 10, padding: "6px 0",
+                      borderBottom: "1px solid var(--line)",
+                      opacity: st.seconds > 0 ? 1 : 0.5,
+                    }}
+                  >
+                    <b style={{ minWidth: 18 }}>{st.n}</b>
+                    <div style={{ flex: 1 }}>
+                      <b>{st.name}</b>
+                      <div className="tiny muted">{st.detail}</div>
+                    </div>
+                    <div style={{ textAlign: "right", minWidth: 120 }}>
+                      <b>{st.count}</b>
+                      <div className="tiny muted">{st.counts}</div>
+                    </div>
+                    <div style={{ textAlign: "right", minWidth: 86 }}>
+                      <b>{st.seconds > 0 ? `${st.seconds}s` : "—"}</b>
+                      <div className="tiny muted">
+                        {st.seconds > 0 ? `${st.pct}%` : "did not run"}
+                      </div>
+                      <div style={{
+                        height: 3, borderRadius: 2, marginTop: 2,
+                        background: "var(--line)",
+                      }}>
+                        <div style={{
+                          height: "100%", borderRadius: 2,
+                          width: `${Math.min(100, st.pct || 0)}%`,
+                          background: (st.pct || 0) >= 40
+                            ? "var(--danger, #c0392b)"
+                            : "var(--emerald-700, #16a34a)",
+                        }} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* 1. WHERE IT LOOKED */}
             <h4 style={{ margin: "12px 0 4px" }}>1 · Where it looked</h4>
             <div className="tiny muted">

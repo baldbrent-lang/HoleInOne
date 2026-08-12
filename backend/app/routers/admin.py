@@ -14237,11 +14237,18 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
     tok = secrets.token_hex(3)
     fps = float(probe_fps(src_path) or 0.0) or 30.0
 
+    # WALL CLOCK PER PHASE, the same shape Debug3 reports. Which step
+    # costs the run is not guessable from the source: the acquisition scan
+    # thresholds every frame of the box, the spot walk reads the whole
+    # clip through a 41px window, and the two MOG2 passes decode their
+    # windows twice over. A perf_counter read per phase costs nothing.
+    _phase: dict = {}
     if progress:
         progress("Scanning the clip for a resting ball", 0, 0)
     _t0 = time.perf_counter()
     rest = _rest_ball_departures(src_path, fps, db, row)
     scan_sec = round(time.perf_counter() - _t0, 2)
+    _phase["scan"] = scan_sec
     # Frame size, carried out of the scan (which already read it) so the
     # flight stages below do not have to open the video again.
     _wh = rest.get("frame_size") or _frame_size(src_path)
@@ -14414,6 +14421,7 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         # which asks only "is it still there" and is both more reliable
         # and cheaper than the scan that produced the position.
         _walk: dict = {}
+        _tw = time.perf_counter()
         try:
             _spot = find_departures_at_spot(
                 src_path, (x, y), fps, debug=_walk,
@@ -14421,6 +14429,8 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("swing test: spot walk failed: %s", exc)
             _spot = []
+        _phase["spot_walk"] = _phase.get("spot_walk", 0.0) + (
+            time.perf_counter() - _tw)
         b["spot_departures"] = _spot
         b["spot_reason"] = _walk.get("reason")
         b["spot_threshold"] = _walk.get("present_threshold")
@@ -14432,6 +14442,7 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             b["frame"] = int(_best["frame"])
             b["t_sec"] = round(float(_best["sec"]), 2)
             b["rest_sec"] = _best["rest_sec"]
+        _ta = time.perf_counter()
         try:
             v = verify_rest_and_impact(
                 src_path, (x, y), b["frame"], fps,
@@ -14440,6 +14451,8 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             ) or {}
         except Exception as exc:  # noqa: BLE001
             v = {"reason": f"departure check crashed: {exc}"}
+        _phase["anchor_check"] = _phase.get("anchor_check", 0.0) + (
+            time.perf_counter() - _ta)
         b["departed"] = v.get("verified")
         b["verify_reason"] = v.get("reason")
         b["snap_px"] = v.get("snap_px")
@@ -14483,6 +14496,8 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
                 db, row, src_path, fps, int(b["impact_frame"]),
                 upload_id, tok, k,
             )
+            _phase["green_descent"] = _phase.get("green_descent", 0.0) + float(
+                (b["green"] or {}).get("seconds") or 0.0)
 
         # STAGES 4, 5 and 6, from ONE pass: MOG2 + component + area
         # filter, nearest-neighbour tracking, then the RANSAC parabola and
@@ -14563,9 +14578,58 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             except Exception as exc:  # noqa: BLE001
                 log.warning("swing test: flight stages failed: %s", exc)
                 b["stages"] = {"error": str(exc)}
+            _phase["tee_flight"] = _phase.get("tee_flight", 0.0) + float(
+                (b.get("stages") or {}).get("seconds") or 0.0)
 
         rep["departures"].append(b)
     rep["verify_sec"] = round(time.perf_counter() - _t0, 2)
+
+    # THE TIME SUMMARY, in the shape Debug3 uses so the two read alike:
+    # ordered steps, what each one produced, and what it cost as a share
+    # of the run. Steps that did not run (no green camera, no departure
+    # to chase) are listed with a dash rather than dropped, because a
+    # missing row reads as a missing feature.
+    _n_dep = len(rep["departures"])
+    _n_land = sum(
+        1 for _b in rep["departures"]
+        if (_b.get("green") or {}).get("landing_frame") is not None
+    )
+    _n_flight = sum(
+        1 for _b in rep["departures"]
+        if (_b.get("stages") or {}).get("flight", {}).get("ok")
+    )
+    _steps = [
+        {"n": 1, "name": "Acquisition scan",
+         "detail": "white, ball-sized, ball-shaped, on grass, inside the "
+                   "box — where the ball is",
+         "count": len(rest.get("deps") or []), "counts": "rest position(s)",
+         "seconds": round(_phase.get("scan", 0.0), 2)},
+        {"n": 2, "name": "Spot walk",
+         "detail": "the whole clip at that one spot, full rate — the frame "
+                   "it left",
+         "count": _n_dep, "counts": "departure(s)",
+         "seconds": round(_phase.get("spot_walk", 0.0), 2)},
+        {"n": 3, "name": "Anchor check",
+         "detail": "the film strip at the rest spot, green present / red "
+                   "gone",
+         "count": sum(1 for _b in rep["departures"] if _b.get("departed")),
+         "counts": "confirmed", "seconds": round(_phase.get("anchor_check", 0.0), 2)},
+        {"n": 4, "name": "Green camera descent",
+         "detail": "4–8s after impact on the other camera: blobs, tracks, "
+                   "then landing, bounce and roll to rest",
+         "count": _n_land, "counts": "landing(s) found",
+         "seconds": round(_phase.get("green_descent", 0.0), 2)},
+        {"n": 5, "name": "Tee flight pipeline",
+         "detail": "MOG2 + components + area filter, nearest-neighbour "
+                   "tracking, RANSAC parabola + flight tests",
+         "count": _n_flight, "counts": "flight(s) fitted",
+         "seconds": round(_phase.get("tee_flight", 0.0), 2)},
+    ]
+    _total = sum(_s["seconds"] for _s in _steps) or 0.0
+    for _s in _steps:
+        _s["pct"] = round(100.0 * _s["seconds"] / _total, 1) if _total else 0.0
+    rep["steps"] = _steps
+    rep["total_sec"] = round(_total, 2)
 
     # One sentence, so the panel does not have to be read to be understood.
     n_conf = sum(1 for b in rep["departures"] if b["departed"])
