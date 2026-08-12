@@ -13441,12 +13441,54 @@ def _debug2_run(row, src_path, db, progress=None):
 # leaves. When it fires it is the better answer, so Debug2 and Debug3 both
 # prefer it and keep the club arc as the fallback.
 
+def _upload_day(row) -> str:
+    """The day key for this upload: YYYY-MM-DD of its capture time.
+
+    Derived from the upload's OWN capture time rather than from today, so
+    re-running last week's clip resolves last week's tee box instead of
+    this morning's. Both the lookup and the save go through here, so the
+    two always agree on which day a clip belongs to — which matters more
+    than the key being astronomically correct. (Capture times are stored
+    as UTC, so a late-evening round can land on the next day's key. It is
+    self-consistent: every clip of that round gets the same key, and the
+    panel prints the day it used.)
+    """
+    dt = getattr(row, "base_captured_at", None)
+    if dt is None:
+        return "unknown"
+    try:
+        return dt.strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _daily_tee_box(db, course, hole: int, day: str):
+    """That hole's box for that day, as fractions, or None."""
+    try:
+        by_hole = (getattr(course, "tee_boxes", None) or {}).get(str(int(hole)))
+        box = (by_hole or {}).get(day)
+        if not box:
+            return None
+        return {
+            "x": float(box["x"]), "y": float(box["y"]),
+            "w": float(box["w"]), "h": float(box["h"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        log.debug("daily tee box read failed (hole=%s day=%s): %s", hole, day, exc)
+        return None
+
+
 def _tee_box_roi_fractions(src_path, db, row) -> dict:
     """Which box the ball scan is allowed to look in, and where it came from.
 
-    Two records can answer, and they are stored in DIFFERENT UNITS, which is
-    exactly the kind of thing that silently searches the wrong quarter of the
-    frame:
+    FIRST CHOICE is the box drawn for THIS hole on THIS day
+    (Course.tee_boxes). The tee markers move every morning and a course
+    has several par-3s, so a box that is not keyed by both is looking at
+    the wrong grass — which is what the two records below actually do.
+    They remain as fallbacks, and the panel says which one answered.
+
+    The older two are stored in DIFFERENT UNITS, which is exactly the kind
+    of thing that silently searches the wrong quarter of the frame:
 
       * Camera.tee_box_roi — NATIVE PIXELS of that camera's frames. Drawn for
         the tee-side person detector, but it is the same box.
@@ -13461,12 +13503,24 @@ def _tee_box_roi_fractions(src_path, db, row) -> dict:
 
     Returns {roi, source, note} — `roi` None means search the whole frame.
     """
-    out = {"roi": None, "source": None, "note": None}
+    out = {"roi": None, "source": None, "note": None, "hole": None, "day": None}
     course = None
     try:
         course = db.get(Course, row.course_id) if row.course_id else None
     except Exception:  # noqa: BLE001
         course = None
+
+    # Today's box for this hole, which is the only one of the three that
+    # is keyed by both things that move.
+    day = _upload_day(row)
+    hole = _hole_for_upload(db, row)
+    out["hole"], out["day"] = hole, day
+    daily = _daily_tee_box(db, course, hole, day) if course else None
+    if daily:
+        out["roi"] = daily
+        out["source"] = f"hole {hole}'s box for {day}"
+        return out
+
     course_roi = getattr(course, "ball_roi", None) if course else None
 
     cam = cam_roi = None
@@ -13516,16 +13570,28 @@ def _tee_box_roi_fractions(src_path, db, row) -> dict:
             out["source"] = f"the tee camera's tee box ({_cname})"
             return out
 
+    # Anything below here means no box was drawn for this hole today, so
+    # say that FIRST: it is the fixable thing, and the fallbacks are all
+    # boxes that were right for some other hole or some other day.
+    _stale = (
+        f"no box is set for hole {hole} on {day} — "
+        "draw one on the frame below and every clip of this hole today "
+        "will use it. Falling back to"
+    )
     if course_roi:
         out["roi"] = course_roi
         out["source"] = (
-            f"the course's tee-box ROI ({getattr(course, 'name', '')})".strip()
+            f"the course's single tee-box ROI "
+            f"({getattr(course, 'name', '')})".strip()
+        )
+        out["note"] = (out["note"] + " · " if out["note"] else "") + (
+            f"{_stale} the one box drawn for the whole course, which is "
+            f"shared by every hole and was drawn on some earlier day"
         )
     else:
         out["note"] = (out["note"] + " · " if out["note"] else "") + (
-            "no tee-box ROI is set for this course — the scan is looking at "
-            "the WHOLE frame, so shoes, cups and sky glints all compete with "
-            "the ball"
+            f"{_stale} the WHOLE frame, so shoes, cups and sky glints all "
+            f"compete with the ball"
         )
     return out
 
@@ -13541,12 +13607,15 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
     """
     out = {
         "deps": [], "roi": None, "roi_source": None, "roi_note": None,
-        "reason": None, "counts": {},
+        "reason": None, "counts": {}, "hole": None, "day": None,
     }
     _r = _tee_box_roi_fractions(src_path, db, row)
     out["roi"], out["roi_source"], out["roi_note"] = (
         _r["roi"], _r["source"], _r["note"],
     )
+    # The hole/day this clip files under, carried out so the swing test
+    # can offer to save a box against it.
+    out["hole"], out["day"] = _r.get("hole"), _r.get("day")
     dbg: dict = {}
     try:
         detect_swings_from_ball(src_path, fps=fps, roi=out["roi"], debug=dbg)
@@ -13941,6 +14010,11 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
     rep = {
         "ok": True,
         "upload_id": upload_id,
+        # Which hole and which day this clip files under — the key the
+        # panel saves a redrawn box against.
+        "course_id": row.course_id,
+        "hole": rest.get("hole"),
+        "day": rest.get("day"),
         "fps": round(fps, 2),
         "scan_sec": scan_sec,
         "verify_sec": 0.0,
@@ -14116,6 +14190,66 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         upload_id, rep["verdict"], scan_sec, rep["verify_sec"],
     )
     return rep
+
+
+@router.post("/courses/{course_id}/tee-box")
+def set_daily_tee_box(course_id: int, payload: dict, db: Session = Depends(get_db)):
+    """Set (or clear) the ball search area for one hole on one day.
+
+    payload: {"hole": 3, "day": "2026-08-12",
+              "roi": {"x","y","w","h"} fractions | null}
+
+    Drawn once each morning per hole, then read by every clip of that
+    hole that day. `day` comes from the swing test report rather than
+    from the clock so that the box is filed against the day of the
+    FOOTAGE — draw a box while cleaning up yesterday's clips and it
+    lands on yesterday, where it belongs.
+    """
+    course = db.get(Course, course_id)
+    if not course:
+        raise HTTPException(404, "course not found")
+    try:
+        hole = str(int((payload or {}).get("hole")))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "hole must be a number")
+    day = str((payload or {}).get("day") or "").strip()
+    try:
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, "day must be YYYY-MM-DD")
+
+    boxes = dict(course.tee_boxes or {})
+    by_day = dict(boxes.get(hole) or {})
+    roi = (payload or {}).get("roi")
+    if roi is None:
+        by_day.pop(day, None)
+    else:
+        try:
+            x = max(0.0, min(1.0, float(roi["x"])))
+            y = max(0.0, min(1.0, float(roi["y"])))
+            w = max(0.01, min(1.0 - x, float(roi["w"])))
+            h = max(0.01, min(1.0 - y, float(roi["h"])))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "roi must be {x,y,w,h} fractions")
+        by_day[day] = {
+            "x": x, "y": y, "w": w, "h": h,
+            "set_at": _utcnow_naive().isoformat(),
+        }
+
+    # An operating record, not a history: keep a month so a re-run of an
+    # older clip still finds its box, drop the rest.
+    for _old in sorted(by_day)[:-30]:
+        by_day.pop(_old, None)
+    if by_day:
+        boxes[hole] = by_day
+    else:
+        boxes.pop(hole, None)
+    # A fresh dict, so SQLAlchemy sees the assignment as dirty without
+    # needing an explicit flag_modified.
+    course.tee_boxes = boxes or None
+    db.commit()
+    return {"ok": True, "hole": int(hole), "day": day,
+            "roi": by_day.get(day)}
 
 
 @router.post("/long-uploads/{upload_id}/swing-test")

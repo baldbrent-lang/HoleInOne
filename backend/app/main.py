@@ -95,6 +95,10 @@ def _migrate() -> None:
             statements.append("UPDATE courses SET hole_yardages = '{}' WHERE hole_yardages IS NULL")
         if "operator_password_hash" not in course_cols:
             statements.append("ALTER TABLE courses ADD COLUMN operator_password_hash VARCHAR(200)")
+        if "tee_boxes" not in course_cols:
+            # Per-hole, per-day ball search areas. Left NULL: no box for
+            # a hole/day simply falls back the way it did before.
+            statements.append("ALTER TABLE courses ADD COLUMN tee_boxes JSON")
         # tee-sheet integration fields. Added to the model but historically
         # missing from this migrator, which 500'd every GET /courses on
         # prod (SELECT of a column that didn't exist). Backfill the

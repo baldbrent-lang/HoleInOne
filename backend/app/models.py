@@ -78,6 +78,24 @@ class Course(Base):
     # detector only looks inside this box, killing false positives (shoes,
     # glints) elsewhere. The camera is fixed per course, so it's drawn once.
     ball_roi: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # The ball search area PER HOLE and PER DAY — what ball_roi above
+    # should have been.
+    #
+    #   {"3": {"2026-08-12": {"x","y","w","h", "set_at": iso}}}
+    #
+    # Fractions of the frame, same units as ball_roi. Two things are
+    # wrong with one box per course: a course has several par-3s and
+    # they do not share a picture, and the tee markers MOVE — a box
+    # drawn on Tuesday is looking at bare grass on Wednesday. So it is
+    # keyed by hole and by the day of the video it was drawn on, set
+    # once each morning per hole and then read for free by every clip
+    # of that hole that day.
+    #
+    # The day comes from the upload's own capture time, not from
+    # "today", so re-running last week's clip uses the box that was
+    # right last week. Days older than ~30 are pruned on write; this is
+    # an operating record, not a history.
+    tee_boxes: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     # The green camera's view mapped onto the tee camera's, PER HOLE:
     #
     #   {"1": {"points": [{"green": [x,y], "tee": [x,y]}, ...],   # >=4

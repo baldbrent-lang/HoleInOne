@@ -5397,11 +5397,74 @@ export function SwingDetectPanel({ sd }) {
  * WHETHER that ball left and on WHICH FRAME (the 15Hz scan re-watched at
  * full rate, with the film-strip that shows the call).
  */
-function SwingTestModal({ state, onClose }) {
-  if (!state) return null;
-  const rep = state.report;
+function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
+  // Hooks before the early return: this component re-renders on every
+  // poll tick, and a conditional hook order would blow up mid-run.
+  const [draft, setDraft] = useState(null);      // {x,y,w,h} fractions
+  const [dragFrom, setDragFrom] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveErr, setSaveErr] = useState(null);
+  const imgRef = useRef(null);
+
+  const rep = state?.report;
   const deps = rep?.departures || [];
   const c = rep?.counts || {};
+  const canSaveBox = !!(rep?.course_id && rep?.hole && rep?.day);
+
+  // Pointer position as a fraction of the displayed image, clamped so a
+  // drag that leaves the picture still yields a box inside the frame.
+  function frac(e) {
+    const r = imgRef.current?.getBoundingClientRect();
+    if (!r || !r.width || !r.height) return null;
+    return {
+      x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+    };
+  }
+  function onDown(e) {
+    const p = frac(e);
+    if (!p) return;
+    e.preventDefault();
+    setDragFrom(p);
+    setDraft({ x: p.x, y: p.y, w: 0, h: 0 });
+    setSaved(false);
+    setSaveErr(null);
+  }
+  function onMove(e) {
+    if (!dragFrom) return;
+    const p = frac(e);
+    if (!p) return;
+    setDraft({
+      x: Math.min(dragFrom.x, p.x),
+      y: Math.min(dragFrom.y, p.y),
+      w: Math.abs(p.x - dragFrom.x),
+      h: Math.abs(p.y - dragFrom.y),
+    });
+  }
+  function onUp() {
+    setDragFrom(null);
+    // A click rather than a drag: treat as "no box", not a 0x0 one.
+    setDraft((d) => (d && d.w > 0.01 && d.h > 0.01 ? d : null));
+  }
+
+  async function saveBox(roi) {
+    setSaving(true);
+    setSaveErr(null);
+    try {
+      await api.setTeeBox(adminPassword, rep.course_id, {
+        hole: rep.hole, day: rep.day, roi,
+      });
+      setSaved(true);
+      if (!roi) setDraft(null);
+    } catch (e) {
+      setSaveErr(e.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!state) return null;
   const Img = ({ url, cap }) =>
     url ? (
       <figure style={{ margin: "8px 0" }}>
@@ -5496,10 +5559,96 @@ function SwingTestModal({ state, onClose }) {
               )}
               {rep.roi_note && <div style={{ marginTop: 3 }}>{rep.roi_note}</div>}
             </div>
-            <Img
-              url={rep.area_image}
-              cap="Orange = the ball search area. Green dots = every white, round, ball-sized blob the scan accepted (before the box gate). Yellow ring = a ball that rested here and then left."
-            />
+            {/* DRAW THE BOX HERE. The tee markers move every morning and
+                a course has several par-3s, so the search area is set per
+                hole per day -- once, on the day's first clip of that hole,
+                and then every other clip that day reads it for free. */}
+            {rep.area_image && (
+              <figure style={{ margin: "8px 0" }}>
+                <div
+                  style={{
+                    position: "relative", lineHeight: 0,
+                    cursor: canSaveBox ? "crosshair" : "default",
+                    userSelect: "none",
+                  }}
+                  onMouseDown={canSaveBox ? onDown : undefined}
+                  onMouseMove={canSaveBox ? onMove : undefined}
+                  onMouseUp={canSaveBox ? onUp : undefined}
+                  onMouseLeave={canSaveBox ? onUp : undefined}
+                >
+                  <img
+                    ref={imgRef}
+                    src={rep.area_image}
+                    alt="ball search area"
+                    draggable={false}
+                    style={{ width: "100%", borderRadius: 6 }}
+                  />
+                  {draft && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        left: `${draft.x * 100}%`, top: `${draft.y * 100}%`,
+                        width: `${draft.w * 100}%`, height: `${draft.h * 100}%`,
+                        border: "3px dashed #00e0ff",
+                        background: "rgba(0,224,255,0.12)",
+                        pointerEvents: "none",
+                      }}
+                    />
+                  )}
+                </div>
+                <figcaption className="tiny muted" style={{ marginTop: 4 }}>
+                  Orange = the search area actually used for this run. Green
+                  dots = every white, round, ball-sized blob the scan accepted
+                  (before the box gate). Yellow ring = a ball that rested here
+                  and then left.
+                  {canSaveBox && <> <b>Drag on the picture</b> to set the box for hole {rep.hole} on {rep.day}.</>}
+                </figcaption>
+              </figure>
+            )}
+
+            {canSaveBox && (
+              <div className="row" style={{ gap: 8, alignItems: "center", marginTop: 4 }}>
+                <button
+                  type="button"
+                  className="small"
+                  style={{ width: "auto" }}
+                  disabled={!draft || saving}
+                  onClick={() => saveBox(draft)}
+                >
+                  {saving ? "Saving…" : `Save as hole ${rep.hole}'s box for ${rep.day}`}
+                </button>
+                {draft && (
+                  <button type="button" className="ghost small"
+                    style={{ width: "auto" }} onClick={() => setDraft(null)}>
+                    Discard
+                  </button>
+                )}
+                {saved && onRerun && (
+                  <button type="button" className="small" style={{ width: "auto" }}
+                    onClick={() => onRerun(state.uploadId)}>
+                    Re-run swing test →
+                  </button>
+                )}
+                <button
+                  type="button" className="ghost small"
+                  style={{ width: "auto", marginLeft: "auto" }}
+                  disabled={saving}
+                  onClick={() => saveBox(null)}
+                  title={`Remove the saved box for hole ${rep.hole} on ${rep.day}`}
+                >
+                  Clear this day&apos;s box
+                </button>
+              </div>
+            )}
+            {saved && (
+              <div className="tiny" style={{ color: "var(--ok, #2a8)", marginTop: 4 }}>
+                Saved. Every clip of hole {rep.hole} on {rep.day} will use this
+                box — no re-drawing per video.
+              </div>
+            )}
+            {saveErr && (
+              <div className="err-text tiny" style={{ marginTop: 4 }}>{saveErr}</div>
+            )}
 
             {/* 2. WHAT IT FOUND */}
             <h4 style={{ margin: "12px 0 4px" }}>2 · What it found</h4>
@@ -11813,7 +11962,12 @@ export default function AdminProduction() {
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
       {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
       {swingTest && (
-        <SwingTestModal state={swingTest} onClose={() => setSwingTest(null)} />
+        <SwingTestModal
+          state={swingTest}
+          adminPassword={adminPassword}
+          onClose={() => setSwingTest(null)}
+          onRerun={(uploadId) => handleSwingTest({ id: uploadId })}
+        />
       )}
 
       <ConfirmDialog

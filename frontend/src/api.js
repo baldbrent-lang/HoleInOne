@@ -637,6 +637,15 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}/swing-test/status`, {
       adminPassword: key,
     }),
+
+  // The ball search area for one hole on one day. Drawn once each
+  // morning per hole; pass roi: null to clear it.
+  setTeeBox: (key, courseId, { hole, day, roi }) =>
+    request(`/api/admin/courses/${courseId}/tee-box`, {
+      method: "POST",
+      body: { hole, day, roi },
+      adminPassword: key,
+    }),
   emailStatus: (key) =>
     request("/api/admin/email-status", { adminPassword: key }),
   emailSendTemplates: (key, to) =>
