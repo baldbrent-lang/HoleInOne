@@ -7808,33 +7808,48 @@ def detect_swings_from_ball(
 
             cands: list[tuple[float, float, float]] = []
             for c in cnts:
-                a = cv2.contourArea(c)
-                if a <= 0:
-                    continue
                 (cx, cy), rad = cv2.minEnclosingCircle(c)
                 rn = rad / scale  # native px
                 if rn < r_lo or rn > r_hi:
                     n_drop_size += 1
                     continue
-                circ_area = np.pi * rad * rad
-                if circ_area <= 0 or (a / circ_area) < circularity_min:
-                    n_drop_shape += 1
-                    continue
-                # A BALL IS AS WIDE AS IT IS TALL. A shoe is not.
-                # Aspect ratio survives occlusion better than circularity
-                # -- a ball with the club sole across it is still roughly
-                # square in its bounding box, a shoe is never square.
                 _bx, _by, _bw, _bh = cv2.boundingRect(c)
                 if _bw <= 0 or _bh <= 0:
                     continue
+                # COUNT THE PIXELS. cv2.contourArea measures the polygon
+                # through the CENTRES of the boundary pixels, so it
+                # undercounts small blobs badly -- a 13-pixel ball comes
+                # back as 8.0, and every area ratio built on it is wrong
+                # by a third. At 720p a ball is ~2px of radius, which is
+                # exactly where that error lives.
+                a = float(cv2.countNonZero(
+                    mask[_by:_by + _bh, _bx:_bx + _bw]
+                ))
+                if a <= 0:
+                    continue
+                # A BALL IS AS WIDE AS IT IS TALL. A shoe is not. This
+                # one holds at any size -- three pixels by one is not a
+                # ball however few pixels there are -- so it is asked
+                # first and always.
                 if max(_bw, _bh) / float(min(_bw, _bh)) > aspect_max:
                     n_drop_shape += 1
                     continue
-                # ... and it FILLS that box the way a disc does (pi/4 =
-                # 0.785). An L-shaped or hollow blob does not.
-                if (a / float(_bw * _bh)) < extent_min:
-                    n_drop_shape += 1
-                    continue
+                # ROUNDNESS AND FILL ARE ONLY ASKED OF BLOBS BIG ENOUGH
+                # TO HAVE A SHAPE. Below ~3px of radius a ball is a
+                # dozen pixels on a square grid: it cannot be round, and
+                # demanding that it be is how a correctly-detected ball
+                # gets thrown away as "the wrong shape". Size, aspect and
+                # the grass around it still have to hold.
+                if rad >= 3.0:
+                    circ_area = np.pi * rad * rad
+                    if circ_area <= 0 or (a / circ_area) < circularity_min:
+                        n_drop_shape += 1
+                        continue
+                    # ... and it FILLS its box the way a disc does
+                    # (pi/4 = 0.785). An L-shaped or hollow blob does not.
+                    if (a / float(_bw * _bh)) < extent_min:
+                        n_drop_shape += 1
+                        continue
                 # ON GRASS, or a bright bit of a person?
                 if not _sits_on_grass(hsv, mask, cx, cy, rad):
                     n_drop_touch += 1
