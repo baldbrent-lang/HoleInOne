@@ -5654,6 +5654,64 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                     </div>
                   </div>
                 ))}
+
+                {/* 6 · PRODUCE. Analysis steps 1-5 describe the shot; this
+                    is the one that makes the clip, and it belongs in the
+                    same list rather than buried under the green images
+                    where it was. It is an action, so it carries its own
+                    button and reports what it built. */}
+                {(() => {
+                  const dep = (rep.departures || []).find((d) => d.green?.cut);
+                  return (
+                    <div className="small"
+                      style={{
+                        display: "flex", gap: 10, padding: "6px 0",
+                        borderBottom: "1px solid var(--line)",
+                        opacity: dep ? 1 : 0.5,
+                      }}
+                    >
+                      <b style={{ minWidth: 18 }}>6</b>
+                      <div style={{ flex: 1 }}>
+                        <b>Produce</b>
+                        <div className="tiny muted">
+                          tee tracer → cut to the green camera 1s before the ball
+                          lands → 3s of green → the usual graphics
+                        </div>
+                        {produced?.url && (
+                          <div className="tiny" style={{ marginTop: 3 }}>
+                            <a href={produced.url} target="_blank" rel="noreferrer">
+                              <b>open the produced clip →</b>
+                            </a>
+                            {" "}tee {produced.tee_window_sec?.join("–")}s + green{" "}
+                            {produced.green_window_sec?.join("–")}s
+                            {produced.n_flight_points != null && (
+                              <> · {produced.n_flight_points} tracer points</>
+                            )}
+                          </div>
+                        )}
+                        {produceErr && (
+                          <div className="err-text tiny" style={{ marginTop: 3 }}>
+                            {produceErr}
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ textAlign: "right", minWidth: 200 }}>
+                        <button type="button" className="small"
+                          style={{ width: "auto" }}
+                          disabled={!dep || producing}
+                          title={dep
+                            ? "Build the clip this analysis describes"
+                            : "Needs a departure with a landing on the green camera"}
+                          onClick={() => produce(dep?.idx ?? 0)}>
+                          {producing ? "Producing…" : "🎬 Produce"}
+                        </button>
+                        <div className="tiny muted" style={{ marginTop: 2 }}>
+                          {produced?.url ? "built" : dep ? "ready" : "no landing to cut to"}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
