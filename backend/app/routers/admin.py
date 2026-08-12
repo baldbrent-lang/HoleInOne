@@ -15061,6 +15061,63 @@ def diagnose_ball(upload_id: int, payload: dict, db: Session = Depends(get_db)):
     }
 
 
+def _guess_landing_tee(db, row, tee_size, short_frac: float = 0.12):
+    """Where a shot on this hole probably came down, in tee pixels.
+
+    A CALIBRATED HOLE ALREADY KNOWS WHERE THE BALL WAS GOING. The green
+    camera's view maps into this one, so the flag -- or failing that the
+    middle of what the green camera can see -- is a real place on this
+    hole rather than a guess from the flight, and it is where the shot
+    was aimed.
+
+    Extending the measured parabola instead is what put a tracer straight
+    up and straight back down: the ball rises almost vertically in this
+    frame, so its screen-space fit has nowhere to go but back down the
+    way it came. The green is in a direction the flight alone cannot know.
+
+    Pulled SHORT by short_frac of the way back toward the tee, because
+    amateur shots to a 200-yard par 3 mostly finish short of the flag,
+    and short is also the forgiving error: a tracer that stops before the
+    green reads as a shot that came up short, one that sails past reads
+    as broken.
+
+    Returns (xy, source) or (None, reason).
+    """
+    try:
+        _c, _hole, vm = _view_map_for(db, row)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"no view map: {exc}"
+    if not vm:
+        return None, "this hole has no green->tee mapping calibrated"
+    gs = vm.get("green_size") or []
+    spot = vm.get("pin_green") or (
+        [float(gs[0]) / 2.0, float(gs[1]) / 2.0] if len(gs) >= 2 else None)
+    if not spot:
+        return None, "the hole's mapping has no flag and no green size"
+    xy, why = _map_landing_to_tee(db, row, list(spot),
+                                  green_size=gs or None, tee_size=tee_size)
+    if not xy:
+        return None, why
+    src = "the hole's flag" if vm.get("pin_green") else "the calibrated green"
+    return [float(xy[0]), float(xy[1])], src
+
+
+def _pull_short(landing, from_xy, frac: float = 0.12):
+    """Move a landing back toward the tee by `frac` of the way.
+
+    Amateur shots to a long par 3 mostly finish short of the flag, and
+    short is the forgiving direction to be wrong in: a tracer stopping
+    before the green reads as a shot that came up short, one sailing past
+    reads as broken.
+    """
+    if not landing or not from_xy:
+        return landing
+    return [
+        float(landing[0]) + (float(from_xy[0]) - float(landing[0])) * frac,
+        float(landing[1]) + (float(from_xy[1]) - float(landing[1])) * frac,
+    ]
+
+
 @router.post("/long-uploads/{upload_id}/swing-test/produce")
 def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
                        db: Session = Depends(get_db)):
@@ -15105,6 +15162,10 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     # rather than stopping dead where MOG2 lost it.
     _tee_only = not cut
 
+    # How long a shot to a par 3 of this length hangs. Only used when
+    # nothing measured the landing.
+    _flight_sec = float((payload or {}).get("assumed_flight_sec") or 5.0)
+
     storage.ensure_local(CLIPS_DIR, row.tee_filename)
     src = _local_tee(row)
     fps = float(probe_fps(src) or 0.0) or 30.0
@@ -15131,31 +15192,40 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     # the frames between the last measurement and the cut.
     _assumed_landing = None
     _assumed_reason = None
-    if _tee_only:
-        # No P2 to bend toward, so follow the measurement's own model:
-        # x at a constant rate, y a parabola -- the same one the RANSAC
-        # fit used -- until the ball is back down to the height it was
-        # struck from.
+    _p2_override = None
+    _f_end_override = None
+    if _tee_only and _pts:
         _fsz = _frame_size(src)
-        _ex = _d3.extrapolate_flight(
-            [{"frame": q["frame"], "x": q["x"], "y": q["y"]} for q in _pts],
-            int(_fsz[1]) if _fsz else 720, fps,
-        ) or {}
-        _assumed_reason = _ex.get("reason")
-        if _ex.get("ok"):
-            _assumed_landing = _ex.get("landing_xy")
-            _seen = {q["frame"] for q in _pts}
-            for _q in _ex["points"]:
-                if _q["frame"] in _seen:
-                    continue
-                _seen.add(_q["frame"])
-                _pts.append({"found": True, "projected": True,
-                             "frame": int(_q["frame"]),
-                             "x": int(_q["x"]), "y": int(_q["y"])})
-            _pts.sort(key=lambda q: q["frame"])
+        _xy, _why = _guess_landing_tee(db, row,
+                                       list(_fsz) if _fsz else None)
+        if _xy:
+            _xy = _pull_short(_xy, (float(b["x"]), float(b["y"])))
+            _p2_override = _xy
+            _assumed_landing = [int(round(_xy[0])), int(round(_xy[1]))]
+            # FIVE SECONDS OF FLIGHT. A 200-yard shot to a par 3 hangs
+            # about that long, and the measured part of it is under half
+            # a second -- so the projection carries the rest. Extending
+            # only as far as the screen-space fit suggested gave 0.64s,
+            # which is a wedge, not a mid-iron.
+            _f_end_override = int(impact) + int(round(_flight_sec * fps))
+            _assumed_reason = (
+                f"no landing on the green camera — assumed one at "
+                f"{_assumed_landing[0]},{_assumed_landing[1]} from "
+                f"{_why}, pulled short, over a {_flight_sec:.0f}s flight"
+            )
+        else:
+            _assumed_reason = (
+                f"no landing on the green camera and no aim point to "
+                f"assume one from — {_why}"
+            )
 
     _bez = b.get("bezier") or {}
-    if not _tee_only and _bez.get("ok") and _bez.get("p0") and _pts:
+    if _p2_override and _pts:
+        _bez = _d3.bezier_continuation(
+            [{"frame": q["frame"], "x": q["x"], "y": q["y"]} for q in _pts],
+            (_p2_override[0], _p2_override[1]),
+        ) or {}
+    if _bez.get("ok") and _bez.get("p0") and _pts:
         # CARRY THE LINE ON, AT THE SPEED IT WAS GOING.
         #
         # The measured points stop where MOG2 lost the ball -- off the
@@ -15178,8 +15248,9 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
         _p0, _p1, _p2 = _bez["p0"], _bez["p1"], _bez["p2"]
         _f_last = _pts[-1]["frame"]
         _land_tee = green.get("landing_sec_tee")
-        _f_end = (int(float(_land_tee) * fps) if _land_tee is not None
-                  else int(float(cut["at_tee_sec"]) * fps))
+        _f_end = (_f_end_override if _f_end_override is not None
+                  else (int(float(_land_tee) * fps) if _land_tee is not None
+                        else int(float(cut["at_tee_sec"]) * fps)))
         _span = _f_end - _f_last
         if _span > 1:
             # THE EASING EXPONENT IS SOLVED FOR, NOT PICKED. Near t=0 the
