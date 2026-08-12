@@ -5698,6 +5698,11 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                             {produced.assumed_landing && (
                               <> · assumed landing {produced.assumed_landing.join(", ")}</>
                             )}
+                            {produced.reason && (
+                              <div className="muted" style={{ marginTop: 2 }}>
+                                {produced.reason}
+                              </div>
+                            )}
                           </div>
                         )}
                         {produceErr && (

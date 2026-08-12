@@ -15290,9 +15290,31 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
                 + f", over a {_flight_sec:.0f}s flight"
             )
         else:
+            # NO CALIBRATION, STILL A SHOT. Without a green->tee mapping
+            # nothing KNOWS where the green is, and refusing to draw
+            # leaves the tracer stopping in mid-air -- which is the one
+            # outcome that reads as broken. So it falls back to the
+            # crudest thing that is still true of every shot on a par 3
+            # from behind the golfer: the ball goes away from the camera,
+            # so it comes down high in the frame, and it drifts toward
+            # the middle rather than off the side it launched over.
+            #
+            # This is a guess about geometry, not a measurement, and it
+            # says so. Calibrating the hole replaces it with the flag.
+            _fw = float(_fsz[0]) if _fsz else 1280.0
+            _fh = float(_fsz[1]) if _fsz else 720.0
+            _lx = float(_pts[-1]["x"])
+            _xy = [_lx + (_fw * 0.5 - _lx) * 0.45, _fh * 0.30]
+            _p2_override = _xy
+            _assumed_landing = [int(round(_xy[0])), int(round(_xy[1]))]
+            _f_end_override = int(impact) + int(round(_flight_sec * fps))
             _assumed_reason = (
-                f"no landing on the green camera and no aim point to "
-                f"assume one from — {_why}"
+                f"no landing on the green camera, and hole {_hole_for_upload(db, row)} "
+                f"has no green→tee mapping to aim at ({_why}) — assumed a "
+                f"landing up the hole at {_assumed_landing[0]},"
+                f"{_assumed_landing[1]} over a {_flight_sec:.0f}s flight. "
+                f"CALIBRATE THE HOLE and this becomes the flag instead of "
+                f"a guess about the frame"
             )
 
     _bez = b.get("bezier") or {}
