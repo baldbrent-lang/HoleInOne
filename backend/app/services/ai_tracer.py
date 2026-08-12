@@ -7612,12 +7612,9 @@ def detect_swings_from_ball(
     after_sec: float = 5.0,
     white_v_min: int = 170,
     white_s_max: int = 90,
-    min_ball_frac: float = 0.00002,
-    # 0.0006 of a 640x360 working frame is ~138px^2, a radius of ~6.6px,
-    # already several times a real ball. It was 0.006 -- ten times this --
-    # which put the top of the window at a 21px radius and let every white
-    # shoe in the frame through as "ball-sized".
-    max_ball_frac: float = 0.0006,
+    # Size is expressed in NATIVE PIXELS now, not as a fraction of a
+    # working frame whose resolution the caller cannot see. See the size
+    # limits in the loop below.
     circularity_min: float = 0.45,
     aspect_max: float = 1.6,
     extent_min: float = 0.5,
@@ -7675,6 +7672,7 @@ def detect_swings_from_ball(
     n_drop_shape = 0   # white + right size, but not ball-SHAPED (shoes)
     n_drop_size = 0    # white + ball-shaped, but not the pinned ball size
     sample_cands: list[tuple[int, int]] = []  # native positions, for diagnostics
+    r_lo = r_hi = None  # the accepted radius window, in native px
     try:
         src_fps = float(fps) if fps else float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         if src_fps <= 0:
@@ -7692,89 +7690,121 @@ def detect_swings_from_ball(
             t = idx / src_fps
             h, w = frame.shape[:2]
             frame_shape = (h, w)
-            # Downscale to ~360p for speed; keep the scale to map back.
-            scale = 360.0 / h if h > 360 else 1.0
-            fr = (
-                cv2.resize(frame, (max(1, int(w * scale)), 360), interpolation=cv2.INTER_AREA)
-                if scale != 1.0
-                else frame
-            )
-            hs, ws = fr.shape[:2]
-            hsv = cv2.cvtColor(fr, cv2.COLOR_BGR2HSV)
+
+            # WORK AT NATIVE RESOLUTION INSIDE THE BOX.
+            #
+            # This function used to resize every frame to 360p and then
+            # ask for blobs of at least 0.00002 of the frame area. On
+            # 1080p footage that is a 3x downscale and a 4.6px^2 floor,
+            # and a golf ball is ~8px across natively -> 2.7px at 360p
+            # -> ~5.6px^2 if it survives the INTER_AREA blend with the
+            # grass around it, which it largely does not. The 3x3
+            # MORPH_OPEN below then erodes ~1px off every edge, which
+            # erases a 2.7px blob and does nothing to a 10px one.
+            #
+            # So the pipeline was systematically deleting balls and
+            # keeping shoes -- not because the thresholds were wrong but
+            # because the ball had been thrown away before they ran.
+            #
+            # Cropping to the box at full resolution is also CHEAPER than
+            # resizing the whole frame: the box is a small part of the
+            # picture, and it is the only part that can contain a ball.
+            if roi:
+                _mx = 0.02  # a little margin so a ball on the edge is not clipped
+                rx0 = int(max(0, (float(roi.get("x", 0.0)) - _mx) * w))
+                ry0 = int(max(0, (float(roi.get("y", 0.0)) - _mx) * h))
+                rx1 = int(min(w, (float(roi.get("x", 0.0))
+                                  + float(roi.get("w", 1.0)) + _mx) * w))
+                ry1 = int(min(h, (float(roi.get("y", 0.0))
+                                  + float(roi.get("h", 1.0)) + _mx) * h))
+                if rx1 - rx0 < 8 or ry1 - ry0 < 8:
+                    rx0, ry0, rx1, ry1 = 0, 0, w, h
+                work = frame[ry0:ry1, rx0:rx1]
+                scale, ox, oy = 1.0, rx0, ry0
+            else:
+                # No box: the whole frame, but only down to 720 tall.
+                # 360 was small enough to erase the thing being looked
+                # for.
+                scale = 720.0 / h if h > 720 else 1.0
+                work = (
+                    cv2.resize(
+                        frame, (max(1, int(w * scale)), int(h * scale)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                    if scale != 1.0 else frame
+                )
+                ox = oy = 0
+
+            hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(
                 hsv, (0, 0, int(white_v_min)), (179, int(white_s_max), 255)
             )
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            frame_area = float(hs * ws)
+            # Denoise WITHOUT eating the ball: at native resolution a ball
+            # is several pixels across, so a 3x3 open removes speckle and
+            # leaves the ball. It is skipped entirely on a downscaled
+            # frame, where it would take the ball with the speckle.
+            if scale == 1.0:
+                mask = cv2.morphologyEx(
+                    mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
+                )
+            cnts, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            # SIZE LIMITS IN REAL PIXELS, not as a fraction of whatever
+            # the working frame happens to be. When the hole has been
+            # calibrated this is the measured ball and a narrow window
+            # around it; otherwise it is a generous range derived from
+            # the frame height, which still excludes a shoe.
+            if expect_radius_px:
+                r_lo, r_hi = 0.6 * expect_radius_px, 1.7 * expect_radius_px
+            else:
+                r_lo, r_hi = max(1.2, 0.0012 * h), 0.010 * h
+
             cands: list[tuple[float, float, float]] = []
             for c in cnts:
                 a = cv2.contourArea(c)
-                if a < min_ball_frac * frame_area or a > max_ball_frac * frame_area:
+                if a <= 0:
                     continue
                 (cx, cy), rad = cv2.minEnclosingCircle(c)
+                rn = rad / scale  # native px
+                if rn < r_lo or rn > r_hi:
+                    n_drop_size += 1
+                    continue
                 circ_area = np.pi * rad * rad
                 if circ_area <= 0 or (a / circ_area) < circularity_min:
+                    n_drop_shape += 1
                     continue
                 # A BALL IS AS WIDE AS IT IS TALL. A shoe is not.
-                #
-                # White shoes were the main false positive and none of the
-                # tests above can see them: they are the same white, they
-                # hold as still as a ball at address, and the old size
-                # window spanned 300x in area, so a shoe and a ball were
-                # both "ball-sized". Shape is what separates them, and
-                # aspect ratio survives occlusion better than circularity
+                # Aspect ratio survives occlusion better than circularity
                 # -- a ball with the club sole across it is still roughly
                 # square in its bounding box, a shoe is never square.
                 _bx, _by, _bw, _bh = cv2.boundingRect(c)
                 if _bw <= 0 or _bh <= 0:
                     continue
-                _aspect = max(_bw, _bh) / float(min(_bw, _bh))
-                if _aspect > aspect_max:
+                if max(_bw, _bh) / float(min(_bw, _bh)) > aspect_max:
                     n_drop_shape += 1
                     continue
                 # ... and it FILLS that box the way a disc does (pi/4 =
-                # 0.785). An L-shaped or hollow blob of the same extent
-                # does not.
+                # 0.785). An L-shaped or hollow blob does not.
                 if (a / float(_bw * _bh)) < extent_min:
                     n_drop_shape += 1
                     continue
-                # KNOWN BALL SIZE — the strong one.
-                #
-                # The ball MOVES: every golfer tees it somewhere else in
-                # the hitting area, so its position tells us nothing. Its
-                # SIZE tells us everything. The camera does not move and
-                # the hitting area is a few yards deep, so a ball is very
-                # nearly the same number of pixels across in every clip
-                # this camera will ever shoot, while a shoe is several
-                # times that. Once the radius has been calibrated for this
-                # hole, a shoe is excluded by arithmetic — before any of
-                # the shape tests above have to be right.
-                #
-                # The window is deliberately narrow (0.6x-1.7x). The whole
-                # value here is that the ball's size is nearly constant;
-                # a generous tolerance throws that away and lets the shoe
-                # back in.
-                if expect_radius_px:
-                    _rn = rad / scale  # native px
-                    if not (0.6 * expect_radius_px <= _rn <= 1.7 * expect_radius_px):
-                        n_drop_size += 1
-                        continue
-                nx, ny = cx / scale, cy / scale  # native-pixel centroid
+                nx, ny = ox + cx / scale, oy + cy / scale
                 n_cand_total += 1
                 if len(sample_cands) < 400:
                     sample_cands.append((int(nx), int(ny)))
-                # Tee-box ROI gate: drop candidates outside the drawn box
-                # (fractions of the frame), killing shoes/glints elsewhere.
+                # The crop above already IS the box, but a box drawn with
+                # margin can still hand back something just outside it.
                 if roi:
-                    rx0 = float(roi.get("x", 0.0)) * w
-                    ry0 = float(roi.get("y", 0.0)) * h
-                    rx1 = rx0 + float(roi.get("w", 1.0)) * w
-                    ry1 = ry0 + float(roi.get("h", 1.0)) * h
-                    if not (rx0 <= nx <= rx1 and ry0 <= ny <= ry1):
+                    bx0 = float(roi.get("x", 0.0)) * w
+                    by0 = float(roi.get("y", 0.0)) * h
+                    bx1 = bx0 + float(roi.get("w", 1.0)) * w
+                    by1 = by0 + float(roi.get("h", 1.0)) * h
+                    if not (bx0 <= nx <= bx1 and by0 <= ny <= by1):
                         continue
                 n_cand_in_roi += 1
-                cands.append((nx, ny, rad / scale))
+                cands.append((nx, ny, rn))
             samples.append((t, cands))
     finally:
         cap.release()
@@ -7872,6 +7902,11 @@ def detect_swings_from_ball(
                 "n_drop_shape": n_drop_shape,
                 "n_drop_size": n_drop_size,
                 "expect_radius_px": expect_radius_px,
+                "accept_radius_px": (
+                    [round(r_lo, 2), round(r_hi, 2)]
+                    if r_lo is not None else None
+                ),
+                "native_scan": bool(roi),
                 "n_tracks": len(tracks),
                 "n_rested": n_rested,
                 "min_rest_sec": float(min_rest_sec),

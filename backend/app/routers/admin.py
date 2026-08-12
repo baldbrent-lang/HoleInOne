@@ -13690,7 +13690,7 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
             # scan path: what the shape tests threw away (shoes)
             "n_drop_shape", "n_drop_size",
             # anchor path: how often the ball was actually on its spot
-            "expect_radius_px",
+            "expect_radius_px", "accept_radius_px", "native_scan",
         )
     }
     _c = out["counts"]

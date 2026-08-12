@@ -5671,13 +5671,19 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                 </div>
                 <div className="small" style={{ marginBottom: 6 }}>
                   {expectR ? (
-                    <>Calibrated: looking for a ball of radius <b>{expectR}px</b>{" "}
-                    (accepting {(expectR * 0.6).toFixed(1)}–{(expectR * 1.7).toFixed(1)}px).</>
+                    <>Calibrated: looking for a ball of radius <b>{expectR}px</b>.</>
                   ) : (
                     <span className="muted">
-                      Not calibrated for hole {rep.hole} yet — the scan is using
-                      generic size limits, which is what lets shoes through.
+                      Not calibrated for hole {rep.hole} yet — using generic
+                      size limits derived from the frame height.
                     </span>
+                  )}
+                  {c.accept_radius_px && (
+                    <> Accepting radius{" "}
+                    <b>{c.accept_radius_px[0]}–{c.accept_radius_px[1]}px</b>
+                    {c.native_scan
+                      ? " scanned at full resolution inside the box."
+                      : " scanned on a downscaled whole frame — draw a box to scan at full resolution."}</>
                   )}
                   {calibrated && (
                     <> <b style={{ color: "var(--ok, #2a8)" }}>
