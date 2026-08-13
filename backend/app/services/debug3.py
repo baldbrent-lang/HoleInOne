@@ -655,6 +655,9 @@ def follow_to_rest(
     max_gap_frames: int = 10,
     rest_frames: int = 15,
     still_px: float = 8.0,
+    bounce_keep: float = 0.6,
+    bounce_sec: float = 1.0,
+    bounce_decay: float = 0.93,
 ) -> dict:
     """Follow the ball from the end of its descent through the ground.
 
@@ -705,10 +708,35 @@ def follow_to_rest(
     last_frames = sorted(by_frame) or [f]
     f_end = last_frames[-1]
 
+    speed_arrival = max(1.0, (vx * vx + vy * vy) ** 0.5)
+    vx_arrival = vx
+
     while f < f_end:
         f += 1
         gap = f - last_seen
         speed = max(1.0, (vx * vx + vy * vy) ** 0.5)
+        # THE GATE MUST NOT COLLAPSE AT THE MOMENT OF THE BOUNCE.
+        #
+        # It scales with how fast the ball is currently going, and the
+        # landing test is a COLLAPSE in the rate of fall -- so the two
+        # fight each other exactly once, at the landing frame, and the
+        # gate wins. The ball arrives at 50px a frame, the vertical
+        # component goes to nothing as it pitches, the measured speed
+        # drops with it, and the gate shuts to its 22px floor on the one
+        # frame the ball is about to kick forward hardest. The bounce
+        # lands outside it, nothing matches for rest_frames, and the
+        # ball is declared at rest a frame after it touched -- which is
+        # what happened: landed f316, "rest" f317, twelve pixels away,
+        # with the bounce plainly visible carrying on across the frame.
+        #
+        # A bounce keeps most of the horizontal speed it arrived with,
+        # so that arrival speed is the floor, decaying over about a
+        # second as the ball skids, kicks and starts to roll.
+        if out["landing_frame"] is not None:
+            _since = f - int(out["landing_frame"])
+            if _since <= int(bounce_sec * max(1.0, fps or 30.0)):
+                speed = max(speed, bounce_keep * speed_arrival
+                            * (bounce_decay ** max(0, _since)))
         # The gate grows with the gap -- a ball missed for three frames
         # has had three frames to travel -- but only so far. Ungapped, it
         # reaches whatever it likes: measured on a real clip, a ten-frame
@@ -717,8 +745,21 @@ def follow_to_rest(
         # of a ball that had already stopped.
         gate = max(gate_min_px, gate_k * speed) * min(max(1, gap), 3)
         best, bestd = None, gate
+        _bouncing = (out["landing_frame"] is not None
+                     and f - int(out["landing_frame"])
+                     <= int(bounce_sec * max(1.0, fps or 30.0)))
         for d in by_frame.get(f, []):
-            dd = ((float(d["x"]) - x) ** 2 + (float(d["y"]) - y) ** 2) ** 0.5
+            _ddx = float(d["x"]) - x
+            # Opening the gate for the bounce also opens it to whatever
+            # else is moving nearby, so the direction has to earn it: a
+            # ball that pitched going one way does not set off back the
+            # other. Only applied while the gate is widened, and only
+            # when the arrival had a real horizontal component to speak
+            # of -- a ball dropping straight down has no "back".
+            if (_bouncing and abs(vx_arrival) >= 2.0
+                    and _ddx * vx_arrival < -gate_min_px):
+                continue
+            dd = (_ddx ** 2 + (float(d["y"]) - y) ** 2) ** 0.5
             if dd < bestd:
                 bestd, best = dd, d
         if best is None:
@@ -1522,9 +1563,23 @@ def find_flight(
         if not res.get("ok"):
             out["reason"] = res.get("reason")
             return out
+        # ACROSS THE GAP. The fit only ever saw one track, and the
+        # tracker closes a track after four blind frames -- so the rest
+        # of the ascent, sitting in a straight line with the part that
+        # was found, was being left out. Anything on the same parabola
+        # joins it.
+        _grown = grow_flight(fit, det.get("dets") or [], r=r)
+        dbg["grown"] = {
+            "n_added": _grown.get("n_added"),
+            "rms_px": _grown.get("rms_px"),
+            "reason": _grown.get("reason"),
+        }
+        _fpts = (_grown.get("points")
+                 if _grown.get("ok") and _grown.get("points")
+                 else (fit.get("inliers") or []))
         out["points"] = [
             {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"])}
-            for q in (fit.get("inliers") or [])
+            for q in _fpts
         ]
         # The launch FRAME, from where the flight meets the ground.
         lg = launch_from_ground(fit, gy)
@@ -2055,6 +2110,182 @@ def flight_shape(points: list, r: float) -> dict:
         )
     out["monotonicity"] = round(out["monotonicity"], 3)
     return out
+
+
+def grow_flight(fit: dict, dets: list, r: float = 12.0,
+                tol: float | None = None, max_reach: int = 90,
+                n_iter: int = 8, min_run: int = 3,
+                run_gap: int = 5) -> dict:
+    """Pull in every OTHER detection that lies on the winning fit.
+
+    The flight is fitted over ONE track, and build_tracks closes a track
+    after four frames with nothing to link to. So a ball that MOG2 loses
+    for five frames -- against a bright sky, behind a branch, through
+    the top of a tree line -- comes back as a SECOND track, and the fit
+    never sees it. On a real swing that left the tracer covering the
+    strike and the first part of the ascent while the rest of the climb
+    sat there in plain sight, in a straight line with the part that was
+    drawn, in its own track, unused.
+
+    The fitted parabola already says where those points would have to
+    be. So this sweeps every detection, keeps the ones within `tol` of
+    the model, refits over the union, and repeats -- the standard
+    grow-and-refit, with the model doing the deciding rather than the
+    tracker's gap rule.
+
+    What stops it swallowing noise is that the model is a parabola, not
+    a corridor: `tol` is the same distance RANSAC used to call a point
+    an inlier, and a detection has to sit on the curve at ITS OWN FRAME.
+    Drifting foliage a hundred frames away has to be in exactly the
+    right place at exactly the right time to qualify. `max_reach` bounds
+    how far past the measured track that is even considered, because an
+    extrapolated parabola is a guess and a distant one is a bad guess.
+
+    It runs until a pass finds nothing new, not for a fixed couple of
+    rounds. A fit made from the first eight points of a flight is a
+    parabola constrained over a quarter of a second, and its
+    extrapolation is only good for a little way past that -- so the far
+    end of the flight sits outside `tol` until the near end has been
+    joined and the curve refitted through it. Reaching the whole flight
+    takes several passes, and stopping at two recovered 13 of 22 points
+    where running to convergence recovers all of them.
+
+    Returns {ok, points, n_added, rms_px, reason}. Never raises.
+    """
+    out = {"ok": False, "points": [], "n_added": 0, "rms_px": None,
+           "reason": None}
+    inl = list((fit or {}).get("inliers") or [])
+    coef = (fit or {}).get("coef") or {}
+    if not HAS_CV or len(inl) < 3 or not coef.get("x") or not coef.get("y"):
+        out["reason"] = "no fit to grow from"
+        return out
+    if tol is None:
+        tol = max(6.0, 1.2 * r)
+    try:
+        cx = np.array(coef["x"], dtype=float)
+        cy = np.array(coef["y"], dtype=float)
+        keep = {(int(p["frame"]), int(p["x"]), int(p["y"])) for p in inl}
+        f_lo = min(int(p["frame"]) for p in inl)
+        f_hi = max(int(p["frame"]) for p in inl)
+        pool = [d for d in (dets or [])
+                if (int(d["frame"]), int(d["x"]), int(d["y"])) not in keep
+                and f_lo - max_reach <= int(d["frame"]) <= f_hi + max_reach]
+        pts = list(inl)
+        added = 0
+        # Two rounds of the same loop. The first only trusts points
+        # within RANSAC's own tolerance, which is the right suspicion of
+        # a curve fitted through three. Once that has converged the
+        # curve is constrained by the whole flight, and holding it to a
+        # tolerance set for three points leaves the far tail out -- 15
+        # of 22 on the reference flight, the last seven all real. So the
+        # second round relaxes it by half, and the rms check at the end
+        # is what says whether that was earned.
+        for _tol in (tol, tol * 1.5):
+            for _ in range(max(1, int(n_iter))):
+                have = {int(p["frame"]) for p in pts}
+                best_at: dict[int, tuple] = {}
+                for d in pool:
+                    _f = int(d["frame"])
+                    if _f in have:
+                        continue
+                    _e = math.hypot(float(d["x"]) - float(np.polyval(cx, _f)),
+                                    float(d["y"]) - float(np.polyval(cy, _f)))
+                    if _e > _tol:
+                        continue
+                    # One ball per frame: the nearest thing to where the
+                    # model says it is.
+                    if _f not in best_at or _e < best_at[_f][0]:
+                        best_at[_f] = (_e, d)
+                _new = [d for _e, d in best_at.values()]
+                if not _new:
+                    break
+                pts = sorted(pts + [{"frame": int(d["frame"]), "x": int(d["x"]),
+                                     "y": int(d["y"])} for d in _new],
+                             key=lambda p: p["frame"])
+                added += len(_new)
+                _t = np.array([p["frame"] for p in pts], float)
+                cx = np.polyfit(_t, np.array([p["x"] for p in pts], float),
+                                2 if len(pts) >= 6 else 1)
+                cy = np.polyfit(_t, np.array([p["y"] for p in pts], float), 2)
+        if not added:
+            out.update({"ok": True, "points": pts, "n_added": 0,
+                        "reason": "no other detection lies on the flight"})
+            return out
+        # A CONTINUATION ARRIVES AS A RUN; NOISE ARRIVES ALONE.
+        #
+        # Filling a hole INSIDE the measured track is safe -- both ends
+        # are pinned by real points, so the curve through the hole is
+        # interpolation. Reaching out PAST the last measurement is
+        # extrapolation, and an extrapolated parabola will eventually
+        # pass near something. On the reference flight it picked up a
+        # single stray at f1365 and a pair at f1372.
+        #
+        # A ball that MOG2 re-acquires gives several frames in a row on
+        # the curve, because it is a ball and it is still there. So
+        # points beyond the original span have to come with company:
+        # part of a run of at least `min_run`, no more than `run_gap`
+        # frames apart. Inside the span nothing is dropped.
+        _outside = sorted((p for p in pts
+                           if not (f_lo <= int(p["frame"]) <= f_hi)),
+                          key=lambda p: p["frame"])
+        _drop = set()
+        _run: list = []
+        for _p in _outside + [None]:
+            if (_run and _p is not None
+                    and int(_p["frame"]) - int(_run[-1]["frame"]) <= run_gap):
+                _run.append(_p)
+                continue
+            if len(_run) < min_run:
+                _drop |= {(int(q["frame"]), int(q["x"]), int(q["y"]))
+                          for q in _run}
+            _run = [] if _p is None else [_p]
+        if _drop:
+            pts = [p for p in pts
+                   if (int(p["frame"]), int(p["x"]), int(p["y"]))
+                   not in _drop]
+            added -= len(_drop)
+            if added <= 0:
+                out.update({
+                    "ok": True, "points": list(inl), "n_added": 0,
+                    "rms_px": fit.get("rms_px"),
+                    "reason": (f"{len(_drop)} detection(s) lay on the "
+                               f"flight past its last measured point but "
+                               f"none had {min_run} in a row to back it "
+                               f"up — kept the original fit")})
+                return out
+            _t = np.array([p["frame"] for p in pts], float)
+            cx = np.polyfit(_t, np.array([p["x"] for p in pts], float),
+                            2 if len(pts) >= 6 else 1)
+            cy = np.polyfit(_t, np.array([p["y"] for p in pts], float), 2)
+        _t = np.array([p["frame"] for p in pts], float)
+        _res = np.hypot(
+            np.array([p["x"] for p in pts], float) - np.polyval(cx, _t),
+            np.array([p["y"] for p in pts], float) - np.polyval(cy, _t))
+        _rms = float(np.sqrt(float(np.mean(_res ** 2))))
+        # A GROWN FIT THAT FITS WORSE IS NOT AN IMPROVEMENT. If pulling
+        # the extra points in has bent the curve off the ones that were
+        # measured cleanly, keep what RANSAC had.
+        if _rms > max(tol, 1.6 * float(fit.get("rms_px") or tol)):
+            out.update({"ok": True, "points": list(inl), "n_added": 0,
+                        "rms_px": fit.get("rms_px"),
+                        "reason": (f"{added} point(s) lay on the flight but "
+                                   f"refitting through them raised the rms "
+                                   f"to {_rms:.1f}px — kept the original fit")})
+            return out
+        out.update({
+            "ok": True, "points": pts, "n_added": added,
+            "rms_px": round(_rms, 2),
+            "reason": (
+                f"joined {added} detection(s) from outside the winning "
+                f"track that sit on the same flight (within {tol:.0f}px), "
+                f"spanning f{pts[0]['frame']}–f{pts[-1]['frame']} at "
+                f"{_rms:.2f}px rms"),
+        })
+        return out
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"could not grow the flight: {exc}"
+        out["points"] = list(inl)
+        return out
 
 
 def pick_flight(
