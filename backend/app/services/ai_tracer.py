@@ -2896,10 +2896,12 @@ TRACER_REST_RING = (255, 60, 0)          # blue — ball-at-rest marker
 TRAJ_OUTLIER_PX = 80
 TRAJ_OUTLIER_MAX_ITERS = 6
 # How many frames before the impact frame the rest-position anchor
-# sits. Operator wanted the tracer line to literally start at the
-# ball-at-rest position a beat before the swing strikes, so the
-# rendered curve begins 2 frames before impact instead of at impact.
-REST_ANCHOR_FRAMES_BEFORE_IMPACT = 2
+# sits. This was 2 -- the line began a beat before the swing struck.
+# Now it starts ON the impact frame: the ball is at rest right up to
+# the moment it is hit, so that is where and when the tracer begins,
+# and the fit no longer has to reach two frames back to a point the
+# flight model says nothing about.
+REST_ANCHOR_FRAMES_BEFORE_IMPACT = 0
 
 
 def _robust_quadratic_fit(
@@ -4037,11 +4039,39 @@ def render_tracer_video(
     anchors: list[tuple[int, int, int]] = []  # (frame, x, y)
 
     def _append_projected(sp: list) -> list:
-        """Continue the drawn line with the caller's projected points.
+        """Continue the drawn line with the caller's projected points,
+        joined smoothly.
 
         Only points BEYOND the fitted section are taken: the fit may
         already have been truncated at the apex, and a projection
         starting behind that would jump backwards.
+
+        THE JOIN HAS TO BE INVISIBLE, and appending the caller's points
+        raw does not manage it. Two things go wrong. The fitted section
+        ends at polyval's prediction while the projection starts from
+        the last MEASURED point, so the line steps sideways; and the two
+        arrive at different angles, so it corners. Measured on a real
+        flight: a 50 degree turn at the seam, plainly visible as a kink.
+        On top of that the projection is rounded to whole pixels per
+        frame, and at two or three pixels a frame that rounding is a
+        staircase, worth 25 degrees a step on its own.
+
+        So the tail is REBUILT rather than appended, as a chain of
+        steps: it starts at the exact point the drawn curve ends, and
+        each step is the caller's own step for that frame, with the
+        first few rotated from the angle the drawn curve arrives at
+        toward the angle the projection wants. Position and direction
+        are continuous, and the steps are accumulated in floating point
+        so the rounding staircase never compounds.
+
+        A chain, specifically, and not a curve fitted to the same
+        constraints. Fitting a quadratic through the drawn end WITH the
+        drawn end's velocity is the obvious thing and it fails badly:
+        the fitted curve leaves at around five pixels a frame while a
+        projection of a receding ball crawls at two, so the curvature
+        needed to reconcile them turns the line right around. That drew
+        a hairpin at the top of the frame. Interpolating between two
+        steps that point the same way cannot reverse.
         """
         if not _projected:
             return sp
@@ -4051,9 +4081,75 @@ def render_tracer_video(
              if _f_end is None or int(p[0]) > _f_end),
             key=lambda p: p[0],
         )
-        if _tailp:
-            sp = list(sp) + _tailp
-        return sp
+        if not _tailp:
+            return sp
+        if not sp or not HAS_NP or len(_tailp) < 2:
+            return list(sp) + _tailp
+        try:
+            # The angle the drawn line ARRIVES at, off the last few
+            # points rather than the last two: two whole-pixel points on
+            # a slow stretch give a direction that is mostly rounding.
+            _base = sp[-5:] if len(sp) >= 5 else list(sp)
+            _bf = np.array([float(p[0]) for p in _base])
+            _ux = _uy = 0.0
+            if len(_base) >= 2 and _bf[-1] > _bf[0]:
+                _ax = float(np.polyfit(
+                    _bf, np.array([float(p[1]) for p in _base]), 1)[0])
+                _ay = float(np.polyfit(
+                    _bf, np.array([float(p[2]) for p in _base]), 1)[0])
+                _an = math.hypot(_ax, _ay)
+                if _an > 0:
+                    _ux, _uy = _ax / _an, _ay / _an
+            _BLEND = 6           # frames to turn from one into the other
+            _px = float(sp[-1][1])
+            _py = float(sp[-1][2])
+            _prev = None
+            _out = []
+            for _i, _p in enumerate(_tailp):
+                _gap = 1
+                if _prev is None:
+                    _vx = float(_p[1]) - float(sp[-1][1])
+                    _vy = float(_p[2]) - float(sp[-1][2])
+                    _gap = max(1, int(_p[0]) - int(sp[-1][0]))
+                else:
+                    _vx = float(_p[1]) - _prev[0]
+                    _vy = float(_p[2]) - _prev[1]
+                _prev = (float(_p[1]), float(_p[2]))
+                _vn = math.hypot(_vx, _vy)
+                if _i < _BLEND and _vn > 0 and (_ux or _uy):
+                    # w=0 leaves along the drawn line, w=1 is entirely
+                    # the caller's step. The step LENGTH is the
+                    # caller's throughout -- only the angle is eased.
+                    _w = (_i + 1) / float(_BLEND + 1)
+                    _mx = (1.0 - _w) * _ux * _vn + _w * _vx
+                    _my = (1.0 - _w) * _uy * _vn + _w * _vy
+                    _mn = math.hypot(_mx, _my)
+                    if _mn > 0:
+                        _vx, _vy = _mx * _vn / _mn, _my * _vn / _mn
+                # BRIDGE THE HOLE, ALONG THE STEP THAT IS ACTUALLY
+                # TAKEN. The fitted section can stop several frames
+                # short of where the projection starts -- the apex and
+                # descent rules both trim it -- and the first step then
+                # covers that whole gap in one go: a 10.8px segment
+                # among 3px neighbours, at its own angle, which reads as
+                # a notch. So it is spread over the frames it spans --
+                # and spread AFTER the blend above, not before. Bridging
+                # the raw step and then landing on the blended one put a
+                # 56 degree corner at the last bridged point, which is
+                # worse than the notch it replaced.
+                if _gap > 1:
+                    for _g in range(1, _gap):
+                        _out.append((
+                            int(sp[-1][0]) + _g,
+                            int(round(_px + _vx * _g / _gap)),
+                            int(round(_py + _vy * _g / _gap)),
+                        ))
+                _px += _vx
+                _py += _vy
+                _out.append((int(_p[0]), int(round(_px)), int(round(_py))))
+            return list(sp) + _out
+        except Exception:  # noqa: BLE001
+            return list(sp) + _tailp
 
     manual_anchor_idxs: set[int] = set()
     rest_anchor_frame: int | None = None
@@ -4404,10 +4500,10 @@ def render_tracer_video(
         if (
             rest_is_anchor_zero and HAS_NP and len(kept) >= 3
             and rest_anchor_frame is not None and 0 in kept_indices
-            # Only when the main fit used LINEAR x — this refit rebuilds a
-            # linear x and would clobber the quadratic x that long
-            # (descent-including) tracks need.
-            and len(x_coef) == 2
+            # Both degrees are handled below now, each constrained at its
+            # own degree, so a quadratic x is no longer clobbered and no
+            # longer a reason to skip starting the line on the ball.
+            and len(x_coef) in (2, 3)
         ):
             try:
                 f0 = float(rest_anchor_frame)
@@ -4437,16 +4533,37 @@ def render_tracer_video(
                 b_q_coef = float(sol_q[1])
                 c_q = y0_rest - a_q * f0 * f0 - b_q_coef * f0
                 y_coef = np.array([a_q, b_q_coef, c_q])
-                # Same substitution for the linear x fit:
-                # x = m·f + k constrained by x0 = m·f0 + k.
-                v_x = (kept_frames - f0) * sqrt_w
-                b_x = (kept_xs - x0_rest) * sqrt_w
-                sol_x, *_ = np.linalg.lstsq(
-                    v_x[:, None], b_x, rcond=None,
-                )
-                m_x = float(sol_x[0])
-                k_x = x0_rest - m_x * f0
-                x_coef = np.array([m_x, k_x])
+                # Same substitution for x, at whatever degree the main
+                # fit chose. It used to handle only the linear case and
+                # skip the whole refit otherwise -- so on any flight
+                # curving enough to need a quadratic x, the constraint
+                # never ran and the line did not start on the ball at
+                # all. Measured on a real one: it began 40px away, with
+                # the ball sitting there in plain view beside it.
+                if len(x_coef) == 3:
+                    A_x = np.column_stack([
+                        (kept_frames**2 - f0**2) * sqrt_w,
+                        (kept_frames - f0) * sqrt_w,
+                    ])
+                    sol_x, *_ = np.linalg.lstsq(
+                        A_x, (kept_xs - x0_rest) * sqrt_w, rcond=None,
+                    )
+                    a_x = float(sol_x[0])
+                    b_x_coef = float(sol_x[1])
+                    x_coef = np.array([
+                        a_x, b_x_coef,
+                        x0_rest - a_x * f0 * f0 - b_x_coef * f0,
+                    ])
+                else:
+                    # x = m·f + k constrained by x0 = m·f0 + k.
+                    v_x = (kept_frames - f0) * sqrt_w
+                    b_x = (kept_xs - x0_rest) * sqrt_w
+                    sol_x, *_ = np.linalg.lstsq(
+                        v_x[:, None], b_x, rcond=None,
+                    )
+                    m_x = float(sol_x[0])
+                    k_x = x0_rest - m_x * f0
+                    x_coef = np.array([m_x, k_x])
             except Exception as exc:
                 log.warning(
                     "ai_tracer: rest-constrained refit failed (%s) — "
@@ -4726,6 +4843,28 @@ def render_tracer_video(
                 "max": round(_dev[-1], 1),
                 "median": round(_dev[len(_dev) // 2], 1),
             }
+        # AND HOW SMOOTH IT IS. The sharpest corner in the drawn line,
+        # in degrees, over segments long enough for the angle to mean
+        # anything. A kink at the seam between the fitted curve and its
+        # continuation is the one artefact that reads instantly as
+        # broken, and it is cheap to measure and expensive to eyeball.
+        _turn, _turn_at = 0.0, None
+        for _a, _b, _c in zip(smoothed_points, smoothed_points[1:],
+                              smoothed_points[2:]):
+            _v1 = (_b[1] - _a[1], _b[2] - _a[2])
+            _v2 = (_c[1] - _b[1], _c[2] - _b[2])
+            _n1 = math.hypot(*_v1)
+            _n2 = math.hypot(*_v2)
+            if _n1 < 1.5 or _n2 < 1.5:
+                continue
+            _cs = max(-1.0, min(1.0, (_v1[0] * _v2[0]
+                                      + _v1[1] * _v2[1]) / (_n1 * _n2)))
+            _ang = math.degrees(math.acos(_cs))
+            if _ang > _turn:
+                _turn, _turn_at = _ang, int(_b[0])
+        if _turn_at is not None:
+            info["max_turn_deg"] = round(_turn, 1)
+            info["max_turn_frame"] = _turn_at
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))

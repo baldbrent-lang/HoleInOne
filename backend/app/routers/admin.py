@@ -15263,6 +15263,13 @@ def _ray_off_frame(ray, frame_w, frame_h, fps, max_sec: float = 1.5,
                                        * float(fps or 30.0)))) + 1):
         vx *= k
         vy *= k
+        # A DECAYING RAY ASYMPTOTES, so left to run it crawls: on one
+        # real flight it spent 75 frames covering 60px, which draws as a
+        # stub that creeps and then stops. Once a frame moves the line
+        # less than a pixel the projection has nothing left to say, so
+        # it stops there instead.
+        if (vx * vx + vy * vy) ** 0.5 < 1.0:
+            break
         x += vx
         y += vy
         out.append({"found": True, "projected": True,
@@ -15542,8 +15549,16 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
 
     traced = CLIPS_DIR / f"swingtest-{upload_id}-produce-tee.mp4"
     try:
+        # rest_verified: the departure walk WATCHED this exact spot frame
+        # by frame and saw the ball leave it -- that is where the swing
+        # test's impact frame came from. Without the flag the renderer
+        # applies a guard that drops a rest anchor sitting far from the
+        # tracked points, and on a blurred launch, where tracking only
+        # locks on well up the arc, that discards the one position we are
+        # surest of and starts the line partway up the flight.
         render_tracer_video(
             src, traced, (float(b["x"]), float(b["y"])), int(impact), _pts,
+            rest_verified=True,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("swing-test produce: tracer render failed: %s", exc,
