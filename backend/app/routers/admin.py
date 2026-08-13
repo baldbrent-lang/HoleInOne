@@ -15182,6 +15182,114 @@ def _pull_short(landing, from_xy, frac: float = 0.12):
     ]
 
 
+def _measured_ray(pts, n_fit: int = 8):
+    """Where the measured track was going, and how fast, and how fast
+    that was dying away. Every number here comes off the track.
+
+    Returns {frame, x, y, vx, vy, k} or None. `k` is the per-frame decay
+    of the SPEED: the ball is flying away from the camera, so its
+    screen-space rate shrinks every frame. Measured, not assumed --
+    compared between the first and second half of the track.
+    """
+    q = [p for p in (pts or []) if p is not None]
+    # A ball clipped by the frame border stops moving and a fit over that
+    # tail reads as a ball hanging in the air.
+    while len(q) > 3:
+        a, b = q[-2], q[-1]
+        if abs(float(b["x"]) - float(a["x"])) <= 2.0 and \
+           abs(float(b["y"]) - float(a["y"])) <= 2.0:
+            q = q[:-1]
+            continue
+        break
+    if len(q) < 2:
+        return None
+
+    def _slope(fs, vs):
+        n = len(fs)
+        if n < 2:
+            return None, None
+        mf = sum(fs) / n
+        den = sum((f - mf) ** 2 for f in fs)
+        if den <= 0:
+            return None, None
+        mv = sum(vs) / n
+        return (sum((f - mf) * (v - mv)
+                    for f, v in zip(fs, vs)) / den), mf
+
+    tail = q[-max(2, int(n_fit)):]
+    _tf = [float(p["frame"]) for p in tail]
+    vx, _ = _slope(_tf, [float(p["x"]) for p in tail])
+    vy, _ = _slope(_tf, [float(p["y"]) for p in tail])
+    if vx is None or vy is None:
+        return None
+    k = 1.0
+    if len(q) >= 6:
+        h = len(q) // 2
+        _f0 = [float(p["frame"]) for p in q[:h]]
+        _f1 = [float(p["frame"]) for p in q[h:]]
+        ax, c0 = _slope(_f0, [float(p["x"]) for p in q[:h]])
+        ay, _ = _slope(_f0, [float(p["y"]) for p in q[:h]])
+        bx, c1 = _slope(_f1, [float(p["x"]) for p in q[h:]])
+        by, _ = _slope(_f1, [float(p["y"]) for p in q[h:]])
+        if (None not in (ax, ay, bx, by, c0, c1)) and c1 > c0:
+            s0 = (ax * ax + ay * ay) ** 0.5
+            s1 = (bx * bx + by * by) ** 0.5
+            if s0 > 0 and 0 < s1 < s0:
+                k = max(0.95, min(1.0, (s1 / s0) ** (1.0 / (c1 - c0))))
+    return {"frame": int(q[-1]["frame"]), "x": float(q[-1]["x"]),
+            "y": float(q[-1]["y"]), "vx": float(vx), "vy": float(vy),
+            "k": float(k)}
+
+
+def _ray_off_frame(ray, frame_w, frame_h, fps, max_sec: float = 1.5,
+                   margin: float = 2.0):
+    """Carry the measured ray on until it leaves the picture, then stop.
+
+    THIS IS WHAT REPLACES AN INVENTED LANDING. When the ball flies out of
+    the top of the frame there is no landing this camera can speak to,
+    and bending the line to a landing chosen anyway is what produced a
+    tracer that climbed out of frame and hairpinned back down. The line
+    goes the way the ball was going, gets out of the picture the way the
+    ball did, and stops -- no apex, no descent, nothing claimed.
+    """
+    out = []
+    if not ray:
+        return out
+    x, y = ray["x"], ray["y"]
+    vx, vy, k = ray["vx"], ray["vy"], ray["k"]
+    fw = float(frame_w or 1280.0)
+    fh = float(frame_h or 720.0)
+    for i in range(1, int(max(1, round(float(max_sec)
+                                       * float(fps or 30.0)))) + 1):
+        vx *= k
+        vy *= k
+        x += vx
+        y += vy
+        out.append({"found": True, "projected": True,
+                    "frame": int(ray["frame"]) + i,
+                    "x": int(round(x)), "y": int(round(y))})
+        if x < -margin or x > fw + margin or y < -margin or y > fh + margin:
+            break
+    return out
+
+
+def _is_forward(landing, ray, min_px: float = 8.0):
+    """Is the landing AHEAD of the ball, along the way it was going?
+
+    A quadratic Bezier from P0 to a P2 that lies behind P0 has to turn
+    around to get there, which draws a hairpin. The measured direction
+    decides, not the assumption.
+    """
+    if not landing or not ray:
+        return False
+    dx = float(landing[0]) - ray["x"]
+    dy = float(landing[1]) - ray["y"]
+    sp = (ray["vx"] ** 2 + ray["vy"] ** 2) ** 0.5
+    if sp <= 0:
+        return False
+    return (dx * ray["vx"] + dy * ray["vy"]) / sp >= float(min_px)
+
+
 @router.post("/long-uploads/{upload_id}/swing-test/produce")
 def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
                        db: Session = Depends(get_db)):
@@ -15258,13 +15366,19 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     _assumed_reason = None
     _p2_override = None
     _f_end_override = None
+    _ray = None
+    _ray_drawn = False
     if _tee_only and _pts:
         _fsz = _frame_size(src)
+        _fw = float(_fsz[0]) if _fsz else 1280.0
+        _fh = float(_fsz[1]) if _fsz else 720.0
+        # WHERE THE MEASURED TRACK WAS GOING. Everything below is judged
+        # against this and nothing overrides it.
+        _ray = _measured_ray(_pts)
         _xy, _why = _guess_landing_tee(db, row,
                                        list(_fsz) if _fsz else None)
         if _xy:
             _xy = _pull_short(_xy, (float(b["x"]), float(b["y"])))
-            _assumed_landing = None
             # AND IT DID NOT LAND WHERE THAT CAMERA WAS LOOKING. The
             # descent pass watched every frame of the window and saw
             # nothing, so anywhere inside the green camera's view is
@@ -15272,13 +15386,25 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
             _poly = _green_view_in_tee(db, row, list(_fsz) if _fsz else None)
             _xy, _moved = _outside_green_view(
                 _xy, (float(b["x"]), float(b["y"])), _poly)
+        # A LANDING BEHIND THE BALL IS NOT A LANDING.
+        #
+        # This is what drew the hairpin. The flight leaves the top of the
+        # frame -- the measured points end around y=15, at the border --
+        # and the landing was placed 200px BELOW that. A quadratic Bezier
+        # cannot reach a point behind its start without turning around,
+        # so the tracer climbed out of frame and doubled back down, which
+        # is not a flight path, it is an artefact of aiming at the wrong
+        # point.
+        #
+        # So the measured direction gets a veto. If the landing is not
+        # ahead of the ball along the way the ball was actually going,
+        # there is no bending toward it at all.
+        if _xy and _is_forward(_xy, _ray):
             _p2_override = _xy
             _assumed_landing = [int(round(_xy[0])), int(round(_xy[1]))]
             # FIVE SECONDS OF FLIGHT. A 200-yard shot to a par 3 hangs
             # about that long, and the measured part of it is under half
-            # a second -- so the projection carries the rest. Extending
-            # only as far as the screen-space fit suggested gave 0.64s,
-            # which is a wedge, not a mid-iron.
+            # a second -- so the projection carries the rest.
             _f_end_override = int(impact) + int(round(_flight_sec * fps))
             _assumed_reason = (
                 f"no landing on the green camera — assumed one at "
@@ -15290,102 +15416,64 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
                 + f", over a {_flight_sec:.0f}s flight"
             )
         else:
-            # NO CALIBRATION, AND STILL NEVER VEER OFF THE MEASURED PATH.
+            # NOTHING AHEAD TO AIM AT, SO NOTHING IS INVENTED.
             #
-            # The MOG2 track is the actual flight. Everything after it is
-            # a continuation OF it, not a different path that happens to
-            # start there -- so the assumed landing is DERIVED from the
-            # measurement rather than chosen and bent toward. Picking a
-            # point and letting the curve swing to it is what put a
-            # tracer across the trees twice.
+            # Either this hole has no green→tee mapping, or the mapping
+            # put the green behind the ball -- which on a flight that
+            # exits the top of the frame it will, because by then the
+            # ball is past everything this camera can see.
             #
-            # What is measured: the sideways drift AND the rate at which
-            # that drift dies away. Both come out of the track itself.
-            # The ball is receding, so its screen-space sideways rate
-            # shrinks every frame -- on the reference flight the first
-            # half of the track drifts 2.46px/frame and the second half
-            # 2.15px/frame, a measured decay of 1.1% per frame. Carrying
-            # the LAST rate on flat for the remaining 225 frames drags x
-            # by 483px, which is the made-up path all over again, just
-            # derived instead of chosen. Carrying the measured decay
-            # gives 177px and settles to a limit, which is what a ball
-            # going away from the camera actually does.
-            #
-            # What is ASSUMED is only how long it stays up, and that it
-            # came down outside the green camera's view -- which the
-            # footage proves, though with no homography there is no view
-            # polygon here to check that against.
-            _fw = float(_fsz[0]) if _fsz else 1280.0
-            _fh = float(_fsz[1]) if _fsz else 720.0
-            _fr = [float(q["frame"]) for q in _pts]
-            _xx = [float(q["x"]) for q in _pts]
-            _half = max(2, len(_pts) // 2)
-
-            def _rate(fs, xs):
-                """px per frame, least squares -- one point, no rate."""
-                n = len(fs)
-                if n < 2:
-                    return None, None
-                _mf = sum(fs) / n
-                _den = sum((f - _mf) ** 2 for f in fs)
-                if _den <= 0:
-                    return None, None
-                _mx = sum(xs) / n
-                return (sum((f - _mf) * (x - _mx)
-                            for f, x in zip(fs, xs)) / _den), _mf
-
-            _r0, _c0 = _rate(_fr[:_half], _xx[:_half])
-            _r1, _c1 = _rate(_fr[_half:], _xx[_half:])
-            if _r1 is None:
-                _r1, _c1 = _rate(_fr, _xx)
-            _dxpf = _r1 if _r1 is not None else 0.0
-            # The decay is only believable when both halves drift the
-            # same way and the later one is the slower. Anything else
-            # (noise, a sign flip) falls back to no decay at all, and
-            # the total drift is capped instead.
-            _k = 1.0
-            if (_r0 and _r1 and _c0 is not None and _c1 is not None
-                    and _c1 > _c0 and _r0 * _r1 > 0 and abs(_r1) < abs(_r0)):
-                _k = (abs(_r1) / abs(_r0)) ** (1.0 / (_c1 - _c0))
-                _k = max(0.95, min(1.0, _k))
-            _f_end_override = int(impact) + int(round(_flight_sec * fps))
-            _rem = max(1, _f_end_override - int(_pts[-1]["frame"]))
-            if _k < 1.0:
-                _drift = _dxpf * (1.0 - _k ** _rem) / (1.0 - _k)
+            # The rule is that we never veer from the MOG2 path. The
+            # honest continuation is therefore the path itself, carried
+            # on: same direction, same speed, decaying at the rate the
+            # track shows it decaying as the ball recedes, until the line
+            # leaves the picture. Then it stops. No apex, no descent, no
+            # landing -- because once the ball is out of the top of the
+            # frame this camera has nothing to say about where it came
+            # down, and the last two attempts to say it anyway both drew
+            # a path the ball plainly never took.
+            _ray_pts = _ray_off_frame(_ray, _fw, _fh, fps)
+            if _ray_pts:
+                _ray_drawn = True
+                _seen0 = {q["frame"] for q in _pts}
+                _pts.extend(q for q in _ray_pts if q["frame"] not in _seen0)
+                _pts.sort(key=lambda q: q["frame"])
+                _last = _ray_pts[-1]
+                _off = (_last["x"] < 0 or _last["x"] > _fw
+                        or _last["y"] < 0 or _last["y"] > _fh)
+                _assumed_reason = (
+                    f"no landing on the green camera"
+                    + (f", and no forward one to aim at ({_why})"
+                       if _xy else f" ({_why})")
+                    + f" — so the measured path is carried on the way it "
+                    f"was going, at {(_ray['vx'] ** 2 + _ray['vy'] ** 2) ** 0.5:.1f}px "
+                    f"per frame decaying {(1.0 - _ray['k']) * 100.0:.1f}% a "
+                    f"frame as the ball recedes (both measured off the "
+                    f"track), for {len(_ray_pts)} frame(s)"
+                    + (" until it leaves the picture, which is where it "
+                       "stops — no landing is claimed, because this "
+                       "camera cannot see one"
+                       if _off else
+                       ", which is as far as the measurement supports")
+                )
             else:
-                # No measurable decay -- carry the rate on, but no
-                # further sideways than the frame is wide, or the curve
-                # ends up somewhere the ball plainly never went.
-                _drift = _dxpf * _rem
-                _cap = _fw * 0.25
-                _drift = max(-_cap, min(_cap, _drift))
-            _xy = [
-                float(_pts[-1]["x"]) + _drift,
-                _fh * 0.30,                    # down near the green's band
-            ]
-            _xy[0] = max(4.0, min(_fw - 4.0, _xy[0]))
-            _p2_override = _xy
-            _assumed_landing = [int(round(_xy[0])), int(round(_xy[1]))]
-            _assumed_reason = (
-                f"no landing on the green camera, and this hole has no "
-                f"green→tee mapping to aim at ({_why}) — so the measured "
-                f"path is carried on at its own drift of {_dxpf:+.2f}px "
-                + (f"per frame, decaying {(1.0 - _k) * 100.0:.1f}% a frame "
-                   f"as the ball recedes (both measured off the track), "
-                   if _k < 1.0 else
-                   f"per frame, with no measurable decay to carry, ")
-                + f"for {_drift:+.0f}px in total, to an assumed landing at "
-                f"{_assumed_landing[0]},{_assumed_landing[1]} over a "
-                f"{_flight_sec:.0f}s flight. Calibrate the hole and the "
-                f"flag replaces the assumption"
-            )
-
+                _assumed_reason = (
+                    "no landing on the green camera and too little "
+                    "measured track to carry on from — the tracer is the "
+                    "measured points only"
+                )
     _bez = b.get("bezier") or {}
     if _p2_override and _pts:
         _bez = _d3.bezier_continuation(
             [{"frame": q["frame"], "x": q["x"], "y": q["y"]} for q in _pts],
             (_p2_override[0], _p2_override[1]),
         ) or {}
+    # THE RAY ALREADY CARRIED THE LINE OUT OF THE PICTURE. Running the
+    # report's own Bezier on top of it would draw a second continuation
+    # from the ray's end -- and with no green landing there is also no
+    # `cut` to take an end frame from, so it would fault before it drew.
+    if _ray_drawn:
+        _bez = {}
     if _bez.get("ok") and _bez.get("p0") and _pts:
         # CARRY THE LINE ON, AT THE SPEED IT WAS GOING.
         #
