@@ -15299,12 +15299,20 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
             # so it comes down high in the frame, and it drifts toward
             # the middle rather than off the side it launched over.
             #
-            # This is a guess about geometry, not a measurement, and it
-            # says so. Calibrating the hole replaces it with the flag.
+            # THE MEASUREMENT WINS ON DIRECTION. A first attempt pulled
+            # the assumed landing 45% of the way to the middle of the
+            # frame, and on a ball that launches near-vertically at
+            # x=1064 that put the aim point at x=873 -- so the curve
+            # swerved hard left across the trees and read as invented,
+            # because it was. Where the ball is GOING is measured; only
+            # how far it gets is being assumed. So the landing keeps the
+            # launch line and drifts only slightly, which is what a ball
+            # flying away from the camera does as perspective closes on
+            # the centre.
             _fw = float(_fsz[0]) if _fsz else 1280.0
             _fh = float(_fsz[1]) if _fsz else 720.0
             _lx = float(_pts[-1]["x"])
-            _xy = [_lx + (_fw * 0.5 - _lx) * 0.45, _fh * 0.30]
+            _xy = [_lx + (_fw * 0.5 - _lx) * 0.10, _fh * 0.30]
             _p2_override = _xy
             _assumed_landing = [int(round(_xy[0])), int(round(_xy[1]))]
             _f_end_override = int(impact) + int(round(_flight_sec * fps))
