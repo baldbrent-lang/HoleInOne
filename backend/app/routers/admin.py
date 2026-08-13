@@ -15290,39 +15290,94 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
                 + f", over a {_flight_sec:.0f}s flight"
             )
         else:
-            # NO CALIBRATION, STILL A SHOT. Without a green->tee mapping
-            # nothing KNOWS where the green is, and refusing to draw
-            # leaves the tracer stopping in mid-air -- which is the one
-            # outcome that reads as broken. So it falls back to the
-            # crudest thing that is still true of every shot on a par 3
-            # from behind the golfer: the ball goes away from the camera,
-            # so it comes down high in the frame, and it drifts toward
-            # the middle rather than off the side it launched over.
+            # NO CALIBRATION, AND STILL NEVER VEER OFF THE MEASURED PATH.
             #
-            # THE MEASUREMENT WINS ON DIRECTION. A first attempt pulled
-            # the assumed landing 45% of the way to the middle of the
-            # frame, and on a ball that launches near-vertically at
-            # x=1064 that put the aim point at x=873 -- so the curve
-            # swerved hard left across the trees and read as invented,
-            # because it was. Where the ball is GOING is measured; only
-            # how far it gets is being assumed. So the landing keeps the
-            # launch line and drifts only slightly, which is what a ball
-            # flying away from the camera does as perspective closes on
-            # the centre.
+            # The MOG2 track is the actual flight. Everything after it is
+            # a continuation OF it, not a different path that happens to
+            # start there -- so the assumed landing is DERIVED from the
+            # measurement rather than chosen and bent toward. Picking a
+            # point and letting the curve swing to it is what put a
+            # tracer across the trees twice.
+            #
+            # What is measured: the sideways drift AND the rate at which
+            # that drift dies away. Both come out of the track itself.
+            # The ball is receding, so its screen-space sideways rate
+            # shrinks every frame -- on the reference flight the first
+            # half of the track drifts 2.46px/frame and the second half
+            # 2.15px/frame, a measured decay of 1.1% per frame. Carrying
+            # the LAST rate on flat for the remaining 225 frames drags x
+            # by 483px, which is the made-up path all over again, just
+            # derived instead of chosen. Carrying the measured decay
+            # gives 177px and settles to a limit, which is what a ball
+            # going away from the camera actually does.
+            #
+            # What is ASSUMED is only how long it stays up, and that it
+            # came down outside the green camera's view -- which the
+            # footage proves, though with no homography there is no view
+            # polygon here to check that against.
             _fw = float(_fsz[0]) if _fsz else 1280.0
             _fh = float(_fsz[1]) if _fsz else 720.0
-            _lx = float(_pts[-1]["x"])
-            _xy = [_lx + (_fw * 0.5 - _lx) * 0.10, _fh * 0.30]
+            _fr = [float(q["frame"]) for q in _pts]
+            _xx = [float(q["x"]) for q in _pts]
+            _half = max(2, len(_pts) // 2)
+
+            def _rate(fs, xs):
+                """px per frame, least squares -- one point, no rate."""
+                n = len(fs)
+                if n < 2:
+                    return None, None
+                _mf = sum(fs) / n
+                _den = sum((f - _mf) ** 2 for f in fs)
+                if _den <= 0:
+                    return None, None
+                _mx = sum(xs) / n
+                return (sum((f - _mf) * (x - _mx)
+                            for f, x in zip(fs, xs)) / _den), _mf
+
+            _r0, _c0 = _rate(_fr[:_half], _xx[:_half])
+            _r1, _c1 = _rate(_fr[_half:], _xx[_half:])
+            if _r1 is None:
+                _r1, _c1 = _rate(_fr, _xx)
+            _dxpf = _r1 if _r1 is not None else 0.0
+            # The decay is only believable when both halves drift the
+            # same way and the later one is the slower. Anything else
+            # (noise, a sign flip) falls back to no decay at all, and
+            # the total drift is capped instead.
+            _k = 1.0
+            if (_r0 and _r1 and _c0 is not None and _c1 is not None
+                    and _c1 > _c0 and _r0 * _r1 > 0 and abs(_r1) < abs(_r0)):
+                _k = (abs(_r1) / abs(_r0)) ** (1.0 / (_c1 - _c0))
+                _k = max(0.95, min(1.0, _k))
+            _f_end_override = int(impact) + int(round(_flight_sec * fps))
+            _rem = max(1, _f_end_override - int(_pts[-1]["frame"]))
+            if _k < 1.0:
+                _drift = _dxpf * (1.0 - _k ** _rem) / (1.0 - _k)
+            else:
+                # No measurable decay -- carry the rate on, but no
+                # further sideways than the frame is wide, or the curve
+                # ends up somewhere the ball plainly never went.
+                _drift = _dxpf * _rem
+                _cap = _fw * 0.25
+                _drift = max(-_cap, min(_cap, _drift))
+            _xy = [
+                float(_pts[-1]["x"]) + _drift,
+                _fh * 0.30,                    # down near the green's band
+            ]
+            _xy[0] = max(4.0, min(_fw - 4.0, _xy[0]))
             _p2_override = _xy
             _assumed_landing = [int(round(_xy[0])), int(round(_xy[1]))]
-            _f_end_override = int(impact) + int(round(_flight_sec * fps))
             _assumed_reason = (
-                f"no landing on the green camera, and hole {_hole_for_upload(db, row)} "
-                f"has no green→tee mapping to aim at ({_why}) — assumed a "
-                f"landing up the hole at {_assumed_landing[0]},"
-                f"{_assumed_landing[1]} over a {_flight_sec:.0f}s flight. "
-                f"CALIBRATE THE HOLE and this becomes the flag instead of "
-                f"a guess about the frame"
+                f"no landing on the green camera, and this hole has no "
+                f"green→tee mapping to aim at ({_why}) — so the measured "
+                f"path is carried on at its own drift of {_dxpf:+.2f}px "
+                + (f"per frame, decaying {(1.0 - _k) * 100.0:.1f}% a frame "
+                   f"as the ball recedes (both measured off the track), "
+                   if _k < 1.0 else
+                   f"per frame, with no measurable decay to carry, ")
+                + f"for {_drift:+.0f}px in total, to an assumed landing at "
+                f"{_assumed_landing[0]},{_assumed_landing[1]} over a "
+                f"{_flight_sec:.0f}s flight. Calibrate the hole and the "
+                f"flag replaces the assumption"
             )
 
     _bez = b.get("bezier") or {}
