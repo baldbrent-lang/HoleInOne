@@ -15350,8 +15350,15 @@ def swing_test_produce(upload_id: int, payload: dict = Body(default={}),
     # without found=True -- pass the points bare and it draws one of
     # them, which reads as the tracer having failed rather than as the
     # caller having used the wrong shape.
+    # `priority` PINS THEM. These are the RANSAC inliers -- the ball,
+    # measured, on frames a camera actually saw it. Without the flag the
+    # renderer treats them as weight-1 suggestions next to a weight-10
+    # rest anchor, free to be dropped as outliers, and draws a parabola
+    # that merely passes NEAR the track. Pinned, they are never rejected
+    # and the fitted line hugs them, which is what "we never veer from
+    # the MOG2 path" has to mean at the pixel level.
     _pts = [
-        {"found": True, "frame": int(q["frame"]),
+        {"found": True, "priority": True, "frame": int(q["frame"]),
          "x": int(q["x"]), "y": int(q["y"])}
         for q in ((_stg.get("flight") or {}).get("points") or [])
     ]

@@ -3912,6 +3912,7 @@ def render_tracer_video(
     rest_verified: bool = False,
     apex_lift: float = 0.0,
     apex_at: float = 0.5,
+    projected_frames: set | None = None,
 ) -> dict:
     """Render an MP4 of the source video with a progressive dashed
     tracer line overlaid.
@@ -3991,6 +3992,23 @@ def render_tracer_video(
     # renderer into operator-plot mode — that would throw away the rest of
     # the flight.)
     priority_frames: set[int] = set()
+    # PROJECTED POINTS ARE NOT EVIDENCE, SO THEY DO NOT GET A VOTE.
+    #
+    # Where the caller has carried a line on past the last measurement --
+    # a Bezier to a landing, or the measured ray continued off the top of
+    # the frame -- those points are a projection, not something a camera
+    # saw. Fed into the fit below as ordinary anchors they do not merely
+    # extend the curve, they RESHAPE it: one global quadratic is solved
+    # over measured and projected together, so a long projected tail
+    # drags the measured section off the ball's actual track. That is the
+    # opposite of the rule, which is that we never veer from the MOG2
+    # path.
+    #
+    # So they are held out of the fit entirely and drawn afterwards, in
+    # frame order, exactly where the caller put them. They continue the
+    # line; they cannot bend it.
+    _proj_frames: set[int] = {int(f) for f in (projected_frames or set())}
+    _projected: list[tuple[int, int, int]] = []
     for rec in track_frames or []:
         if not rec.get("found"):
             continue
@@ -3998,6 +4016,12 @@ def render_tracer_video(
         y = rec.get("y")
         f = rec.get("frame")
         if f is None or x is None or y is None:
+            continue
+        if int(f) in _proj_frames or rec.get("projected"):
+            try:
+                _projected.append((int(f), int(x), int(y)))
+            except (TypeError, ValueError):
+                pass
             continue
         try:
             points_by_frame[int(f)] = (int(x), int(y), bool(rec.get("manual", False)))
@@ -4011,6 +4035,26 @@ def render_tracer_video(
     # track which anchor indices came from manual edits so they can
     # be pinned + weighted in the fit.
     anchors: list[tuple[int, int, int]] = []  # (frame, x, y)
+
+    def _append_projected(sp: list) -> list:
+        """Continue the drawn line with the caller's projected points.
+
+        Only points BEYOND the fitted section are taken: the fit may
+        already have been truncated at the apex, and a projection
+        starting behind that would jump backwards.
+        """
+        if not _projected:
+            return sp
+        _f_end = max((int(p[0]) for p in sp), default=None)
+        _tailp = sorted(
+            (p for p in _projected
+             if _f_end is None or int(p[0]) > _f_end),
+            key=lambda p: p[0],
+        )
+        if _tailp:
+            sp = list(sp) + _tailp
+        return sp
+
     manual_anchor_idxs: set[int] = set()
     rest_anchor_frame: int | None = None
     rest_added = False
@@ -4564,6 +4608,12 @@ def render_tracer_video(
                                    if target_frame is not None else None),
                 }
 
+            # The projection goes on AFTER the fitted curve and BEFORE
+            # the reveal schedule, for the reason given just above: a
+            # schedule built from the shorter list draws the tail and
+            # then never uncovers it.
+            smoothed_points = _append_projected(smoothed_points)
+
             # Observed-progress timing: reveal the curve at the ball's
             # actual per-frame pace (front-loaded) instead of the fit's
             # constant rate, which visibly lagged the ball off the tee.
@@ -4582,7 +4632,7 @@ def render_tracer_video(
         # Fall back to the raw point-to-point line. (Skipped in
         # manual_render mode — smoothed_points is already built by
         # interpolating through the operator's plotted points above.)
-        smoothed_points = list(anchors)
+        smoothed_points = _append_projected(list(anchors))
         log.info(
             "ai_tracer: tracer — falling back to raw %d anchors (no fit)",
             len(anchors),
@@ -4653,6 +4703,29 @@ def render_tracer_video(
     info["n_points"] = len(smoothed_points)
     if smoothed_points:
         info["frame_range"] = [int(smoothed_points[0][0]), int(smoothed_points[-1][0])]
+        # HOW FAR THE DRAWN LINE SITS FROM THE MEASURED BALL. The whole
+        # question of whether the tracer follows the MOG2 path or merely
+        # resembles it is answered by this number, and until it was
+        # reported the only way to ask was to produce a clip and squint
+        # at it. Worst and typical distance, in pixels, from every
+        # measured point to the nearest point actually drawn.
+        _dev = []
+        for _f, _mx, _my, _ in (
+                (f, p[0], p[1], p[2]) for f, p in points_by_frame.items()):
+            _best = None
+            for _sf, _sx, _sy in smoothed_points:
+                _d = ((_sx - _mx) ** 2 + (_sy - _my) ** 2) ** 0.5
+                if _best is None or _d < _best:
+                    _best = _d
+            if _best is not None:
+                _dev.append(_best)
+        if _dev:
+            _dev.sort()
+            info["measured_dev_px"] = {
+                "n": len(_dev),
+                "max": round(_dev[-1], 1),
+                "median": round(_dev[len(_dev) // 2], 1),
+            }
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
