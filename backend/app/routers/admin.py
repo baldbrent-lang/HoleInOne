@@ -642,7 +642,10 @@ def resend_gallery(participant_id: int, db: Session = Depends(get_db)):
     if not p:
         raise HTTPException(404, "participant not found")
     gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
-    notifications.notify_gallery_ready(p.name, p.mobile, p.email, gallery_url)
+    notifications.notify_gallery_ready(
+        p.name, p.mobile, p.email, gallery_url,
+        course_name=notifications.course_name_for(p),
+    )
     db.add(
         AuditLog(actor="admin", action="resend_gallery", target=f"participant:{p.id}")
     )
@@ -12150,7 +12153,10 @@ async def upload_clip(
         if p and not p.gallery_ready_sent:
             p.gallery_ready_sent = True
             gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
-            notifications.notify_gallery_ready(p.name, p.mobile, p.email, gallery_url)
+            notifications.notify_gallery_ready(
+                p.name, p.mobile, p.email, gallery_url,
+                course_name=notifications.course_name_for(p),
+            )
             db.commit()
 
     return {

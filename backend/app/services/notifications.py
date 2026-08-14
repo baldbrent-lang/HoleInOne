@@ -420,10 +420,59 @@ def notify_registration_confirmed(
             f"Your gallery: {gallery_url}"))
 
 
-def notify_gallery_ready(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:
-    msg = f"Your GolfReelz videos are ready, {name}! View + share: {gallery_url}"
-    send_sms(mobile, msg)
-    send_email(email, "Your GolfReelz videos are ready", msg)
+def course_name_for(participant) -> str | None:
+    """The course a participant played, or None.
+
+    Every one of these messages wants to name the course, and every
+    caller has a participant rather than a course to hand. The walk is
+    guarded because a half-built or orphaned row must not be the reason
+    a golfer never hears from us -- a missing course name costs the
+    email three words, a raised exception costs the whole email.
+    """
+    try:
+        return participant.tee_time.course.name
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def notify_gallery_ready(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    gallery_url: str,
+    course_name: str | None = None,
+) -> None:
+    """The gallery is live and the golfer can go and watch it.
+
+    This used to be a single sentence, sent identically to the phone and
+    the inbox -- which made the email read like a text message that had
+    wandered into the wrong medium. It is a real email now, in the same
+    shape as the registration one, and the text stays a text.
+    """
+    course = (course_name or "").strip()
+    at_course = f" from {course}" if course else ""
+
+    lines = [
+        f"{name},",
+        "",
+        f"Your videos{at_course} are ready.",
+        "",
+        "Check out your shots in your gallery here:",
+        gallery_url,
+        "",
+        "Every par-3 tee shot we recorded is waiting for you there, "
+        "ready to watch, download, or share.",
+        "",
+        "Thanks for playing — we hope to see you out there again soon.",
+    ]
+    send_email(
+        email,
+        f"{name}, your GolfReelz videos{at_course} are ready",
+        "\n".join(lines),
+    )
+    send_sms(mobile, (
+        f"GolfReelz: your videos{at_course} are ready, {name}. Check out "
+        f"your shots in your gallery: {gallery_url}"))
 
 
 def notify_hio_under_review(name: str, mobile: str | None, email: str | None) -> None:

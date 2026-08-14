@@ -63,7 +63,10 @@ def _maybe_send_gallery_ready(db: Session, clip: VideoClip) -> None:
         return
     participant.gallery_ready_sent = True
     gallery_url = f"{settings.app_base_url}/g/{participant.gallery_token}"
-    notifications.notify_gallery_ready(participant.name, participant.mobile, participant.email, gallery_url)
+    notifications.notify_gallery_ready(
+        participant.name, participant.mobile, participant.email, gallery_url,
+        course_name=notifications.course_name_for(participant),
+    )
     db.commit()
 
 
@@ -84,17 +87,12 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             if p and not p.paid:
                 p.paid = True
                 gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
-                # The subject names the course, so it has to be resolved
-                # here too rather than left blank on the one path that
-                # does not already have it in hand.
-                _course = None
-                try:
-                    _course = p.tee_time.course.name
-                except Exception:  # noqa: BLE001 - a stale row must not block the mail
-                    _course = None
                 notifications.notify_registration_confirmed(
                     p.name, p.mobile, p.email, gallery_url,
-                    course_name=_course,
+                    # The subject names the course, so it has to be
+                    # resolved here too rather than left blank on the one
+                    # path that does not already have it in hand.
+                    course_name=notifications.course_name_for(p),
                     # This fires on Stripe's confirmation of the lead's
                     # own payment, and the lead's selfie was required at
                     # registration -- but a member who somehow has no
