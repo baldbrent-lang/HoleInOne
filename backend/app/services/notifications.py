@@ -350,13 +350,74 @@ def send_email_with_attachments(
     SendGridAPIClient(settings.sendgrid_api_key).send(message)
 
 
-def notify_registration_confirmed(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:
-    msg = (
-        f"You're registered for GolfReelz, {name}! "
-        f"We'll text you when your videos are ready. Your gallery: {gallery_url}"
-    )
-    send_sms(mobile, msg)
-    send_email(email, "You're registered with GolfReelz", msg)
+def notify_registration_confirmed(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    gallery_url: str,
+    course_name: str | None = None,
+    invite_url: str | None = None,
+) -> None:
+    """THE registration email. One template, every way in.
+
+    There used to be three, all saying the same thing in different
+    words: one for a golfer who signed themselves up, one for a group
+    member whose photo was taken at the desk, and one for a group member
+    whose photo was not. Three subject lines, three voices, one event.
+
+    So there is one now, and the only thing that varies is a single
+    block. `invite_url` is set when we do NOT have that golfer's photo
+    yet -- which happens only when the lead registers someone who is not
+    standing there, since a golfer registering themselves cannot get
+    past the form without one. Without a photo the matcher has nothing
+    to recognise them by and their clips go unassigned, so that case
+    still has to ask, and it is the one thing in the email that is a
+    request rather than a confirmation.
+    """
+    course = (course_name or "").strip()
+    at_course = f" at {course}" if course else ""
+
+    lines = [f"{name},", ""]
+    lines.append(
+        f"You are registered to participate in GolfReelz{at_course}.")
+    lines.append("")
+    lines.append(
+        "Head out and enjoy your round. We will automatically track and "
+        "record every one of your par-3 tee shots — nothing to set up, "
+        "nothing to carry, and no need to do anything differently out "
+        "there.")
+    lines.append("")
+    lines.append(
+        "When you finish, keep an eye on your inbox. Your videos will be "
+        "sent to you shortly after your round.")
+    if invite_url:
+        lines.append("")
+        lines.append(
+            "One more step first: we match videos to you by what you are "
+            "wearing, and we do not have your photo yet. Add one here and "
+            "you are all set:")
+        lines.append(invite_url)
+    lines.append("")
+    lines.append("Your gallery, where every clip is collected:")
+    lines.append(gallery_url)
+    lines.append("")
+    lines.append(
+        "Best of luck out there — may this be the round you make an ace.")
+
+    subject = f"{name}, you are registered for GolfReelz{at_course}"
+    send_email(email, subject, "\n".join(lines))
+
+    # The text message stays a text message: one line, and the link that
+    # matters most -- the photo when we need it, the gallery otherwise.
+    if invite_url:
+        send_sms(mobile, (
+            f"GolfReelz: you're registered{at_course}, {name}. One step "
+            f"left — add a photo so we can match your shots: {invite_url}"))
+    else:
+        send_sms(mobile, (
+            f"GolfReelz: you're registered{at_course}, {name}. We'll "
+            f"record every par 3 and email your videos after the round. "
+            f"Your gallery: {gallery_url}"))
 
 
 def notify_gallery_ready(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:

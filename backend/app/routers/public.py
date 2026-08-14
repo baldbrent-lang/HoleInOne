@@ -551,8 +551,12 @@ async def register(
     gallery_url = f"{settings.app_base_url}/g/{participant.gallery_token}"
 
     if participant.paid:
+        # No invite_url: the lead's selfie is required by this endpoint
+        # (`selfie: UploadFile = File(...)`), so by the time we are here
+        # there is always a photo on file for them.
         notifications.notify_registration_confirmed(
-            participant.name, participant.mobile, participant.email, gallery_url
+            participant.name, participant.mobile, participant.email,
+            gallery_url, course_name=course.name,
         )
 
     # Group members: lead pays for everyone AND captures every player's
@@ -609,40 +613,29 @@ async def register(
             m_fpath.write_bytes(m_selfie_bytes)
             member.selfie_path = f"selfies/{m_fname}"
 
-            # Selfie captured up-front — send a confirmation email/SMS with
-            # their gallery link instead of an "add your selfie" invite.
-            gallery = f"{settings.app_base_url}/g/{member.gallery_token}"
-            notifications.send_email(
-                m_email,
-                f"You're registered for GolfReelz at {course.name}",
-                (
-                    f"{name.strip()} signed you up for a round at {course.name}.\n\n"
-                    f"You're all set — your outfit photo was captured at registration.\n"
-                    f"We'll email your par-3 clips after the round.\n\n"
-                    f"Bookmark your gallery: {gallery}"
-                ),
-            )
-            notifications.send_sms(
-                m_mobile,
-                f"GolfReelz: {name.strip()} added you to a round at {course.name}. Your gallery: {gallery}",
-            )
-        else:
-            # Fallback: no selfie at registration time. Send the legacy invite
-            # link so they can add one later.
-            invite_url = f"{settings.app_base_url}/invite/{member.gallery_token}"
-            notifications.send_email(
-                m_email,
-                f"You're registered for GolfReelz at {course.name}",
-                (
-                    f"{name.strip()} signed you up for a round at {course.name}.\n\n"
-                    f"One more step — take a quick outfit photo so we can match\n"
-                    f"your shots: {invite_url}"
-                ),
-            )
-            notifications.send_sms(
-                m_mobile,
-                f"GolfReelz: {name.strip()} added you to a round at {course.name}. Snap an outfit photo: {invite_url}",
-            )
+        # ONE REGISTRATION EMAIL, WHOEVER YOU ARE AND HOWEVER YOU GOT
+        # HERE. The two branches here used to send two different emails
+        # that both meant "you're registered", and a third lived in
+        # notifications for golfers who signed themselves up.
+        #
+        # The photo is the only real difference. A golfer registering
+        # themselves cannot get past the form without one, and the lead
+        # photographs whoever is standing with them -- so the only way
+        # to arrive without a photo is to be signed up while you are
+        # somewhere else. Those are the people who get the invite link,
+        # because without a photo the matcher cannot pick them out and
+        # their clips would never reach them.
+        notifications.notify_registration_confirmed(
+            (m_name or "").strip(),
+            m_mobile,
+            m_email,
+            f"{settings.app_base_url}/g/{member.gallery_token}",
+            course_name=course.name,
+            invite_url=(
+                None if m_selfie_bytes
+                else f"{settings.app_base_url}/invite/{member.gallery_token}"
+            ),
+        )
 
     db.commit()
 
