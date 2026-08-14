@@ -25,8 +25,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
 from .database import Base, engine
-from .routers import admin, auth, broadcast, cameras, gallery, operator, public, webhooks
-from .services import storage
+from .routers import (
+    admin, auth, broadcast, cameras, gallery, operator, public, reviews, webhooks,
+)
+from .services import storage, thanks
 
 # Our internal loggers (`golfreelz.tracer`, `golfreelz.admin`, etc.) default to
 # WARNING and uvicorn doesn't configure them, so INFO diagnostics were never
@@ -74,6 +76,10 @@ def _migrate() -> None:
         statements.append("ALTER TABLE participants ADD COLUMN user_id INTEGER")
     if "refunded_at" not in cols:
         statements.append("ALTER TABLE participants ADD COLUMN refunded_at TIMESTAMP")
+    if "thanks_due_at" not in cols:
+        statements.append("ALTER TABLE participants ADD COLUMN thanks_due_at TIMESTAMP")
+    if "thanks_sent_at" not in cols:
+        statements.append("ALTER TABLE participants ADD COLUMN thanks_sent_at TIMESTAMP")
     # Old schema had playing_order NOT NULL. The matcher no longer uses it,
     # so drop the constraint on Postgres (SQLite can't ALTER nullability
     # and enforces it loosely anyway).
@@ -401,6 +407,8 @@ def _startup() -> None:
     # Produce tee-only when a paired event's green half never arrives, so a
     # green cellular dropout doesn't cost the whole shot.
     cameras.start_tee_only_fallback_sweeper()
+    # Send the thank-you / review email once its delay has elapsed.
+    thanks.start_thanks_sweeper()
 
 
 # Demo courses previously seeded into the DB that we no longer want shown
@@ -516,6 +524,7 @@ app.include_router(auth.router)
 app.include_router(operator.router)
 app.include_router(broadcast.router)
 app.include_router(cameras.router)
+app.include_router(reviews.router)
 
 
 # --- Uploads (selfies) -------------------------------------------------------

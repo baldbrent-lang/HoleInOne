@@ -31,7 +31,7 @@ from ..models import (
     TeeTime,
     VideoClip,
 )
-from . import appearance, notifications
+from . import appearance
 
 
 def _candidates_in_window(db: Session, course: Course, clip: VideoClip) -> list[Participant]:
@@ -81,10 +81,6 @@ def match_clip(db: Session, clip: VideoClip) -> Participant | None:
 
     if clip.ball_in_cup and clip.camera_type in ("hole", "tee"):
         _ensure_hio_event(db, participant, clip)
-
-    # Once all par-3 holes have a clip for this golfer, fire the single
-    # round summary email (idempotent via participant.summary_sent_at).
-    notifications.maybe_send_round_summary(db, participant, course)
 
     return participant
 

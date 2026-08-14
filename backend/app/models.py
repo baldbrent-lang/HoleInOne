@@ -183,6 +183,12 @@ class Participant(Base):
     gallery_token: Mapped[str] = mapped_column(String(64), unique=True, default=lambda: _token("g_", 20))
     gallery_ready_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     summary_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # The thank-you / review email. `due_at` is stamped when the gallery
+    # goes out and the sweeper sends once the clock passes it; `sent_at`
+    # is the idempotency guard, so a restart mid-window cannot double-send
+    # and a manual send from the admin closes the automatic one out.
+    thanks_due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    thanks_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tee_time: Mapped[TeeTime] = relationship(back_populates="participants")
@@ -547,3 +553,33 @@ class Showcase(Base):
     title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     caption: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Review(Base):
+    """A golfer's review of their GolfReelz round.
+
+    Collected on our own site rather than a third party, so the thank-you
+    email can link straight to a form that already knows who the golfer
+    is -- no login, no "which course was it again", and the rating lands
+    attached to a real round rather than an anonymous form fill.
+
+    Name and course are snapshotted at submit time. A review is a record
+    of what someone said on a given day; it should not silently change
+    because a course was later renamed or a participant row was tidied
+    up, and it must survive the participant being deleted.
+    """
+
+    __tablename__ = "reviews"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    participant_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("participants.id"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    course_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    rating: Mapped[int] = mapped_column(Integer)          # 1-5
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Off by default: nothing a golfer writes appears on the site until
+    # someone has read it.
+    published: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

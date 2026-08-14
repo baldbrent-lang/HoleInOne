@@ -99,6 +99,7 @@ export default function Admin() {
       <div className="nav">
         <Link to="/admin" className="active">Dashboard</Link>
         <Link to="/admin/participants">Players</Link>
+        <Link to="/admin/reviews">Reviews</Link>
         <Link to="/admin/courses">Courses</Link>
         <Link to="/admin/upload-videos">Upload</Link>
         <Link to="/admin/production">Production</Link>
@@ -315,9 +316,8 @@ function TestEmailCard({ adminPassword, onToast }) {
       )}
       <p className="small muted" style={{ marginBottom: 10 }}>
         <b>Send test</b> drops one generic message to check the wiring.{" "}
-        <b>Send all templates</b> fires the five real emails a golfer gets —
-        registration, gallery ready, ace under review, ace confirmed, and the
-        per-clip delivery with a genuine clip attached.
+        <b>Send all templates</b> fires the four real emails a golfer gets —
+        registration, gallery ready, ace confirmed, and the thank-you.
       </p>
       <div className="row">
         <div className="field" style={{ flex: 2 }}>

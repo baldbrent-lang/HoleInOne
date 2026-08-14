@@ -90,7 +90,7 @@ from ..schemas import (
     HIOEventOut,
     HIOReviewAction,
 )
-from ..services import notifications, storage, tracer_examples
+from ..services import notifications, storage, thanks, tracer_examples
 from ..services.matcher import match_clip
 from ..services.qr import generate_qr_png
 from ..services.auth import hash_password
@@ -579,31 +579,6 @@ def send_test_email(payload: dict, db: Session = Depends(get_db)):
     return {"ok": True, "provider": provider, "to": to}
 
 
-@router.post("/participants/{participant_id}/send-summary")
-def send_round_summary(
-    participant_id: int, force: bool = False, db: Session = Depends(get_db)
-):
-    """Manually fire the round-summary email for a participant.
-
-    Use force=true to resend even if summary_sent_at is already set.
-    """
-    p = db.get(Participant, participant_id)
-    if not p:
-        raise HTTPException(404, "participant not found")
-    course = db.get(Course, p.tee_time.course_id) if p.tee_time else None
-    if not course:
-        raise HTTPException(404, "course not found")
-    if force:
-        p.summary_sent_at = None
-    sent = notifications.maybe_send_round_summary(db, p, course)
-    db.commit()
-    return {
-        "sent": sent,
-        "summary_sent_at": p.summary_sent_at,
-        "to": p.email,
-    }
-
-
 @router.post("/participants/{participant_id}/refund")
 def refund_participant(participant_id: int, db: Session = Depends(get_db)):
     p = db.get(Participant, participant_id)
@@ -651,6 +626,91 @@ def resend_gallery(participant_id: int, db: Session = Depends(get_db)):
     )
     db.commit()
     return {"ok": True, "gallery_url": gallery_url}
+
+
+@router.post("/participants/{participant_id}/send-thanks")
+def send_thanks(
+    participant_id: int, force: bool = False, db: Session = Depends(get_db)
+):
+    """Send the thank-you / review-request email now, ahead of its timer.
+
+    Normally this email sends itself `thanks_delay_hours` after the
+    gallery goes out. This is the override for sending it early, and it
+    stamps thanks_sent_at so the sweeper does not then send it again.
+
+    Refuses a second send unless force=true. A duplicate review request
+    is the one repeat in this system that actively costs goodwill, so it
+    takes a deliberate flag rather than a second click.
+    """
+    p = db.get(Participant, participant_id)
+    if not p:
+        raise HTTPException(404, "participant not found")
+    if p.thanks_sent_at is not None and not force:
+        return {
+            "ok": False,
+            "already_sent": True,
+            "thanks_sent_at": p.thanks_sent_at,
+            "to": p.email,
+        }
+    gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
+    review_url = notifications.review_url_for(p.gallery_token)
+    notifications.notify_thanks_for_playing(
+        p.name, p.mobile, p.email, gallery_url,
+        course_name=notifications.course_name_for(p),
+        review_url=review_url,
+    )
+    p.thanks_sent_at = datetime.utcnow()
+    db.add(
+        AuditLog(actor="admin", action="send_thanks", target=f"participant:{p.id}")
+    )
+    db.commit()
+    return {
+        "ok": True,
+        "to": p.email,
+        "review_url": review_url or None,
+        "thanks_sent_at": p.thanks_sent_at,
+    }
+
+
+@router.get("/reviews")
+def list_reviews(db: Session = Depends(get_db)):
+    """Every review golfers have left, newest first, with the average."""
+    from ..models import Review
+
+    rows = db.query(Review).order_by(Review.created_at.desc()).all()
+    ratings = [r.rating for r in rows]
+    return {
+        "count": len(rows),
+        "average": round(sum(ratings) / len(ratings), 2) if ratings else None,
+        "reviews": [
+            {
+                "id": r.id,
+                "participant_id": r.participant_id,
+                "name": r.name,
+                "course_name": r.course_name,
+                "rating": r.rating,
+                "comment": r.comment,
+                "published": r.published,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/reviews/{review_id}/publish")
+def set_review_published(
+    review_id: int, published: bool = True, db: Session = Depends(get_db)
+):
+    """Mark a review as OK to show publicly (or take it back down)."""
+    from ..models import Review
+
+    r = db.get(Review, review_id)
+    if not r:
+        raise HTTPException(404, "review not found")
+    r.published = published
+    db.commit()
+    return {"ok": True, "id": r.id, "published": r.published}
 
 
 @router.get("/flagged-clips")
@@ -740,11 +800,8 @@ def manually_assign_clip(
         )
     )
 
-    course = db.get(Course, clip.course_id)
-    notifications.maybe_send_round_summary(db, participant, course)
-
     db.commit()
-    return {"ok": True, "summary_sent": participant.summary_sent_at is not None}
+    return {"ok": True}
 
 
 # --- Manual clip upload (proxy for Shot Tracer webhook in V0) ---------------
@@ -3755,11 +3812,6 @@ def _process_long_upload_segments(
                 _db.add(_c)
                 _db.flush()
                 participant = match_clip(_db, _c)
-                if participant and _c.ball_in_cup:
-                    notifications.notify_hio_under_review(
-                        participant.name, participant.mobile,
-                        participant.email,
-                    )
                 _intro_overlay_for_clip(_c, participant)
                 _intro_overlay_for_vertical(_c, participant)
                 _clip_holder["clip"] = _c
@@ -3879,10 +3931,6 @@ def _process_long_upload_segments(
         db.flush()
 
         participant = match_clip(db, clip)
-        if participant and clip.ball_in_cup:
-            notifications.notify_hio_under_review(
-                participant.name, participant.mobile, participant.email
-            )
         _intro_overlay_for_clip(clip, participant)
         db.commit()
         # Save the swing's detections for the Edit wizard (see helper).
@@ -12136,11 +12184,7 @@ async def upload_clip(
     db.add(clip)
     db.flush()
 
-    participant = match_clip(db, clip)
-    if participant and ball_in_cup:
-        notifications.notify_hio_under_review(
-            participant.name, participant.mobile, participant.email
-        )
+    match_clip(db, clip)
 
     db.commit()
 
@@ -12157,6 +12201,7 @@ async def upload_clip(
                 p.name, p.mobile, p.email, gallery_url,
                 course_name=notifications.course_name_for(p),
             )
+            thanks.schedule_thanks(p)
             db.commit()
 
     return {
@@ -17813,16 +17858,11 @@ def email_send_templates(
 
     Uses the REAL notify_* functions, not copies — a preview that renders
     its own approximation of the template is a preview of the wrong thing.
-    The clip email attaches a genuine produced clip when one is on disk,
-    so the attachment path gets exercised too rather than only the body.
     """
     to = (payload.get("to") or "").strip()
     if "@" not in to:
         raise HTTPException(400, "a destination email address is required")
     which = payload.get("templates") or "all"
-    from types import SimpleNamespace
-
-    from ..models import Course, VideoClip
     from ..services import notifications as N
 
     gallery = f"{settings.app_base_url}/g/sample-token"
@@ -17842,43 +17882,11 @@ def email_send_templates(
         "Ben", None, to, gallery))
     _try("gallery_ready", lambda: N.notify_gallery_ready(
         "Ben", None, to, gallery))
-    _try("hio_review", lambda: N.notify_hio_under_review("Ben", None, to))
     _try("hio_confirmed", lambda: N.notify_hio_confirmed(
         "Ben", None, to, gallery))
-
-    # The clip email, with a real clip when we can find one — this is the
-    # message golfers actually receive, and the one worth seeing.
-    def _clip():
-        clip_row = (
-            db.query(VideoClip)
-            .filter(VideoClip.source_url.isnot(None))
-            .order_by(VideoClip.id.desc())
-            .first()
-        )
-        fake_participant = SimpleNamespace(
-            id=0, name="Ben", email=to, gallery_token="sample-token",
-        )
-        # VideoClip carries course_id, not a `course` relationship, so the
-        # course has to be fetched. Use its real name and yardages when we
-        # found a clip, so the preview matches what a golfer would get.
-        course_row = (
-            db.get(Course, clip_row.course_id) if clip_row else None
-        )
-        fake_course = SimpleNamespace(
-            name=(course_row.name if course_row else "Baldwin Links"),
-            hole_yardages=(course_row.hole_yardages or {}) if course_row
-            else {"3": 173},
-        )
-        fake_clip = SimpleNamespace(
-            id=0,
-            delivered_at=None,          # so the idempotency guard lets it send
-            hole_number=(clip_row.hole_number if clip_row else 3),
-            carry_yards=168, ball_speed_mph=112,
-            source_url=(clip_row.source_url if clip_row else None),
-        )
-        N.notify_clip_ready(fake_participant, fake_clip, fake_course)
-
-    _try("clip_ready", _clip)
+    _try("thanks", lambda: N.notify_thanks_for_playing(
+        "Ben", None, to, gallery,
+        review_url=N.review_url_for("sample-token")))
 
     st = email_status()
     return {

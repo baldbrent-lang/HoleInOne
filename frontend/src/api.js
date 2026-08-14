@@ -99,6 +99,13 @@ export const api = {
   stripeConfig: () => request(`/api/public/stripe-config`, { auth: false }),
   inviteInfo: (token) =>
     request(`/api/public/invite/${token}`, { auth: false }),
+  reviewContext: (token) => request(`/api/reviews/${token}`, { auth: false }),
+  submitReview: (token, payload) =>
+    request(`/api/reviews/${token}`, {
+      method: "POST",
+      auth: false,
+      body: payload,
+    }),
   inviteSelfie: async (token, file) => {
     const fd = new FormData();
     fd.append("selfie", file, file.name || "selfie.jpg");
@@ -1011,19 +1018,26 @@ export const api = {
       method: "POST",
       adminPassword: key,
     }),
-  refundParticipant: (key, id) =>
-    request(`/api/admin/participants/${id}/refund`, {
-      method: "POST",
-      adminPassword: key,
-    }),
-  sendRoundSummary: (key, id, force = false) =>
+  sendThanks: (key, id, force = false) =>
     request(
-      `/api/admin/participants/${id}/send-summary${force ? "?force=true" : ""}`,
+      `/api/admin/participants/${id}/send-thanks${force ? "?force=true" : ""}`,
       {
         method: "POST",
         adminPassword: key,
       },
     ),
+  refundParticipant: (key, id) =>
+    request(`/api/admin/participants/${id}/refund`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  listReviews: (key) =>
+    request(`/api/admin/reviews`, { adminPassword: key }),
+  setReviewPublished: (key, id, published) =>
+    request(`/api/admin/reviews/${id}/publish?published=${published}`, {
+      method: "POST",
+      adminPassword: key,
+    }),
   sendTestEmail: (key, payload) =>
     request(`/api/admin/test-email`, {
       method: "POST",

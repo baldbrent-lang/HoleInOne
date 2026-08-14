@@ -98,6 +98,32 @@ export default function AdminParticipants() {
     }
   }
 
+  async function thanks(p) {
+    // This email sends itself a few hours after the gallery. The button
+    // is the "send it now" override, so it says so -- an operator who
+    // thinks nothing is scheduled will click it on every row.
+    showToast(`Sending the thank-you to ${p.email || p.name}…`);
+    try {
+      let r = await api.sendThanks(adminPassword, p.id);
+      if (r.already_sent) {
+        const when = new Date(r.thanks_sent_at + "Z").toLocaleString();
+        if (!window.confirm(`${p.name} was already sent the thank-you on ${when}. Send it again?`)) {
+          showToast("Left it alone.");
+          return;
+        }
+        r = await api.sendThanks(adminPassword, p.id, true);
+      }
+      showToast(
+        r.review_url
+          ? `Thank-you sent to ${p.email || p.name}`
+          : `Thank-you sent to ${p.email || p.name} — no REVIEW_URL set, so it went without the review link`,
+      );
+      load();
+    } catch (e) {
+      showToast(`Error: ${e.message}`);
+    }
+  }
+
   async function refund(p) {
     if (!window.confirm(`Refund ${p.name}? This issues a Stripe refund (or no-op in mock mode) and marks the round as refunded. Their clips stay accessible.`)) return;
     showToast(`Refunding ${p.name}…`);
@@ -107,21 +133,6 @@ export default function AdminParticipants() {
         showToast(`${p.name} was already refunded.`);
       } else {
         showToast(`Refund issued (${r.mode || "ok"})`);
-      }
-      load();
-    } catch (e) {
-      showToast(`Error: ${e.message}`);
-    }
-  }
-
-  async function sendSummary(p, force = true) {
-    showToast(`Sending the round summary to ${p.email || p.name}…`);
-    try {
-      const r = await api.sendRoundSummary(adminPassword, p.id, force);
-      if (r.sent) {
-        showToast(`Round summary sent to ${p.email || p.name}`);
-      } else {
-        showToast(`Couldn't send — ${p.email ? "round not complete (missing par-3 clips)" : "no email on file"}`);
       }
       load();
     } catch (e) {
@@ -309,15 +320,15 @@ export default function AdminParticipants() {
                       >
                         Gallery ↗
                       </a>
-                      <button
-                        className="ghost small"
-                        onClick={() => sendSummary(p, true)}
-                        title="Email all par-3 clips as one summary email"
-                      >
-                        Email round
-                      </button>
                       <button className="ghost small" onClick={() => resend(p)} title="Re-send gallery link">
                         Resend
+                      </button>
+                      <button
+                        className="ghost small"
+                        onClick={() => thanks(p)}
+                        title="Send the thank-you / review request now, ahead of its 4-hour timer"
+                      >
+                        Thank you
                       </button>
                       {p.paid && !p.refunded_at && (
                         <button className="ghost small" onClick={() => refund(p)} title="Refund this round" style={{ color: "var(--danger)" }}>

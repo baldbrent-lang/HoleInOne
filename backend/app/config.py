@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./golfreelz.db"
     app_base_url: str = _default_app_base_url()
     admin_password: str = "Baldy123"
+    # Overrides where the thank-you email sends golfers to review us.
+    # EMPTY IS THE NORMAL CASE: we host our own review page at
+    # /review/<gallery_token>, which knows who the golfer is and files the
+    # rating against their round. Set this only to push people to an
+    # external site (Google, Trustpilot) instead -- one link for everyone,
+    # so attribution is lost.
+    review_url: str = ""
+    # How long after the gallery email the thank-you follows. Set to 0 to
+    # turn the automatic send off entirely -- the admin button still works.
+    thanks_delay_hours: float = 4.0
     # User-auth secret. Override in prod via env. Tokens are JWT HS256.
     jwt_secret: str = "dev-jwt-secret-change-in-prod"
     jwt_ttl_days: int = 30

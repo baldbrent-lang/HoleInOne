@@ -32,6 +32,8 @@ import OperatorDashboard from "./pages/OperatorDashboard.jsx";
 import Footer from "./components/Footer.jsx";
 import Home from "./pages/Home.jsx";
 import Watch from "./pages/Watch.jsx";
+import Review from "./pages/Review.jsx";
+import AdminReviews from "./pages/AdminReviews.jsx";
 
 function ConditionalFooter() {
   const { pathname } = useLocation();
@@ -71,6 +73,7 @@ export default function App() {
         <Route path="/r/:courseToken" element={<Register />} />
         <Route path="/confirm/:participantId" element={<Confirmation />} />
         <Route path="/g/:galleryToken" element={<Gallery />} />
+        <Route path="/review/:galleryToken" element={<Review />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/admin/participants" element={<AdminParticipants />} />
         <Route path="/admin/upload" element={<AdminUpload />} />
@@ -85,6 +88,7 @@ export default function App() {
         <Route path="/admin/courses" element={<AdminCourses />} />
         <Route path="/admin/showcase" element={<AdminShowcase />} />
         <Route path="/admin/review" element={<AdminReview />} />
+        <Route path="/admin/reviews" element={<AdminReviews />} />
         <Route
           path="*"
           element={

@@ -8,7 +8,7 @@ from ..config import settings
 from ..database import get_db
 from ..models import ClipProcessingStatus, Participant, VideoClip
 from ..schemas import IncomingClip
-from ..services import notifications
+from ..services import notifications, thanks
 from ..services.matcher import match_clip
 from ..services.stripe_service import verify_webhook
 
@@ -40,10 +40,7 @@ def shot_tracer_ingest(
     db.add(clip)
     db.flush()
 
-    participant = match_clip(db, clip)
-
-    if participant and payload.ball_in_cup:
-        notifications.notify_hio_under_review(participant.name, participant.mobile, participant.email)
+    match_clip(db, clip)
 
     db.commit()
     _maybe_send_gallery_ready(db, clip)
@@ -67,6 +64,7 @@ def _maybe_send_gallery_ready(db: Session, clip: VideoClip) -> None:
         participant.name, participant.mobile, participant.email, gallery_url,
         course_name=notifications.course_name_for(participant),
     )
+    thanks.schedule_thanks(participant)
     db.commit()
 
 
