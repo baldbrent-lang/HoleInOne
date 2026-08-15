@@ -1,9 +1,10 @@
 """Prize claims for confirmed holes-in-one.
 
-Reached from the link in the confirmation email. The gallery token says
-who is claiming, and an APPROVED HoleInOneEvent says whether there is
-anything to claim -- the token alone is not enough, or anyone who played
-a round could open the form and file for a prize they did not win.
+Reached from the link in a win email. The gallery token says who is
+claiming; an APPROVED HoleInOneEvent or a declared ContestWin says
+whether there is anything to claim. The token alone is not enough, or
+anyone who played a round could open the form and file for a prize they
+did not win.
 
 No payment details are collected here. The claim records who won, how to
 reach them, and where a physical prize should go; the payout itself is
@@ -19,7 +20,9 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import HIOStatus, HoleInOneEvent, Participant, PrizeClaim
+from ..models import (
+    ContestWin, HIOStatus, HoleInOneEvent, Participant, PrizeClaim,
+)
 
 router = APIRouter(prefix="/api/claims", tags=["claims"])
 
@@ -44,6 +47,8 @@ class ClaimContext(BaseModel):
     status: Optional[str] = None
     # What they have won, worded exactly as the email worded it.
     prize_label: Optional[str] = None
+    # Which contest this claim is for, for the page headline.
+    won_what: Optional[str] = None
 
 
 def _participant(db: Session, token: str) -> Participant:
@@ -65,6 +70,22 @@ def _approved_ace(db: Session, participant_id: int) -> Optional[HoleInOneEvent]:
     )
 
 
+def _latest_contest_win(db: Session, participant_id: int) -> Optional[ContestWin]:
+    return (
+        db.query(ContestWin)
+        .filter(ContestWin.participant_id == participant_id)
+        .order_by(ContestWin.created_at.desc())
+        .first()
+    )
+
+
+CONTEST_TITLES = {
+    "ctp": "Closest to the Pin",
+    "shot_of_week": "Shot of the Week",
+    "monthly_draw": "the monthly draw",
+}
+
+
 def _course_name(participant) -> Optional[str]:
     try:
         return participant.tee_time.course.name
@@ -72,8 +93,31 @@ def _course_name(participant) -> Optional[str]:
         return None
 
 
+def _prize_label_for(ace, win) -> Optional[str]:
+    """What this particular win pays.
+
+    An explicit label on the win row wins, since that is what the email
+    that reached the golfer said; otherwise fall back to the configured
+    default for that contest. The page must never quote a different
+    figure from the mail that sent them here.
+    """
+    if ace is not None:
+        return (settings.hio_prize_label or "").strip() or None
+    if win is None:
+        return None
+    if win.prize_label:
+        return win.prize_label.strip() or None
+    default = {
+        "ctp": settings.ctp_prize_label,
+        "shot_of_week": settings.shot_of_week_prize_label,
+        "monthly_draw": settings.monthly_draw_prize_label,
+    }.get(win.kind, "")
+    return (default or "").strip() or None
+
+
 def _context(db: Session, p: Participant) -> ClaimContext:
     ace = _approved_ace(db, p.id)
+    win = None if ace else _latest_contest_win(db, p.id)
     claim = (
         db.query(PrizeClaim)
         .filter(PrizeClaim.participant_id == p.id)
@@ -83,13 +127,18 @@ def _context(db: Session, p: Participant) -> ClaimContext:
     return ClaimContext(
         name=p.name,
         course_name=_course_name(p),
-        hole_number=ace.hole_number if ace else None,
-        eligible=ace is not None,
+        hole_number=(ace.hole_number if ace else (win.hole_number if win else None)),
+        eligible=(ace is not None or win is not None),
+        won_what=(
+            "your hole-in-one" if ace
+            else CONTEST_TITLES.get(win.kind, "our contest") if win
+            else None
+        ),
         already_claimed=claim is not None,
         email=(claim.email if claim else p.email),
         mobile=(claim.mobile if claim else p.mobile),
         status=claim.status if claim else None,
-        prize_label=(settings.hio_prize_label or "").strip() or None,
+        prize_label=_prize_label_for(ace, win),
     )
 
 
@@ -111,10 +160,11 @@ def submit_claim(
     """
     p = _participant(db, gallery_token)
     ace = _approved_ace(db, p.id)
-    if ace is None:
+    win = None if ace else _latest_contest_win(db, p.id)
+    if ace is None and win is None:
         # Deliberately not 404 -- the link is valid, there is simply
-        # nothing confirmed against it yet.
-        raise HTTPException(403, "no confirmed hole-in-one on this account")
+        # nothing won against it yet.
+        raise HTTPException(403, "nothing to claim on this account")
 
     def _clean(v: str | None) -> str | None:
         return (v or "").strip() or None
@@ -128,12 +178,12 @@ def submit_claim(
     if claim is None:
         claim = PrizeClaim(
             participant_id=p.id,
-            hio_event_id=ace.id,
+            hio_event_id=(ace.id if ace else None),
             name=p.name,
             email=_clean(payload.email) or p.email,
             mobile=_clean(payload.mobile) or p.mobile,
             course_name=_course_name(p),
-            hole_number=ace.hole_number,
+            hole_number=(ace.hole_number if ace else win.hole_number),
             mailing_address=_clean(payload.mailing_address),
             note=_clean(payload.note),
         )

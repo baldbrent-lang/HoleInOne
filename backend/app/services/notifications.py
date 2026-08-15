@@ -414,12 +414,15 @@ def notify_hio_confirmed(
     ).strip()
     # An unset prize falls back to naming no figure at all. Better a
     # vaguer sentence than one that promises an empty amount.
-    prize_phrase = f"{prize} is waiting for you" if prize else "a prize is waiting for you"
+    prize_line = f"There is more. Your prize: {prize}." if prize else \
+        "There is more — you have a prize waiting."
 
     if claim_url:
         lines += [
             "",
-            f"There is more: {prize_phrase}. Claim it here:",
+            prize_line,
+            "",
+            "Claim it here:",
             claim_url,
             "",
             "The form takes a minute — confirm how to reach you and we "
@@ -430,8 +433,9 @@ def notify_hio_confirmed(
         # implying the golfer should do something we have not enabled.
         lines += [
             "",
-            f"There is more: {prize_phrase}. We will be in touch shortly "
-            f"to arrange it.",
+            prize_line,
+            "",
+            "We will be in touch shortly to arrange it.",
         ]
 
     lines += [
@@ -450,7 +454,7 @@ def notify_hio_confirmed(
     if claim_url:
         send_sms(mobile, (
             f"GolfReelz: your hole-in-one{at_course} is confirmed, {name}! "
-            f"Claim your {prize} prize here: {claim_url}" if prize else
+            f"Your prize: {prize}. Claim it here: {claim_url}" if prize else
             f"GolfReelz: your hole-in-one{at_course} is confirmed, {name}! "
             f"Claim your prize here: {claim_url}"))
     else:
@@ -543,3 +547,190 @@ def notify_thanks_for_playing(
         send_sms(mobile, (
             f"GolfReelz: thanks for playing{at_course}, {name}. Your "
             f"gallery stays up here: {gallery_url}"))
+
+
+def _contest_win_email(
+    *,
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    subject: str,
+    opening: str,
+    flourish: str,
+    gallery_url: str,
+    prize: str,
+    claim_url: str,
+    sms_lead: str,
+) -> None:
+    """The shared body of the three contest-win emails.
+
+    They are the same message with different news at the top: you won,
+    here is the shot, here is the prize, here is how to collect. Writing
+    that three times invites the three to drift apart -- and the one that
+    drifts is the one nobody re-reads until a winner complains.
+
+    Only `opening` and `flourish` differ per contest, which is exactly
+    the part that should.
+    """
+    prize = (prize or "").strip()
+    # "Your prize: X." rather than "X is waiting for you", because the
+    # label is not always a noun -- a free round reads as a phrase, and
+    # the older wording produced "a free round on us is waiting for you".
+    prize_line = f"There is more. Your prize: {prize}." if prize else \
+        "There is more — you have a prize waiting."
+
+    lines = [f"{name},", "", opening, "", flourish, gallery_url]
+
+    if claim_url:
+        lines += [
+            "",
+            prize_line,
+            "",
+            "Claim it here:",
+            claim_url,
+            "",
+            "The form takes a minute — confirm how to reach you and we "
+            "will be in touch to arrange everything.",
+        ]
+    else:
+        lines += [
+            "",
+            prize_line,
+            "",
+            "We will be in touch shortly to arrange it.",
+        ]
+
+    lines += ["", "Congratulations again from all of us.", "", "The GolfReelz Team"]
+
+    send_email(email, subject, "\n".join(lines))
+
+    if claim_url:
+        tail = f"Your prize: {prize}. Claim it here: {claim_url}" if prize else \
+               f"Claim your prize here: {claim_url}"
+    else:
+        tail = f"Your shots: {gallery_url}"
+    send_sms(mobile, f"{sms_lead} {tail}")
+
+
+def notify_ctp_win(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    gallery_url: str,
+    course_name: str | None = None,
+    hole_number: int | None = None,
+    distance_feet: float | None = None,
+    claim_url: str | None = None,
+    prize_label: str | None = None,
+) -> None:
+    """Closest to the Pin — a single shot, on a single hole, on the day.
+
+    The distance is the whole story here, so it goes in the subject line
+    where the golfer will see it before opening anything.
+    """
+    course = (course_name or "").strip()
+    at_course = f" at {course}" if course else ""
+    hole = f" on hole {hole_number}" if hole_number else ""
+    dist = f"{distance_feet:g} ft" if distance_feet is not None else None
+
+    subject = (
+        f"Congratulations {name} — closest to the pin{at_course}"
+        + (f" at {dist}" if dist else "")
+    )
+    opening = (
+        f"Congratulations — you won Closest to the Pin{at_course}{hole}"
+        + (f", at {dist} from the cup." if dist else ".")
+        + " Nobody got nearer all day."
+    )
+    _contest_win_email(
+        name=name, mobile=mobile, email=email, subject=subject,
+        opening=opening,
+        flourish=(
+            "The shot that did it is in your gallery, ready to watch and "
+            "share:"),
+        gallery_url=gallery_url,
+        prize=(prize_label if prize_label is not None else settings.ctp_prize_label),
+        claim_url=(claim_url or "").strip(),
+        sms_lead=(
+            f"GolfReelz: you won closest to the pin{at_course}"
+            + (f" at {dist}" if dist else "") + f", {name}!"),
+    )
+
+
+def notify_shot_of_week(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    gallery_url: str,
+    course_name: str | None = None,
+    period_label: str | None = None,
+    claim_url: str | None = None,
+    prize_label: str | None = None,
+) -> None:
+    """Shot of the Week — chosen by us, out of everything recorded.
+
+    Unlike the other contests this one is a judgement rather than a
+    measurement, so the email says who chose it and why that is worth
+    something.
+    """
+    course = (course_name or "").strip()
+    at_course = f" at {course}" if course else ""
+    period = (period_label or "").strip()
+    of_period = f" for {period}" if period else " this week"
+
+    subject = f"Congratulations {name} — your shot is our Shot of the Week"
+    opening = (
+        f"Congratulations — out of every shot recorded{at_course}"
+        f"{of_period}, ours went to yours. Our team picked it as Shot of "
+        f"the Week."
+    )
+    _contest_win_email(
+        name=name, mobile=mobile, email=email, subject=subject,
+        opening=opening,
+        flourish=(
+            "It is worth another look. Watch it, download it, send it to "
+            "whoever you told about it:"),
+        gallery_url=gallery_url,
+        prize=(prize_label if prize_label is not None
+               else settings.shot_of_week_prize_label),
+        claim_url=(claim_url or "").strip(),
+        sms_lead=f"GolfReelz: your shot is our Shot of the Week, {name}!",
+    )
+
+
+def notify_monthly_draw(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    gallery_url: str,
+    period_label: str | None = None,
+    claim_url: str | None = None,
+    prize_label: str | None = None,
+) -> None:
+    """The monthly draw — won by entering, not by playing well.
+
+    Nothing about the golf earned this one, so the email does not pretend
+    otherwise. It says they were drawn, which is the honest and the more
+    pleasant version: a stroke of luck on top of a round they already had.
+    """
+    period = (period_label or "").strip()
+    for_period = f" for {period}" if period else ""
+
+    subject = f"Congratulations {name} — you won our monthly draw{for_period}"
+    opening = (
+        f"Congratulations — your name came out of our monthly draw"
+        f"{for_period}. Every golfer who played with us was entered, and "
+        f"yours is the one that was drawn."
+    )
+    _contest_win_email(
+        name=name, mobile=mobile, email=email, subject=subject,
+        opening=opening,
+        flourish=(
+            "While you are here, your rounds are all still in your "
+            "gallery:"),
+        gallery_url=gallery_url,
+        prize=(prize_label if prize_label is not None
+               else settings.monthly_draw_prize_label),
+        claim_url=(claim_url or "").strip(),
+        sms_lead=f"GolfReelz: you won our monthly draw{for_period}, {name}!",
+    )

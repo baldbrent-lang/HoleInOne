@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     # back to "a prize", so a blanked value degrades to the old wording
     # instead of mailing out "you have won  waiting for you".
     hio_prize_label: str = "$10,000"
+    # The other three contests. Every label is read back inside
+    # "Your prize: <label>." so a phrase works as well as a figure, and
+    # an empty one degrades to "you have a prize waiting" rather than
+    # printing an empty amount.
+    ctp_prize_label: str = "a free round on us, next time you play"
+    shot_of_week_prize_label: str = (
+        "a free round on us, plus your shot featured on our social media"
+    )
+    monthly_draw_prize_label: str = "$100"
     # User-auth secret. Override in prod via env. Tokens are JWT HS256.
     jwt_secret: str = "dev-jwt-secret-change-in-prod"
     jwt_ttl_days: int = 30

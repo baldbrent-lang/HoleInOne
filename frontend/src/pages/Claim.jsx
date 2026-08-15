@@ -84,9 +84,9 @@ export default function Claim() {
         <div className="card">
           <h2>Nothing to claim yet</h2>
           <p className="small muted">
-            We don't have a confirmed hole-in-one on your account. If you
-            believe that's wrong, reply to the email we sent you and we'll
-            take another look.
+            We don't have a confirmed win on your account. If you believe
+            that's wrong, reply to the email we sent you and we'll take
+            another look.
           </p>
           <Link className="btn secondary" to={`/g/${galleryToken}`}>
             Back to your gallery
@@ -127,7 +127,7 @@ export default function Claim() {
       <div className="card">
         <h2>Claim your {info.prize_label || ""} prize</h2>
         <p className="small muted">
-          Congratulations, {info.name} — your hole-in-one
+          Congratulations, {info.name} — {info.won_what || "your win"}
           {where ? ` on ${where}` : ""} is confirmed
           {info.prize_label ? `, and ${info.prize_label} is waiting for you` : ""}.
           Confirm how to reach you and we'll arrange everything.

@@ -622,3 +622,35 @@ class PrizeClaim(Base):
     # operator can be honest about states we did not anticipate.
     status: Mapped[str] = mapped_column(String(20), default="new")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class ContestWin(Base):
+    """A declared winner of one of the non-ace contests.
+
+    Closest to the Pin, Shot of the Week and the Monthly Draw are all
+    decided by a person, not by the matcher -- so a win exists because an
+    operator said so, and this row is that statement. It is what the
+    congratulations email is sent from and what opens the claim page for
+    a golfer who has not hit an ace.
+
+    `period_label` is free text ("Week of 12 Aug", "August 2026") because
+    the three contests do not share a cadence and the email only ever
+    reads it back.
+    """
+
+    __tablename__ = "contest_wins"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("participants.id"), index=True
+    )
+    # ctp | shot_of_week | monthly_draw
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    prize_label: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    period_label: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    # CTP only: which hole, and how close. Null for the other two.
+    hole_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    distance_feet: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

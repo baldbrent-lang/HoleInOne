@@ -713,6 +713,100 @@ def set_review_published(
     return {"ok": True, "id": r.id, "published": r.published}
 
 
+CONTEST_KINDS = ("ctp", "shot_of_week", "monthly_draw")
+
+
+@router.post("/contest-wins")
+def declare_contest_win(payload: dict, db: Session = Depends(get_db)):
+    """Declare a contest winner and send them the congratulations email.
+
+    Body: {participant_id, kind, prize_label?, period_label?,
+           hole_number?, distance_feet?, note?}
+
+    The three non-ace contests are decided by a person, so this endpoint
+    IS the decision -- it writes the win, which is what later opens the
+    claim page for a golfer who never hit an ace.
+    """
+    from ..models import ContestWin
+
+    kind = (payload.get("kind") or "").strip()
+    if kind not in CONTEST_KINDS:
+        raise HTTPException(400, f"kind must be one of {CONTEST_KINDS}")
+    p = db.get(Participant, payload.get("participant_id") or 0)
+    if not p:
+        raise HTTPException(404, "participant not found")
+
+    win = ContestWin(
+        participant_id=p.id,
+        kind=kind,
+        prize_label=(payload.get("prize_label") or "").strip() or None,
+        period_label=(payload.get("period_label") or "").strip() or None,
+        hole_number=payload.get("hole_number"),
+        distance_feet=payload.get("distance_feet"),
+        note=(payload.get("note") or "").strip() or None,
+    )
+    db.add(win)
+    db.add(
+        AuditLog(actor="admin", action=f"contest_win_{kind}", target=f"participant:{p.id}")
+    )
+    db.commit()
+
+    # Only after the win is committed, for the same reason the ace email
+    # waits: the mail hands them a claim link the claim page validates
+    # against committed state.
+    gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
+    claim_url = notifications.claim_url_for(p.gallery_token)
+    course = notifications.course_name_for(p)
+    common = dict(
+        name=p.name, mobile=p.mobile, email=p.email,
+        gallery_url=gallery_url, claim_url=claim_url,
+        prize_label=win.prize_label,
+    )
+    if kind == "ctp":
+        notifications.notify_ctp_win(
+            course_name=course, hole_number=win.hole_number,
+            distance_feet=win.distance_feet, **common,
+        )
+    elif kind == "shot_of_week":
+        notifications.notify_shot_of_week(
+            course_name=course, period_label=win.period_label, **common,
+        )
+    else:
+        notifications.notify_monthly_draw(
+            period_label=win.period_label, **common,
+        )
+
+    win.notified_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "id": win.id, "kind": kind, "to": p.email}
+
+
+@router.get("/contest-wins")
+def list_contest_wins(db: Session = Depends(get_db)):
+    """Declared winners, newest first."""
+    from ..models import ContestWin
+
+    rows = db.query(ContestWin).order_by(ContestWin.created_at.desc()).all()
+    return {
+        "count": len(rows),
+        "wins": [
+            {
+                "id": w.id,
+                "participant_id": w.participant_id,
+                "kind": w.kind,
+                "prize_label": w.prize_label,
+                "period_label": w.period_label,
+                "hole_number": w.hole_number,
+                "distance_feet": w.distance_feet,
+                "note": w.note,
+                "notified_at": w.notified_at,
+                "created_at": w.created_at,
+            }
+            for w in rows
+        ],
+    }
+
+
 @router.get("/claims")
 def list_claims(db: Session = Depends(get_db)):
     """Prize claims, newest first. Open ones matter most, so they lead."""
@@ -17942,6 +18036,17 @@ def email_send_templates(
     _try("hio_confirmed", lambda: N.notify_hio_confirmed(
         "Ben", None, to, gallery,
         course_name="Baldwin Links", hole_number=3,
+        claim_url=N.claim_url_for("sample-token")))
+    _try("ctp", lambda: N.notify_ctp_win(
+        "Ben", None, to, gallery, course_name="Baldwin Links",
+        hole_number=7, distance_feet=3.4,
+        claim_url=N.claim_url_for("sample-token")))
+    _try("shot_of_week", lambda: N.notify_shot_of_week(
+        "Ben", None, to, gallery, course_name="Baldwin Links",
+        period_label="week of 10 August",
+        claim_url=N.claim_url_for("sample-token")))
+    _try("monthly_draw", lambda: N.notify_monthly_draw(
+        "Ben", None, to, gallery, period_label="August",
         claim_url=N.claim_url_for("sample-token")))
     _try("thanks", lambda: N.notify_thanks_for_playing(
         "Ben", None, to, gallery,
