@@ -317,9 +317,10 @@ function TestEmailCard({ adminPassword, onToast }) {
       )}
       <p className="small muted" style={{ marginBottom: 10 }}>
         <b>Send test</b> drops one generic message to check the wiring.{" "}
-        <b>Send all templates</b> fires the four real emails a golfer gets —
-        registration, gallery ready, ace confirmed (with its prize-claim
-        link), and the thank-you.
+        <b>Send all templates</b> fires every email a golfer can get —
+        registration, gallery ready, the thank-you, all four win emails
+        with their prize-claim links, and the two we hope not to send: a
+        refund and a no-clips apology.
       </p>
       <div className="row">
         <div className="field" style={{ flex: 2 }}>

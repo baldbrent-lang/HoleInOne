@@ -580,7 +580,12 @@ def send_test_email(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/participants/{participant_id}/refund")
-def refund_participant(participant_id: int, db: Session = Depends(get_db)):
+def refund_participant(
+    participant_id: int,
+    notify: bool = True,
+    reason: str | None = None,
+    db: Session = Depends(get_db),
+):
     p = db.get(Participant, participant_id)
     if not p:
         raise HTTPException(404, "participant not found")
@@ -604,11 +609,62 @@ def refund_participant(participant_id: int, db: Session = Depends(get_db)):
         )
     )
     db.commit()
+
+    # Tell them. A refund the golfer learns about from their bank
+    # statement is a refund they email us about. Sent after the commit,
+    # and a send failure must not undo a refund that already happened at
+    # Stripe -- so it is caught rather than raised.
+    if notify:
+        try:
+            notifications.notify_refund_issued(
+                p.name, p.mobile, p.email,
+                amount_cents=settings.registration_price_cents,
+                course_name=notifications.course_name_for(p),
+                reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("refund email failed for participant %s: %s", p.id, exc)
+
     return {
         "ok": True,
         "mode": result.get("mode"),
         "refund_id": result.get("refund_id"),
+        "notified": bool(notify and p.email),
     }
+
+
+@router.post("/participants/{participant_id}/no-clips")
+def send_no_clips(
+    participant_id: int,
+    refunded: bool = False,
+    reason: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Tell a golfer we recorded nothing for them.
+
+    Manual on purpose. "No clips" is not always a failure -- a round may
+    still be processing, or the golfer may have walked in -- and an
+    automatic apology for a round that turns up an hour later is worse
+    than the silence it replaced. Someone has to look and decide.
+
+    Pass refunded=true when the refund has already been issued, so the
+    two facts arrive in one message instead of two.
+    """
+    p = db.get(Participant, participant_id)
+    if not p:
+        raise HTTPException(404, "participant not found")
+    notifications.notify_no_clips(
+        p.name, p.mobile, p.email,
+        course_name=notifications.course_name_for(p),
+        refunded=refunded or p.refunded_at is not None,
+        amount_cents=settings.registration_price_cents,
+        reason=reason,
+    )
+    db.add(
+        AuditLog(actor="admin", action="no_clips_email", target=f"participant:{p.id}")
+    )
+    db.commit()
+    return {"ok": True, "to": p.email}
 
 
 @router.post("/participants/{participant_id}/resend-gallery")
@@ -18051,6 +18107,13 @@ def email_send_templates(
     _try("thanks", lambda: N.notify_thanks_for_playing(
         "Ben", None, to, gallery,
         review_url=N.review_url_for("sample-token")))
+    _try("refund", lambda: N.notify_refund_issued(
+        "Ben", None, to,
+        amount_cents=settings.registration_price_cents,
+        course_name="Baldwin Links"))
+    _try("no_clips", lambda: N.notify_no_clips(
+        "Ben", None, to, course_name="Baldwin Links", refunded=True,
+        amount_cents=settings.registration_price_cents))
 
     st = email_status()
     return {

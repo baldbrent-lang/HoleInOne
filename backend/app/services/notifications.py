@@ -734,3 +734,139 @@ def notify_monthly_draw(
         claim_url=(claim_url or "").strip(),
         sms_lead=f"GolfReelz: you won our monthly draw{for_period}, {name}!",
     )
+
+
+def _money(cents: int | None) -> str | None:
+    """Cents as $20 or $19.50. None when we do not know the amount."""
+    if not cents:
+        return None
+    d = cents / 100.0
+    return f"${d:,.0f}" if abs(d - round(d)) < 0.005 else f"${d:,.2f}"
+
+
+def notify_refund_issued(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    amount_cents: int | None = None,
+    course_name: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """We have refunded this golfer.
+
+    Money moved and nothing said so. A refund the customer finds out
+    about from their bank statement is a refund they email us about, and
+    an unexplained one reads worse than the problem that caused it.
+
+    Deliberately does not apologise twice or explain at length -- the
+    refund IS the apology, and a golfer reading this mostly wants the
+    amount and the timing.
+    """
+    course = (course_name or "").strip()
+    at_course = f" at {course}" if course else ""
+    amount = _money(amount_cents)
+
+    lines = [f"{name},", ""]
+    lines.append(
+        f"We have refunded your GolfReelz registration{at_course}"
+        + (f" — {amount}." if amount else ".")
+    )
+    if (reason or "").strip():
+        lines += ["", reason.strip()]
+    lines += [
+        "",
+        "The money goes back to the card you paid with. Most banks show "
+        "it within five to ten business days; it can occasionally take a "
+        "little longer, which is the bank's timing rather than ours.",
+        "",
+        "If anything about this does not look right, reply to this email "
+        "and a person will pick it up.",
+        "",
+        "Thank you for giving us a try — we would be glad to record your "
+        "next round.",
+        "",
+        "The GolfReelz Team",
+    ]
+
+    subject = (
+        f"Your GolfReelz refund{f' of {amount}' if amount else ''} is on its way"
+    )
+    send_email(email, subject, "\n".join(lines))
+    send_sms(mobile, (
+        f"GolfReelz: we've refunded your registration{at_course}"
+        + (f" ({amount})" if amount else "")
+        + ". It should be back on your card within 5-10 business days."))
+
+
+def notify_no_clips(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    course_name: str | None = None,
+    refunded: bool = False,
+    amount_cents: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """We recorded nothing for this golfer, and have to say so.
+
+    The worst outcome in the system and, until now, the only one that
+    said nothing at all: gallery-ready fires on the first assigned clip,
+    so a golfer with no clips simply never heard from us again after
+    registering. Silence after taking someone's money is the version of
+    this that costs a customer permanently.
+
+    So it leads with the failure rather than burying it, says plainly
+    that it is our fault, and -- when a refund has been issued -- says so
+    in the same breath rather than making them ask.
+    """
+    course = (course_name or "").strip()
+    at_course = f" at {course}" if course else ""
+    amount = _money(amount_cents)
+
+    lines = [
+        f"{name},",
+        "",
+        f"We have to apologise. We did not manage to record your par-3 "
+        f"tee shots{at_course}, so there is nothing in your gallery from "
+        f"your round. That is our failure, not anything you did.",
+    ]
+    if (reason or "").strip():
+        lines += ["", reason.strip()]
+
+    if refunded:
+        lines += [
+            "",
+            "We have refunded your registration"
+            + (f" — {amount}" if amount else "")
+            + ". The money goes back to the card you paid with, and most "
+            "banks show it within five to ten business days.",
+        ]
+    else:
+        lines += [
+            "",
+            "We do not think you should pay for a round we did not "
+            "capture. Reply to this email and we will put that right.",
+        ]
+
+    lines += [
+        "",
+        "We would genuinely like another go at this. If you play with us "
+        "again, reply and we will make sure someone is watching your "
+        "group's cameras that day.",
+        "",
+        "Sorry again — and thank you for the chance.",
+        "",
+        "The GolfReelz Team",
+    ]
+
+    send_email(
+        email,
+        f"{name}, we did not get your shots{at_course} — and we are sorry",
+        "\n".join(lines),
+    )
+    send_sms(mobile, (
+        f"GolfReelz: we're sorry — we didn't manage to record your shots"
+        f"{at_course}. "
+        + ("We've refunded your registration. " if refunded
+           else "Reply and we'll put it right. ")
+        + "Details are in your email."))

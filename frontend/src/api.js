@@ -1038,6 +1038,14 @@ export const api = {
       method: "POST",
       adminPassword: key,
     }),
+  sendNoClips: (key, id, refunded = false) =>
+    request(
+      `/api/admin/participants/${id}/no-clips${refunded ? "?refunded=true" : ""}`,
+      {
+        method: "POST",
+        adminPassword: key,
+      },
+    ),
   listClaims: (key) => request(`/api/admin/claims`, { adminPassword: key }),
   setClaimStatus: (key, id, status) =>
     request(`/api/admin/claims/${id}/status?status=${status}`, {

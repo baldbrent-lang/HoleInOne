@@ -124,15 +124,38 @@ export default function AdminParticipants() {
     }
   }
 
+  async function noClips(p) {
+    // Confirmed, because this one tells a customer we failed them —
+    // sending it to the wrong row is worse than not sending it.
+    const already = !!p.refunded_at;
+    if (!window.confirm(
+      `Tell ${p.name} we didn't record their shots?` +
+      (already
+        ? " The email will say their refund is on its way."
+        : " They have NOT been refunded — the email will offer to put it right."),
+    )) return;
+    showToast(`Sending to ${p.email || p.name}…`);
+    try {
+      await api.sendNoClips(adminPassword, p.id, already);
+      showToast(`Sent to ${p.email || p.name}`);
+    } catch (e) {
+      showToast(`Error: ${e.message}`);
+    }
+  }
+
   async function refund(p) {
-    if (!window.confirm(`Refund ${p.name}? This issues a Stripe refund (or no-op in mock mode) and marks the round as refunded. Their clips stay accessible.`)) return;
+    if (!window.confirm(`Refund ${p.name}? This issues a Stripe refund (or no-op in mock mode), marks the round as refunded, and EMAILS ${p.email || "the golfer"} to say the money is on its way. Their clips stay accessible.`)) return;
     showToast(`Refunding ${p.name}…`);
     try {
       const r = await api.refundParticipant(adminPassword, p.id);
       if (r.already_refunded) {
-        showToast(`${p.name} was already refunded.`);
+        showToast(`${p.name} was already refunded — no second email sent.`);
       } else {
-        showToast(`Refund issued (${r.mode || "ok"})`);
+        showToast(
+          r.notified
+            ? `Refund issued (${r.mode || "ok"}) and ${p.email} emailed`
+            : `Refund issued (${r.mode || "ok"}) — no email on file`,
+        );
       }
       load();
     } catch (e) {
@@ -329,6 +352,13 @@ export default function AdminParticipants() {
                         title="Send the thank-you / review request now, ahead of its 4-hour timer"
                       >
                         Thank you
+                      </button>
+                      <button
+                        className="ghost small"
+                        onClick={() => noClips(p)}
+                        title="Tell this golfer we didn't record their shots"
+                      >
+                        No clips
                       </button>
                       {p.paid && !p.refunded_at && (
                         <button className="ghost small" onClick={() => refund(p)} title="Refund this round" style={{ color: "var(--danger)" }}>
