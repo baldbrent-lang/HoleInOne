@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # How long after the gallery email the thank-you follows. Set to 0 to
     # turn the automatic send off entirely -- the admin button still works.
     thanks_delay_hours: float = 4.0
+    # What a confirmed hole-in-one is worth, as it should read in the
+    # email and on the claim page. A setting rather than a constant so
+    # changing the prize does not mean changing code -- and empty falls
+    # back to "a prize", so a blanked value degrades to the old wording
+    # instead of mailing out "you have won  waiting for you".
+    hio_prize_label: str = "$10,000"
     # User-auth secret. Override in prod via env. Tokens are JWT HS256.
     jwt_secret: str = "dev-jwt-secret-change-in-prod"
     jwt_ttl_days: int = 30

@@ -34,6 +34,8 @@ import Home from "./pages/Home.jsx";
 import Watch from "./pages/Watch.jsx";
 import Review from "./pages/Review.jsx";
 import AdminReviews from "./pages/AdminReviews.jsx";
+import Claim from "./pages/Claim.jsx";
+import AdminClaims from "./pages/AdminClaims.jsx";
 
 function ConditionalFooter() {
   const { pathname } = useLocation();
@@ -74,6 +76,7 @@ export default function App() {
         <Route path="/confirm/:participantId" element={<Confirmation />} />
         <Route path="/g/:galleryToken" element={<Gallery />} />
         <Route path="/review/:galleryToken" element={<Review />} />
+        <Route path="/claim/:galleryToken" element={<Claim />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/admin/participants" element={<AdminParticipants />} />
         <Route path="/admin/upload" element={<AdminUpload />} />
@@ -89,6 +92,7 @@ export default function App() {
         <Route path="/admin/showcase" element={<AdminShowcase />} />
         <Route path="/admin/review" element={<AdminReview />} />
         <Route path="/admin/reviews" element={<AdminReviews />} />
+        <Route path="/admin/claims" element={<AdminClaims />} />
         <Route
           path="*"
           element={

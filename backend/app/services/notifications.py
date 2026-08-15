@@ -364,10 +364,99 @@ def notify_gallery_ready(
         f"your shots in your gallery: {gallery_url}"))
 
 
-def notify_hio_confirmed(name: str, mobile: str | None, email: str | None, gallery_url: str) -> None:
-    msg = f"HOLE IN ONE confirmed, {name}! Congrats. Clip + prize info: {gallery_url}"
-    send_sms(mobile, msg)
-    send_email(email, "GolfReelz: hole-in-one CONFIRMED", msg)
+def claim_url_for(gallery_token: str | None) -> str:
+    """Where a confirmed ace goes to claim the prize."""
+    if not gallery_token:
+        return ""
+    return f"{settings.app_base_url}/claim/{gallery_token}"
+
+
+def notify_hio_confirmed(
+    name: str,
+    mobile: str | None,
+    email: str | None,
+    gallery_url: str,
+    course_name: str | None = None,
+    hole_number: int | None = None,
+    claim_url: str | None = None,
+    prize_label: str | None = None,
+) -> None:
+    """The ace is verified and there is a prize to collect.
+
+    This was one line reused verbatim as both the text and the email,
+    written to fit 160 characters -- so the biggest moment we ever report
+    arrived as the shortest thing we ever sent. It is a real email now.
+
+    The claim link is the point of it. A golfer told they have won and
+    then handed a gallery link has to work out for themselves what
+    happens next; one instruction, stated plainly, is the difference
+    between a prize claimed and a prize wondered about.
+    """
+    course = (course_name or "").strip()
+    at_course = f" at {course}" if course else ""
+    hole = f" on hole {hole_number}" if hole_number else ""
+
+    lines = [
+        f"{name},",
+        "",
+        f"Congratulations — your hole-in-one{at_course}{hole} has been "
+        f"confirmed. Our team has reviewed the footage, and the shot is "
+        f"official.",
+        "",
+        "It is a rare thing to do and a rarer thing to have on video. "
+        "Yours is waiting in your gallery, ready to watch and share:",
+        gallery_url,
+    ]
+
+    claim_url = (claim_url or "").strip()
+    prize = (
+        prize_label if prize_label is not None else settings.hio_prize_label
+    ).strip()
+    # An unset prize falls back to naming no figure at all. Better a
+    # vaguer sentence than one that promises an empty amount.
+    prize_phrase = f"{prize} is waiting for you" if prize else "a prize is waiting for you"
+
+    if claim_url:
+        lines += [
+            "",
+            f"There is more: {prize_phrase}. Claim it here:",
+            claim_url,
+            "",
+            "The form takes a minute — confirm how to reach you and we "
+            "will be in touch to arrange everything.",
+        ]
+    else:
+        # No claim link configured: say who acts next rather than
+        # implying the golfer should do something we have not enabled.
+        lines += [
+            "",
+            f"There is more: {prize_phrase}. We will be in touch shortly "
+            f"to arrange it.",
+        ]
+
+    lines += [
+        "",
+        "Congratulations again from all of us. Enjoy it.",
+        "",
+        "The GolfReelz Team",
+    ]
+
+    send_email(
+        email,
+        f"Congratulations {name} — your hole-in-one is confirmed",
+        "\n".join(lines),
+    )
+
+    if claim_url:
+        send_sms(mobile, (
+            f"GolfReelz: your hole-in-one{at_course} is confirmed, {name}! "
+            f"Claim your {prize} prize here: {claim_url}" if prize else
+            f"GolfReelz: your hole-in-one{at_course} is confirmed, {name}! "
+            f"Claim your prize here: {claim_url}"))
+    else:
+        send_sms(mobile, (
+            f"GolfReelz: your hole-in-one{at_course} is confirmed, {name}! "
+            f"Watch it here: {gallery_url}"))
 
 
 def review_url_for(gallery_token: str | None) -> str:

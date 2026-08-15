@@ -26,7 +26,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .config import settings
 from .database import Base, engine
 from .routers import (
-    admin, auth, broadcast, cameras, gallery, operator, public, reviews, webhooks,
+    admin, auth, broadcast, cameras, claims, gallery, operator, public, reviews,
+    webhooks,
 )
 from .services import storage, thanks
 
@@ -525,6 +526,7 @@ app.include_router(operator.router)
 app.include_router(broadcast.router)
 app.include_router(cameras.router)
 app.include_router(reviews.router)
+app.include_router(claims.router)
 
 
 # --- Uploads (selfies) -------------------------------------------------------

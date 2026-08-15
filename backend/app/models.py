@@ -583,3 +583,42 @@ class Review(Base):
     # someone has read it.
     published: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class PrizeClaim(Base):
+    """A golfer's claim on the prize for a confirmed hole-in-one.
+
+    Raised by the golfer from the link in the confirmation email, and
+    worked by hand afterwards -- this records who won, how to reach them
+    and where to send it, so the follow-up is not a scramble through
+    three screens.
+
+    Deliberately holds NO payment details. Bank and card numbers are not
+    something a web form should be collecting for a handful of prizes a
+    season, and not something this table should be holding if it did.
+    Payout is arranged directly once the claim is in.
+    """
+
+    __tablename__ = "prize_claims"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("participants.id"), index=True
+    )
+    hio_event_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("hole_in_one_events.id"), nullable=True
+    )
+    # Snapshotted, for the same reason reviews are: this is a record of a
+    # claim as it was made, and must outlive edits to the round.
+    name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    mobile: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    course_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    hole_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Where a physical prize goes. Optional -- a cash prize needs no address.
+    mailing_address: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # new -> contacted -> fulfilled. Free text rather than an enum so the
+    # operator can be honest about states we did not anticipate.
+    status: Mapped[str] = mapped_column(String(20), default="new")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

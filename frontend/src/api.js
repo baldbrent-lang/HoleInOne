@@ -99,6 +99,13 @@ export const api = {
   stripeConfig: () => request(`/api/public/stripe-config`, { auth: false }),
   inviteInfo: (token) =>
     request(`/api/public/invite/${token}`, { auth: false }),
+  claimContext: (token) => request(`/api/claims/${token}`, { auth: false }),
+  submitClaim: (token, payload) =>
+    request(`/api/claims/${token}`, {
+      method: "POST",
+      auth: false,
+      body: payload,
+    }),
   reviewContext: (token) => request(`/api/reviews/${token}`, { auth: false }),
   submitReview: (token, payload) =>
     request(`/api/reviews/${token}`, {
@@ -1028,6 +1035,12 @@ export const api = {
     ),
   refundParticipant: (key, id) =>
     request(`/api/admin/participants/${id}/refund`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+  listClaims: (key) => request(`/api/admin/claims`, { adminPassword: key }),
+  setClaimStatus: (key, id, status) =>
+    request(`/api/admin/claims/${id}/status?status=${status}`, {
       method: "POST",
       adminPassword: key,
     }),

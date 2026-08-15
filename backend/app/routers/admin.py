@@ -713,6 +713,52 @@ def set_review_published(
     return {"ok": True, "id": r.id, "published": r.published}
 
 
+@router.get("/claims")
+def list_claims(db: Session = Depends(get_db)):
+    """Prize claims, newest first. Open ones matter most, so they lead."""
+    from ..models import PrizeClaim
+
+    rows = db.query(PrizeClaim).order_by(PrizeClaim.created_at.desc()).all()
+    return {
+        "count": len(rows),
+        "open": sum(1 for r in rows if r.status != "fulfilled"),
+        "claims": [
+            {
+                "id": r.id,
+                "participant_id": r.participant_id,
+                "name": r.name,
+                "email": r.email,
+                "mobile": r.mobile,
+                "course_name": r.course_name,
+                "hole_number": r.hole_number,
+                "mailing_address": r.mailing_address,
+                "note": r.note,
+                "status": r.status,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/claims/{claim_id}/status")
+def set_claim_status(claim_id: int, status: str, db: Session = Depends(get_db)):
+    """Move a claim along: new -> contacted -> fulfilled."""
+    from ..models import PrizeClaim
+
+    if status not in ("new", "contacted", "fulfilled"):
+        raise HTTPException(400, "invalid status")
+    c = db.get(PrizeClaim, claim_id)
+    if not c:
+        raise HTTPException(404, "claim not found")
+    c.status = status
+    db.add(
+        AuditLog(actor="admin", action="claim_status", target=f"claim:{c.id}", detail=status)
+    )
+    db.commit()
+    return {"ok": True, "id": c.id, "status": c.status}
+
+
 @router.get("/flagged-clips")
 def flagged_clips(db: Session = Depends(get_db)):
     clips = (
@@ -12423,12 +12469,23 @@ def hio_decide(event_id: int, payload: HIOReviewAction, db: Session = Depends(ge
         )
     )
 
+    db.commit()
+
+    # Only after the approval is committed. The email tells the golfer
+    # they have won and hands them a claim link, and the claim page only
+    # opens for an APPROVED event -- so sending first would mean a
+    # rollback could leave someone holding a congratulations for a prize
+    # the system no longer agrees they won.
     if new_status == HIOStatus.approved.value:
         p = db.get(Participant, evt.participant_id)
         if p:
             gallery_url = f"{settings.app_base_url}/g/{p.gallery_token}"
-            notifications.notify_hio_confirmed(p.name, p.mobile, p.email, gallery_url)
-    db.commit()
+            notifications.notify_hio_confirmed(
+                p.name, p.mobile, p.email, gallery_url,
+                course_name=notifications.course_name_for(p),
+                hole_number=evt.hole_number,
+                claim_url=notifications.claim_url_for(p.gallery_token),
+            )
     return {"ok": True, "status": new_status}
 
 
@@ -17883,7 +17940,9 @@ def email_send_templates(
     _try("gallery_ready", lambda: N.notify_gallery_ready(
         "Ben", None, to, gallery))
     _try("hio_confirmed", lambda: N.notify_hio_confirmed(
-        "Ben", None, to, gallery))
+        "Ben", None, to, gallery,
+        course_name="Baldwin Links", hole_number=3,
+        claim_url=N.claim_url_for("sample-token")))
     _try("thanks", lambda: N.notify_thanks_for_playing(
         "Ben", None, to, gallery,
         review_url=N.review_url_for("sample-token")))
