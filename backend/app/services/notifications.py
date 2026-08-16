@@ -34,6 +34,17 @@ _LOGO_CANDIDATES = (
     _REPO_ROOT / "frontend" / "public" / "golfreelz-logo.png",
 )
 _LOGO_WIDTH_PX = 280          # 2x the 140px display width, for retina
+
+# The footer as TEXT, for the plain-text alternative.
+#
+# The HTML part carries the logo and tagline, but a client is free to
+# render the text part instead -- Outlook does, at least sometimes -- and
+# a message that then arrives with no sign-off at all looks like a
+# different sender from the one before it. The logo is also skipped
+# entirely when the PNG cannot be found, which would silently drop the
+# footer from every email at once. Signing the text part means the
+# sign-off is unconditional and the image is the enhancement.
+_TEXT_FOOTER = "\n\n—\nGolfReelz · Every par-3 shot, tracked and delivered."
 _logo_cache: tuple[bytes, str] | None | bool = False   # False = not tried
 
 
@@ -176,7 +187,9 @@ def _send_smtp(
     msg["From"] = settings.smtp_from or settings.smtp_user
     msg["To"] = to
     msg["Subject"] = subject
-    msg.set_content(body)
+    # Text part is signed; the HTML part below builds from the UNSIGNED
+    # body so the tagline does not appear twice for HTML readers.
+    msg.set_content(body + _TEXT_FOOTER)
     # HTML alternative carrying the logo footer. The plain-text part above
     # stays exactly as it was, so nothing is lost for text-only readers —
     # and if the logo file is missing we simply do not add the HTML part.
@@ -230,7 +243,9 @@ def send_email(to: str | None, subject: str, body: str) -> None:
         from_email=settings.sendgrid_from_email,
         to_emails=to,
         subject=subject,
-        plain_text_content=body,
+        # Signed, same as the SMTP path — the two must not disagree about
+        # whether our emails carry a sign-off.
+        plain_text_content=body + _TEXT_FOOTER,
     )
     _lg = _sg_logo_attachment()
     if _lg is not None:
