@@ -50,13 +50,19 @@ export default function CoursePicker() {
         </p>
 
         {courses !== null && courses.length > 3 && (
-          <div className="field">
+          <div className="field" style={{ marginBottom: 16 }}>
             <input
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search by course or town"
               aria-label="Search courses"
+              style={{
+                width: "100%",
+                fontSize: "1.05rem",
+                padding: "15px 16px",
+                borderRadius: "var(--radius)",
+              }}
             />
           </div>
         )}
