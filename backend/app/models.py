@@ -654,3 +654,43 @@ class ContestWin(Base):
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class ShotOfWeekNominee(Base):
+    """A clip put up for the week's Shot of the Week vote.
+
+    Nominated by us, voted on by everyone. `week_start` is the Monday
+    00:00 UTC of the week it belongs to, so a nominee is tied to its
+    week rather than to whenever someone happened to add it -- last
+    week's shortlist stays last week's when Monday comes round.
+    """
+
+    __tablename__ = "sotw_nominees"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    clip_id: Mapped[int] = mapped_column(ForeignKey("video_clips.id"), index=True)
+    week_start: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # Optional editorial line: why this one is worth a look.
+    caption: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ShotOfWeekVote(Base):
+    """One vote. `voter_key` is a signed-in user id when we have one and
+    a browser-generated id when we do not.
+
+    That is deliberately weak: a determined person can clear storage and
+    vote again. The alternative is making people sign up to vote, which
+    would cost far more votes than it would save. The count is a popular
+    verdict, not an election, and the final pick is ours anyway.
+    """
+
+    __tablename__ = "sotw_votes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    nominee_id: Mapped[int] = mapped_column(ForeignKey("sotw_nominees.id"), index=True)
+    week_start: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # One vote per voter per WEEK, not per nominee — enforced in the
+    # router so a re-vote moves the vote rather than being rejected.
+    voter_key: Mapped[str] = mapped_column(String(80), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

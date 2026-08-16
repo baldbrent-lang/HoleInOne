@@ -6,6 +6,22 @@ const API_BASE =
   (import.meta.env.DEV ? "http://localhost:8000" : "");
 
 const USER_TOKEN_STORAGE = "golfreelz.userToken";
+const VIEWER_KEY = "golfreelz.viewerId";
+
+/**
+ * A stable per-browser id, for the places we need to tell viewers apart
+ * without making them sign in — the broadcast playlist, and the Shot of
+ * the Week vote. Shared so both use the SAME id: two keys would mean a
+ * viewer who has watched is a stranger when they come to vote.
+ */
+export function viewerId() {
+  let id = localStorage.getItem(VIEWER_KEY);
+  if (!id) {
+    id = `v_${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(VIEWER_KEY, id);
+  }
+  return id;
+}
 const OPERATOR_TOKEN_STORAGE = "golfreelz.operatorToken";
 
 export function getUserToken() {
@@ -126,6 +142,28 @@ export const api = {
   listShowcase: () => request(`/api/public/showcase`),
   publicStats: () => request(`/api/public/stats`, { auth: false }),
   contests: () => request(`/api/public/contests`, { auth: false }),
+  shotOfWeek: (viewerId) =>
+    request(
+      `/api/public/shot-of-week${viewerId ? `?viewer_id=${encodeURIComponent(viewerId)}` : ""}`,
+    ),
+  voteShotOfWeek: (nomineeId, viewerId) =>
+    request(
+      `/api/public/shot-of-week/${nomineeId}/vote?viewer_id=${encodeURIComponent(viewerId)}`,
+      { method: "POST" },
+    ),
+  adminListSotw: (key) =>
+    request(`/api/admin/shot-of-week`, { adminPassword: key }),
+  adminAddSotw: (key, clipId, caption) =>
+    request(`/api/admin/shot-of-week`, {
+      method: "POST",
+      body: { clip_id: clipId, caption },
+      adminPassword: key,
+    }),
+  adminRemoveSotw: (key, nomineeId) =>
+    request(`/api/admin/shot-of-week/${nomineeId}`, {
+      method: "DELETE",
+      adminPassword: key,
+    }),
   broadcastChannels: () => request(`/api/broadcast/channels`, { auth: false }),
   channelShareLink: (key, channelKey) =>
     request(

@@ -816,6 +816,93 @@ def set_review_published(
     return {"ok": True, "id": r.id, "published": r.published}
 
 
+def _sotw_week_start(now: datetime) -> datetime:
+    """Monday 00:00 UTC — must match public._week_start exactly, or a
+    nominee lands in a week the public page is not looking at."""
+    d = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return d - timedelta(days=d.weekday())
+
+
+@router.get("/shot-of-week")
+def list_sotw_nominees(db: Session = Depends(get_db)):
+    """This week's shortlist, with vote counts."""
+    from ..models import ShotOfWeekNominee, ShotOfWeekVote
+
+    ws = _sotw_week_start(datetime.utcnow())
+    rows = (
+        db.query(ShotOfWeekNominee)
+        .filter(ShotOfWeekNominee.week_start == ws)
+        .order_by(ShotOfWeekNominee.created_at.asc())
+        .all()
+    )
+    counts = dict(
+        db.query(ShotOfWeekVote.nominee_id, func.count(ShotOfWeekVote.id))
+        .filter(ShotOfWeekVote.week_start == ws)
+        .group_by(ShotOfWeekVote.nominee_id)
+        .all()
+    )
+    out = []
+    for n in rows:
+        clip = db.get(VideoClip, n.clip_id)
+        p = db.get(Participant, clip.participant_id) if clip and clip.participant_id else None
+        out.append({
+            "id": n.id,
+            "clip_id": n.clip_id,
+            "caption": n.caption,
+            "golfer": p.name if p else None,
+            "participant_id": p.id if p else None,
+            "hole": clip.hole_number if clip else None,
+            "thumbnail_url": clip.thumbnail_url if clip else None,
+            "source_url": clip.source_url if clip else None,
+            "votes": int(counts.get(n.id, 0)),
+        })
+    return {"week_start": ws.isoformat() + "Z", "nominees": out}
+
+
+@router.post("/shot-of-week")
+def add_sotw_nominee(payload: dict, db: Session = Depends(get_db)):
+    """Put a clip up for this week's vote. Body: {clip_id, caption?}"""
+    from ..models import ShotOfWeekNominee
+
+    clip = db.get(VideoClip, payload.get("clip_id") or 0)
+    if not clip:
+        raise HTTPException(404, "clip not found")
+    ws = _sotw_week_start(datetime.utcnow())
+    dupe = (
+        db.query(ShotOfWeekNominee)
+        .filter(
+            ShotOfWeekNominee.week_start == ws,
+            ShotOfWeekNominee.clip_id == clip.id,
+        )
+        .first()
+    )
+    if dupe:
+        return {"ok": True, "id": dupe.id, "already": True}
+    n = ShotOfWeekNominee(
+        clip_id=clip.id, week_start=ws,
+        caption=(payload.get("caption") or "").strip() or None,
+    )
+    db.add(n)
+    db.add(AuditLog(actor="admin", action="sotw_nominate", target=f"clip:{clip.id}"))
+    db.commit()
+    return {"ok": True, "id": n.id}
+
+
+@router.delete("/shot-of-week/{nominee_id}")
+def remove_sotw_nominee(nominee_id: int, db: Session = Depends(get_db)):
+    """Take a clip back off the shortlist, and its votes with it."""
+    from ..models import ShotOfWeekNominee, ShotOfWeekVote
+
+    n = db.get(ShotOfWeekNominee, nominee_id)
+    if not n:
+        raise HTTPException(404, "nominee not found")
+    db.query(ShotOfWeekVote).filter(ShotOfWeekVote.nominee_id == n.id).delete()
+    db.delete(n)
+    db.add(AuditLog(actor="admin", action="sotw_remove", target=f"nominee:{nominee_id}"))
+    db.commit()
+    return {"ok": True}
+
+
 CONTEST_KINDS = ("ctp", "shot_of_week", "monthly_draw")
 
 

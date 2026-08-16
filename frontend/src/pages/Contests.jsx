@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../api.js";
+import { api, viewerId } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 import LeaderboardCard from "../components/LeaderboardCard.jsx";
 
@@ -65,6 +65,156 @@ function DrawCounter({ contest }) {
         <b style={{ color: "var(--emerald-700)" }}>{contest.prize}</b>
       </div>
     </div>
+  );
+}
+
+/**
+ * Shot of the Week. Five clips we picked, one vote each.
+ *
+ * The empty state matters as much as the full one: a shortlist we have
+ * not put up yet is not a contest with no entries, and rendering it as
+ * one would read like nobody plays here. So it says plainly that the
+ * vote is coming, and when.
+ */
+function ShotOfWeek() {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+
+  async function load() {
+    try {
+      setData(await api.shotOfWeek(viewerId()));
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+  useEffect(() => { load(); }, []);
+
+  async function vote(nomineeId) {
+    setBusy(nomineeId);
+    try {
+      const r = await api.voteShotOfWeek(nomineeId, viewerId());
+      // Take the server's counts rather than guessing locally — a vote
+      // that MOVED has to decrement the old one too.
+      setData((d) => d && {
+        ...d,
+        my_vote: r.my_vote,
+        nominees: d.nominees.map((n) => ({
+          ...n, votes: Number(r.votes?.[String(n.id)] ?? n.votes),
+        })),
+      });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (error && !data) return null;
+  if (!data) {
+    return (
+      <section style={{ marginBottom: 28 }}>
+        <div className="card"><div className="shimmer" style={{ height: 160 }} /></div>
+      </section>
+    );
+  }
+
+  return (
+    <section id="sotw" style={{ marginBottom: 28 }}>
+      <div className="cadence-header">
+        <div>
+          <h2 style={{ marginBottom: 2 }}>Shot of the Week</h2>
+          <p className="small muted" style={{ margin: 0 }}>
+            We shortlist the week&rsquo;s best. You pick the winner.
+          </p>
+        </div>
+        <div className="cadence-countdown">
+          <span className="tiny upper muted" style={{ marginRight: 6 }}>voting ends</span>
+          <Countdown endsAt={data.ends_at} />
+        </div>
+      </div>
+
+      {!data.open ? (
+        <div className="card" style={{ textAlign: "center", padding: "30px 24px" }}>
+          <h3 style={{ marginBottom: 6 }}>Voting opens soon</h3>
+          <p className="small muted" style={{ maxWidth: 460, margin: "0 auto" }}>
+            We are still going through this week&rsquo;s footage. Once the
+            shortlist is up, five shots appear here and the vote is yours.
+          </p>
+          <div
+            className="small center"
+            style={{
+              marginTop: 16, paddingTop: 12,
+              borderTop: "1px solid var(--border)", color: "var(--ink-soft)",
+            }}
+          >
+            <span className="tiny upper muted" style={{ marginRight: 6 }}>Prize</span>
+            <b style={{ color: "var(--emerald-700)" }}>{data.prize}</b>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+            {data.nominees.map((n) => {
+              const mine = data.my_vote === n.id;
+              return (
+                <div key={n.id} className="card" style={{ padding: 12 }}>
+                  <video
+                    src={n.source_url}
+                    poster={n.thumbnail_url || undefined}
+                    controls
+                    playsInline
+                    preload="metadata"
+                    style={{ width: "100%", borderRadius: 8, display: "block", background: "#000" }}
+                  />
+                  <div style={{ marginTop: 10 }}>
+                    <b>{n.golfer}</b>
+                    <span className="small muted">
+                      {n.course ? ` · ${n.course}` : ""}
+                      {n.hole ? ` · Hole ${n.hole}` : ""}
+                    </span>
+                    {n.ball_in_cup && (
+                      <span className="pill ok" style={{ marginLeft: 6 }}>ACE</span>
+                    )}
+                  </div>
+                  {n.caption && (
+                    <p className="small muted" style={{ margin: "6px 0 0" }}>{n.caption}</p>
+                  )}
+                  <div
+                    style={{
+                      display: "flex", alignItems: "center", gap: 10,
+                      marginTop: 10, justifyContent: "space-between",
+                    }}
+                  >
+                    <button
+                      className={mine ? "small" : "secondary small"}
+                      style={{ width: "auto" }}
+                      disabled={busy === n.id}
+                      onClick={() => vote(n.id)}
+                    >
+                      {busy === n.id ? "Voting…" : mine ? "✓ Your vote" : "Vote"}
+                    </button>
+                    <span className="small muted">
+                      {n.votes} vote{n.votes === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div
+            className="small center"
+            style={{ marginTop: 12, color: "var(--ink-soft)" }}
+          >
+            <span className="tiny upper muted" style={{ marginRight: 6 }}>Prize</span>
+            <b style={{ color: "var(--emerald-700)" }}>{data.prize}</b>
+            {data.my_vote && (
+              <span className="muted"> · you can change your vote until voting closes</span>
+            )}
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -142,11 +292,14 @@ export default function Contests() {
         })
       )}
 
+      <ShotOfWeek />
+
       <div className="card" style={{ background: "var(--primary-soft)", border: "1px solid var(--emerald-200)" }}>
         <h3 style={{ color: "var(--emerald-800)" }}>About the prizes</h3>
         <p className="small" style={{ color: "var(--emerald-800)" }}>
-          Closest to the pin is measured from real clips; shot of the week and
-          the monthly draw are picked by us. Winners are locked when the timer
+          Closest to the pin is measured from real clips. Shot of the week is
+          shortlisted by us and decided by your votes. The monthly draw is one
+          entry per round, drawn at random. Winners are locked when the timer
           hits zero, and we email you if it is you.
         </p>
       </div>

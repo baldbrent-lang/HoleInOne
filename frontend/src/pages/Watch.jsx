@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { api } from "../api.js";
+import { api, viewerId } from "../api.js";
 import { Brand, Icon } from "../components/Brand.jsx";
 import { fmtDateTime } from "../time.js";
 
@@ -14,17 +14,6 @@ import { fmtDateTime } from "../time.js";
  *   ?course_id=N  — restrict the channel to one course (clubhouse-TV mode).
  *   ?fullscreen=1 — hide all chrome for kiosk displays.
  */
-
-const VIEWER_KEY = "golfreelz.viewerId";
-
-function viewerId() {
-  let id = localStorage.getItem(VIEWER_KEY);
-  if (!id) {
-    id = `v_${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)}`;
-    localStorage.setItem(VIEWER_KEY, id);
-  }
-  return id;
-}
 
 export default function Watch() {
   const [params] = useSearchParams();

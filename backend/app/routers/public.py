@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -279,6 +279,150 @@ def contests(db: Session = Depends(get_db)):
             "ends_at": month_end.isoformat() + "Z",
             "contests": [monthly_draw],
         },
+    }
+
+
+def _week_start(now: datetime) -> datetime:
+    """Monday 00:00 UTC of the week `now` falls in."""
+    d = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return d - timedelta(days=d.weekday())
+
+
+def _voter_key(user, viewer_id: str | None) -> str | None:
+    """Who is voting. A signed-in user id when we have one, otherwise the
+    browser's own id. Returns None when we have neither, which is the
+    only case a vote is refused."""
+    if user is not None:
+        return f"u:{user.id}"
+    vid = (viewer_id or "").strip()
+    return f"v:{vid[:70]}" if vid else None
+
+
+@router.get("/shot-of-week")
+def shot_of_week(
+    viewer_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(optional_user),
+):
+    """This week's shortlist, its vote counts, and what this voter picked.
+
+    Returns an empty `nominees` list when we have not put anything up
+    yet, which the page renders as "voting opens soon" rather than as an
+    empty contest -- there is a difference between nobody voting and
+    there being nothing to vote on, and only one of them is a problem.
+    """
+    from ..models import ShotOfWeekNominee, ShotOfWeekVote
+
+    now = datetime.utcnow()
+    ws = _week_start(now)
+    week_end = ws + timedelta(days=7)
+
+    nominees = (
+        db.query(ShotOfWeekNominee)
+        .filter(ShotOfWeekNominee.week_start == ws)
+        .order_by(ShotOfWeekNominee.created_at.asc())
+        .all()
+    )
+
+    counts = dict(
+        db.query(ShotOfWeekVote.nominee_id, func.count(ShotOfWeekVote.id))
+        .filter(ShotOfWeekVote.week_start == ws)
+        .group_by(ShotOfWeekVote.nominee_id)
+        .all()
+    )
+
+    key = _voter_key(user, viewer_id)
+    mine = None
+    if key:
+        row = (
+            db.query(ShotOfWeekVote)
+            .filter(ShotOfWeekVote.week_start == ws, ShotOfWeekVote.voter_key == key)
+            .first()
+        )
+        mine = row.nominee_id if row else None
+
+    out = []
+    for n in nominees:
+        clip = db.get(VideoClip, n.clip_id)
+        if not clip:
+            continue
+        participant = (
+            db.get(Participant, clip.participant_id) if clip.participant_id else None
+        )
+        course = db.get(Course, clip.course_id) if clip.course_id else None
+        out.append({
+            "id": n.id,
+            "clip_id": clip.id,
+            "golfer": _short_name(participant.name) if participant else "A golfer",
+            "course": course.name if course else None,
+            "hole": clip.hole_number,
+            "caption": n.caption,
+            "source_url": clip.source_url,
+            "thumbnail_url": clip.thumbnail_url,
+            "ball_in_cup": clip.ball_in_cup,
+            "votes": int(counts.get(n.id, 0)),
+        })
+
+    return {
+        "week_start": ws.isoformat() + "Z",
+        "ends_at": week_end.isoformat() + "Z",
+        "prize": settings.shot_of_week_prize_label or "a prize",
+        "open": bool(out),
+        "nominees": out,
+        "my_vote": mine,
+        "total_votes": sum(counts.values()) if counts else 0,
+    }
+
+
+@router.post("/shot-of-week/{nominee_id}/vote")
+def vote_shot_of_week(
+    nominee_id: int,
+    viewer_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+    user=Depends(optional_user),
+):
+    """Cast (or move) this voter's vote for the week.
+
+    One vote per voter per WEEK. Voting again moves the existing vote
+    rather than being rejected -- changing your mind after watching the
+    others is the whole point of showing five clips.
+    """
+    from ..models import ShotOfWeekNominee, ShotOfWeekVote
+
+    now = datetime.utcnow()
+    ws = _week_start(now)
+
+    nominee = db.get(ShotOfWeekNominee, nominee_id)
+    if not nominee or nominee.week_start != ws:
+        raise HTTPException(404, "not up for a vote this week")
+
+    key = _voter_key(user, viewer_id)
+    if not key:
+        raise HTTPException(400, "viewer_id required")
+
+    existing = (
+        db.query(ShotOfWeekVote)
+        .filter(ShotOfWeekVote.week_start == ws, ShotOfWeekVote.voter_key == key)
+        .first()
+    )
+    if existing:
+        existing.nominee_id = nominee.id
+    else:
+        db.add(ShotOfWeekVote(
+            nominee_id=nominee.id, week_start=ws, voter_key=key,
+        ))
+    db.commit()
+
+    counts = dict(
+        db.query(ShotOfWeekVote.nominee_id, func.count(ShotOfWeekVote.id))
+        .filter(ShotOfWeekVote.week_start == ws)
+        .group_by(ShotOfWeekVote.nominee_id)
+        .all()
+    )
+    return {
+        "ok": True,
+        "my_vote": nominee.id,
+        "votes": {str(k): int(v) for k, v in counts.items()},
     }
 
 
