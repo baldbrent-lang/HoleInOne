@@ -11,6 +11,29 @@ function ordinalSuffix(n) {
   return s[(v - 20) % 10] || s[v] || s[0];
 }
 
+/** Most recent first. The last round played is the one being looked for. */
+function byDateDesc(a, b) {
+  return new Date(b.tee_time) - new Date(a.tee_time);
+}
+
+/**
+ * What to say about a round under its date.
+ *
+ * This used to read "email sent" or "in progress" from summary_sent_at,
+ * a column nothing writes any more since the round-summary email was
+ * removed — so every round, however complete, said "in progress"
+ * forever. It describes the clips now, which is what the golfer came to
+ * find out and what we can actually answer.
+ */
+function roundStatus(r) {
+  const { assigned, total } = r.clips;
+  const known = total || assigned;
+  if (known === 0) return "No clips yet";
+  if (assigned === 0) return `${known} clip${known === 1 ? "" : "s"} being matched`;
+  if (assigned < known) return `${assigned} of ${known} clips ready`;
+  return `${assigned} clip${assigned === 1 ? "" : "s"} ready to watch`;
+}
+
 function formatRoundDate(value) {
   const d = new Date(value);
   const weekday = d.toLocaleDateString("en-US", { weekday: "long" });
@@ -26,6 +49,8 @@ export default function Me() {
   const [error, setError] = useState(null);
   const [openRoundId, setOpenRoundId] = useState(null);
   const [openRoundData, setOpenRoundData] = useState(null);
+  // Which course we have drilled into. Null = showing the course picker.
+  const [courseId, setCourseId] = useState(null);
 
   useEffect(() => {
     if (loading) return;
@@ -58,6 +83,12 @@ export default function Me() {
     );
   }
 
+  // A picker with one option is just an extra click, so a golfer who has
+  // only ever played one course lands straight on their rounds.
+  const selected =
+    (courseId && groups.find((g) => g.course.id === courseId)) ||
+    (groups.length === 1 ? groups[0] : null);
+
   return (
     <div className="wrap">
       <Brand subtitle="Your rounds" />
@@ -69,7 +100,13 @@ export default function Me() {
         <h1 style={{ fontSize: "clamp(1.6rem, 3vw, 2.1rem)" }}>
           Hi {user?.name || user?.email?.split("@")[0]}.
         </h1>
-        <p>{groups.length === 0 ? "No rounds yet — pick a course to get started." : "Pick a round below to watch your clips."}</p>
+        <p>
+          {groups.length === 0
+            ? "No rounds yet — pick a course to get started."
+            : selected
+              ? "Pick a date to watch your clips."
+              : "Pick a course to see the rounds you played there."}
+        </p>
         <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
           <Link to="/courses" className="btn small" style={{ width: "auto" }}>
             Register for a new round
@@ -93,15 +130,62 @@ export default function Me() {
         </div>
       )}
 
-      {groups.map((g) => (
-        <div key={g.course.id} className="card">
-          <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 8 }}>
-            <h3>{g.course.name}</h3>
-            <span className="small muted">{g.course.location}</span>
+      {/* COURSE PICKER. The list used to be every course with every
+          round nested under it, which on a third visit is a long scroll
+          past rounds you are not looking for. Pick the course, then the
+          date. */}
+      {groups.length > 0 && selected === null && (
+        <div
+          className="grid"
+          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}
+        >
+          {groups.map((g) => {
+            const rounds = [...g.rounds].sort(byDateDesc);
+            const last = rounds[0];
+            return (
+              <div
+                key={g.course.id}
+                className="card pointer"
+                onClick={() => { setCourseId(g.course.id); setOpenRoundId(null); }}
+              >
+                <h3 style={{ marginBottom: 2 }}>{g.course.name}</h3>
+                <div className="small muted">{g.course.location}</div>
+                <div className="small" style={{ marginTop: 10 }}>
+                  <b>{rounds.length}</b> round{rounds.length === 1 ? "" : "s"}
+                  {last && (
+                    <span className="muted"> · last {formatRoundDate(last.tee_time)}</span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* THE ROUNDS AT ONE COURSE, newest first. */}
+      {selected && (
+        <>
+          <div
+            className="inline"
+            style={{ justifyContent: "space-between", width: "100%", marginBottom: 10, flexWrap: "wrap", gap: 8 }}
+          >
+            <div>
+              {groups.length > 1 && (
+                <button
+                  className="ghost small"
+                  style={{ width: "auto", marginBottom: 4 }}
+                  onClick={() => { setCourseId(null); setOpenRoundId(null); }}
+                >
+                  ← All courses
+                </button>
+              )}
+              <h3 style={{ margin: 0 }}>{selected.course.name}</h3>
+            </div>
+            <span className="small muted">{selected.course.location}</span>
           </div>
 
           <div className="stack" style={{ gap: 8 }}>
-            {g.rounds.map((r) => {
+            {[...selected.rounds].sort(byDateDesc).map((r) => {
               const open = openRoundId === r.participant_id;
               return (
                 <div key={r.participant_id} className="card tight" style={{ margin: 0 }}>
@@ -112,11 +196,7 @@ export default function Me() {
                   >
                     <div>
                       <b>{formatRoundDate(r.tee_time)}</b>
-                      <div className="small muted">
-                        {r.clips.assigned} of {r.clips.total || r.clips.assigned} clip
-                        {r.clips.assigned === 1 ? "" : "s"} matched
-                        {r.summary_sent_at ? "  ·  email sent" : "  ·  in progress"}
-                      </div>
+                      <div className="small muted">{roundStatus(r)}</div>
                     </div>
                     <div style={{ display: "flex", gap: 6 }}>
                       <a
@@ -164,8 +244,9 @@ export default function Me() {
               );
             })}
           </div>
-        </div>
-      ))}
+        </>
+      )}
+
     </div>
   );
 }
