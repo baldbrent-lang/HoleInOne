@@ -42,13 +42,12 @@ export default function Contests() {
           Climb the boards. Win the prize.
         </h1>
         <p>
-          Every registered round counts. Daily, monthly, and yearly winners across longest carry,
-          highest apex, fastest ball, most aces, and most rounds played. The $10,000 hole-in-one
+          Every registered round counts. Closest to the pin, shot of the week,
+          the monthly draw, and most rounds played. The $10,000 hole-in-one
           sweepstakes runs alongside.
         </p>
         <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
           <Link to="/courses" className="btn small" style={{ width: "auto" }}>Pick a course — $20</Link>
-          <Link to="/leaderboards" className="btn secondary small" style={{ width: "auto" }}>All-time leaderboards →</Link>
         </div>
       </div>
 
@@ -103,10 +102,9 @@ export default function Contests() {
       <div className="card" style={{ background: "var(--primary-soft)", border: "1px solid var(--emerald-200)" }}>
         <h3 style={{ color: "var(--emerald-800)" }}>About the prizes</h3>
         <p className="small" style={{ color: "var(--emerald-800)" }}>
-          Prize amounts are illustrative for V0 — operators wire in the real
-          prize pool, sponsorship, and payout schedule. The leaderboards
-          themselves run on real data: every assigned clip with a stat counts
-          toward its window's contest. Winners are locked when the timer hits zero.
+          Closest to the pin is measured from real clips; shot of the week and
+          the monthly draw are picked by us. Winners are locked when the timer
+          hits zero, and we email you if it is you.
         </p>
       </div>
     </div>

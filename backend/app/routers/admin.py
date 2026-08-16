@@ -535,9 +535,6 @@ def participant_clips(participant_id: int, db: Session = Depends(get_db)):
                 "captured_at": c.captured_at,
                 "source_url": c.source_url,
                 "thumbnail_url": c.thumbnail_url,
-                "carry_yards": c.carry_yards,
-                "apex_feet": c.apex_feet,
-                "ball_speed_mph": c.ball_speed_mph,
                 "processing_status": c.processing_status,
                 "ball_in_cup": c.ball_in_cup,
             }

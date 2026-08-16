@@ -121,9 +121,11 @@ class ClipOut(BaseModel):
     captured_at: datetime
     source_url: str
     thumbnail_url: Optional[str] = None
-    carry_yards: Optional[int] = None
-    apex_feet: Optional[int] = None
-    ball_speed_mph: Optional[int] = None
+    # Carry, apex and ball speed are no longer surfaced: we cannot measure
+    # them reliably, so publishing them was publishing a guess. The
+    # columns stay on the model, and the tracer still fills them, so
+    # nothing in the pipeline changes and this can come back.
+    # distance_from_pin_feet stays -- it is what Closest to the Pin IS.
     distance_from_pin_feet: Optional[int] = None
     processing_status: str
     ball_in_cup: bool
@@ -147,6 +149,8 @@ class IncomingClip(BaseModel):
     captured_at: datetime
     source_url: str
     thumbnail_url: Optional[str] = None
+    # Still ACCEPTED so an existing sender does not start failing
+    # validation; simply not shown anywhere.
     carry_yards: Optional[int] = None
     apex_feet: Optional[int] = None
     ball_speed_mph: Optional[int] = None

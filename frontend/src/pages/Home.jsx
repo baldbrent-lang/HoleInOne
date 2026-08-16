@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Brand, Icon } from "../components/Brand.jsx";
-import LeaderboardCard from "../components/LeaderboardCard.jsx";
 import { api } from "../api.js";
 import useAuth from "../hooks/useAuth.js";
 
@@ -158,16 +157,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* THE GAMES. Four cards, each a doorway to its own leaderboard.
-            This replaced a "Current leaderboard" block that showed two
-            boards inline: the prizes are the reason to play, so they lead,
-            and the standings are one tap away rather than in the way. */}
+        {/* THE GAMES. Each card a doorway to its own contest. The prizes
+            are the reason to play, so they lead. */}
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="inline" style={{ justifyContent: "space-between", width: "100%", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
             <h3>Games &amp; prizes</h3>
-            <div className="small">
-              <Link to="/leaderboards">All-time leaderboards →</Link>
-            </div>
           </div>
           <p className="small muted" style={{ marginBottom: 14 }}>
             Every round you play enters you automatically. Tap a game for

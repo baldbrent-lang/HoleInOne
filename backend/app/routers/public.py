@@ -96,78 +96,6 @@ def _short_name(full_name: str | None) -> str:
     return f"{first} {parts[-1][0].upper()}."
 
 
-@router.get("/leaderboards")
-def public_leaderboards(limit: int = 10, db: Session = Depends(get_db)):
-    """Top entries across the meaningful axes. limit=3 for the home preview,
-    higher for the full page."""
-    limit = max(1, min(50, limit))
-    assigned = ClipProcessingStatus.assigned.value
-
-    # Longest single-shot carry
-    longest_carry_rows = (
-        db.query(Participant.name, Course.name.label("course"), VideoClip.hole_number, VideoClip.carry_yards)
-        .join(VideoClip, VideoClip.participant_id == Participant.id)
-        .join(TeeTime, TeeTime.id == Participant.tee_time_id)
-        .join(Course, Course.id == TeeTime.course_id)
-        .filter(VideoClip.carry_yards.isnot(None), VideoClip.processing_status == assigned)
-        .order_by(desc(VideoClip.carry_yards))
-        .limit(limit)
-        .all()
-    )
-
-    # Fastest single-shot ball speed
-    fastest_ball_rows = (
-        db.query(Participant.name, Course.name.label("course"), VideoClip.hole_number, VideoClip.ball_speed_mph)
-        .join(VideoClip, VideoClip.participant_id == Participant.id)
-        .join(TeeTime, TeeTime.id == Participant.tee_time_id)
-        .join(Course, Course.id == TeeTime.course_id)
-        .filter(VideoClip.ball_speed_mph.isnot(None), VideoClip.processing_status == assigned)
-        .order_by(desc(VideoClip.ball_speed_mph))
-        .limit(limit)
-        .all()
-    )
-
-    # Most hole-in-ones (aces) — counted at the participant level
-    most_aces_rows = (
-        db.query(Participant.name, func.count(VideoClip.id).label("aces"))
-        .join(VideoClip, VideoClip.participant_id == Participant.id)
-        .filter(VideoClip.ball_in_cup.is_(True), VideoClip.processing_status == assigned)
-        .group_by(Participant.id)
-        .order_by(desc(func.count(VideoClip.id)))
-        .limit(limit)
-        .all()
-    )
-
-    # Most rounds played — counted across registered Users
-    most_rounds_rows = (
-        db.query(User.name, User.email, func.count(Participant.id).label("rounds"))
-        .join(Participant, Participant.user_id == User.id)
-        .group_by(User.id)
-        .order_by(desc(func.count(Participant.id)))
-        .limit(limit)
-        .all()
-    )
-
-    return {
-        "longest_carry": [
-            {"golfer": _short_name(name), "course": course, "hole": hole, "value": yards, "unit": "yds"}
-            for (name, course, hole, yards) in longest_carry_rows
-        ],
-        "fastest_ball": [
-            {"golfer": _short_name(name), "course": course, "hole": hole, "value": mph, "unit": "mph"}
-            for (name, course, hole, mph) in fastest_ball_rows
-        ],
-        "most_aces": [
-            {"golfer": _short_name(name), "value": aces, "unit": "aces"}
-            for (name, aces) in most_aces_rows
-        ],
-        "most_rounds": [
-            {"golfer": _short_name(name or email.split("@")[0]), "value": rounds, "unit": "rounds"}
-            for (name, email, rounds) in most_rounds_rows
-        ],
-    }
-
-
 @router.get("/profile/{user_id}")
 def public_profile(user_id: int, db: Session = Depends(get_db)):
     """Public-facing player profile. Aggregates stats across every round
@@ -206,18 +134,26 @@ def public_profile(user_id: int, db: Session = Depends(get_db)):
         clip_q = []
 
     total_aces = sum(1 for (c, _) in clip_q if c.ball_in_cup)
-    longest_carry = max((c.carry_yards for (c, _) in clip_q if c.carry_yards), default=None)
-    fastest_ball = max((c.ball_speed_mph for (c, _) in clip_q if c.ball_speed_mph), default=None)
     closest_ctp = min((c.distance_from_pin_feet for (c, _) in clip_q if c.distance_from_pin_feet is not None), default=None)
 
-    # Highlight clips: prefer aces, then longest carry, then fastest ball
+    # Highlight clips: aces first, then the nearest the pin, then
+    # whatever is most recent. Carry used to rank these, and ranking by a
+    # number we cannot measure put arbitrary shots at the top of a
+    # golfer's profile.
     highlights = []
     for c, course in clip_q:
         if c.ball_in_cup:
-            highlights.append((1000 + (c.carry_yards or 0), c, course, "ACE"))
+            highlights.append((3_000_000, c, course, "ACE"))
     for c, course in clip_q:
-        if c.carry_yards:
-            highlights.append((c.carry_yards, c, course, f"{c.carry_yards} yd carry"))
+        d = c.distance_from_pin_feet
+        if d is not None:
+            # Closest wins, so invert: 1 ft outranks 40 ft.
+            highlights.append((2_000_000 - int(d), c, course, f"{d} ft from the pin"))
+    for c, course in clip_q:
+        # Nothing measured on this one -- still worth showing, ordered by
+        # recency, so a profile is never empty just because the tracer
+        # had nothing to say.
+        highlights.append((int(c.captured_at.timestamp()), c, course, None))
     seen = set()
     dedup = []
     for score, clip, course, tag in sorted(highlights, key=lambda x: -x[0]):
@@ -255,8 +191,6 @@ def public_profile(user_id: int, db: Session = Depends(get_db)):
             "total_rounds": total_rounds,
             "total_aces": total_aces,
             "courses_played": courses_played,
-            "longest_carry_yards": longest_carry,
-            "fastest_ball_mph": fastest_ball,
             "closest_ctp_feet": closest_ctp,
         },
         "highlights": dedup,

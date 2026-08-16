@@ -413,8 +413,6 @@ export default function AdminParticipants() {
                   </div>
                   <div className="small muted" style={{ marginTop: 4 }}>
                     {c.camera_type.replace("_", " ")}
-                    {c.carry_yards ? ` · ${c.carry_yards} yd carry` : ""}
-                    {c.ball_speed_mph ? ` · ${c.ball_speed_mph} mph` : ""}
                   </div>
                 </div>
               ))}

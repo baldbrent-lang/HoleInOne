@@ -1,8 +1,7 @@
 import { Icon } from "./Brand.jsx";
 
 /**
- * Renders one leaderboard's top N rows. Used both in the Home preview and
- * on the full /leaderboards page.
+ * Renders one contest's top N rows, on the contests page.
  */
 export default function LeaderboardCard({ title, icon = "chart", rows, emptyText, footer }) {
   return (

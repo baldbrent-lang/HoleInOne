@@ -125,10 +125,6 @@ export const api = {
   },
   listShowcase: () => request(`/api/public/showcase`),
   publicStats: () => request(`/api/public/stats`, { auth: false }),
-  leaderboards: (limit) =>
-    request(`/api/public/leaderboards${limit ? `?limit=${limit}` : ""}`, {
-      auth: false,
-    }),
   contests: () => request(`/api/public/contests`, { auth: false }),
   broadcastChannels: () => request(`/api/broadcast/channels`, { auth: false }),
   channelShareLink: (key, channelKey) =>

@@ -25,10 +25,10 @@ export default function SampleGallery() {
   const courseName = "Maridoe Golf Club";
   const golferName = "Sample Golfer";
   const holes = [
-    { hole_number: 3, camera_type: "tee", carry_yards: 168, ball_speed_mph: 138, ball_in_cup: false },
-    { hole_number: 8, camera_type: "tee", carry_yards: 161, ball_speed_mph: 134, ball_in_cup: false },
-    { hole_number: 11, camera_type: "tee", carry_yards: 198, ball_speed_mph: 145, ball_in_cup: false },
-    { hole_number: 14, camera_type: "tee", carry_yards: 188, ball_speed_mph: 141, ball_in_cup: true },
+    { hole_number: 3, camera_type: "tee", ball_in_cup: false },
+    { hole_number: 8, camera_type: "tee", ball_in_cup: false },
+    { hole_number: 11, camera_type: "tee", ball_in_cup: false },
+    { hole_number: 14, camera_type: "tee", ball_in_cup: true },
   ];
   const yardages = { "3": 173, "8": 165, "11": 205, "14": 192 };
 
@@ -76,8 +76,6 @@ export default function SampleGallery() {
             />
             <div className="small muted" style={{ marginTop: 8 }}>
               {h.camera_type.replace("_", " ")}
-              {h.carry_yards && `  ·  ${h.carry_yards} yd carry`}
-              {h.ball_speed_mph && `  ·  ${h.ball_speed_mph} mph`}
               {h.ball_in_cup && "  ·  ACE!"}
             </div>
           </div>

@@ -24,8 +24,6 @@ export default function AdminUpload() {
   const [hole, setHole] = useState("");
   const [cameraType, setCameraType] = useState("tee");
   const [capturedAt, setCapturedAt] = useState(nowLocal());
-  const [carryYards, setCarryYards] = useState("");
-  const [ballSpeed, setBallSpeed] = useState("");
   const [distanceFromPin, setDistanceFromPin] = useState("");
   const [ballInCup, setBallInCup] = useState(false);
   const [alreadyTraced, setAlreadyTraced] = useState(false);
@@ -61,8 +59,6 @@ export default function AdminUpload() {
     fd.append("hole_number", hole);
     fd.append("camera_type", cameraType);
     fd.append("captured_at", new Date(capturedAt).toISOString());
-    if (carryYards) fd.append("carry_yards", carryYards);
-    if (ballSpeed) fd.append("ball_speed_mph", ballSpeed);
     if (distanceFromPin) fd.append("distance_from_pin_feet", distanceFromPin);
     fd.append("ball_in_cup", ballInCup ? "true" : "false");
     fd.append("already_traced", alreadyTraced ? "true" : "false");
@@ -193,14 +189,6 @@ export default function AdminUpload() {
           </div>
 
           <div className="row">
-            <div className="field">
-              <label>Carry (yds)</label>
-              <input type="number" value={carryYards} onChange={(e) => setCarryYards(e.target.value)} placeholder="optional" />
-            </div>
-            <div className="field">
-              <label>Ball speed (mph)</label>
-              <input type="number" value={ballSpeed} onChange={(e) => setBallSpeed(e.target.value)} placeholder="optional" />
-            </div>
             <div className="field">
               <label>Distance from pin (ft)</label>
               <input

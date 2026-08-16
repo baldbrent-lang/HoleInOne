@@ -69,17 +69,12 @@ export default function PlayerProfile() {
           <button onClick={share} className="btn small" style={{ width: "auto" }}>
             <Icon name="share" size={14} /> {copied ? "Copied!" : "Share profile"}
           </button>
-          <Link to="/leaderboards" className="btn secondary small" style={{ width: "auto" }}>
-            All-time leaderboards →
-          </Link>
         </div>
       </div>
 
       <div className="stat-grid">
         <StatTile label="Rounds played" value={s.total_rounds} />
         <StatTile label="Hole-in-ones" value={s.total_aces} />
-        <StatTile label="Longest carry" value={s.longest_carry_yards} unit="yds" />
-        <StatTile label="Fastest ball" value={s.fastest_ball_mph} unit="mph" />
         <StatTile label="Closest to pin" value={s.closest_ctp_feet} unit="ft" />
       </div>
 

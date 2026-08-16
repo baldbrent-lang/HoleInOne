@@ -130,9 +130,6 @@ export default function Gallery() {
                 <div className="inline" style={{ justifyContent: "space-between", marginTop: 8, flexWrap: "wrap", gap: 8 }}>
                   <div className="small muted" style={{ textTransform: "capitalize" }}>
                     {c.camera_type.replace("_", " ")}
-                    {c.carry_yards ? `  ·  ${c.carry_yards} yd carry` : ""}
-                    {c.apex_feet ? `  ·  ${c.apex_feet} ft apex` : ""}
-                    {c.ball_speed_mph ? `  ·  ${c.ball_speed_mph} mph` : ""}
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
                     <a className="btn secondary small" href={c.source_url} download>

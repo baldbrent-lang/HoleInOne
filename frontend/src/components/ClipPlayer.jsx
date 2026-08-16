@@ -8,7 +8,9 @@
  * downloads we'd re-render via server-side ffmpeg (out of scope for V0).
  */
 export default function ClipPlayer({ clip, courseName, golferName, yardage }) {
-  const yards = yardage ?? clip.carry_yards;
+  // The hole's yardage only. Measured carry is gone: it was a guess
+  // dressed as a number, and the hole's length is a fact.
+  const yards = yardage;
   return (
     <div className="clip-player">
       <video

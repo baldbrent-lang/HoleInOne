@@ -27,8 +27,6 @@ const EMPTY_SEG = {
   start_sec: "",
   end_sec: "",
   distance_from_pin_feet: "",
-  carry_yards: "",
-  ball_speed_mph: "",
   ball_in_cup: false,
 };
 
@@ -241,8 +239,6 @@ export default function AdminLongUpload() {
           start_sec: parseFloat(s.start_sec),
           end_sec: parseFloat(s.end_sec),
           distance_from_pin_feet: s.distance_from_pin_feet ? parseInt(s.distance_from_pin_feet, 10) : null,
-          carry_yards: s.carry_yards ? parseInt(s.carry_yards, 10) : null,
-          ball_speed_mph: s.ball_speed_mph ? parseInt(s.ball_speed_mph, 10) : null,
           ball_in_cup: !!s.ball_in_cup,
         }))
         .filter((s) => Number.isFinite(s.hole_number) && Number.isFinite(s.start_sec) && Number.isFinite(s.end_sec));
@@ -1127,14 +1123,6 @@ export default function AdminLongUpload() {
                   </div>
                 </div>
                 <div className="row" style={{ marginTop: 8 }}>
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label>Carry (yds)</label>
-                    <input type="number" value={s.carry_yards} onChange={(e) => setSeg(i, { carry_yards: e.target.value })} placeholder="opt" />
-                  </div>
-                  <div className="field" style={{ marginBottom: 0 }}>
-                    <label>Ball speed (mph)</label>
-                    <input type="number" value={s.ball_speed_mph} onChange={(e) => setSeg(i, { ball_speed_mph: e.target.value })} placeholder="opt" />
-                  </div>
                   <div className="field" style={{ marginBottom: 0 }}>
                     <label>Distance from pin (ft)</label>
                     <input type="number" value={s.distance_from_pin_feet} onChange={(e) => setSeg(i, { distance_from_pin_feet: e.target.value })} placeholder="for CTP" />

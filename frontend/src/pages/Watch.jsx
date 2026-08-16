@@ -167,7 +167,6 @@ export default function Watch() {
             </p>
             {!shareToken && (
               <div className="inline" style={{ gap: 8 }}>
-                <Link to="/leaderboards" className="btn ghost small" style={{ width: "auto" }}>Leaderboards</Link>
                 <Link to="/contests" className="btn ghost small" style={{ width: "auto" }}>Contests</Link>
               </div>
             )}

@@ -177,8 +177,6 @@ def my_round_clips(
                 "captured_at": c.captured_at,
                 "source_url": c.source_url,
                 "thumbnail_url": c.thumbnail_url,
-                "carry_yards": c.carry_yards,
-                "ball_speed_mph": c.ball_speed_mph,
                 "ball_in_cup": c.ball_in_cup,
             }
             for c in clips

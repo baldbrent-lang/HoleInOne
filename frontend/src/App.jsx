@@ -24,7 +24,6 @@ import SampleGallery from "./pages/SampleGallery.jsx";
 import Legal from "./pages/Legal.jsx";
 import Invite from "./pages/Invite.jsx";
 import Pay from "./pages/Pay.jsx";
-import Leaderboards from "./pages/Leaderboards.jsx";
 import Contests from "./pages/Contests.jsx";
 import PlayerProfile from "./pages/PlayerProfile.jsx";
 import OperatorLogin from "./pages/OperatorLogin.jsx";
@@ -65,7 +64,6 @@ export default function App() {
         <Route path="/legal/:doc" element={<Legal />} />
         <Route path="/invite/:galleryToken" element={<Invite />} />
         <Route path="/pay/:participantId" element={<Pay />} />
-        <Route path="/leaderboards" element={<Leaderboards />} />
         <Route path="/contests" element={<Contests />} />
         <Route path="/watch" element={<Watch />} />
         <Route path="/c/:shareToken" element={<Watch />} />
