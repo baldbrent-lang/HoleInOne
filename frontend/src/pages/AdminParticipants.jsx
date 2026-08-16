@@ -125,19 +125,30 @@ export default function AdminParticipants() {
   }
 
   async function noClips(p) {
-    // Confirmed, because this one tells a customer we failed them —
-    // sending it to the wrong row is worse than not sending it.
-    const already = !!p.refunded_at;
+    // Confirmed, because this both moves money and tells a customer we
+    // failed them — on the wrong row it is two mistakes, not one.
+    const willRefund = p.paid && !p.refunded_at;
     if (!window.confirm(
       `Tell ${p.name} we didn't record their shots?` +
-      (already
-        ? " The email will say their refund is on its way."
-        : " They have NOT been refunded — the email will offer to put it right."),
+      (willRefund
+        ? " This ALSO refunds their round — one email covers both."
+        : p.refunded_at
+          ? " They're already refunded, so the email will say so."
+          : " Nothing to refund on this round."),
     )) return;
-    showToast(`Sending to ${p.email || p.name}…`);
+    showToast(`${willRefund ? "Refunding and emailing" : "Emailing"} ${p.email || p.name}…`);
     try {
-      await api.sendNoClips(adminPassword, p.id, already);
-      showToast(`Sent to ${p.email || p.name}`);
+      const r = await api.sendNoClips(adminPassword, p.id, true);
+      if (r.refund_error) {
+        // The apology went; the money did not. Say which, plainly —
+        // this is the one outcome an operator must not miss.
+        showToast(`Email sent, but the REFUND FAILED: ${r.refund_error}`);
+      } else if (r.refunded_now) {
+        showToast(`Refunded and emailed ${p.email || p.name}`);
+      } else {
+        showToast(`Emailed ${p.email || p.name}`);
+      }
+      load();
     } catch (e) {
       showToast(`Error: ${e.message}`);
     }
@@ -356,7 +367,7 @@ export default function AdminParticipants() {
                       <button
                         className="ghost small"
                         onClick={() => noClips(p)}
-                        title="Tell this golfer we didn't record their shots"
+                        title="Refund this golfer and tell them we didn't record their shots"
                       >
                         No clips
                       </button>

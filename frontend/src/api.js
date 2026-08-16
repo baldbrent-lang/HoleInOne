@@ -1038,9 +1038,9 @@ export const api = {
       method: "POST",
       adminPassword: key,
     }),
-  sendNoClips: (key, id, refunded = false) =>
+  sendNoClips: (key, id, refund = true) =>
     request(
-      `/api/admin/participants/${id}/no-clips${refunded ? "?refunded=true" : ""}`,
+      `/api/admin/participants/${id}/no-clips${refund ? "" : "?refund=false"}`,
       {
         method: "POST",
         adminPassword: key,

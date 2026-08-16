@@ -636,35 +636,85 @@ def refund_participant(
 @router.post("/participants/{participant_id}/no-clips")
 def send_no_clips(
     participant_id: int,
-    refunded: bool = False,
+    refund: bool = True,
     reason: str | None = None,
     db: Session = Depends(get_db),
 ):
-    """Tell a golfer we recorded nothing for them.
+    """We recorded nothing for this golfer: refund them and say so.
 
     Manual on purpose. "No clips" is not always a failure -- a round may
     still be processing, or the golfer may have walked in -- and an
     automatic apology for a round that turns up an hour later is worse
     than the silence it replaced. Someone has to look and decide.
 
-    Pass refunded=true when the refund has already been issued, so the
-    two facts arrive in one message instead of two.
+    But once someone HAS decided, the refund and the apology are one
+    decision, so this does both. Refunding separately and then sending
+    this would mail the golfer twice, each message announcing the same
+    $20 -- which is why the refund happens here rather than being left
+    to the operator to remember in the right order.
+
+    refund=false covers the case where the money should not move: an
+    unpaid comp round, a group member the lead paid for, or a round
+    already refunded.
     """
     p = db.get(Participant, participant_id)
     if not p:
         raise HTTPException(404, "participant not found")
-    notifications.notify_no_clips(
-        p.name, p.mobile, p.email,
-        course_name=notifications.course_name_for(p),
-        refunded=refunded or p.refunded_at is not None,
-        amount_cents=settings.registration_price_cents,
-        reason=reason,
-    )
+
+    # Only refund what there is to refund. Already-refunded and unpaid
+    # rows fall through to the email, which then reads correctly for
+    # each: "we have refunded you" when the money has moved at some
+    # point, and the offer to put it right when it never was owed.
+    refunded_now = False
+    refund_error: str | None = None
+    if refund and p.paid and not p.refunded_at:
+        result = refund_payment_intent(p.stripe_payment_intent_id)
+        if result.get("ok"):
+            p.refunded_at = datetime.utcnow()
+            p.paid = False
+            refunded_now = True
+            db.add(
+                AuditLog(
+                    actor="admin",
+                    action="refund",
+                    target=f"participant:{p.id}",
+                    detail=(
+                        f"via=no_clips mode={result.get('mode')} "
+                        f"refund_id={result.get('refund_id')}"
+                    ),
+                )
+            )
+        else:
+            # Say so rather than sending an email that promises money we
+            # failed to send. The apology still goes -- the golfer is
+            # owed that either way -- but it drops the refund sentence
+            # and the caller is told to chase it.
+            refund_error = str(result.get("error") or "unknown")
+            log.warning(
+                "no-clips refund failed for participant %s: %s",
+                p.id, refund_error,
+            )
+
     db.add(
         AuditLog(actor="admin", action="no_clips_email", target=f"participant:{p.id}")
     )
     db.commit()
-    return {"ok": True, "to": p.email}
+
+    money_moved = refunded_now or (p.refunded_at is not None)
+    notifications.notify_no_clips(
+        p.name, p.mobile, p.email,
+        course_name=notifications.course_name_for(p),
+        refunded=money_moved,
+        amount_cents=settings.registration_price_cents,
+        reason=reason,
+    )
+    return {
+        "ok": True,
+        "to": p.email,
+        "refunded": money_moved,
+        "refunded_now": refunded_now,
+        "refund_error": refund_error,
+    }
 
 
 @router.post("/participants/{participant_id}/resend-gallery")
