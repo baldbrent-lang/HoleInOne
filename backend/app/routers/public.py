@@ -9,7 +9,7 @@ from typing import Optional
 import json
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
-from sqlalchemy import desc, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -200,12 +200,17 @@ def public_profile(user_id: int, db: Session = Depends(get_db)):
 
 @router.get("/contests")
 def contests(db: Session = Depends(get_db)):
-    """Three contests, three cadences:
-        Daily   — Closest to the Pin (one contest per course)
-        Monthly — Most Rounds Played
-        Yearly  — Most Hole-in-Ones (prize pool splits if multiple golfers tie)
+    """Two live contests:
+        Daily   — Closest to the Pin (one per course)
+        Monthly — the draw, which is a COUNT of entries rather than a board
 
-    Time windows are UTC midnight boundaries.
+    Most Rounds Played and Most Hole-in-Ones are gone. Both ranked people
+    over a whole month or year, which meant a page that mostly showed a
+    near-empty table and a prize nobody could see themselves winning.
+
+    The draw has no standings by design: every round is one entry and no
+    entry is ahead of another, so the honest thing to show is how many
+    are in. Time windows are UTC midnight boundaries.
     """
     from datetime import datetime, timedelta
 
@@ -217,8 +222,6 @@ def contests(db: Session = Depends(get_db)):
         month_end = month_start.replace(year=month_start.year + 1, month=1)
     else:
         month_end = month_start.replace(month=month_start.month + 1)
-    year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    year_end = year_start.replace(year=year_start.year + 1)
 
     assigned = ClipProcessingStatus.assigned.value
 
@@ -241,76 +244,30 @@ def contests(db: Session = Depends(get_db)):
             "id": f"daily_ctp_{course.id}",
             "title": f"Closest to Pin — {course.name}",
             "icon": "flag",
-            "prize": "$50 pro shop gift card",
+            "prize": settings.ctp_prize_label or "a prize",
             "rows": [
                 {"golfer": _short_name(name), "hole": hole, "value": dist, "unit": "ft"}
                 for (name, hole, dist) in ctp_rows
             ],
         })
 
-    # Monthly — Most Rounds Played
-    monthly_rows = (
-        db.query(User.name, User.email, func.count(Participant.id).label("rounds"))
-        .join(Participant, Participant.user_id == User.id)
+    # Monthly — the draw. One entry per round registered this month.
+    entries = (
+        db.query(func.count(Participant.id))
         .filter(Participant.created_at >= month_start)
-        .group_by(User.id)
-        .order_by(desc(func.count(Participant.id)))
-        .limit(10)
-        .all()
-    )
-    monthly_contest = {
-        "id": "monthly_rounds",
-        "title": "Most Rounds Played",
+        .filter(Participant.created_at < month_end)
+        .scalar()
+    ) or 0
+
+    monthly_draw = {
+        "id": "monthly_draw",
+        "title": "Monthly Draw",
         "icon": "users",
-        "prize": "$500 cash + free month of GolfReelz",
-        "rows": [
-            {"golfer": _short_name(n or e.split("@")[0]), "value": r, "unit": "rounds"}
-            for (n, e, r) in monthly_rows
-        ],
-    }
-
-    # Yearly — Most Hole-in-Ones (split prize among ties for #1)
-    aces_rows = (
-        db.query(Participant.name, func.count(VideoClip.id).label("aces"))
-        .join(VideoClip, VideoClip.participant_id == Participant.id)
-        .filter(VideoClip.ball_in_cup.is_(True))
-        .filter(VideoClip.processing_status == assigned)
-        .filter(VideoClip.captured_at >= year_start)
-        .group_by(Participant.id)
-        .order_by(desc(func.count(VideoClip.id)))
-        .limit(20)
-        .all()
-    )
-    pool_dollars = 5000
-    top_score = aces_rows[0][1] if aces_rows else 0
-    leaders_count = sum(1 for (_, c) in aces_rows if c == top_score) if top_score > 0 else 0
-    if leaders_count > 1:
-        per_winner = pool_dollars // leaders_count
-        prize_label = (
-            f"${pool_dollars:,} pool — split ${per_winner:,} each among {leaders_count} leaders tied at {top_score}"
-        )
-    elif leaders_count == 1:
-        prize_label = f"${pool_dollars:,} cash"
-    else:
-        prize_label = f"${pool_dollars:,} pool — split if multiple aces"
-
-    yearly_contest = {
-        "id": "yearly_aces",
-        "title": "Most Hole-in-Ones",
-        "icon": "dollar",
-        "prize": prize_label,
-        "split_pool_dollars": pool_dollars,
-        "leaders_count": leaders_count,
-        "top_score": top_score,
-        "rows": [
-            {
-                "golfer": _short_name(n),
-                "value": c,
-                "unit": "aces",
-                "tied_for_first": c == top_score and top_score > 0,
-            }
-            for (n, c) in aces_rows
-        ],
+        "prize": settings.monthly_draw_prize_label or "a prize",
+        "kind": "counter",
+        "count": int(entries),
+        "count_label": "rounds entered this month",
+        "rows": [],
     }
 
     return {
@@ -320,11 +277,7 @@ def contests(db: Session = Depends(get_db)):
         },
         "monthly": {
             "ends_at": month_end.isoformat() + "Z",
-            "contests": [monthly_contest],
-        },
-        "yearly": {
-            "ends_at": year_end.isoformat() + "Z",
-            "contests": [yearly_contest],
+            "contests": [monthly_draw],
         },
     }
 

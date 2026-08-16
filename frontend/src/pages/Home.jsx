@@ -29,7 +29,7 @@ const GAMES = [
     icon: "dollar",
     blurb:
       "Every ace is on camera and on the wall. One swing, any round, any course.",
-    prize: "Cash prize",
+    prize: "$10,000",
     to: "/contests#ace",
   },
   {
@@ -38,8 +38,8 @@ const GAMES = [
     cadence: "Weekly · all courses",
     icon: "sparkle",
     blurb:
-      "The best tracer of the week, voted by players. Winner gets posted on our socials.",
-    prize: "Cash prize",
+      "The best shot of the week, picked by us. Winner gets posted on our socials.",
+    prize: "Free round + featured",
     to: "/contests#sotw",
   },
   {
@@ -49,7 +49,7 @@ const GAMES = [
     icon: "users",
     blurb:
       "Every round you play is one entry. Play more, more chances. Drawn on the 1st.",
-    prize: "Cash prize",
+    prize: "$100",
     to: "/contests#draw",
   },
 ];
