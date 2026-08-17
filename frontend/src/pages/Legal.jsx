@@ -2,10 +2,18 @@ import { Link, useParams } from "react-router-dom";
 import { Brand } from "../components/Brand.jsx";
 
 /**
- * Static legal + FAQ pages. Boilerplate text — operator should have a real
- * lawyer review before any public launch. Especially the sweepstakes rules
- * (state-by-state requirements) and the privacy policy (BIPA in IL,
- * CCPA in CA).
+ * Static legal + FAQ pages. DRAFT TEXT — a real lawyer must review this
+ * before any public launch, and every [BRACKETED] value below has to be
+ * filled in first.
+ *
+ * The hole-in-one prize is written as a CONTEST OF SKILL, not a
+ * sweepstakes. The $20 buys the par-3 video system; making an ace is a
+ * feat of skill, not a draw, so there are no "entries", no odds, and no
+ * alternate free entry method. That framing has to stay consistent
+ * everywhere or it stops being true: the moment the prize turns on
+ * chance rather than the shot, it needs the whole sweepstakes apparatus
+ * back (and, for a prize over $5,000, registration and bonding in FL
+ * and NY).
  */
 
 const DOCS = {
@@ -13,11 +21,11 @@ const DOCS = {
     title: "FAQ",
     sections: [
       ["What is GolfReelz?",
-        "GolfReelz films your par-3 tee shots, adds tracer overlays + stats, and emails the clips to you after your round. Every registered round is also entered into a $10,000 hole-in-one sweepstakes."],
+        "GolfReelz films your par-3 tee shots, adds tracer overlays, and emails the clips to you after your round. Golfers registered on the par-3 video system are also eligible for our $10,000 hole-in-one contest."],
       ["How much does it cost?",
-        "$20 per round per golfer. That covers all video capture, processing, and delivery, plus your sweepstakes entry. Optional alternate (free) entry available — see Official Rules."],
+        "$20 per round per golfer. That covers the par-3 video system in full — capture, processing, and delivery. Eligibility for the hole-in-one contest comes with being registered; there is no separate entry fee for it."],
       ["Is the $10,000 prize for real?",
-        "Yes. Each round you register includes one entry. Aces on any par-3 you played that round are eligible. We verify with the on-cup camera, so disputes are minimal. If approved, we cut a check within 7 days."],
+        "Yes. Any ace you make on a camera-equipped par 3 while registered is eligible, subject to the Official Rules. We verify with the on-cup camera, so disputes are minimal. If approved, we pay within thirty (30) days of verification."],
       ["What if my clip doesn't show up?",
         "Tap the 'Flag' button on any clip in your gallery, or reply to the delivery email. Our ops team manually reviews flagged clips and either re-assigns or refunds."],
       ["Do I need to download an app?",
@@ -37,7 +45,7 @@ const DOCS = {
       ["Acceptance",
         "By registering for a round, you agree to these Terms and to our Privacy Policy. If you don't agree, don't use the service."],
       ["The service",
-        "GolfReelz captures, processes, and delivers video clips of your par-3 tee shots at participating golf courses. Each registration also entitles you to one entry in our hole-in-one sweepstakes (Official Rules separately published)."],
+        "GolfReelz operates a par-3 video system at participating golf courses: we capture, process, and deliver video clips of your tee shots. Registering also makes you eligible for our hole-in-one contest (Official Rules separately published)."],
       ["Pricing & payment",
         "Each round registration is $20.00 USD, charged at registration via Stripe. Group registrations charge the lead golfer for all players. All sales final except as described under Refunds."],
       ["Refunds",
@@ -45,7 +53,7 @@ const DOCS = {
       ["Video rights",
         "You grant GolfReelz a non-exclusive license to film, process, store, and deliver clips of your tee shots, and to use anonymized clips (no personally identifying info) for product marketing. You retain all rights to publicly share your own clips. We will remove clips on request within 30 days."],
       ["Acceptable use",
-        "Don't impersonate another golfer, share gallery links to defraud the sweepstakes, or attempt to bypass clip-matching to claim someone else's shots. Violations void your sweepstakes entry and may result in account termination."],
+        "Don't impersonate another golfer, misrepresent a shot to claim a prize, or attempt to bypass clip-matching to claim someone else's shots. Violations void any prize eligibility and may result in account termination."],
       ["Disclaimers",
         "Service provided as-is. We don't guarantee 100% capture rate (cameras malfunction, weather happens). We aren't responsible for course conditions, your scores, or your slice."],
       ["Liability cap",
@@ -84,34 +92,38 @@ const DOCS = {
   },
 
   rules: {
-    title: "$10,000 Hole-in-One Sweepstakes — Official Rules",
+    title: "$10,000 Hole-in-One Contest — Official Rules",
     sections: [
-      ["No purchase necessary",
-        "NO PURCHASE OR PAYMENT NECESSARY TO ENTER OR WIN. A purchase or payment will not increase your chances of winning."],
+      ["What this is",
+        "This is a CONTEST OF SKILL, not a sweepstakes or a lottery. The prize is won by making a hole-in-one — a feat of skill — and not by any drawing, random selection, or element of chance. Your $20 registration pays for the GolfReelz par-3 video system (capture, processing, and delivery of your clips). No part of it is an entry fee for this contest, and paying more does not improve your chances, because there are no chances to improve."],
       ["Eligibility",
-        "Open to legal residents of the 50 United States and the District of Columbia, age 18 or older at time of entry. Void where prohibited or restricted by law. GolfReelz employees, contractors, and immediate family are not eligible."],
+        "Open to legal residents of the 50 United States and the District of Columbia, age 18 or older. Void where prohibited or restricted by law. GolfReelz employees, contractors, and their immediate families are not eligible."],
       ["Sponsor",
-        "GolfReelz, Inc. (the 'Sponsor'), [Sponsor address — fill in before launch]."],
-      ["Sweepstakes period",
-        "Entries accepted from [LAUNCH DATE] until [END DATE] ('Sweepstakes Period'). Entries received before or after this period are void."],
-      ["How to enter",
-        "Method 1 (paid): Register for a GolfReelz round at a participating course for $20. Each round gives you one (1) entry per par-3 you tee off. Method 2 (free / AMOE): Mail a 3x5 card with your name, mailing address, email, phone, date of birth, and the participating course you'll be playing to: GolfReelz Sweepstakes Entry, [P.O. Box], [City, State, ZIP]. Limit one (1) free entry per person per day. Free entries have equal odds of winning as paid entries."],
-      ["Winning condition",
-        "A valid entry wins the prize when, during the Sweepstakes Period, the entered golfer makes a hole-in-one on a par-3 hole at the participating course, captured on the GolfReelz cup-cam, and verified by the Sponsor as a hole-in-one in accordance with USGA Rules of Golf. The Sponsor's determination is final."],
-      ["Prize",
-        "Ten thousand US dollars ($10,000.00) paid by check to the verified winner within thirty (30) days of verification. Limit one prize per person per Sweepstakes Period. Sponsor reserves the right to substitute a prize of equal or greater value if the advertised prize becomes unavailable."],
+        "GolfReelz, Inc. (the 'Sponsor'), [SPONSOR ADDRESS]."],
+      ["Contest period",
+        "Runs from [LAUNCH DATE] until [END DATE] (the 'Contest Period'). Shots made outside this period are not eligible."],
+      ["How to take part",
+        "Register for a round on the GolfReelz par-3 video system at a participating course and play the camera-equipped par-3 holes. Registration must be completed BEFORE you tee off on the hole in question — a shot made before registering cannot be verified against a registered golfer and is not eligible."],
+      ["Qualifying shot",
+        "A qualifying shot is a hole-in-one made from the designated tee markers on a camera-equipped par-3 hole during the Contest Period, in the course of an ordinary round of golf, in accordance with the USGA Rules of Golf. The hole must play at least [MINIMUM YARDAGE] yards from the tee used. Practice swings, replayed shots, mulligans, and shots taken outside an ordinary round do not qualify."],
+      ["Witnesses",
+        "The shot must be witnessed by at least [NUMBER] other golfers aged 18 or older who are not immediate family of the claimant, and who are willing to confirm the shot in writing if asked."],
       ["Verification",
-        "All claimed aces are reviewed by Sponsor's verification queue using cup-camera footage and tee-camera footage. If any verification camera was malfunctioning, the claim is reviewed by an independent panel; in case of insufficient evidence, the claim is denied. By participating, you agree to abide by the Sponsor's verification decision."],
+        "All claimed aces are reviewed by the Sponsor using cup-camera and tee-camera footage. Where a verification camera was not functioning, the claim is reviewed by an independent panel; where the evidence is insufficient, the claim is denied. By taking part you agree to abide by the Sponsor's verification decision, which is final."],
+      ["Prize",
+        "Ten thousand US dollars ($10,000.00), paid to the verified winner within thirty (30) days of verification. Limit one prize per person per Contest Period. The Sponsor may substitute a prize of equal or greater value if the advertised prize becomes unavailable. [NOTE FOR COUNSEL: confirm this matches the terms of the prize indemnity policy — insurers commonly set their own minimum yardage, witness, and advance-notice conditions, and any condition in the policy must also appear in these rules.]"],
+      ["Claiming",
+        "Verified winners are notified by email and asked to complete a short claim form confirming how to reach them. The Sponsor will never ask for bank or card details by email or on that form."],
       ["Taxes",
-        "Winner is solely responsible for all federal, state, and local taxes on the prize. A 1099-MISC will be issued."],
+        "The winner is solely responsible for all federal, state, and local taxes on the prize. A 1099-MISC will be issued."],
       ["Publicity release",
-        "By accepting the prize, the winner grants Sponsor the right to use their name, likeness, voice, and biographical information for promotional purposes without further compensation, except where prohibited."],
+        "By accepting the prize, the winner grants the Sponsor the right to use their name, likeness, and the video of the winning shot for promotional purposes without further compensation, except where prohibited by law."],
       ["Limitation of liability",
-        "Participants release Sponsor and its agents from any liability for claims arising out of participation. Sponsor is not responsible for technical failures, mis-captures, or any condition beyond its control."],
+        "Participants release the Sponsor and its agents from any liability for claims arising out of participation. The Sponsor is not responsible for camera or technical failures, mis-captures, or any condition beyond its control. Where a shot cannot be verified because of such a failure, the sole remedy is the refund described in the Terms of Service."],
       ["Governing law",
-        "These rules are governed by the laws of [State], without regard to conflict-of-law principles. Disputes shall be resolved in [County], [State]."],
+        "These rules are governed by the laws of [STATE], without regard to conflict-of-law principles. Disputes shall be resolved in [COUNTY], [STATE]."],
       ["Winner's list",
-        "For a list of winners, send a self-addressed stamped envelope to the Sponsor address above within 90 days of the end of the Sweepstakes Period."],
+        "For a list of winners, write to the Sponsor address above within 90 days of the end of the Contest Period."],
     ],
   },
 };

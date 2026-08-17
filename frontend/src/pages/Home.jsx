@@ -77,7 +77,7 @@ export default function Home() {
 
   return (
     <div className="wrap wide">
-      <Brand subtitle="Par 3 Videos and Hole In One Sweepstakes!" />
+      <Brand subtitle="Par 3 video system · $10,000 hole-in-one contest" />
 
       <div className="hero">
         <span className="eyebrow">

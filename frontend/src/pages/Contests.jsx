@@ -232,8 +232,7 @@ export default function Contests() {
         </h1>
         <p>
           Every registered round counts. Closest to the pin, shot of the week,
-          and the monthly draw. The $10,000 hole-in-one sweepstakes runs
-          alongside.
+          and the monthly draw. The $10,000 hole-in-one contest runs alongside.
         </p>
         <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
           <Link to="/courses" className="btn small" style={{ width: "auto" }}>Pick a course — $20</Link>
