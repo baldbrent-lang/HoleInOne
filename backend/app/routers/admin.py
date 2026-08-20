@@ -67,6 +67,7 @@ from ..database import SessionLocal, get_db
 from ..deps import require_admin
 from .cameras import _LIVE_FRAMES, _WATCHERS, _LIVE_LOCK, WATCH_TTL, FRAME_TTL
 from .cameras import battery_status as _battery_status
+from .cameras import focus_status as _focus_status
 from ..models import (
     AuditLog,
     Camera,
@@ -12811,6 +12812,9 @@ def _camera_to_dict(
         "firmware_version": c.firmware_version,
         "battery": _battery_status(
             c.battery_voltage, c.battery_current_a, c.battery_updated_at,
+        ),
+        "focus": _focus_status(
+            c.focus_score, c.focus_brightness, c.focus_updated_at,
         ),
         "enabled": bool(c.enabled),
         "triggering_enabled": bool(c.triggering_enabled),

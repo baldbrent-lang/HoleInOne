@@ -422,6 +422,16 @@ class Camera(Base):
     # Low-battery alert dedup — one notification per discharge, reset
     # when the battery comes back above the threshold.
     battery_low_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Focus, measured by the agent off the frames it is already reading
+    # and reported with each heartbeat. Variance of the Laplacian: high
+    # is sharper. The ABSOLUTE value means nothing across cameras — it
+    # depends entirely on what the camera is pointed at, and turf alone
+    # scores low however sharp it is. It is worth watching two ways: as
+    # a trend on one camera, where a drop means something moved; and
+    # live at the mount, where the peak is what you turn the ring to.
+    focus_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    focus_brightness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    focus_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # Soft toggle distinct from `enabled`: when False the camera stays
     # online (heartbeats + live-watch still work) but the backend

@@ -1178,6 +1178,36 @@ export default function AdminCameras() {
                       {cam.battery.low && <> · LOW</>}
                     </span>
                   )}{" "}
+                  {cam.focus && (
+                    <span
+                      className={`pill small ${cam.focus.unreliable ? "" : "ok"}`}
+                      style={
+                        cam.focus.unreliable
+                          ? { background: "#f59e0b", color: "#1a1a1a" }
+                          : undefined
+                      }
+                      title={[
+                        `Focus score ${cam.focus.score}`,
+                        "higher is sharper; compare against THIS camera over time, not against another one — the number depends on what the camera is pointed at",
+                        cam.focus.brightness != null
+                          ? `brightness ${cam.focus.brightness}`
+                          : null,
+                        cam.focus.exposure === "dark"
+                          ? "too dark to trust — fix exposure before reading the score"
+                          : cam.focus.exposure === "bright"
+                            ? "blown out — fix exposure before reading the score"
+                            : null,
+                        cam.focus.updated_at
+                          ? `updated ${tsRel(cam.focus.updated_at)}`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    >
+                      🔎 {cam.focus.score}
+                      {cam.focus.unreliable && <> · {cam.focus.exposure}</>}
+                    </span>
+                  )}{" "}
                   {/* Course FIRST, and always — it is the camera's real
                       placement. `name` is free text and goes stale the
                       moment a camera moves, so it renders after, dimmer,

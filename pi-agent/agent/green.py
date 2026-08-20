@@ -33,6 +33,7 @@ from .common import (
     mux_audio_into_video,
     open_camera,
 )
+from .focus_meter import FocusMeter
 from .livestream import LiveStreamer
 
 log = logging.getLogger("golfreelz_agent.green")
@@ -128,15 +129,24 @@ class GreenAgent:
         from .battery import BatteryMonitor
 
         _batt = BatteryMonitor(self.cfg.get("battery"))
+        # No ROI on the green: it has no tee box, so the meter falls
+        # back to the middle-lower half of the frame -- the green and
+        # its surrounds rather than the sky.
+        _focus = FocusMeter()
+        self._focus = _focus
+
+        def _hb_extra():
+            out = {}
+            if (r := _batt.read_averaged()):
+                out["battery_voltage"] = r["voltage"]
+                out["battery_current_a"] = r["current_a"]
+            if (f := _focus.read()):
+                out.update(f)
+            return out or None
+
         hb = HeartbeatThread(
             self.client, self.heartbeat_seconds, FIRMWARE,
-            extra_fn=lambda: (
-                {
-                    "battery_voltage": r["voltage"],
-                    "battery_current_a": r["current_a"],
-                }
-                if (r := _batt.read_averaged()) else None
-            ),
+            extra_fn=_hb_extra,
         )
         hb.start()
 
@@ -225,6 +235,8 @@ class GreenAgent:
         deliver frames. Runs until self.stopping is set."""
         while not self.stopping.is_set():
             ok, frame = cap.read()
+            if ok and frame is not None:
+                self._focus.sample(frame)
             if not ok or frame is None:
                 time.sleep(0.02)
                 continue

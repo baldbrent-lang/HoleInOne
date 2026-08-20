@@ -31,6 +31,7 @@ from .common import (
     mux_audio_into_video,
     open_camera,
 )
+from .focus_meter import FocusMeter
 from .livestream import LiveStreamer
 
 log = logging.getLogger("golfreelz_agent.tee")
@@ -582,15 +583,25 @@ class TeeAgent:
         from .battery import BatteryMonitor
 
         _batt = BatteryMonitor(self.cfg.get("battery"))
+        # The tee measures sharpness INSIDE the tee box: that is the
+        # patch whose focus decides whether a golfer is detected at all,
+        # and a camera sharp on the horizon but soft on the tee is
+        # exactly the failure this is meant to surface.
+        _focus = FocusMeter(roi=self.roi)
+        self._focus = _focus
+
+        def _hb_extra():
+            out = {}
+            if (r := _batt.read_averaged()):
+                out["battery_voltage"] = r["voltage"]
+                out["battery_current_a"] = r["current_a"]
+            if (f := _focus.read()):
+                out.update(f)
+            return out or None
+
         hb = HeartbeatThread(
             self.client, self.heartbeat_seconds, FIRMWARE,
-            extra_fn=lambda: (
-                {
-                    "battery_voltage": r["voltage"],
-                    "battery_current_a": r["current_a"],
-                }
-                if (r := _batt.read_averaged()) else None
-            ),
+            extra_fn=_hb_extra,
         )
         hb.start()
 
@@ -648,6 +659,9 @@ class TeeAgent:
                 # meanwhile, so a slow detect() can't drop frames.
                 frame = snap[-1][1]
                 now = time.time()
+                # Sharpness, off the frame we already have. No-op except
+                # every few seconds; rides out on the heartbeat.
+                _focus.sample(frame)
                 centroid = detector.detect(frame)
                 in_roi = centroid is not None and _in_roi(centroid, self.roi)
                 # Manual trigger, for testing the record+upload path

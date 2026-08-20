@@ -453,12 +453,53 @@ def battery_status(
     }
 
 
+def focus_status(
+    score: float | None,
+    brightness: float | None,
+    updated_at=None,
+) -> dict | None:
+    """Focus readout for the dashboard. None when nothing reported yet.
+
+    NO PASS/FAIL, deliberately. The score is a variance of the
+    Laplacian, and its absolute value depends entirely on what the
+    camera is pointed at -- a tree line scores an order of magnitude
+    above bare turf at identical sharpness. A threshold would be wrong
+    on half the cameras the day it shipped.
+
+    What IS reportable is when the number cannot be trusted: the
+    measurement needs light, and below ~40 or above ~220 mean luma the
+    region is crushed or blown and the score says more about exposure
+    than about the lens. That gets flagged; sharpness itself is left for
+    a human to read against the same camera yesterday.
+    """
+    if score is None:
+        return None
+    b = float(brightness) if brightness is not None else None
+    exposure = None
+    if b is not None:
+        if b < 40:
+            exposure = "dark"
+        elif b > 220:
+            exposure = "bright"
+    return {
+        "score": round(float(score), 1),
+        "brightness": round(b, 1) if b is not None else None,
+        # True when exposure makes the score unreliable — fix the light
+        # before reading anything into the sharpness.
+        "unreliable": exposure is not None,
+        "exposure": exposure,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+
+
 @router.post("/{token}/heartbeat")
 def heartbeat(
     token: str,
     firmware_version: str | None = Form(None),
     battery_voltage: float | None = Form(None),
     battery_current_a: float | None = Form(None),
+    focus_score: float | None = Form(None),
+    focus_brightness: float | None = Form(None),
     db: Session = Depends(get_db),
 ):
     """Cheap keepalive the Pi calls every ~60 s. Touches last_seen_at
@@ -468,6 +509,16 @@ def heartbeat(
     cam = _get_camera_by_token(token, db)
     if firmware_version:
         cam.firmware_version = firmware_version.strip()[:40]
+    # Sharpness, measured by the agent on a frame it already had. Stored
+    # unconditionally rather than alerted on: unlike battery voltage
+    # there is no threshold that means the same thing on two cameras
+    # pointed at different scenes, so this is for a human to read.
+    if focus_score is not None:
+        cam.focus_score = float(focus_score)
+        cam.focus_brightness = (
+            float(focus_brightness) if focus_brightness is not None else None
+        )
+        cam.focus_updated_at = _utcnow_naive()
     if battery_voltage is not None:
         cam.battery_voltage = float(battery_voltage)
         cam.battery_current_a = (
