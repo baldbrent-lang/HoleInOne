@@ -68,6 +68,7 @@ from ..deps import require_admin
 from .cameras import _LIVE_FRAMES, _WATCHERS, _LIVE_LOCK, WATCH_TTL, FRAME_TTL
 from .cameras import battery_status as _battery_status
 from .cameras import focus_status as _focus_status
+from .cameras import _focus_remaining as _cam_focus_remaining
 from ..models import (
     AuditLog,
     Camera,
@@ -12535,11 +12536,18 @@ async def upload_clip(
             thanks.schedule_thanks(p)
             db.commit()
 
+    # Looked up here rather than reusing `p` above: that one only exists
+    # inside the notification branch, so on any clip that did not fire a
+    # gallery email the name was simply not in scope.
+    _matched = (
+        db.get(Participant, clip.participant_id)
+        if clip.participant_id else None
+    )
     return {
         "clip_id": clip.id,
         "status": clip.processing_status,
         "participant_id": clip.participant_id,
-        "participant_name": participant.name if participant else None,
+        "participant_name": _matched.name if _matched else None,
         "source_url": clip.source_url,
         "tracer_url": clip.tracer_url,
         "tracer_info": tracer_info,
@@ -12815,6 +12823,8 @@ def _camera_to_dict(
         ),
         "focus": _focus_status(
             c.focus_score, c.focus_brightness, c.focus_updated_at,
+            best=c.focus_best,
+            focus_seconds=_cam_focus_remaining(c.id),
         ),
         "enabled": bool(c.enabled),
         "triggering_enabled": bool(c.triggering_enabled),
@@ -13008,6 +13018,67 @@ def capture_camera(
             "Production."
         ),
     }
+
+
+@router.post("/cameras/{camera_id}/focus-mode")
+def start_focus_mode(
+    camera_id: int,
+    seconds: int = Body(600, embed=True),
+    db: Session = Depends(get_db),
+):
+    """Arm focus mode so a lens ring can be turned against a live number.
+
+    Focus normally rides the heartbeat, once a minute. That is right for
+    noticing a camera has drifted and useless for adjusting one: turn,
+    wait a minute, turn, wait a minute. Armed, the agent measures every
+    second and reports every few, which is fast enough to work against.
+
+    Time-boxed on purpose. Someone who drives away mid-adjustment should
+    not leave a Pi reporting at that rate on cellular data until the next
+    person notices, so it lapses on its own.
+
+    Arming also resets the session peak. The peak is the whole point --
+    turning the ring, by the time you know you are past the best you are
+    past it -- and a peak carried over from a previous session would sit
+    there unreachable and make the new one look like a failure.
+    """
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    seconds = max(60, min(1800, int(seconds)))
+    from .cameras import request_focus_mode
+
+    request_focus_mode(camera_id, seconds)
+    cam.focus_best = None
+    cam.focus_best_at = None
+    db.add(AuditLog(
+        actor="admin", action="focus_mode",
+        target=f"camera:{camera_id}", detail=f"seconds={seconds}",
+    ))
+    db.commit()
+    return {
+        "ok": True,
+        "camera_id": camera_id,
+        "seconds": seconds,
+        "note": (
+            "Focus mode armed. The camera picks it up on its next status "
+            "poll (a second or two) and starts reporting fast. Turn the "
+            "ring until the score peaks — 'best' tells you when you have "
+            "gone past. It switches itself off when the time is up."
+        ),
+    }
+
+
+@router.post("/cameras/{camera_id}/focus-mode/stop")
+def stop_focus_mode(camera_id: int, db: Session = Depends(get_db)):
+    """End focus mode early. Not required — it expires on its own."""
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    from .cameras import clear_focus_mode
+
+    clear_focus_mode(camera_id)
+    return {"ok": True, "camera_id": camera_id}
 
 
 @router.post("/cameras/{camera_id}/calibrate")
