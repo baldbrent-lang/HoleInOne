@@ -447,6 +447,25 @@ class TeeAgent:
         )
         return MotionFallbackDetector(detect_width=det_width)
 
+    def _on_focus_mode(self, seconds: float) -> None:
+        """Backend says focus mode is armed for `seconds` (0 = off).
+
+        Called on every watch-status poll while armed, so the deadline
+        keeps sliding forward and the mode ends a beat after the backend
+        stops asking -- no explicit "off" message to lose.
+
+        Guarded on both attributes because this arrives from the
+        livestream thread, which starts before the meter and the
+        heartbeat exist on the green runner.
+        """
+        deadline = time.monotonic() + float(seconds or 0)
+        meter = getattr(self, "_focus", None)
+        if meter is not None:
+            meter.set_fast_until(deadline)
+        hb = getattr(self, "_hb", None)
+        if hb is not None:
+            hb.set_fast_until(deadline)
+
     def _request_capture(self, seconds: float) -> None:
         """Operator pressed Capture. Records `seconds` regardless of
         whether anyone is in the ROI, then follows the ordinary trigger
@@ -603,10 +622,12 @@ class TeeAgent:
             self.client, self.heartbeat_seconds, FIRMWARE,
             extra_fn=_hb_extra,
         )
+        self._hb = hb
         hb.start()
 
         streamer = LiveStreamer(
             self.client, on_capture_request=self._request_capture,
+            on_focus_mode=self._on_focus_mode,
         )
         streamer.start()
         self.streamer = streamer

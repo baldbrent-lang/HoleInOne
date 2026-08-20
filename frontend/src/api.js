@@ -381,6 +381,17 @@ export const api = {
       method: "POST",
       adminPassword: key,
     }),
+  focusMode: (key, cameraId, seconds = 600) =>
+    request(`/api/admin/cameras/${cameraId}/focus-mode`, {
+      method: "POST",
+      adminPassword: key,
+      body: { seconds },
+    }),
+  stopFocusMode: (key, cameraId) =>
+    request(`/api/admin/cameras/${cameraId}/focus-mode/stop`, {
+      method: "POST",
+      adminPassword: key,
+    }),
   // ---- Green-camera calibration (image px -> feet on the green) ----
   getGreenCalibration: (key, cameraId) =>
     request(`/api/admin/cameras/${cameraId}/calibration`, { adminPassword: key }),

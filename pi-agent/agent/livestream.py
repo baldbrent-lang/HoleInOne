@@ -49,6 +49,7 @@ class LiveStreamer:
         idle_poll_seconds: float = 1.0,
         watched_poll_seconds: float = 5.0,
         on_capture_request=None,
+        on_focus_mode=None,
     ) -> None:
         self.client = client
         # Called with (seconds) when the backend asks for an on-demand
@@ -58,6 +59,9 @@ class LiveStreamer:
         # green ignores it, because a green records only when its paired
         # tee tells it to.
         self.on_capture_request = on_capture_request
+        # Called on every poll with the seconds of focus mode remaining
+        # (0 when off), so the agent can raise its measurement rate.
+        self.on_focus_mode = on_focus_mode
         self.frame_interval = 1.0 / max(1, fps)
         self.jpeg_quality = max(20, min(95, jpeg_quality))
         self.idle_poll = idle_poll_seconds
@@ -124,6 +128,15 @@ class LiveStreamer:
                 log.info("live-stream %s", "started" if new_state else "stopped")
             self._watching = new_state
             # Consumed server-side on read, so it arrives exactly once.
+            # Focus mode is a STATE, not a one-shot: it arrives on every
+            # poll until it expires, and the handler is called each time
+            # so the deadline keeps moving forward while it is armed.
+            fsecs = payload.get("focus_seconds")
+            if self.on_focus_mode:
+                try:
+                    self.on_focus_mode(float(fsecs or 0))
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("focus-mode handler failed: %s", exc)
             secs = payload.get("capture_seconds")
             if secs and self.on_capture_request:
                 log.info("capture requested by operator: %ss", secs)

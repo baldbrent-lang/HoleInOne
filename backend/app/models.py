@@ -432,6 +432,13 @@ class Camera(Base):
     focus_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     focus_brightness: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     focus_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # The best score seen since the last focus-mode session began. Turning
+    # a lens ring, the number climbs to a peak and falls off again, and
+    # the peak is the answer -- but you cannot see it in a live readout,
+    # because by the time you know you have passed it you have passed it.
+    # Reset when focus mode is armed, so each session starts honest.
+    focus_best: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    focus_best_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # Soft toggle distinct from `enabled`: when False the camera stays
     # online (heartbeats + live-watch still work) but the backend

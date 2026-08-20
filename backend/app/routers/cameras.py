@@ -457,6 +457,8 @@ def focus_status(
     score: float | None,
     brightness: float | None,
     updated_at=None,
+    best: float | None = None,
+    focus_seconds: int = 0,
 ) -> dict | None:
     """Focus readout for the dashboard. None when nothing reported yet.
 
@@ -489,6 +491,10 @@ def focus_status(
         "unreliable": exposure is not None,
         "exposure": exposure,
         "updated_at": updated_at.isoformat() if updated_at else None,
+        # Peak of the current focus session, and how long that session
+        # has left. Both empty outside a session.
+        "best": round(float(best), 1) if best is not None else None,
+        "focus_seconds": int(focus_seconds or 0),
     }
 
 
@@ -519,6 +525,16 @@ def heartbeat(
             float(focus_brightness) if focus_brightness is not None else None
         )
         cam.focus_updated_at = _utcnow_naive()
+        # The peak of the session, kept because a live number cannot show
+        # it: turning the ring, by the time you know you are past the
+        # best you are past it. Only tracked while focus mode is armed --
+        # otherwise the "best" would be whatever the light did at noon
+        # three weeks ago and would never fall.
+        if _focus_remaining(cam.id) and (
+            cam.focus_best is None or cam.focus_score > cam.focus_best
+        ):
+            cam.focus_best = cam.focus_score
+            cam.focus_best_at = cam.focus_updated_at
     if battery_voltage is not None:
         cam.battery_voltage = float(battery_voltage)
         cam.battery_current_a = (
@@ -580,6 +596,42 @@ _CAPTURE_LOCK = threading.Lock()
 _CAPTURE_REQUESTS: dict[int, int] = {}
 
 
+_FOCUS_LOCK = threading.Lock()
+_FOCUS_UNTIL: dict[int, float] = {}
+
+
+def request_focus_mode(camera_id: int, seconds: int) -> None:
+    """Arm focus mode: the agent measures and reports far more often, so
+    a ring can be turned against a live number.
+
+    In-memory and time-boxed, like the capture request beside it. A Pi
+    that never picks it up should not stay in a high-rate mode forever,
+    and an operator who drives away mid-adjustment should not leave one
+    hammering the backend -- so it expires on its own rather than
+    needing to be switched off.
+    """
+    with _FOCUS_LOCK:
+        _FOCUS_UNTIL[int(camera_id)] = time.time() + max(1, int(seconds))
+
+
+def _focus_remaining(camera_id: int) -> int:
+    """Seconds of focus mode left for this camera, 0 when off."""
+    with _FOCUS_LOCK:
+        until = _FOCUS_UNTIL.get(int(camera_id))
+        if not until:
+            return 0
+        left = until - time.time()
+        if left <= 0:
+            _FOCUS_UNTIL.pop(int(camera_id), None)
+            return 0
+        return int(left)
+
+
+def clear_focus_mode(camera_id: int) -> None:
+    with _FOCUS_LOCK:
+        _FOCUS_UNTIL.pop(int(camera_id), None)
+
+
 def request_capture(camera_id: int, seconds: int) -> None:
     """Queue a one-shot capture for a camera. Called from the admin
     router; delivered on the camera's next watch-status poll."""
@@ -607,7 +659,14 @@ def watch_status(token: str, db: Session = Depends(get_db)):
             "cameras: delivering capture request to camera %s (%ss)",
             cam.id, capture_seconds,
         )
-    return {"watching": watching, "capture_seconds": capture_seconds}
+    return {
+        "watching": watching,
+        "capture_seconds": capture_seconds,
+        # Not consumed on read, unlike the capture above: this is a mode
+        # the agent stays in, not a one-shot, and it has to survive every
+        # poll until it expires.
+        "focus_seconds": _focus_remaining(cam.id),
+    }
 
 
 @router.post("/{token}/live-frame")

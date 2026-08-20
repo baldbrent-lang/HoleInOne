@@ -66,6 +66,19 @@ class FocusMeter:
         self._last_at = 0.0
         self._score: Optional[float] = None
         self._bright: Optional[float] = None
+        # Focus mode: measure every frame-ish while someone is at the
+        # mount turning the ring. Off by default -- the cost is trivial
+        # per sample but not worth paying continuously for a number
+        # nobody is watching.
+        self.fast_interval = 1.0
+        self._fast_until = 0.0
+
+    def set_fast_until(self, monotonic_deadline: float) -> None:
+        self._fast_until = float(monotonic_deadline)
+
+    def _due(self, now: float) -> bool:
+        gap = (self.fast_interval if self._fast_until > now else self.interval)
+        return (now - self._last_at) >= gap
 
     def _region(self, frame):
         h, w = frame.shape[:2]
@@ -88,7 +101,7 @@ class FocusMeter:
         if cv2 is None or frame is None:
             return
         now = time.monotonic()
-        if now - self._last_at < self.interval:
+        if not self._due(now):
             return
         self._last_at = now
         try:

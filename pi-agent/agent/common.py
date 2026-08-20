@@ -740,6 +740,26 @@ class HeartbeatThread(threading.Thread):
         # Failures inside it must never kill the heartbeat.
         self.extra_fn = extra_fn
         self.stopping = threading.Event()
+        # Focus mode: report far more often for a while, so someone at
+        # the mount can turn a ring against a live number instead of
+        # waiting a minute per adjustment. `_wake` cuts the current sleep
+        # short so arming it is felt immediately rather than up to a full
+        # interval later.
+        self._wake = threading.Event()
+        self.fast_interval = 3
+        self._fast_until = 0.0
+
+    def set_fast_until(self, monotonic_deadline: float) -> None:
+        """Report at fast_interval until this monotonic time."""
+        was_fast = self._fast_until > time.monotonic()
+        self._fast_until = float(monotonic_deadline)
+        if not was_fast:
+            self._wake.set()
+
+    def _sleep_interval(self) -> float:
+        if self._fast_until > time.monotonic():
+            return max(1, int(self.fast_interval))
+        return self.interval
 
     def run(self) -> None:
         # First heartbeat immediately so admin UI sees the camera
@@ -758,8 +778,16 @@ class HeartbeatThread(threading.Thread):
                 log.debug("heartbeat ok")
             except Exception as exc:  # pragma: no cover
                 log.warning("heartbeat failed: %s", exc)
-            if self.stopping.wait(self.interval):
-                return
+            # Wait the interval, but wake early if focus mode is armed
+            # mid-sleep. Polling in short slices keeps stop() responsive
+            # without a second event to reason about.
+            self._wake.clear()
+            _deadline = time.monotonic() + self._sleep_interval()
+            while time.monotonic() < _deadline:
+                if self.stopping.wait(0.25):
+                    return
+                if self._wake.is_set():
+                    break
 
     def stop(self) -> None:
         self.stopping.set()

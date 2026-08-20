@@ -114,7 +114,9 @@ class GreenAgent:
         # Start the livestream helper before the capture thread so the
         # very first frame can be forwarded if an admin happens to be
         # watching.
-        self.streamer = LiveStreamer(self.client)
+        self.streamer = LiveStreamer(
+            self.client, on_focus_mode=self._on_focus_mode,
+        )
         self.streamer.start()
 
         # Background thread continuously drains the camera into the
@@ -148,6 +150,7 @@ class GreenAgent:
             self.client, self.heartbeat_seconds, FIRMWARE,
             extra_fn=_hb_extra,
         )
+        self._hb = hb
         hb.start()
 
         # Uploads run on a background worker so a slow (cellular) upload
@@ -229,6 +232,25 @@ class GreenAgent:
             self.streamer.stop()
 
     # -----------------------------------------------------------------
+
+    def _on_focus_mode(self, seconds: float) -> None:
+        """Backend says focus mode is armed for `seconds` (0 = off).
+
+        Called on every watch-status poll while armed, so the deadline
+        keeps sliding forward and the mode ends a beat after the backend
+        stops asking -- no explicit "off" message to lose.
+
+        Guarded on both attributes because this arrives from the
+        livestream thread, which starts before the meter and the
+        heartbeat exist on the green runner.
+        """
+        deadline = time.monotonic() + float(seconds or 0)
+        meter = getattr(self, "_focus", None)
+        if meter is not None:
+            meter.set_fast_until(deadline)
+        hb = getattr(self, "_hb", None)
+        if hb is not None:
+            hb.set_fast_until(deadline)
 
     def _capture_loop(self, cap) -> None:
         """Drain the camera into the ring buffer as fast as it'll

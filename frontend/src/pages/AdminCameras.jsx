@@ -731,6 +731,23 @@ export default function AdminCameras() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adminPassword]);
 
+  // Keep the list fresh. It used to load once, which was fine when the
+  // only live things on it were "last seen" and battery, and wrong the
+  // moment a focus score arrived: someone at the mount turning a ring
+  // was reading a number frozen at page load.
+  //
+  // Two rates. Idle, this is a dashboard and 15s is plenty. While any
+  // camera is in focus mode it is an instrument being watched by
+  // someone with a screwdriver, so it goes to 2s -- which is roughly
+  // how fast the agent reports while armed, and no faster.
+  const anyFocusing = (cameras || []).some((c) => c?.focus?.focus_seconds);
+  useEffect(() => {
+    if (!adminPassword) return undefined;
+    const id = setInterval(load, anyFocusing ? 2000 : 15000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adminPassword, anyFocusing]);
+
   // Poll the live frame ~10 fps while watching. Uses fetch (not <img>
   // src) so we can send the X-Admin-Password header and so 204 (no
   // frame yet) doesn't trigger a broken-image render.
@@ -844,6 +861,19 @@ export default function AdminCameras() {
       setError(e.message);
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function focusMode(cam) {
+    setBusy((b) => ({ ...b, [cam.id]: true }));
+    setError(null);
+    try {
+      await api.focusMode(adminPassword, cam.id, 600);
+      await load();
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy((b) => ({ ...b, [cam.id]: false }));
     }
   }
 
@@ -1205,6 +1235,9 @@ export default function AdminCameras() {
                         .join(" · ")}
                     >
                       🔎 {cam.focus.score}
+                      {cam.focus.best != null && (
+                        <> · best {cam.focus.best}</>
+                      )}
                       {cam.focus.unreliable && <> · {cam.focus.exposure}</>}
                     </span>
                   )}{" "}
@@ -1340,6 +1373,20 @@ export default function AdminCameras() {
                       Capture
                     </button>
                   )}
+                  <button
+                    type="button" className="secondary small"
+                    onClick={() => focusMode(cam)}
+                    disabled={isBusy || !cam.enabled}
+                    title={
+                      cam.focus?.focus_seconds
+                        ? `Focus mode on — ${cam.focus.focus_seconds}s left. The score updates every few seconds; turn the ring until it peaks.`
+                        : "Report the focus score every few seconds for 10 minutes, so you can turn the lens ring against a live number. Resets the session best."
+                    }
+                  >
+                    {cam.focus?.focus_seconds
+                      ? `Focusing ${cam.focus.focus_seconds}s`
+                      : "Focus mode"}
+                  </button>
                   <button
                     type="button" className="secondary small"
                     onClick={() => openMove(cam)} disabled={isBusy}
