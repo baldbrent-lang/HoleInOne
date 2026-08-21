@@ -7824,6 +7824,13 @@ def detect_swings_from_ai_ball(
     return segments
 
 
+# Where skin stops and turf starts, in OpenCV hue. Measured across two
+# clips: bare legs 5-21, turf 23-38 in golden light and 35-45 in flat
+# light. Everything at or above this is eligible to be grass; everything
+# below it is eligible to be skin.
+SKIN_HUE_MAX = 20
+
+
 def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
                    min_grass: float = 0.8, max_white: float = 0.25,
                    max_skin: float = 0.12) -> bool:
@@ -7861,8 +7868,21 @@ def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
     # leg its ring is mostly grass -- so counting grass alone lets it
     # through. Skin has a narrow hue and real saturation, and none of it
     # belongs anywhere near a ball at rest.
+    # HUE 20, NOT 25, and the difference is a whole course.
+    #
+    # Measured on late-afternoon footage where the turf reads golden
+    # rather than green: the grass around a ball is hue 23-38, and bare
+    # legs in the same frame are hue 5-21. A boundary at 25 therefore
+    # runs THROUGH the turf -- 91% of the ring around a resting ball was
+    # classified as skin and the ball was rejected for sitting on a
+    # person, on every frame of the clip. At 20 the two separate with
+    # room to spare.
+    #
+    # Same failure as the saturation floor before it: a colour constant
+    # tuned on one clip's light, correct until the sun moved.
     skin = (
-        (sub[:, :, 0] <= 25) & (sub[:, :, 1] >= 40) & (sub[:, :, 2] >= 90)
+        (sub[:, :, 0] <= SKIN_HUE_MAX)
+        & (sub[:, :, 1] >= 40) & (sub[:, :, 2] >= 90)
     )
     if (float((skin & ring).sum()) / n) > max_skin:
         return False
@@ -7880,7 +7900,8 @@ def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
     # a lit toe on a shoe -- is only distinguishable by how much of its
     # surroundings is NOT grass.
     grass = (
-        (sub[:, :, 0] >= 25) & (sub[:, :, 0] <= 95) & (sub[:, :, 1] >= 25)
+        (sub[:, :, 0] >= SKIN_HUE_MAX) & (sub[:, :, 0] <= 95)
+        & (sub[:, :, 1] >= 25)
     )
     return (float((grass & ring).sum()) / n) >= min_grass
 

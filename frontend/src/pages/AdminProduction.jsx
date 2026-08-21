@@ -5415,6 +5415,9 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
   const [draft, setDraft] = useState(null);      // {x,y,w,h} fractions
   const [calibrating, setCalibrating] = useState(false);
   const [calibrated, setCalibrated] = useState(null);  // measured px
+  // Show the frame with nothing drawn on it, to check the picture
+  // rather than the detector's account of it.
+  const [bareFrame, setBareFrame] = useState(false);
   const [diag, setDiag] = useState(null);              // why-not-found
   const [producing, setProducing] = useState(false);
   const [produced, setProduced] = useState(null);
@@ -5760,6 +5763,26 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                 and then every other clip that day reads it for free. */}
             {rep.area_image && (
               <figure style={{ margin: "8px 0" }}>
+                {/* EVERY MARK ON THE PICTURE IS AN ASSERTION. The box, the
+                    dots and the caption are all the detector's claims about
+                    the frame, and the question they most often provoke --
+                    is the ball really there? -- cannot be answered while
+                    they cover it. Same pixels, drawn on or not. */}
+                {rep.area_image_clean && (
+                  <button
+                    type="button"
+                    className="secondary small"
+                    onClick={() => setBareFrame((v) => !v)}
+                    style={{ marginBottom: 6 }}
+                    title={
+                      bareFrame
+                        ? "Put the search box, the accepted blobs and the caption back"
+                        : "Hide every overlay and show the raw frame underneath"
+                    }
+                  >
+                    {bareFrame ? "Show the graphics" : "Clear the graphics"}
+                  </button>
+                )}
                 <div
                   style={{
                     position: "relative", lineHeight: 0,
@@ -5776,7 +5799,11 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                 >
                   <img
                     ref={imgRef}
-                    src={rep.area_image}
+                    src={
+                      bareFrame && rep.area_image_clean
+                        ? rep.area_image_clean
+                        : rep.area_image
+                    }
                     alt="ball search area"
                     draggable={false}
                     style={{ width: "100%", borderRadius: 6 }}

@@ -14910,6 +14910,7 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         "n_cands_drawn": len(cands),
         "reason": rest.get("reason"),
         "area_image": None,
+        "area_image_clean": None,
         "frame_w": None,
         "frame_h": None,
         "departures": [],
@@ -15010,6 +15011,19 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             rep["area_image"] = _clip_url_for(_name)
         except Exception as exc:  # noqa: BLE001
             log.warning("swing test: area image write failed: %s", exc)
+        # THE SAME FRAME WITH NOTHING DRAWN ON IT. Every mark on the
+        # picture above is an assertion the detector is making, and the
+        # question the operator most often has is whether the ball is
+        # actually where the marks say -- which cannot be answered while
+        # a box, six dots and a caption sit on top of it. Written from
+        # `ref`, before any drawing, so the two are the same pixels.
+        _cname = f"swingtest-{upload_id}-{tok}-area-clean.jpg"
+        try:
+            cv2.imwrite(str(CLIPS_DIR / _cname), ref,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            rep["area_image_clean"] = _clip_url_for(_cname)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("swing test: clean area image write failed: %s", exc)
 
     # DID IT LEAVE, AND WHEN. The scan samples at ~15Hz and its `t` is the
     # last frame the ball was SEEN, not the frame it went. Re-watch the
