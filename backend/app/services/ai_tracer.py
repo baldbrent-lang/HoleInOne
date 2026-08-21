@@ -5477,6 +5477,191 @@ _FIND_RESTING_BALL_PROMPT = (
 )
 
 
+# WHAT A STRIKE LOOKS LIKE IN MOTION, as opposed to a shoe walking off.
+#
+# Measured on a real strike, foreground area in a box around the ball:
+# 0.6% at rest, peaking 2.7% one frame after the ball leaves, back under
+# 0.5% five frames later. A golfer's shoe over the same frames: 2.3%,
+# climbing to 17% ten frames later and still 15% twenty frames after
+# that.
+#
+# The trap is that the shoe's peak is SIX TIMES BIGGER than the strike's.
+# Anything keyed to how much motion there is picks the shoe. What
+# separates them is shape -- a strike is an impulse and a walk is a
+# plateau -- and timing: the burst from a strike is at the departure,
+# because the club is what causes both, while a shoe's motion peaks long
+# after the detector lost the blob.
+BURST_FALL_MIN = 6.0      # peak / what it settles back to. Strike 24, shoe 3.3
+BURST_WIDTH_MAX_SEC = 0.30  # strike 6 frames @50fps = 0.12s; shoe 25 = 0.50s
+BURST_LAG_MAX_SEC = 0.10    # strike peaks +1 frame; shoe +10
+
+
+def impact_burst_profile(
+    input_path: Path,
+    xy: tuple[float, float],
+    dep_frame: int,
+    fps: float,
+    box_frac: float = 0.12,
+    warmup_frames: int = 150,
+    after_frames: int = 60,
+) -> dict:
+    """Foreground area around a spot, through a candidate impact.
+
+    A struck ball is not the only thing that moves at impact: the club
+    is travelling at its fastest, it takes turf with it, and all of that
+    lands in the same few frames in the same small box. A ball that
+    merely stopped being detected -- a shoe that walked away, a club
+    head lifted, a ball picked up -- has motion too, but a different
+    shape.
+
+    Returns {ok, frames, area, dep_frame, reason}, where `area` is the
+    fraction of the box that is foreground, one value per frame.
+    Never raises.
+    """
+    out: dict = {"ok": False, "frames": [], "area": [],
+                 "dep_frame": int(dep_frame), "reason": None}
+    if not HAS_CV:
+        out["reason"] = "opencv not installed"
+        return out
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        out["reason"] = "could not open video"
+        return out
+    try:
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        if h <= 0 or w <= 0:
+            out["reason"] = "video reports no frame size"
+            return out
+        half = max(12, int(round(0.5 * float(box_frac) * h)))
+        cx, cy = int(round(xy[0])), int(round(xy[1]))
+        x0, x1 = max(0, cx - half), min(w, cx + half)
+        y0, y1 = max(0, cy - half), min(h, cy + half)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            out["reason"] = "spot is at the frame edge"
+            return out
+
+        # MOG2 needs to have seen the scene before it can call anything
+        # foreground, so the model is warmed on frames BEFORE the window
+        # and those frames are not reported.
+        lo = max(0, int(dep_frame) - int(warmup_frames))
+        report_from = max(0, int(dep_frame) - 40)
+        hi = int(dep_frame) + int(after_frames)
+        mog = cv2.createBackgroundSubtractorMOG2(
+            history=200, varThreshold=25, detectShadows=False,
+        )
+        kernel = np.ones((3, 3), np.uint8)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
+        f = lo
+        while f <= hi:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            fg = mog.apply(frame)
+            fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, kernel)
+            if f >= report_from:
+                box = fg[y0:y1, x0:x1]
+                out["frames"].append(f)
+                out["area"].append(float((box > 0).mean()))
+            f += 1
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"burst profile failed: {exc}"
+        return out
+    finally:
+        cap.release()
+
+    out["ok"] = len(out["frames"]) >= 20
+    if not out["ok"]:
+        out["reason"] = "not enough frames around the departure to judge"
+    return out
+
+
+def judge_impact_burst(profile: dict, fps: float) -> dict:
+    """Does this departure look like a strike, or like something leaving?
+
+    Three measurements, all of shape rather than size:
+
+      fall   peak divided by where it settles back to. A strike is an
+             impulse and comes back down; a walk is a step and does not.
+      width  how many frames sit above half the peak.
+      lag    how far the peak is from the departure. The club is what
+             makes the ball leave AND makes the burst, so on a strike
+             they are the same instant.
+
+    Returns {verdict, fall, width_sec, lag_sec, peak, ...}. `verdict` is
+    "strike", "sustained" (something moved away rather than was hit), or
+    "quiet" (nothing happened here at all). Never raises.
+    """
+    out: dict = {"verdict": None, "reason": None}
+    fr = list(profile.get("frames") or [])
+    ar = list(profile.get("area") or [])
+    if not profile.get("ok") or len(fr) < 20:
+        out["verdict"] = None
+        out["reason"] = profile.get("reason") or "no burst profile"
+        return out
+    dep = int(profile.get("dep_frame") or 0)
+    idx = {f: i for i, f in enumerate(fr)}
+    at = lambda f: ar[idx[f]] if f in idx else None  # noqa: E731
+
+    win = [f for f in range(dep - 2, dep + 11) if f in idx]
+    if not win:
+        out["verdict"] = None
+        out["reason"] = "departure is outside the profile"
+        return out
+    peak = max(at(f) for f in win)
+    peak_f = next(f for f in win if at(f) == peak)
+    base_vals = [at(f) for f in range(dep - 25, dep - 4) if f in idx]
+    settle_vals = [at(f) for f in range(peak_f + 15, peak_f + 36) if f in idx]
+    base = float(np.median(base_vals)) if base_vals else 0.0
+    settle = float(np.median(settle_vals)) if settle_vals else 0.0
+    wide = [f for f in fr if dep - 10 <= f <= dep + 45 and at(f) >= peak / 2.0]
+    width_f = (max(wide) - min(wide) + 1) if wide else 0
+
+    out.update({
+        "peak": round(peak * 100, 2),
+        "base": round(base * 100, 2),
+        "settle": round(settle * 100, 2),
+        "fall": round(peak / max(settle, 1e-4), 1),
+        "width_sec": round(width_f / max(1.0, fps), 3),
+        "lag_sec": round((peak_f - dep) / max(1.0, fps), 3),
+        "peak_frame": int(peak_f),
+    })
+
+    # A strike has to actually disturb something. Below this the box is
+    # simply quiet and there is nothing to judge either way -- which is
+    # a real answer, not a failure: a clean lie on a mat throws no turf.
+    if peak < 0.004:
+        out["verdict"] = "quiet"
+        out["reason"] = (
+            f"almost no motion at the departure (peak {out['peak']}% of the "
+            f"box) — nothing here says strike or says otherwise"
+        )
+        return out
+
+    ok_fall = out["fall"] >= BURST_FALL_MIN
+    ok_width = out["width_sec"] <= BURST_WIDTH_MAX_SEC
+    ok_lag = abs(out["lag_sec"]) <= BURST_LAG_MAX_SEC
+    votes = sum((ok_fall, ok_width, ok_lag))
+    if votes >= 2:
+        _when = "at the departure" if ok_lag else f"{out['lag_sec']:+}s after it"
+        out["verdict"] = "strike"
+        out["reason"] = (
+            f"burst looks like a strike: peaks {out['peak']}% {_when}, "
+            f"settles back to {out['settle']}% ({out['fall']}x), "
+            f"{out['width_sec']}s wide"
+        )
+    else:
+        out["verdict"] = "sustained"
+        out["reason"] = (
+            f"motion here does not look like a strike: peaks {out['peak']}% "
+            f"{out['lag_sec']:+}s after the departure and is still "
+            f"{out['settle']}% later ({out['fall']}x), {out['width_sec']}s "
+            f"wide — a shoe, a hand or a club moving off rather than a ball "
+            f"being hit"
+        )
+    return out
+
+
 def verify_rest_and_impact(
     input_path: Path,
     rest_xy: tuple[float, float],
@@ -5711,6 +5896,33 @@ def verify_rest_and_impact(
                     f"ball departed the rest spot at f{dep} "
                     f"({dep - imp:+d} vs estimate)"
                 )
+                # WAS IT HIT, OR DID IT JUST LEAVE? Everything above only
+                # establishes that something ball-shaped stopped being
+                # there. A shoe that stood still and then walked off
+                # passes every one of those tests. What a strike has that
+                # a departure does not is the strike itself -- the club
+                # at its fastest, the turf it takes with it -- all inside
+                # a few frames of the same small box.
+                try:
+                    _bp = impact_burst_profile(
+                        input_path, (float(out["rest_xy"][0]),
+                                     float(out["rest_xy"][1])), int(dep), fps,
+                    )
+                    _bj = judge_impact_burst(_bp, fps)
+                    out["burst"] = _bj
+                    if _bj.get("verdict") == "sustained":
+                        # This is the false positive the check exists for.
+                        out["verified"] = False
+                        out["reason"] = (
+                            f"something left the spot at f{dep}, but it was "
+                            f"not struck — {_bj['reason']}"
+                        )
+                    elif _bj.get("verdict") == "strike":
+                        out["reason"] += f"; {_bj['reason']}"
+                except Exception as exc:  # noqa: BLE001
+                    # Corroboration, not a dependency.
+                    log.debug("impact burst check failed: %s", exc)
+                    out["burst"] = {"verdict": None, "reason": f"failed: {exc}"}
 
         # Debug film-strip — SHOW THE WORK: each patch crop bordered by
         # its presence verdict, the departure frame flagged.
