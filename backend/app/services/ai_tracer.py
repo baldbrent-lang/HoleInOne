@@ -5494,6 +5494,12 @@ def verify_rest_and_impact(
     # comes several seconds later. Watching only +1s reported "the ball
     # never left" for shots that plainly did.
     forward_sec: float = 4.0,
+    # HOW LONG A DEPARTURE HAS TO LAST to be a strike rather than the
+    # club sitting in front of the ball at address. 1.5s is longer than
+    # any address occlusion measured (the worst was 0.3s of a 15-frame
+    # gap at 50fps) and far shorter than the gap after a real strike,
+    # which is the rest of the clip.
+    stay_gone_sec: float = 1.5,
 ) -> dict:
     """Pixel-verify and TIGHTEN the two anchors the tracers lean on —
     no API calls, one sequential decode of ~2s of video.
@@ -5635,29 +5641,67 @@ def verify_rest_and_impact(
             # DEPARTURE: first frame absent and STAYS absent 3 frames
             # (clubhead passing over occludes 1-2 frames at most).
             fs_sorted = sorted(crops)
+            # A STRUCK BALL DOES NOT COME BACK, and that -- not the
+            # length of the gap -- is what tells a strike from a hidden
+            # ball. The old rule accepted three absent frames on the
+            # theory that "the clubhead passing over occludes 1-2 frames
+            # at most". That is true of the clubhead passing THROUGH. It
+            # is badly wrong at ADDRESS, where the sole sits behind the
+            # ball for as long as the player stands there: measured on
+            # one clip, the ball vanished at f346, came back at f361,
+            # stayed visible through f441, and only actually left at
+            # f449. The old rule called f346 impact -- two seconds early,
+            # on a ball that was still sitting on the tee.
+            #
+            # So a candidate departure has to stay departed. Anything
+            # that reappears was being hidden, not hit.
+            stay_gone = max(6, int(round(stay_gone_sec * fps)))
             dep = None
+            late_dep = None
             for i, f in enumerate(fs_sorted[:-2]):
                 # Scan the WHOLE window (not just past the baseline) —
                 # the impact estimate can run late (pose peak), putting
                 # the true departure well before it.
                 if f < fs_sorted[0] + 3:
                     continue
-                if (
-                    not present[f]
-                    and not present.get(f + 1, True)
-                    and not present.get(f + 2, True)
-                    and any(present.get(f - k, False) for k in (1, 2, 3, 4))
-                ):
-                    dep = f
-                    break
-            if dep is None:
+                if present[f]:
+                    continue
+                if not any(present.get(f - k, False) for k in (1, 2, 3, 4)):
+                    continue
+                after = [g for g in fs_sorted if f < g <= f + stay_gone]
+                if len(after) < max(6, stay_gone // 3):
+                    # Too close to the end of the window to tell a
+                    # strike from an occlusion. Saying "impact" here is
+                    # a guess wearing a measurement's clothes.
+                    late_dep = f if late_dep is None else late_dep
+                    continue
+                back = sum(1 for g in after if present[g])
+                if back > max(1, int(0.10 * len(after))):
+                    continue
+                dep = f
+                break
+            if dep is None and late_dep is not None:
+                # It went, but too near the end of the window to prove it
+                # stayed gone. Different failure from "it never moved",
+                # and the fix is a longer window, not a different spot.
+                out["verified"] = False
+                out["late_departure_frame"] = int(late_dep)
+                out["reason"] = (
+                    f"ball left the rest spot at f{late_dep}, too close to "
+                    f"the end of the {forward_sec:.0f}s window to confirm "
+                    f"it stayed gone — widen forward_sec to tell a strike "
+                    f"from the club sitting in front of it"
+                )
+            elif dep is None:
                 out["verified"] = False
                 out["reason"] = (
-                    f"ball never left the rest spot in the "
+                    f"ball never left the rest spot for "
+                    f"{stay_gone_sec:.1f}s in the "
                     f"{window_sec:.0f}s before / {forward_sec:.0f}s after "
                     f"the estimated impact (practice swing, a ball that "
-                    f"was picked up rather than struck, or an estimate "
-                    f"further out than this window)"
+                    f"was picked up rather than struck, an estimate "
+                    f"further out than this window, or the club merely "
+                    f"covering it at address)"
                 )
             else:
                 out["verified"] = True

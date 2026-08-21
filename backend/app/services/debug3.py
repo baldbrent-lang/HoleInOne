@@ -1608,36 +1608,6 @@ def find_descents(
     return out
 
 
-def swing_windows_from_descents(
-    descents: list,
-    green_delta_sec: float = 0.0,
-    flight_lo_sec: float = 5.0,
-    flight_hi_sec: float = 7.0,
-) -> list:
-    """Turn green landings into windows to hunt for the swing on the tee.
-
-    `green_delta_sec` is green_start - tee_start, the same convention the
-    rest of the pipeline uses, so tee_time = green_time + delta.
-
-    The window is deliberately expressed as an interval and not a guess.
-    Hang time on a par 3 runs about 5 to 7 seconds, and the honest output
-    of that is two seconds of tee clock to search, not a single frame
-    that pretends to a precision nobody measured.
-    """
-    outs = []
-    for ev in descents or []:
-        g = float(ev.get("last_descent_sec") or 0.0)
-        t = g + float(green_delta_sec)
-        outs.append({
-            "green_sec": round(g, 2),
-            "tee_sec": round(t, 2),
-            "swing_from_sec": round(t - float(flight_hi_sec), 2),
-            "swing_to_sec": round(t - float(flight_lo_sec), 2),
-            "landing_xy": ev.get("landing_xy"),
-        })
-    return outs
-
-
 def find_flight(
     input_path: Path,
     fps: float,

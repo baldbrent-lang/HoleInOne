@@ -5996,24 +5996,46 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                 </div>
                 {(rep.green_descents.swing_windows || []).map((w, i) => (
                   <div key={i} className="tiny" style={{ marginTop: 4 }}>
-                    Landed {w.green_sec}s into the green clip
+                    Landed{" "}
+                    <b>{w.landed_at ? clockOf(w.landed_at) : `${w.green_sec}s in`}</b>
                     {w.landing_xy && (
                       <> at ({w.landing_xy[0]}, {w.landing_xy[1]})</>
-                    )}{" "}
-                    — so the swing should be between{" "}
-                    <b>{w.swing_from_sec}s</b> and <b>{w.swing_to_sec}s</b> on
-                    the tee clip.
+                    )}
+                    {" "}(green f{w.green_frame})
+                    {w.swing_from_at ? (
+                      <>
+                        {" "}— so the swing is between{" "}
+                        <b>{clockOf(w.swing_from_at)}</b> and{" "}
+                        <b>{clockOf(w.swing_to_at)}</b>, which is{" "}
+                        {w.swing_from_sec}s–{w.swing_to_sec}s (f
+                        {w.swing_from_frame}–f{w.swing_to_frame}) on the tee
+                        clip.
+                      </>
+                    ) : (
+                      <> — no wall clock on this pair, so the landing cannot
+                      be placed on the tee clip's timeline.</>
+                    )}
                   </div>
                 ))}
-                {rep.green_descents.delta_source && (
-                  <div className="tiny muted" style={{ marginTop: 4 }}>
-                    Camera sync: {rep.green_descents.delta_sec}s offset,{" "}
-                    {rep.green_descents.delta_source === "assumed_zero"
-                      ? "ASSUMED — no wall clocks on this pair, so the tee "
-                        + "times above are only as good as that assumption"
-                      : `measured from ${rep.green_descents.delta_source}`}
-                  </div>
-                )}
+                <div className="tiny muted" style={{ marginTop: 4 }}>
+                  Tee {rep.green_descents.tee_fps}fps started{" "}
+                  {rep.green_descents.tee_started_at
+                    ? clockOf(rep.green_descents.tee_started_at)
+                    : "at an unknown time"}
+                  {" · "}green {rep.green_descents.green_fps}fps started{" "}
+                  {rep.green_descents.green_started_at
+                    ? clockOf(rep.green_descents.green_started_at)
+                    : "at an unknown time"}
+                  {rep.green_descents.clock_ok ? (
+                    <> — matched on the clock, not on clip position.</>
+                  ) : (
+                    <>
+                      {" "}— <b>NO WALL CLOCK</b> on this pair. The two clips
+                      cannot be lined up, because they neither start together
+                      nor run at the same rate.
+                    </>
+                  )}
+                </div>
               </div>
             )}
 

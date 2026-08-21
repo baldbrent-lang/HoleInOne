@@ -6229,6 +6229,55 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
     }
 
 
+# HOW LONG A PAR-3 TEE SHOT HANGS. Measured on one pair with wall
+# clocks on both cameras: impact 09:45:35.049 on the tee, the ball down
+# at 09:45:41.418 on the green -- 6.37 seconds. The range either side of
+# that covers a short iron to a long one; it is deliberately wide,
+# because the answer it produces is a window to search and a window
+# that is honestly two seconds long beats a single frame that is wrong.
+FLIGHT_LO_SEC = 5.0
+FLIGHT_HI_SEC = 8.0
+
+
+def _clip_start_instant(db, row, which: str):
+    """When a clip's FIRST frame happened, as a datetime (or None).
+
+    THE ONLY HONEST WAY TO LINE TWO CAMERAS UP. Seconds-into-the-clip is
+    a position in a file, and two files that started at different
+    instants both begin at 0.0s -- so the numbers agree while the
+    moments do not. Worse here, the two cameras do not even run at the
+    same rate: the tee records at 50fps and the green at 30, so a frame
+    number means a different amount of time on each.
+
+    What they do share is a clock. Both Pis stamp the wall-clock instant
+    of their first frame, and every cross-camera question -- "where is
+    this landing on the tee clip" -- is that stamp plus frame/fps on one
+    side and the reverse on the other.
+    """
+    try:
+        ev = None
+        if getattr(row, "camera_event_id", None):
+            ev = db.query(CameraEvent).filter(
+                CameraEvent.id == row.camera_event_id,
+            ).first()
+        if str(which).lower() == "green":
+            start = getattr(ev, "green_recording_started_at", None)
+            if start is None:
+                _tee = (getattr(ev, "tee_recording_started_at", None)
+                        or getattr(row, "base_captured_at", None))
+                if _tee is not None:
+                    delta, _ = _d3_green_delta_sec(db, row)
+                    start = _tee + timedelta(seconds=float(delta))
+        else:
+            start = getattr(ev, "tee_recording_started_at", None)
+        return start if start is not None else getattr(
+            row, "base_captured_at", None)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("clip start for upload %s (%s) failed: %s",
+                  getattr(row, "id", None), which, exc)
+        return None
+
+
 def _frame_wall_clock(db, row, which: str, frame_idx: int, fps: float):
     """Real-world instant of a frame, as an ISO string (or None).
 
@@ -15488,17 +15537,61 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             _gp = _local_green(row)
             if not _gp or not _gp.exists():
                 raise FileNotFoundError("the green video is missing on disk")
-            _gd = _d3g.find_descents(_gp, fps=probe_fps(_gp) or None)
+            _gfps = float(probe_fps(_gp) or 0.0) or 30.0
+            _gd = _d3g.find_descents(_gp, fps=_gfps)
             _delta, _dsrc = _d3_green_delta_sec(db, row)
-            _wins = _d3g.swing_windows_from_descents(
-                _gd.get("events") or [], green_delta_sec=_delta,
-            )
+
+            # THE CLOCK, NOT THE CLIP. Both cameras stamp when their
+            # first frame happened, and that is the only thing the two
+            # files share -- they start at different instants and run at
+            # different rates (50fps on the tee, 30 on the green), so a
+            # second-into-the-clip on one is not a second-into-the-clip
+            # on the other. Every number below is an instant first and a
+            # position in a file second.
+            _g_start = _clip_start_instant(db, row, "green")
+            _t_start = _clip_start_instant(db, row, "tee")
+            _clock_ok = bool(_g_start and _t_start)
+            _wins = []
+            for _ev in (_gd.get("events") or []):
+                _gsec = float(_ev.get("last_descent_sec") or 0.0)
+                _w = {
+                    "green_sec": round(_gsec, 2),
+                    "green_frame": _ev.get("last_descent_frame"),
+                    "landing_xy": _ev.get("landing_xy"),
+                    "landed_at": None,
+                    "swing_from_at": None, "swing_to_at": None,
+                    "swing_from_sec": None, "swing_to_sec": None,
+                    "swing_from_frame": None, "swing_to_frame": None,
+                }
+                if _clock_ok:
+                    _land_at = _g_start + timedelta(seconds=_gsec)
+                    _w["landed_at"] = _land_at.isoformat()
+                    _lo = _land_at - timedelta(seconds=FLIGHT_HI_SEC)
+                    _hi = _land_at - timedelta(seconds=FLIGHT_LO_SEC)
+                    _w["swing_from_at"] = _lo.isoformat()
+                    _w["swing_to_at"] = _hi.isoformat()
+                    # Back onto the tee clip's own timeline.
+                    _w["swing_from_sec"] = round(
+                        (_lo - _t_start).total_seconds(), 2)
+                    _w["swing_to_sec"] = round(
+                        (_hi - _t_start).total_seconds(), 2)
+                    _w["swing_from_frame"] = int(
+                        round(_w["swing_from_sec"] * fps))
+                    _w["swing_to_frame"] = int(
+                        round(_w["swing_to_sec"] * fps))
+                _wins.append(_w)
+
             rep["green_descents"] = {
                 "reason": _gd.get("reason"),
                 "n_tracks": _gd.get("n_tracks"),
                 "n_descents": len(_gd.get("events") or []),
                 "events": _gd.get("events") or [],
                 "swing_windows": _wins,
+                "green_fps": round(_gfps, 2),
+                "tee_fps": round(float(fps), 2),
+                "clock_ok": _clock_ok,
+                "green_started_at": _g_start.isoformat() if _g_start else None,
+                "tee_started_at": _t_start.isoformat() if _t_start else None,
                 "delta_sec": round(_delta, 3),
                 "delta_source": _dsrc,
             }
@@ -15511,8 +15604,11 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
                 except (TypeError, ValueError):
                     continue
                 for _w in _wins:
+                    if _w["swing_from_sec"] is None:
+                        continue
                     if _w["swing_from_sec"] <= _ts <= _w["swing_to_sec"]:
                         _d["green_landing_sec"] = _w["green_sec"]
+                        _d["green_landed_at"] = _w["landed_at"]
                         break
             log.info("swing test: green descents — %s (delta %.2fs from %s)",
                      _gd.get("reason"), _delta, _dsrc)
