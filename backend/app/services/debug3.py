@@ -1320,7 +1320,6 @@ def find_flight(
     ball_side: str | None = None,
     rest_ball: dict | None = None,
     ball_locked: bool = False,
-    win_post: int | None = None,
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -1369,13 +1368,14 @@ def find_flight(
             f_lo, f_hi = 0, (n_frames - 1 if n_frames else 400)
         else:
             f_lo = max(0, int(impact_frame) - WIN_PRE)
-            # WIN_POST is the flight window produce uses. A caller that
-            # wants a different one (the swing test asks for 3 seconds,
-            # which is 150 frames at 50fps rather than 100) says so
-            # rather than editing a constant that produce also reads.
-            f_hi = int(impact_frame) + int(
-                WIN_POST if win_post is None else win_post
-            )
+            # ONE WINDOW, NOT A PARAMETER. This used to take a win_post
+            # override so the swing test could ask for 3 seconds where
+            # produce uses WIN_POST. That made the panel meant to show
+            # what produce does see a different number of frames than
+            # produce, which is a way for the two to disagree about the
+            # flight on the same swing -- the exact drift that sharing
+            # this function was supposed to end.
+            f_hi = int(impact_frame) + WIN_POST
         dbg["window"] = [f_lo, f_hi]
         dbg["r_px"] = round(r, 1)
 

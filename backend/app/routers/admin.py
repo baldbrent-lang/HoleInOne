@@ -15067,21 +15067,76 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         # shows what actually happens rather than a lookalike -- and one
         # MOG2 pass serves all three instead of three passes.
         #
-        # Windowed to the 3 seconds after impact. That is where a ball in
-        # flight is; the rest of the clip is frames with nothing struck.
+        # CALLED THE WAY PRODUCE CALLS IT, argument for argument. Sharing
+        # the function was not enough: the swing test was handing it a
+        # different set of inputs, so it ran a different path through the
+        # same code and answered a slightly different question. Three
+        # things were missing.
         if b["impact_frame"] is not None:
             try:
                 from ..services import debug3 as _d3
+
+                # 1. WHICH SIDE THE BALL SITS ON. A per-camera setting
+                # produce reads and this did not, so detections on the
+                # wrong side of the golfer were kept here and dropped
+                # there.
+                _side = _wizard_ball_side(db, row)
+
+                # 2. THE POSE AT IMPACT. Without feet there is no ground
+                # line, so launch_from_ground cannot run and the launch
+                # frame and ball fall back to a different branch than the
+                # one produce takes -- measured on a real clip as
+                # "no ground line (pose gave no feet)". Head and feet
+                # also give the body box that keeps detections ON the
+                # golfer out of the flight.
+                #
+                # Produce gets these from a whole-clip swing scan. This
+                # already knows the impact frame, so it asks the same
+                # function for the seconds around it instead: same code,
+                # same landmarks, a fraction of the work. Rejected bursts
+                # are kept because the gate is a swing test and we have
+                # already established there was a swing -- the ball left.
+                _head = _feet = None
+                try:
+                    from ..services import pose_swing as _ps
+
+                    _t_imp = float(b["impact_frame"]) / max(1e-6, fps)
+                    _cands = list(_ps.detect_swings_from_pose(
+                        src_path, fps=fps,
+                        start_sec=max(0.0, _t_imp - 4.0),
+                        max_scan_sec=8.0,
+                        keep_rejected=True,
+                    ) or [])
+                    if _cands:
+                        _near = min(_cands, key=lambda z: abs(
+                            float(z.get("peak_time_sec") or 0.0) - _t_imp))
+                        _head = _near.get("impact_head_xy")
+                        _feet = _near.get("impact_feet_xy")
+                except Exception as exc:  # noqa: BLE001
+                    # Pose is an input, not a requirement -- find_flight
+                    # takes None for both and produce survives a clip
+                    # mediapipe cannot read. Losing the ground line is
+                    # worth strictly less than losing the stage.
+                    log.info("swing test: no pose for flight inputs: %s", exc)
 
                 _t1 = time.perf_counter()
                 _ff = _d3.find_flight(
                     src_path, fps,
                     impact_frame=int(b["impact_frame"]),
+                    head_xy=_head, feet_xy=_feet,
                     frame_w=(_wh[0] if _wh else None),
                     frame_h=(_wh[1] if _wh else None),
-                    rest_ball={"xy": [b["x"], b["y"]]},
+                    ball_side=_side,
+                    rest_ball={
+                        "ok": True, "xy": [b["x"], b["y"]],
+                        "reason": "measured by the departure walk",
+                    },
                     ball_locked=True,
-                    win_post=int(round(3.0 * fps)),
+                    # 3. THE WINDOW. This asked for 3s where produce uses
+                    # WIN_POST, so the two saw different numbers of
+                    # frames and could disagree about the flight on the
+                    # same swing. Produce's window wins: the point of
+                    # this panel is to show what produce will do.
                     debug_dir=CLIPS_DIR,
                     debug_prefix=f"swingtest-{upload_id}-{tok}-fl{k}",
                 ) or {}
