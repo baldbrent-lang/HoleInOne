@@ -5975,6 +5975,48 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
               <div className="tiny muted">{rep.reason}</div>
             )}
 
+            {/* 2b. THE GREEN AS A CLOCK */}
+            {rep.green_descents && (
+              <div
+                className="card"
+                style={{ margin: "10px 0", padding: 10 }}
+              >
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <b>Working backwards from the green</b>
+                  <span
+                    className={
+                      rep.green_descents.n_descents ? "pill ok" : "pill warn"
+                    }
+                  >
+                    {rep.green_descents.n_descents ?? 0} descent(s)
+                  </span>
+                </div>
+                <div className="tiny muted" style={{ marginTop: 4 }}>
+                  {rep.green_descents.reason}
+                </div>
+                {(rep.green_descents.swing_windows || []).map((w, i) => (
+                  <div key={i} className="tiny" style={{ marginTop: 4 }}>
+                    Landed {w.green_sec}s into the green clip
+                    {w.landing_xy && (
+                      <> at ({w.landing_xy[0]}, {w.landing_xy[1]})</>
+                    )}{" "}
+                    — so the swing should be between{" "}
+                    <b>{w.swing_from_sec}s</b> and <b>{w.swing_to_sec}s</b> on
+                    the tee clip.
+                  </div>
+                ))}
+                {rep.green_descents.delta_source && (
+                  <div className="tiny muted" style={{ marginTop: 4 }}>
+                    Camera sync: {rep.green_descents.delta_sec}s offset,{" "}
+                    {rep.green_descents.delta_source === "assumed_zero"
+                      ? "ASSUMED — no wall clocks on this pair, so the tee "
+                        + "times above are only as good as that assumption"
+                      : `measured from ${rep.green_descents.delta_source}`}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* 3. DID IT LEAVE, AND WHEN */}
             {deps.length > 0 && (
               <>
@@ -5988,6 +6030,11 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                     <div className="row" style={{ justifyContent: "space-between" }}>
                       <b>
                         Ball {b.idx + 1} — rested {b.rest_sec}s at ({b.x}, {b.y})
+                        {b.green_landing_sec != null && (
+                          <span className="pill ok" style={{ marginLeft: 6 }}>
+                            lands on the green at {b.green_landing_sec}s
+                          </span>
+                        )}
                         {b.club_rate != null && (
                           <span className="tiny muted" style={{ marginLeft: 6 }}>
                             · club at address on{" "}

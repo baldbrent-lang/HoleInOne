@@ -1309,6 +1309,205 @@ def ransac_parabola(
     return out
 
 
+# HOW FAST A FALLING GOLF BALL LOOKS, as a fraction of frame height per
+# second, so the numbers survive a change of lens or resolution.
+#
+# The lower bound is what separates a ball from everything else that
+# moves on a green. Measured across two clips: real descents fell at
+# 0.53 and 1.29 frame-heights/sec, and the fastest of the 47 other
+# tracks -- players walking, a flag, wind in the tree line, MOG2
+# speckle -- managed 0.16. There is nearly a factor of four of daylight
+# between them.
+#
+# The upper bound is physics. A par-3 tee shot comes down at 20-35 m/s;
+# the one track that beat 3.0 was doing the equivalent of 96 m/s, and
+# was three 9-pixel specks in black tree shadow that the tracker had
+# chained into a straight line.
+DESCENT_RATE_LO = 0.30
+DESCENT_RATE_HI = 3.0
+# How much of its peak fall speed a track must still have to count as
+# still descending. Below this it has landed and is rolling.
+DESCENT_FLATTEN_FRAC = 0.4
+
+
+def find_descents(
+    input_path: Path,
+    fps: float | None = None,
+    window: tuple[int, int] | None = None,
+    r: float = 12.0,
+    min_points: int = 4,
+    min_drop_frac: float = 0.05,
+    rate_lo: float = DESCENT_RATE_LO,
+    rate_hi: float = DESCENT_RATE_HI,
+    merge_sec: float = 1.0,
+    max_events: int = 20,
+) -> dict:
+    """Every ball descent in a green-camera clip, found without being told
+    where to look.
+
+    WORKING BACKWARDS. Finding the swing on the tee camera is hard --
+    people stand in front of the ball, there is more than one ball on the
+    tee, and the ball is four pixels wide. Finding the ball ARRIVING on
+    the green is easy, and this is why: on a green camera nothing else in
+    the picture falls. Players walk, the flag moves, the tree line shifts
+    in the wind, and all of it is slow and mostly sideways. A ball coming
+    down off a par 3 crosses a quarter of the frame in half a second, and
+    it is the only thing that does.
+
+    So the count of descents is the count of shots that reached the
+    green, and each one dates itself. A tee shot is airborne about 5 to 7
+    seconds, so a descent that ends at green-clock T puts its swing in a
+    two-second window at tee-clock T minus 5 to T minus 7 -- which is a
+    small enough haystack that the tee-side detector only has to be right
+    about WHERE, not WHEN.
+
+    Each event carries `last_descent_frame`: the frame the fall
+    flattened out, which is the landing, not the last frame the tracker
+    still had something to follow. Those differ by the length of the
+    bounce.
+
+    FOR A GREEN CAMERA ONLY. Everything above rests on the view being
+    quiet, and a tee camera is not: pointed at the same footage this
+    returns 27 tracks on a green clip and 1611 on a tee clip, because a
+    tee is full of people. Run on a tee view it will happily report
+    twenty "descents". `n_tracks` in the result is the tell.
+
+    Returns {ok, events, n_tracks, reason}. Never raises.
+    """
+    out: dict = {"ok": False, "events": [], "n_tracks": 0, "reason": None}
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open video"
+            return out
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        _fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        cap.release()
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"could not read video: {exc}"
+        return out
+    if _fps <= 1.0:
+        _fps = 30.0
+    if frame_h <= 0 or n_frames <= 1:
+        out["reason"] = "video reports no frames"
+        return out
+
+    f_lo, f_hi = window if window else (0, n_frames - 1)
+    f_lo = max(0, int(f_lo))
+    f_hi = min(max(f_lo + 1, int(f_hi)), n_frames - 1)
+
+    try:
+        det = detect_ball_blobs(input_path, f_lo, f_hi)
+        tracks = build_tracks(det.get("dets") or [], r)
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"detection failed: {exc}"
+        return out
+    out["n_tracks"] = len(tracks)
+
+    min_drop = float(min_drop_frac) * frame_h
+    events = []
+    for tk in tracks:
+        pts = tk.get("points") or []
+        if len(pts) < int(min_points):
+            continue
+        drop = float(pts[-1]["y"]) - float(pts[0]["y"])
+        if drop < min_drop:
+            continue
+        span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
+        rate = (drop / span_f) * _fps / frame_h
+        if not (float(rate_lo) <= rate <= float(rate_hi)):
+            continue
+
+        # WHERE IT LANDED, not where the tracker gave up. The seed keeps
+        # producing points through the bounce and the roll, so the last
+        # point of the track can be a second after the ball touched
+        # down. Walk back to the last frame it was still falling at a
+        # decent share of its peak speed.
+        peak = 0.0
+        vys = []
+        for a, b in zip(pts, pts[1:]):
+            df = max(1, int(b["frame"]) - int(a["frame"]))
+            v = (float(b["y"]) - float(a["y"])) / df
+            vys.append(v)
+            peak = max(peak, v)
+        last_i = len(pts) - 1
+        if peak > 0:
+            for i in range(len(vys) - 1, -1, -1):
+                if vys[i] >= DESCENT_FLATTEN_FRAC * peak:
+                    last_i = i + 1
+                    break
+        land = pts[last_i]
+        events.append({
+            "first_frame": int(pts[0]["frame"]),
+            "last_frame": int(pts[-1]["frame"]),
+            "last_descent_frame": int(land["frame"]),
+            "last_descent_sec": round(int(land["frame"]) / _fps, 2),
+            "landing_xy": [int(round(land["x"])), int(round(land["y"]))],
+            "n_points": len(pts),
+            "drop_px": int(round(drop)),
+            "fall_rate": round(rate, 3),
+            "peak_px_per_frame": round(peak, 1),
+        })
+
+    # One descent can arrive as two tracks when the ball blinks out
+    # against the tree line on the way down. Anything landing within a
+    # second of an earlier event is the same shot; keep the one with
+    # more evidence behind it.
+    events.sort(key=lambda e: e["last_descent_frame"])
+    merged: list[dict] = []
+    for ev in events:
+        if merged and (ev["last_descent_frame"] - merged[-1]["last_descent_frame"]) \
+                <= merge_sec * _fps:
+            if ev["n_points"] > merged[-1]["n_points"]:
+                merged[-1] = ev
+            continue
+        merged.append(ev)
+
+    out["events"] = merged[:int(max_events)]
+    out["ok"] = bool(out["events"])
+    out["fps"] = round(_fps, 3)
+    out["reason"] = (
+        f"{len(out['events'])} descent(s) in {len(tracks)} track(s): "
+        + ", ".join(f"f{e['last_descent_frame']} ({e['last_descent_sec']}s)"
+                    for e in out["events"])
+        if out["events"] else
+        f"no descent among {len(tracks)} track(s) — "
+        f"nothing fell at {rate_lo}-{rate_hi} frame-heights/sec"
+    )
+    return out
+
+
+def swing_windows_from_descents(
+    descents: list,
+    green_delta_sec: float = 0.0,
+    flight_lo_sec: float = 5.0,
+    flight_hi_sec: float = 7.0,
+) -> list:
+    """Turn green landings into windows to hunt for the swing on the tee.
+
+    `green_delta_sec` is green_start - tee_start, the same convention the
+    rest of the pipeline uses, so tee_time = green_time + delta.
+
+    The window is deliberately expressed as an interval and not a guess.
+    Hang time on a par 3 runs about 5 to 7 seconds, and the honest output
+    of that is two seconds of tee clock to search, not a single frame
+    that pretends to a precision nobody measured.
+    """
+    outs = []
+    for ev in descents or []:
+        g = float(ev.get("last_descent_sec") or 0.0)
+        t = g + float(green_delta_sec)
+        outs.append({
+            "green_sec": round(g, 2),
+            "tee_sec": round(t, 2),
+            "swing_from_sec": round(t - float(flight_hi_sec), 2),
+            "swing_to_sec": round(t - float(flight_lo_sec), 2),
+            "landing_xy": ev.get("landing_xy"),
+        })
+    return outs
+
+
 def find_flight(
     input_path: Path,
     fps: float,

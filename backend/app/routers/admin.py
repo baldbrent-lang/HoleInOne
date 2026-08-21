@@ -14955,6 +14955,7 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         "counts": counts,
         "n_cands_drawn": len(cands),
         "reason": rest.get("reason"),
+        "green_descents": None,
         "area_image": None,
         "area_image_clean": None,
         "frame_w": None,
@@ -15071,6 +15072,67 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("swing test: clean area image write failed: %s", exc)
 
+    # WORKING BACKWARDS FROM THE GREEN.
+    #
+    # Everything above is the hard half of the problem: find a four-pixel
+    # ball on a tee that people keep standing in front of. The easy half
+    # is on the other camera. Nothing on a green falls -- players walk,
+    # the flag moves, the tree line shifts, and all of it is slow and
+    # sideways -- so a ball coming down is the only thing in the picture
+    # doing what a ball does. Measured over two clips: the real descents
+    # fell at 0.53 and 1.29 frame-heights/sec and the fastest of the 47
+    # other tracks managed 0.16.
+    #
+    # That makes the green a CLOCK. A par-3 tee shot is airborne 5 to 7
+    # seconds, so each descent dates its own swing to a two-second window
+    # of tee time, and the count of descents is the count of shots that
+    # reached the green. It is reported rather than enforced: a shot can
+    # miss the green entirely and still be a shot, and the two cameras
+    # are only as aligned as their wall clocks.
+    _green_name = getattr(row, "green_filename", None)
+    if _green_name:
+        if progress:
+            progress("Counting descents on the green", 0, 0)
+        try:
+            from ..services import debug3 as _d3g
+
+            _gp = _local_green(row)
+            if not _gp or not _gp.exists():
+                raise FileNotFoundError("the green video is missing on disk")
+            _gd = _d3g.find_descents(_gp, fps=probe_fps(_gp) or None)
+            _delta, _dsrc = _d3_green_delta_sec(db, row)
+            _wins = _d3g.swing_windows_from_descents(
+                _gd.get("events") or [], green_delta_sec=_delta,
+            )
+            rep["green_descents"] = {
+                "reason": _gd.get("reason"),
+                "n_tracks": _gd.get("n_tracks"),
+                "n_descents": len(_gd.get("events") or []),
+                "events": _gd.get("events") or [],
+                "swing_windows": _wins,
+                "delta_sec": round(_delta, 3),
+                "delta_source": _dsrc,
+            }
+            # Which of the tee departures we found lands in one of those
+            # windows. A match is corroboration from a second camera; a
+            # window with nothing in it is where to go looking next.
+            for _d in deps:
+                try:
+                    _ts = float(_d.get("t") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                for _w in _wins:
+                    if _w["swing_from_sec"] <= _ts <= _w["swing_to_sec"]:
+                        _d["green_landing_sec"] = _w["green_sec"]
+                        break
+            log.info("swing test: green descents — %s (delta %.2fs from %s)",
+                     _gd.get("reason"), _delta, _dsrc)
+        except Exception as exc:  # noqa: BLE001
+            # A second camera is corroboration, not a dependency.
+            log.warning("swing test: green descent scan failed: %s", exc)
+            rep["green_descents"] = {"reason": f"failed: {exc}",
+                                     "n_descents": 0, "events": []}
+
     # DID IT LEAVE, AND WHEN. The scan samples at ~15Hz and its `t` is the
     # last frame the ball was SEEN, not the frame it went. Re-watch the
     # rest patch at full rate to pin the exact frame.
@@ -15091,6 +15153,7 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             "frame": int(t * fps + 0.5),
             "x": int(round(x)), "y": int(round(y)),
             "rest_sec": d.get("rest_sec"),
+            "green_landing_sec": d.get("green_landing_sec"),
             "source": d.get("source"),
             "votes": d.get("votes"),
             "club_rate": d.get("club_rate"),
