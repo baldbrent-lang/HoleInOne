@@ -5262,6 +5262,8 @@ export function SwingDetectPanel({ sd }) {
               <th style={{ padding: "2px 4px" }}>impact frame</th>
               <th style={{ padding: "2px 4px" }}>ball at</th>
               <th style={{ padding: "2px 4px" }}>rest</th>
+              <th style={{ padding: "2px 4px" }}>AI judge</th>
+              <th style={{ padding: "2px 4px" }}>preview</th>
             </tr>
           </thead>
           <tbody>
@@ -5315,12 +5317,65 @@ export function SwingDetectPanel({ sd }) {
                   )}
                 </td>
                 <td style={{ padding: "2px 4px" }}>
-                  {r.ball ? `${r.ball.x},${r.ball.y}` : <span className="muted">—</span>}
+                  {/* Two different answers to the same question, shown
+                      together: the departure detector's, and stage 2's
+                      club-arc one. They disagree often enough that
+                      collapsing them hides the disagreement. */}
+                  {r.ball ? (
+                    <span title="where the resting-ball detector saw it leave">
+                      {r.ball.x},{r.ball.y}
+                    </span>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                  {r.ball_hint && (
+                    <div className="tiny muted"
+                         title="where stage 2 put it, from the bottom of the club arc">
+                      arc {Math.round(r.ball_hint[0])},{Math.round(r.ball_hint[1])}
+                    </div>
+                  )}
+                  {r.ball_final && !r.ball_hint && (
+                    <div className="tiny muted" title="the ball the tracer used">
+                      used {Math.round(r.ball_final[0])},{Math.round(r.ball_final[1])}
+                    </div>
+                  )}
                 </td>
                 <td style={{ padding: "2px 4px" }}>
                   {r.ball?.rest_sec != null
                     ? `${r.ball.rest_sec}s`
                     : <span className="muted">—</span>}
+                </td>
+                <td style={{ padding: "2px 4px" }}>
+                  {!r.judge ? (
+                    <span className="muted">—</span>
+                  ) : r.judge.ai_judge == null ? (
+                    <span className="muted" title={r.judge.ai_reason || r.judge.verdict || ""}>
+                      {r.judge.verdict || "not judged"}
+                    </span>
+                  ) : (
+                    <span
+                      className={`pill ${r.judge.ai_judge ? "ok" : (r.judge.unsure ? "warn" : "bad")}`}
+                      title={r.judge.ai_reason || ""}
+                    >
+                      {r.judge.ai_judge ? "swing" : "not a swing"}
+                      {r.judge.ai_confidence ? ` (${r.judge.ai_confidence})` : ""}
+                      {r.judge.dropped ? " · dropped" : ""}
+                      {!r.judge.dropped && r.judge.unsure ? " · unsure, kept" : ""}
+                    </span>
+                  )}
+                </td>
+                <td style={{ padding: "2px 4px" }}>
+                  {!r.preview ? (
+                    <span className="muted">—</span>
+                  ) : r.preview.clip_url ? (
+                    <a href={r.preview.clip_url} target="_blank" rel="noreferrer">
+                      clip
+                    </a>
+                  ) : (
+                    <span className="muted" title={r.preview.error || ""}>
+                      {r.preview.error ? "failed" : "none"}
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}
@@ -6549,6 +6604,143 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
  * composite: per-frame MOG2, drop the golfer, keep ball-sized blobs, link
  * them over time, fit a parabola. Read-only, so nothing to save.
  */
+/** The tee box Debug3 searches in, drawn on a frame you can redraw it on.
+ *
+ * The ROI resolver has always written "draw one on the frame below" when
+ * no box exists for the hole and day. That was true of the swing test and
+ * has never been true here -- Debug3 printed the instruction with nothing
+ * underneath it, so the one action it asked for was the one action it did
+ * not offer.
+ */
+function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
+  const [drag, setDrag] = useState(null);      // {x,y,w,h} fractions
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const imgRef = useRef(null);
+  if (!tb) return null;
+
+  const box = drag || tb.roi || null;
+  const canDraw = !!(tb.frame_url && tb.course_id && tb.hole && tb.day);
+
+  const frac = (e) => {
+    const r = imgRef.current.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+    };
+  };
+  const onDown = (e) => {
+    if (!canDraw) return;
+    e.preventDefault();
+    const p = frac(e);
+    setDrag({ x: p.x, y: p.y, w: 0, h: 0, _ax: p.x, _ay: p.y });
+  };
+  const onMove = (e) => {
+    if (!drag) return;
+    const p = frac(e);
+    setDrag((d) => ({
+      ...d,
+      x: Math.min(d._ax, p.x), y: Math.min(d._ay, p.y),
+      w: Math.abs(p.x - d._ax), h: Math.abs(p.y - d._ay),
+    }));
+  };
+  const onUp = () => {
+    if (drag && (drag.w < 0.01 || drag.h < 0.01)) setDrag(null);
+  };
+
+  const save = async (roi) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.setTeeBox(adminPassword, tb.course_id,
+        { hole: tb.hole, day: tb.day, roi });
+      setMsg(roi ? "Saved. Re-run to search inside it."
+                 : "Cleared. Re-run to search the fallback box.");
+      if (!roi) setDrag(null);
+    } catch (err) {
+      setMsg(`Could not save: ${err.message || err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ padding: 10, marginBottom: 10 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <b>Where stage 2 looks for the ball</b>
+        <span className="tiny muted">{tb.source || "no box"}</span>
+      </div>
+      {tb.note && (
+        <div className="tiny" style={{ color: "var(--warn, #b45309)", marginTop: 4 }}>
+          {tb.note}
+        </div>
+      )}
+      {canDraw ? (
+        <>
+          <div
+            style={{ position: "relative", marginTop: 8, userSelect: "none" }}
+            onMouseDown={onDown}
+            onMouseMove={onMove}
+            onMouseUp={onUp}
+            onMouseLeave={onUp}
+          >
+            <img
+              ref={imgRef}
+              src={tb.frame_url}
+              alt="tee box"
+              draggable={false}
+              style={{ width: "100%", borderRadius: 6, display: "block" }}
+            />
+            {box && (
+              <div
+                style={{
+                  position: "absolute",
+                  left: `${box.x * 100}%`, top: `${box.y * 100}%`,
+                  width: `${box.w * 100}%`, height: `${box.h * 100}%`,
+                  border: `2px solid ${drag ? "#22c55e" : "#3b82f6"}`,
+                  background: "rgba(59,130,246,0.10)",
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+          </div>
+          <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            <span className="tiny muted">
+              {drag
+                ? `New box: x ${Math.round(drag.x * 100)}% y ${Math.round(drag.y * 100)}%, `
+                  + `${Math.round(drag.w * 100)}%×${Math.round(drag.h * 100)}%`
+                : "Drag on the frame to set the box for this hole today."}
+            </span>
+            <button
+              className="btn tiny"
+              disabled={!drag || busy}
+              onClick={() => save({ x: drag.x, y: drag.y, w: drag.w, h: drag.h })}
+            >
+              {busy ? "Saving…" : `Save box for hole ${tb.hole} on ${tb.day}`}
+            </button>
+            <button className="btn tiny ghost" disabled={busy}
+                    onClick={() => save(null)}>
+              Clear this day's box
+            </button>
+            <button className="btn tiny" disabled={busy}
+                    onClick={() => onRerun && onRerun()}>
+              Re-run Debug3
+            </button>
+          </div>
+          {msg && <div className="tiny" style={{ marginTop: 6 }}>{msg}</div>}
+        </>
+      ) : (
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          {tb.frame_url
+            ? "No course/hole/day on this upload, so a box cannot be saved against it."
+            : "This report predates the reference frame — run Debug3 again to draw a box."}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function Debug3Modal({ state, onClose }) {
   if (!state) return null;
   const rep = state.report;
@@ -6621,6 +6813,12 @@ function Debug3Modal({ state, onClose }) {
             {/* First thing in the report, above the stage list: it is the
                 question the stages cannot answer — how many swings are in
                 this clip — and it is what someone opens Debug3 to check. */}
+            <D3TeeBox
+              tb={rep.tee_box}
+              uploadId={state.uploadId ?? state.id}
+              adminPassword={state.adminPassword}
+              onRerun={state.onRerun}
+            />
             {rep.swing_detect ? (
               <SwingDetectPanel sd={rep.swing_detect} />
             ) : (
@@ -11609,7 +11807,12 @@ export default function AdminProduction() {
     const tick = async () => {
       try {
         const st = await statusCall(adminPassword, uploadId);
-        setter({
+        // MERGE, do not replace. The opener puts things on this state
+        // that no poll knows about -- the admin password and a re-run
+        // handle for the tee-box drawer -- and a plain object here
+        // silently dropped them on the first tick.
+        setter((prev) => ({
+          ...(prev || {}),
           running: !!st.running,
           uploadId,
           stage: st.stage,
@@ -11617,13 +11820,14 @@ export default function AdminProduction() {
           total: st.total,
           report: st.report || null,
           error: st.error || null,
-        });
+        }));
         if (st.running) setTimeout(tick, 2500);
         else setBusyId((cur) => (cur === uploadId ? null : cur));
       } catch (e) {
-        setter({
+        setter((prev) => ({
+          ...(prev || {}),
           running: false, uploadId, report: null, error: e.message,
-        });
+        }));
         setBusyId((cur) => (cur === uploadId ? null : cur));
       }
     };
@@ -11651,7 +11855,13 @@ export default function AdminProduction() {
   async function handleDebug3(row) {
     // Window first, same reason as Debug2: a throw after this still leaves
     // a visible panel carrying the error.
-    setD3({ running: true, uploadId: row.id, report: null, error: null });
+    // adminPassword and a re-run handle ride along so the tee-box drawer
+    // inside the modal can save a box and immediately search inside it,
+    // which is the only reason anyone draws one.
+    setD3({
+      running: true, uploadId: row.id, report: null, error: null,
+      adminPassword, onRerun: () => handleDebug3(row),
+    });
     busySinceRef.current = Date.now();
     setBusyId(row.id);
     try {

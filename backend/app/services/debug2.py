@@ -117,6 +117,7 @@ def club_bottom_ball(
     feet_xy=None,
     head_xy=None,
     ball_side=None,
+    roi=None,
     debug_dir: Path | None = None,
     debug_prefix: str = "d2club",
 ) -> dict:
@@ -142,10 +143,18 @@ def club_bottom_ball(
     Without feet_xy it falls back to the old wrist-centred box, which is
     much weaker — the reason string says which was used.
 
-    Returns {ok, xy, arc_px, reason, image, side, offset_body}. Never
-    raises."""
+    `roi` is the TEE BOX, in fractions of the frame, and it is applied on
+    top of whichever of those two windows was used. Pose puts the window
+    where the golfer is; the tee box says where a ball can be at all. The
+    two constrain different things and the intersection is smaller and
+    more honest than either -- a window derived from a mis-detected
+    golfer can land on the fairway, and the tee box will not follow it
+    there.
+
+    Returns {ok, xy, arc_px, reason, image, side, offset_body, roi_used}.
+    Never raises."""
     out = {"ok": False, "xy": None, "arc_px": 0, "reason": None, "image": None,
-           "side": None, "offset_body": None}
+           "side": None, "offset_body": None, "roi_used": None}
     if not HAS_CV:
         out["reason"] = "opencv not installed"
         return out
@@ -226,6 +235,31 @@ def club_bottom_ball(
             mask = cv2.bitwise_and(mask, box)
             wins = [(max(0, hx - rx), ry_lo, min(w, hx + rx), ry_hi)]
 
+        # THE TEE BOX, on top of whatever pose asked for. Drawn per hole
+        # per day, so it is the one constraint that knows the markers
+        # moved this morning.
+        roi_rect = None
+        if roi and all(k in roi for k in ("x", "y", "w", "h")):
+            try:
+                rx0 = max(0, min(w - 2, int(float(roi["x"]) * w)))
+                ry0 = max(0, min(h - 2, int(float(roi["y"]) * h)))
+                rx1 = max(rx0 + 2, min(w, int((float(roi["x"])
+                                               + float(roi["w"])) * w)))
+                ry1 = max(ry0 + 2, min(h, int((float(roi["y"])
+                                               + float(roi["h"])) * h)))
+                roi_rect = (rx0, ry0, rx1, ry1)
+                rbox = np.zeros_like(mask)
+                rbox[ry0:ry1, rx0:rx1] = 255
+                mask = cv2.bitwise_and(mask, rbox)
+                out["roi_used"] = {"x": rx0, "y": ry0,
+                                   "w": rx1 - rx0, "h": ry1 - ry0}
+                if not wins:
+                    # No pose window at all -- then the tee box IS the
+                    # window, which beats searching the whole frame.
+                    wins = [roi_rect]
+            except (TypeError, ValueError) as exc:
+                log.debug("club_bottom_ball: bad roi %r: %s", roi, exc)
+
         ys, xs = np.nonzero(mask)
         out["arc_px"] = int(xs.size)
 
@@ -248,6 +282,11 @@ def club_bottom_ball(
             for _r in wins:
                 cv2.rectangle(img, (_r[0], _r[1]), (_r[2], _r[3]),
                               (60, 60, 235), 2)
+            # The tee box in green, so a window that lost most of itself
+            # to the intersection is obvious rather than mysterious.
+            if roi_rect is not None:
+                cv2.rectangle(img, (roi_rect[0], roi_rect[1]),
+                              (roi_rect[2], roi_rect[3]), (80, 220, 80), 2)
             if ground_y is not None:
                 # Only across the windows, not the whole frame — drawn edge
                 # to edge it read as a horizon and invited the question of

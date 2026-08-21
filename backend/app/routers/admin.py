@@ -18528,6 +18528,51 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             rep["swing_detect"] = {"error": str(exc)}
         _add("swing_detect", time.perf_counter() - _t0)
 
+    # THE TEE BOX, resolved once for the whole run. Stage 2 needs it, and
+    # so does the panel: a box that came from the wrong day, or from the
+    # course-wide fallback, is the difference between a ball search that
+    # is constrained and one that only looks constrained.
+    try:
+        _d3_roi = _tee_box_roi_fractions(src_path, db, row)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3: tee-box ROI lookup failed: %s", exc)
+        _d3_roi = {"roi": None, "source": f"failed: {exc}", "note": None}
+    rep["tee_box"] = {
+        "roi": _d3_roi.get("roi"),
+        "source": _d3_roi.get("source"),
+        "note": _d3_roi.get("note"),
+        "hole": _d3_roi.get("hole"),
+        "day": _d3_roi.get("day"),
+        "course_id": getattr(row, "course_id", None),
+        "frame_url": None, "frame_w": None, "frame_h": None,
+    }
+    # A FRAME TO DRAW ON. The note this resolver writes says "draw one on
+    # the frame below", which was true of the swing test and has never
+    # been true here -- Debug3 printed the instruction with nothing under
+    # it. One clean frame, no overlay, because the operator is about to
+    # draw a box on it and anything already drawn is in the way.
+    try:
+        import cv2  # type: ignore
+
+        _c = cv2.VideoCapture(str(src_path))
+        _c.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * fps))
+        _ok, _ref = _c.read()
+        if not _ok or _ref is None:
+            _c.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            _ok, _ref = _c.read()
+        _c.release()
+        if _ok and _ref is not None:
+            _fh, _fw = _ref.shape[:2]
+            _fn = f"d3box-{upload_id}-{tok}.jpg"
+            cv2.imwrite(str(CLIPS_DIR / _fn), _ref,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            rep["tee_box"].update({
+                "frame_url": _clip_url(_fn),
+                "frame_w": int(_fw), "frame_h": int(_fh),
+            })
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3: tee-box reference frame failed: %s", exc)
+
     n_flights = 0
     n_produced = 0
     n_judged_out = 0
@@ -18572,6 +18617,13 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
                     feet_xy=c.get("impact_feet_xy"),
                     head_xy=c.get("impact_head_xy"),
                     ball_side=_ball_side,
+                    # WHERE A BALL CAN BE AT ALL. Pose says where the
+                    # golfer is, which is an inference about a person;
+                    # the tee box says where a teed ball can be, which
+                    # is a fact about this hole on this day. Stage 2 had
+                    # only the first, so a mis-read golfer took the ball
+                    # search out onto the fairway with it.
+                    roi=(_d3_roi or {}).get("roi"),
                     debug_dir=_art_dir,
                     debug_prefix=f"d3-{upload_id}-{tok}-{i}-hint",
                 ) or {}
@@ -18588,6 +18640,7 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry["ball_hint"] = _rest_xy
         entry["ball_hint_reason"] = _pre.get("reason")
         entry["ball_hint_image_url"] = _clip_url(_pre.get("image"))
+        entry["ball_hint_roi"] = _pre.get("roi_used")
 
         # STAGE 3: IS IT A SWING AT ALL? Pose fires on wrist speed and
         # spine bend, which a practice swing, a bag drop or someone
@@ -18904,6 +18957,42 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             rep["produced"] = {"ok": False, "error": f"{exc}"}
         _add("produce_real", time.perf_counter() - _t0)
     # Consumed (or not needed) — keep them out of the panel payload.
+    # JOIN THE VERDICTS BACK ONTO THE SUMMARY. The comparison table is
+    # built before any candidate has been judged or produced, so on its
+    # own it can only say what the two detectors thought -- not whether
+    # the AI judge agreed, and not whether anything came out the far end.
+    # Those are the two things an operator actually scans the table for.
+    try:
+        _by_idx = {int(e["idx"]): e for e in (rep.get("swings") or [])
+                   if e.get("idx") is not None}
+        for _r in ((rep.get("swing_detect") or {}).get("rows") or []):
+            _p = _r.get("pose") or {}
+            _e = _by_idx.get(_p.get("idx"))
+            if not _e:
+                continue
+            _j = _e.get("judge") or {}
+            _r["judge"] = {
+                "verdict": _j.get("verdict"),
+                "ai_judge": _j.get("ai_judge"),
+                "ai_reason": _j.get("ai_reason"),
+                "ai_confidence": _j.get("ai_confidence"),
+                "decided_by": _j.get("decided_by"),
+                "dropped": bool(_e.get("dropped_by_judge")),
+                "unsure": bool(_e.get("judge_unsure")),
+            }
+            _pr = _e.get("produce") or {}
+            _r["preview"] = {
+                "ok": bool(_pr.get("ok")),
+                "clip_url": _pr.get("clip_url"),
+                "error": _pr.get("error"),
+            }
+            # Stage 2's answer, which is a different number from the
+            # departure detector's and worth seeing next to it.
+            _r["ball_hint"] = _e.get("ball_hint")
+            _r["ball_final"] = _e.get("ball")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3: could not join judge/preview onto the summary: %s", exc)
+
     for _s in rep["swings"]:
         _s.pop("candidates", None)
         # The produce job ran synchronously on THIS thread, so its
