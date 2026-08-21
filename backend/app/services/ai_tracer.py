@@ -8110,6 +8110,216 @@ def find_departures_at_spot(
     return out
 
 
+def ball_candidates_in_frame(
+    frame,
+    roi: dict | None = None,
+    expect_radius_px: float | None = None,
+    white_v_min: int = 80,
+    white_s_max: int = 85,
+    tophat_min: int = 40,
+    circularity_min: float = 0.45,
+    aspect_max: float = 1.6,
+    extent_min: float = 0.5,
+    r_lo_frac: float = 0.0012,
+    r_hi_frac: float = 0.0075,
+) -> list[tuple[float, float, float]]:
+    """Every ball-shaped white blob on grass in ONE frame.
+
+    Lifted out of detect_swings_from_ball's per-frame loop so a second
+    caller can ask the same question of a different set of frames. It is
+    the same crop, the same upscale, the same white top-hat and the same
+    gates -- factored, not reimplemented, because a second copy of this
+    would drift from the first the way Debug3 drifted from produce.
+
+    Returns [(x, y, radius)] in NATIVE frame pixels, inside `roi`.
+    """
+    if not HAS_CV or frame is None:
+        return []
+    h, w = frame.shape[:2]
+    ox = oy = 0
+    scale = 1.0
+    work = frame
+    if roi:
+        _mx = 0.02
+        rx0 = int(max(0, (float(roi.get("x", 0.0)) - _mx) * w))
+        ry0 = int(max(0, (float(roi.get("y", 0.0)) - _mx) * h))
+        rx1 = int(min(w, (float(roi.get("x", 0.0))
+                          + float(roi.get("w", 1.0)) + _mx) * w))
+        ry1 = int(min(h, (float(roi.get("y", 0.0))
+                          + float(roi.get("h", 1.0)) + _mx) * h))
+        if rx1 - rx0 < 8 or ry1 - ry0 < 8:
+            rx0, ry0, rx1, ry1 = 0, 0, w, h
+        work = frame[ry0:ry1, rx0:rx1]
+        ox, oy = rx0, ry0
+        _want_r = expect_radius_px if expect_radius_px else 0.0025 * h
+        if _want_r < 2.5:
+            scale = float(min(4.0, 4.0 / max(0.5, _want_r)))
+            work = cv2.resize(work, None, fx=scale, fy=scale,
+                              interpolation=cv2.INTER_LINEAR)
+    else:
+        scale = 720.0 / h if h > 720 else 1.0
+        if scale != 1.0:
+            work = cv2.resize(frame, (max(1, int(w * scale)), int(h * scale)),
+                              interpolation=cv2.INTER_AREA)
+
+    r_lo = max(0.8, r_lo_frac * h)
+    r_hi = max(r_lo + 0.5, r_hi_frac * h)
+    if expect_radius_px:
+        r_lo = max(0.8, float(expect_radius_px) * 0.55)
+        r_hi = max(r_lo + 0.5, float(expect_radius_px) * 1.9)
+
+    hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
+    _ks = int(max(7, min(41, round(6.0 * max(1.0, r_hi * scale)))))
+    _ks |= 1
+    _th = cv2.morphologyEx(
+        hsv[:, :, 2], cv2.MORPH_TOPHAT,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ks, _ks)),
+    )
+    mask = (
+        (_th >= int(tophat_min))
+        & (hsv[:, :, 1] <= int(white_s_max))
+        & (hsv[:, :, 2] >= int(white_v_min))
+    ).astype(np.uint8) * 255
+    if scale == 1.0:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    out: list[tuple[float, float, float]] = []
+    bx0 = by0 = 0.0
+    bx1, by1 = float(w), float(h)
+    if roi:
+        bx0 = float(roi.get("x", 0.0)) * w
+        by0 = float(roi.get("y", 0.0)) * h
+        bx1 = bx0 + float(roi.get("w", 1.0)) * w
+        by1 = by0 + float(roi.get("h", 1.0)) * h
+    for c in cnts:
+        ok, _why, meas = _gate_ball_blob(
+            c, mask, hsv, scale, r_lo, r_hi,
+            circularity_min, aspect_max, extent_min,
+        )
+        if not ok:
+            continue
+        nx = ox + meas["x_work"] / scale
+        ny = oy + meas["y_work"] / scale
+        if not (bx0 <= nx <= bx1 and by0 <= ny <= by1):
+            continue
+        out.append((nx, ny, meas["radius_native_px"]))
+    return out
+
+
+def find_rest_spots_by_persistence(
+    input_path: Path,
+    fps: float | None = None,
+    window: tuple[int, int] | None = None,
+    n_samples: int = 60,
+    roi: dict | None = None,
+    expect_radius_px: float | None = None,
+    cluster_px: float = 6.0,
+    min_votes: int = 4,
+    max_spots: int = 6,
+) -> dict:
+    """Where a ball SAT, found across frames instead of within one.
+
+    THE OCCLUSION PROBLEM. This camera is behind the tee and people
+    stand and walk between it and the ball. The per-frame detector asks
+    "is there a ball in this picture", so a frame with someone in front
+    of it is a frame with no ball, and if that is the frame we looked at,
+    the ball is simply not found. Measured on a real clip: the ball
+    scores 107 against its surroundings when visible and 0 when a body
+    crosses it -- the detector is not weak, it is blindfolded.
+
+    But the ball is the one white thing in shot that DOES NOT MOVE. It
+    sits for seconds while everything blocking it walks past. So this
+    asks a different question -- "what has been a ball at the same pixel,
+    across many frames" -- and a body crossing costs it votes rather than
+    the answer. On that clip, with 55% of frames occluded, this still
+    found the ball at 26 votes of 60.
+
+    A median-of-frames plate was the other candidate and is worse: it
+    also erases movers, but it fails hard once the ball is hidden in half
+    the samples, where this degrades smoothly.
+
+    IT DOES NOT DECIDE WHICH SPOT IS THE BALL, and must not. Persistence
+    is what a tee marker has MORE of than a golf ball -- on that same
+    clip the top-voted spot was a static object with 60/60 while the ball
+    had 26. What separates them is that the ball leaves and the marker
+    does not, which find_departures_at_spot already tests. This finds
+    places worth testing; that decides.
+
+    Returns {ok, spots: [{x, y, votes, n_samples, radius}], reason}.
+    Never raises.
+    """
+    out: dict = {"ok": False, "spots": [], "n_samples": 0, "reason": None}
+    if not HAS_CV:
+        out["reason"] = "opencv not installed"
+        return out
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        out["reason"] = "could not open video"
+        return out
+    try:
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        f_lo, f_hi = window if window else (0, max(0, n_frames - 1))
+        f_lo = max(0, int(f_lo))
+        f_hi = min(max(f_lo + 1, int(f_hi)), max(1, n_frames - 1))
+        n = max(4, int(n_samples))
+        idxs = [
+            int(round(f_lo + (f_hi - f_lo) * i / float(n - 1)))
+            for i in range(n)
+        ]
+        # (sum_x, sum_y, sum_r, votes) per cluster, merged on the fly so
+        # a long window does not hold every detection in memory.
+        clusters: list[list[float]] = []
+        seen = 0
+        for fi in idxs:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            seen += 1
+            for (x, y, r) in ball_candidates_in_frame(
+                frame, roi=roi, expect_radius_px=expect_radius_px,
+            ):
+                for cl in clusters:
+                    cx, cy = cl[0] / cl[3], cl[1] / cl[3]
+                    if ((cx - x) ** 2 + (cy - y) ** 2) ** 0.5 <= cluster_px:
+                        cl[0] += x
+                        cl[1] += y
+                        cl[2] += r
+                        cl[3] += 1
+                        cl[4] = max(cl[4], fi)
+                        break
+                else:
+                    clusters.append([x, y, r, 1.0, float(fi)])
+    finally:
+        cap.release()
+
+    out["n_samples"] = seen
+    spots = [
+        {
+            "x": int(round(cl[0] / cl[3])),
+            "y": int(round(cl[1] / cl[3])),
+            "radius": round(cl[2] / cl[3], 2),
+            "votes": int(cl[3]),
+            "n_samples": seen,
+            # Same meaning the scan gives its `t`: the last sampled frame
+            # this spot still held a ball. The caller walks back from it.
+            "last_seen_frame": int(cl[4]),
+        }
+        for cl in clusters if cl[3] >= min_votes
+    ]
+    spots.sort(key=lambda z: -z["votes"])
+    out["spots"] = spots[:max_spots]
+    out["ok"] = bool(out["spots"])
+    out["reason"] = (
+        f"{len(out['spots'])} spot(s) held a ball across {seen} sampled "
+        f"frame(s)"
+        + (f", best {out['spots'][0]['votes']} vote(s)" if out["spots"] else "")
+        if seen else "no frames could be read"
+    )
+    return out
+
+
 def detect_swings_from_ball(
     input_path: Path,
     fps: float | None = None,

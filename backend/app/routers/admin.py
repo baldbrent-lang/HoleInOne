@@ -113,6 +113,7 @@ from ..services.ai_tracer import (
     detect_swings_from_audio,
     detect_swings_from_motion,
     detect_swings_from_ball,
+    find_rest_spots_by_persistence,
     detect_swings_from_ai_ball,
     classify_swing_shot,
     find_resting_ball,
@@ -14152,6 +14153,71 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
         out["reason"] = f"departure detector crashed: {exc}"
         return out
     out["deps"] = list(dbg.get("departures") or [])
+
+    # THE SECOND METHODOLOGY, layered rather than substituted.
+    #
+    # The scan above asks "is there a ball in this frame". This camera
+    # sits behind the tee with players standing and walking between it
+    # and the ball, so a frame with a body across the ball is a frame
+    # with no ball -- and if the scan's samples land there, the spot is
+    # never proposed at all. Measured on a real clip: the ball scores 107
+    # against its surroundings when visible and 0 when a body crosses it.
+    #
+    # The ball is the one white thing in shot that does not move. Asking
+    # "what has been a ball at the same pixel, across many frames" turns
+    # an occluding body into lost votes instead of a lost ball: on that
+    # clip it still finds the ball with 90% of frames blocked, where a
+    # single frame fails at any.
+    #
+    # It only ADDS spots. Anything the scan already proposed is left
+    # alone, because persistence cannot tell a ball from a tee marker --
+    # a marker is MORE persistent, and on that clip out-voted the ball
+    # 60 to 52. What separates them is that the ball leaves, which the
+    # caller's departure walk already tests on every spot it is handed.
+    try:
+        _pers = find_rest_spots_by_persistence(
+            src_path, fps=fps, roi=out["roi"], expect_radius_px=expect_r,
+        )
+        out["persistence"] = {
+            "reason": _pers.get("reason"),
+            "n_samples": _pers.get("n_samples"),
+            "spots": _pers.get("spots") or [],
+        }
+        _known = [
+            (float(d.get("x") or 0.0), float(d.get("y") or 0.0))
+            for d in out["deps"]
+        ]
+        _added = 0
+        for _sp in _pers.get("spots") or []:
+            _sx, _sy = float(_sp["x"]), float(_sp["y"])
+            if any(((_sx - kx) ** 2 + (_sy - ky) ** 2) ** 0.5 <= 12.0
+                   for kx, ky in _known):
+                continue
+            # `t` carries the same meaning the scan gives it: the last
+            # moment the ball was SEEN there. Not when it left -- that is
+            # the caller's walk to decide -- but it has to be a real time
+            # or the rest snapshot is taken from frame 0.
+            _lsf = _sp.get("last_seen_frame")
+            out["deps"].append({
+                "t": (float(_lsf) / max(1e-6, fps)) if _lsf else None,
+                "x": _sx, "y": _sy,
+                "rest_sec": None,
+                "source": "persistence",
+                "votes": _sp.get("votes"),
+                "n_samples": _sp.get("n_samples"),
+            })
+            _known.append((_sx, _sy))
+            _added += 1
+        out["persistence"]["n_added"] = _added
+        if _added:
+            log.info(
+                "swing test: persistence added %d spot(s) the scan missed "
+                "(%s)", _added, _pers.get("reason"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        # A second opinion is an improvement, not a dependency.
+        log.warning("swing test: persistence pass failed: %s", exc)
+        out["persistence"] = {"reason": f"failed: {exc}", "spots": []}
     # Every white/round/ball-sized blob the scan saw, in native pixels,
     # before the ROI gate. Only the swing test draws them, but they are
     # the difference between "the box is wrong" and "the ball is not
