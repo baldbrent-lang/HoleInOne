@@ -570,3 +570,194 @@ def apply_intro_overlay_inplace(
         tmp.unlink(missing_ok=True)
         return False
     return True
+
+
+# ── closing plate: distance to pin ─────────────────────────────────────
+# How long the distance plate stays up at the end, and how long it takes
+# to drop in. It holds to the last frame rather than sliding away: it is
+# the answer the clip was building to, and a viewer who scrubs back to
+# the end should find it there rather than watch it leave.
+DIST_DROP_SEC = 0.45
+DIST_LEAD_SEC = 2.6          # how far before the end it starts dropping
+
+
+def render_distance_panel(
+    distance_display: str,
+    label: str = "DISTANCE TO PIN",
+) -> "Image.Image | None":
+    """The closing plate: 'DISTANCE TO PIN — 41 FEET'.
+
+    Takes a pre-formatted display string rather than a number, because
+    the rounding is a measurement decision, not a drawing one --
+    green_calibration already refuses to print a precision the
+    homography does not have, and this must not quietly re-round it into
+    something more confident.
+    """
+    if not HAS_PIL:
+        return None
+    text = (distance_display or "").strip()
+    if not text:
+        return None
+
+    bold_big = _find_font(FONT_CANDIDATES_BOLD, 34)
+    bold_lbl = _find_font(FONT_CANDIDATES_BOLD, 16)
+
+    label_text = label.upper()
+    value_text = text.upper()
+
+    pad_x, pad_y = 26, 14
+    gap = 10
+    w_lbl = _measure(label_text, bold_lbl)
+    w_val = _measure(value_text, bold_big)
+    content_w = max(w_lbl, w_val)
+    width = content_w + 2 * pad_x
+    lbl_h = (bold_lbl.size if hasattr(bold_lbl, "size") else 16)
+    val_h = (bold_big.size if hasattr(bold_big, "size") else 34)
+    height = pad_y * 2 + lbl_h + gap + val_h
+
+    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, width, height), fill=PANEL_BOTTOM_BLUE)
+    # A thin brand rule under the value, the same green the mark uses.
+    d.rectangle((0, height - 4, width, height), fill=BRAND_GREEN)
+
+    d.text(((width - w_lbl) // 2, pad_y), label_text,
+           fill=TEXT_MUTED, font=bold_lbl)
+    d.text(((width - w_val) // 2, pad_y + lbl_h + gap), value_text,
+           fill=TEXT_PRIMARY, font=bold_big)
+    return img
+
+
+def _y_expr_distance(anchor_y: int, start_t: float) -> str:
+    """Drop the plate in from above at `start_t` and hold to the end."""
+    return (
+        f"if(lt(t,{start_t}), -h, "
+        f"if(lt(t,{start_t + DIST_DROP_SEC}), "
+        f"-h+(h+{anchor_y})*(t-{start_t})/{DIST_DROP_SEC}, {anchor_y}))"
+    )
+
+
+def apply_distance_plate(
+    input_video: Path,
+    output_video: Path,
+    distance_display: str,
+    label: str = "DISTANCE TO PIN",
+    rest_at_sec: float | None = None,
+) -> bool:
+    """Drop the distance plate into the top of the frame at the end.
+
+    Separate from the intro overlay on purpose: the intro is about the
+    hole and can be drawn before anything is known, while this is the
+    RESULT and only exists once the ball has come to rest and a
+    calibrated camera has turned that into feet. Bolting it onto the
+    intro would mean an unmeasurable shot could not get its intro either.
+
+    Returns False and leaves the input alone on any failure -- including
+    an empty distance, which is the normal case for an uncalibrated
+    camera and must never become a blank or guessed plate.
+    """
+    if not (distance_display or "").strip():
+        return False
+    if not HAS_PIL or not _have_ffmpeg() or not input_video.exists():
+        return False
+
+    plate = render_distance_panel(distance_display, label=label)
+    if plate is None:
+        return False
+
+    dur = _probe_seconds(input_video)
+    if not dur or dur <= 0:
+        return False
+    # WHEN THE BALL STOPPED, not a fixed lead off the end. Timing this
+    # from the tail alone announced the distance while the ball was
+    # still in the air on a clip whose green angle ran long -- the
+    # answer arriving before the thing it answers, which reads as a
+    # spoiler and invites the obvious "how does it know yet?".
+    if rest_at_sec is not None and 0 <= rest_at_sec < dur:
+        start_t = min(rest_at_sec + 0.25, max(0.0, dur - DIST_DROP_SEC))
+    else:
+        start_t = max(0.0, dur - DIST_LEAD_SEC)
+
+    with tempfile.TemporaryDirectory() as td:
+        png = Path(td) / "distance_plate.png"
+        plate.save(png)
+        # Top-centre, a little below the top edge -- clear of the
+        # GolfReelz mark in the corner.
+        y_expr = _y_expr_distance(28, start_t)
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(input_video), "-i", str(png),
+            "-filter_complex",
+            f"[0:v][1:v]overlay=x=(W-w)/2:y='{y_expr}':eval=frame",
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-c:a", "copy", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_video),
+        ]
+        try:
+            subprocess.run(cmd, check=True, timeout=600)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            log.warning("distance plate: ffmpeg failed: %s", exc)
+            output_video.unlink(missing_ok=True)
+            return False
+
+    if not output_video.exists() or output_video.stat().st_size == 0:
+        output_video.unlink(missing_ok=True)
+        return False
+    log.info("distance plate: %s -> %s (%s)",
+             input_video.name, output_video.name, distance_display)
+    return True
+
+
+def _probe_seconds(path: Path) -> float | None:
+    """Clip duration in seconds, or None.
+
+    ffprobe first, cv2 second. They ship together often enough to assume
+    and not always enough to rely on -- a box with ffmpeg but no ffprobe
+    would otherwise lose the plate silently, which looks exactly like
+    "we had no distance" and is a much harder thing to notice.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        d = float((out.stdout or "").strip())
+        if d > 0:
+            return d
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(path))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+        n = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+        cap.release()
+        if fps > 0 and n > 0:
+            return float(n) / float(fps)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("distance plate: could not probe duration: %s", exc)
+    return None
+
+
+def apply_distance_plate_inplace(
+    video_path: Path, distance_display: str,
+    label: str = "DISTANCE TO PIN",
+    rest_at_sec: float | None = None,
+) -> bool:
+    """As above, writing to a temp file and renaming over the original."""
+    tmp = video_path.with_suffix(video_path.suffix + ".dist.tmp.mp4")
+    ok = apply_distance_plate(video_path, tmp, distance_display, label=label,
+                              rest_at_sec=rest_at_sec)
+    if not ok:
+        tmp.unlink(missing_ok=True)
+        return False
+    try:
+        tmp.replace(video_path)
+        return True
+    except OSError as exc:
+        log.warning("distance plate: rename failed: %s", exc)
+        tmp.unlink(missing_ok=True)
+        return False

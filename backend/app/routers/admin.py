@@ -139,7 +139,9 @@ from ..services.video import (
     splice_impact_clip,
     transcode_for_web,
 )
-from ..services.intro_overlay import apply_intro_overlay_inplace
+from ..services.intro_overlay import (
+    apply_distance_plate_inplace, apply_intro_overlay_inplace,
+)
 
 # ── produce phase clock ────────────────────────────────────────────────
 # Stage 7 of the Debug3 panel — the real produce run — was 82.5% of a
@@ -207,6 +209,9 @@ splice_impact_clip = _timed(splice_impact_clip, "ffmpeg_composite")
 concat_two_clips = _timed(concat_two_clips, "ffmpeg_composite")
 apply_intro_overlay_inplace = _timed(
     apply_intro_overlay_inplace, "ffmpeg_overlay",
+)
+apply_distance_plate_inplace = _timed(
+    apply_distance_plate_inplace, "ffmpeg_overlay",
 )
 render_tracer_video = _timed(render_tracer_video, "render_tracer")
 detect_swings_combined = _timed(detect_swings_combined, "detect_swings")
@@ -9010,6 +9015,48 @@ def finalize_wizard_video(
     except Exception as exc:  # pragma: no cover
         log.warning("finalize: intro overlay failed for upload %s: %s", upload_id, exc)
 
+    # THE CLOSING PLATE. A clip that ends on the ball sitting on the
+    # green has been building to a number; this is where it gets said.
+    #
+    # Every input is optional and the whole thing is best-effort: an
+    # uncalibrated camera, an unmarked pin, or a swing whose ball never
+    # came to rest in view all end with no plate, which is the honest
+    # output. The one thing that must not happen is a plate carrying a
+    # guess, so nothing here invents a distance -- it either comes from
+    # the homography or it does not come.
+    try:
+        _plate = (payload.get("distance_text") or "").strip() or None
+        _rest_sec = payload.get("rest_at_sec")
+        if _plate is None:
+            _rest_xy = payload.get("green_rest_xy") or saved.get("green_rest_xy")
+            _cam_id = payload.get("green_camera_id") or saved.get("green_camera_id")
+            if _rest_xy and _cam_id:
+                from ..services import ctp as _ctp
+
+                _cam = db.get(Camera, int(_cam_id))
+                if _cam is not None:
+                    _plate = _ctp.distance_plate_for_clip(
+                        _cam.green_homography or {}, _rest_xy,
+                    )
+                    if _plate is None:
+                        log.info(
+                            "finalize %s: no distance plate — camera %s cannot "
+                            "measure this pixel (calibration or pin missing)",
+                            upload_id, _cam_id,
+                        )
+        if _plate:
+            ok_plate = apply_distance_plate_inplace(
+                final_path, _plate,
+                rest_at_sec=(float(_rest_sec) if _rest_sec is not None else None),
+            )
+            if ok_plate:
+                saved["distance_plate_text"] = _plate
+            else:
+                log.warning("finalize %s: distance plate render failed", upload_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("finalize: distance plate failed for upload %s: %s",
+                    upload_id, exc)
+
     compress_for_email(final_path)
     final_url = (
         f"{settings.app_base_url}/uploads/clips/{final_path.name}"
@@ -13172,6 +13219,348 @@ def calibrate_green_camera(
             "error estimate, or verify by clicking a ball you can pace out."
         ),
     }
+
+
+@router.post("/cameras/{camera_id}/geo-calibrate")
+async def geo_calibrate_camera(
+    camera_id: int,
+    frame: UploadFile | None = File(None),
+    mount_height_ft: float = 8.0,
+    hfov_deg: float = 54.0,
+    stick_base_x: float | None = None,
+    stick_base_y: float | None = None,
+    stick_top_y: float | None = None,
+    save: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Calibrate a green camera from geometry instead of a tape measure.
+
+    Needs three things: how high the camera is mounted, the lens's
+    horizontal FOV (Pi HQ + 6mm is ~54 deg, per field-deployment.md),
+    and a flagstick -- 7 ft of known vertical object standing on the
+    plane we are mapping, which fixes the horizon.
+
+    The flagstick can be detected or given. DETECTION OF THE BASE IS
+    GOOD; detection of the TOP is a proposal, because the walk up the
+    pole either loses it or runs past the flag into the trees behind.
+    So pass stick_top_y once, from a frame you have looked at.
+
+    That is a once-per-camera question, not a daily one: the mount is
+    fixed, so the horizon never moves. Afterwards only the PIN moves,
+    and detect-pin handles that on its own.
+
+    save=false by default. This produces a mapping that decides who wins
+    a prize; look at the horizon it reports before trusting it.
+    """
+    import numpy as np
+
+    from ..services import geom_calibration as gcal
+    from ..services import pin_detect as pd
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    raw = await _frame_bytes_for(camera_id, frame)
+    import cv2
+
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "could not read that image")
+    fh, fw = img.shape[:2]
+
+    det = None
+    bx, by, top = stick_base_x, stick_base_y, stick_top_y
+    if bx is None or by is None or top is None:
+        det = pd.detect_pin(img)
+        if det is None and (bx is None or by is None):
+            raise HTTPException(
+                422, "no flagstick found — pass stick_base_x/y and "
+                     "stick_top_y from a frame you have looked at",
+            )
+        if det is not None:
+            if bx is None:
+                bx = det.x * fw
+            if by is None:
+                by = det.y * fh
+            if top is None:
+                top = det.stick_top_y
+    if top is None:
+        raise HTTPException(
+            422, "could not measure the flagstick's height — pass "
+                 "stick_top_y (the top of the flag) once for this camera",
+        )
+
+    stick_px = float(by) - float(top)
+    try:
+        cal = gcal.build_calibration(
+            fw, fh, mount_height_ft, hfov_deg, (float(bx), float(by)), stick_px,
+        )
+    except gcal.GeomError as exc:
+        raise HTTPException(400, str(exc))
+
+    out = {
+        "camera_id": camera_id,
+        "frame_size": [fw, fh],
+        "flagstick": {"base": [round(float(bx), 1), round(float(by), 1)],
+                      "top": round(float(top), 1),
+                      "height_px": round(stick_px, 1),
+                      "auto_detected": det is not None},
+        "geometry": cal["geometry"],
+        "pin_world_ft": cal["pin"]["world"],
+        "check": (
+            f"horizon lands at row {cal['geometry']['horizon_y']} of {fh} — "
+            f"look at the frame and confirm that is where the ground "
+            f"actually vanishes. If it is not, the mount height or the FOV "
+            f"is wrong, and every distance built on this will be too."
+        ),
+        "saved": False,
+    }
+    if save:
+        cam.green_homography = cal
+        db.add(AuditLog(
+            actor="admin", action="geo_calibrate", target=f"camera:{camera_id}",
+            detail=f"h={mount_height_ft}ft fov={hfov_deg} horizon={cal['geometry']['horizon_y']}",
+        ))
+        db.commit()
+        out["saved"] = True
+    return out
+
+
+@router.post("/cameras/{camera_id}/measure-rest")
+def measure_resting_ball(
+    camera_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """How far is a resting ball from the pin? Body: {"x": px, "y": px}
+
+    The pixel is a GREEN-camera one -- debug3's `rest_xy` for the swing,
+    or an operator's click on the green frame. Returns the feet, the
+    plate text, and why not when there is no answer: an operator who
+    gets nothing needs to know whether to calibrate, mark the pin, or
+    look at the clip again.
+    """
+    from ..services import ctp
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    try:
+        xy = (float(payload["x"]), float(payload["y"]))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, 'body must be {"x": px, "y": px}')
+
+    cal = cam.green_homography or {}
+    pos = ctp.measure_rest(cal, xy)
+    if pos is None:
+        if not cal.get("homography"):
+            why = "camera is not calibrated"
+        elif (cal.get("purpose") or "measure") != "measure":
+            why = "this fit aims the tracer; it is not a measuring fit"
+        elif not (cal.get("pin") or {}).get("world"):
+            why = "no pin marked — set one before measuring"
+        else:
+            why = "that pixel does not land on the green's plane"
+        return {"measured": False, "reason": why}
+    return {
+        "measured": True,
+        "x_ft": pos["x_ft"],
+        "y_ft": pos["y_ft"],
+        "distance_from_pin_ft": pos["distance_from_pin_ft"],
+        "plate_text": ctp.plate_text(pos),
+        "pin_set_at": cal.get("pin_set_at"),
+        "rms_error_ft": cal.get("rms_error_ft"),
+    }
+
+
+@router.post("/cameras/{camera_id}/detect-pin")
+async def detect_camera_pin(
+    camera_id: int,
+    frame: UploadFile | None = File(None),
+    save: bool = False,
+    roi_x: float | None = None,
+    roi_y: float | None = None,
+    roi_w: float | None = None,
+    roi_h: float | None = None,
+    h_lo: int | None = None, s_lo: int | None = None, v_lo: int | None = None,
+    h_hi: int | None = None, s_hi: int | None = None, v_hi: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Find today's flagstick base, and optionally make it the origin.
+
+    Upload a frame, or omit it to use the camera's latest live frame.
+    The pin moves daily and the calibration's origin does not move with
+    it, so this is the piece that keeps closest-to-the-pin honest
+    overnight without anyone driving out to click a picture.
+
+    save=true writes it into the calibration as the new pin. It does NOT
+    save on its own, and deliberately so: a mis-detected pin does not
+    produce a visibly wrong picture, it produces a plausible distance
+    that hands a prize to the wrong golfer. Look at the preview first.
+
+    The HSV and ROI overrides exist so this can be tuned against real
+    frames in the field rather than against a guess made indoors.
+    """
+    import numpy as np
+
+    from ..services import green_calibration as gc
+    from ..services import pin_detect as pd
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    raw = await _frame_bytes_for(camera_id, frame)
+    import cv2
+
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "could not read that image")
+
+    roi = None
+    if None not in (roi_x, roi_y, roi_w, roi_h):
+        roi = (roi_x, roi_y, roi_w, roi_h)
+
+    lo = (h_lo if h_lo is not None else pd.DEFAULT_HSV_LO[0],
+          s_lo if s_lo is not None else pd.DEFAULT_HSV_LO[1],
+          v_lo if v_lo is not None else pd.DEFAULT_HSV_LO[2])
+    hi = (h_hi if h_hi is not None else pd.DEFAULT_HSV_HI[0],
+          s_hi if s_hi is not None else pd.DEFAULT_HSV_HI[1],
+          v_hi if v_hi is not None else pd.DEFAULT_HSV_HI[2])
+
+    prev = None
+    cal = cam.green_homography or {}
+    prev_img = (cal.get("pin") or {}).get("image")
+    if prev_img:
+        h, w = img.shape[:2]
+        prev = (float(prev_img[0]) / w, float(prev_img[1]) / h)
+
+    det = pd.detect_pin(img, roi=roi, prev=prev, hsv_lo=lo, hsv_hi=hi)
+    if det is None:
+        return {
+            "found": False,
+            "reason": "no flag-coloured object of a plausible size was found",
+            "hint": "check the HSV range against a real frame, or pass an roi",
+        }
+
+    h, w = img.shape[:2]
+    px, py = det.x * w, det.y * h
+    out = {"found": True, "detection": det.as_dict(), "image_px": [round(px, 1), round(py, 1)],
+           "frame_size": [w, h]}
+
+    # Where that lands on the green, when the camera can answer.
+    world = gc.image_to_green(cal, px, py) if cal.get("homography") else None
+    out["world"] = world
+    if world is None and cal.get("homography"):
+        out["warning"] = (
+            "the detected base does not project onto the green's plane — "
+            "that usually means the detection is above the horizon, so "
+            "treat it as wrong rather than as a measurement"
+        )
+
+    if save:
+        if not cal.get("homography"):
+            raise HTTPException(409, "camera is not calibrated; nothing to save the pin against")
+        if world is None:
+            raise HTTPException(422, "detected point does not land on the green's plane")
+        cal = dict(cal)
+        cal["pin"] = {"image": [round(px, 1), round(py, 1)],
+                      "world": [world["x_ft"], world["y_ft"]]}
+        cal["pin_set_at"] = _utcnow_naive().isoformat()
+        cal["pin_source"] = f"auto:{det.method}"
+        cam.green_homography = cal
+        db.add(AuditLog(actor="admin", action="detect_pin", target=f"camera:{camera_id}",
+                        detail=f"conf={det.confidence} method={det.method}"))
+        db.commit()
+        out["saved"] = True
+
+    return out
+
+
+@router.post("/cameras/{camera_id}/detect-pin/preview")
+async def detect_camera_pin_preview(
+    camera_id: int,
+    frame: UploadFile | None = File(None),
+    roi_x: float | None = None, roi_y: float | None = None,
+    roi_w: float | None = None, roi_h: float | None = None,
+    h_lo: int | None = None, s_lo: int | None = None, v_lo: int | None = None,
+    h_hi: int | None = None, s_hi: int | None = None, v_hi: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """The same detection, drawn on the frame, as a JPEG.
+
+    Looking at it is the only honest way to tune this. A number in a JSON
+    body cannot tell you the detector locked onto a yellow bag; a
+    crosshair sitting on a yellow bag can.
+    """
+    import cv2
+    import numpy as np
+
+    from ..services import pin_detect as pd
+
+    if not db.get(Camera, camera_id):
+        raise HTTPException(404, "camera not found")
+    raw = await _frame_bytes_for(camera_id, frame)
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "could not read that image")
+
+    roi = None
+    if None not in (roi_x, roi_y, roi_w, roi_h):
+        roi = (roi_x, roi_y, roi_w, roi_h)
+    lo = (h_lo if h_lo is not None else pd.DEFAULT_HSV_LO[0],
+          s_lo if s_lo is not None else pd.DEFAULT_HSV_LO[1],
+          v_lo if v_lo is not None else pd.DEFAULT_HSV_LO[2])
+    hi = (h_hi if h_hi is not None else pd.DEFAULT_HSV_HI[0],
+          s_hi if s_hi is not None else pd.DEFAULT_HSV_HI[1],
+          v_hi if v_hi is not None else pd.DEFAULT_HSV_HI[2])
+
+    det = pd.detect_pin(img, roi=roi, hsv_lo=lo, hsv_hi=hi)
+    h, w = img.shape[:2]
+    if roi:
+        cv2.rectangle(
+            img, (int(roi[0] * w), int(roi[1] * h)),
+            (int((roi[0] + roi[2]) * w), int((roi[1] + roi[3]) * h)),
+            (255, 200, 0), 2,
+        )
+    if det:
+        if det.flag_box:
+            bx, by, bw, bh = det.flag_box
+            cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (0, 200, 255), 2)
+        px, py = int(det.x * w), int(det.y * h)
+        cv2.drawMarker(img, (px, py), (0, 0, 255), cv2.MARKER_CROSS, 40, 3)
+        cv2.circle(img, (px, py), 14, (0, 0, 255), 2)
+        cv2.putText(
+            img, f"{det.method} conf={det.confidence:.2f}", (px + 20, py - 12),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2, cv2.LINE_AA,
+        )
+    else:
+        cv2.putText(img, "NO FLAG FOUND", (30, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 3, cv2.LINE_AA)
+
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        raise HTTPException(500, "could not encode the preview")
+    return Response(content=bytes(buf), media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
+async def _frame_bytes_for(camera_id: int, frame) -> bytes:
+    """An uploaded frame if given, otherwise the camera's live one."""
+    if frame is not None:
+        data = await frame.read()
+        if data:
+            return data
+    with _LIVE_LOCK:
+        slot = _LIVE_FRAMES.get(camera_id)
+    if not slot:
+        raise HTTPException(
+            409,
+            "no frame: upload one, or open the camera's live view first so "
+            "a frame is cached",
+        )
+    return slot[0]
 
 
 @router.get("/cameras/{camera_id}/calibration")
