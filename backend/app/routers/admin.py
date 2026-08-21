@@ -138,7 +138,9 @@ from ..services.video import (
     splice_impact_clip,
     transcode_for_web,
 )
-from ..services.intro_overlay import apply_intro_overlay_inplace
+from ..services.intro_overlay import (
+    apply_distance_plate_inplace, apply_intro_overlay_inplace,
+)
 
 # ── produce phase clock ────────────────────────────────────────────────
 # Stage 7 of the Debug3 panel — the real produce run — was 82.5% of a
@@ -206,6 +208,9 @@ splice_impact_clip = _timed(splice_impact_clip, "ffmpeg_composite")
 concat_two_clips = _timed(concat_two_clips, "ffmpeg_composite")
 apply_intro_overlay_inplace = _timed(
     apply_intro_overlay_inplace, "ffmpeg_overlay",
+)
+apply_distance_plate_inplace = _timed(
+    apply_distance_plate_inplace, "ffmpeg_overlay",
 )
 render_tracer_video = _timed(render_tracer_video, "render_tracer")
 detect_swings_combined = _timed(detect_swings_combined, "detect_swings")
@@ -9009,6 +9014,48 @@ def finalize_wizard_video(
     except Exception as exc:  # pragma: no cover
         log.warning("finalize: intro overlay failed for upload %s: %s", upload_id, exc)
 
+    # THE CLOSING PLATE. A clip that ends on the ball sitting on the
+    # green has been building to a number; this is where it gets said.
+    #
+    # Every input is optional and the whole thing is best-effort: an
+    # uncalibrated camera, an unmarked pin, or a swing whose ball never
+    # came to rest in view all end with no plate, which is the honest
+    # output. The one thing that must not happen is a plate carrying a
+    # guess, so nothing here invents a distance -- it either comes from
+    # the homography or it does not come.
+    try:
+        _plate = (payload.get("distance_text") or "").strip() or None
+        _rest_sec = payload.get("rest_at_sec")
+        if _plate is None:
+            _rest_xy = payload.get("green_rest_xy") or saved.get("green_rest_xy")
+            _cam_id = payload.get("green_camera_id") or saved.get("green_camera_id")
+            if _rest_xy and _cam_id:
+                from ..services import ctp as _ctp
+
+                _cam = db.get(Camera, int(_cam_id))
+                if _cam is not None:
+                    _plate = _ctp.distance_plate_for_clip(
+                        _cam.green_homography or {}, _rest_xy,
+                    )
+                    if _plate is None:
+                        log.info(
+                            "finalize %s: no distance plate — camera %s cannot "
+                            "measure this pixel (calibration or pin missing)",
+                            upload_id, _cam_id,
+                        )
+        if _plate:
+            ok_plate = apply_distance_plate_inplace(
+                final_path, _plate,
+                rest_at_sec=(float(_rest_sec) if _rest_sec is not None else None),
+            )
+            if ok_plate:
+                saved["distance_plate_text"] = _plate
+            else:
+                log.warning("finalize %s: distance plate render failed", upload_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("finalize: distance plate failed for upload %s: %s",
+                    upload_id, exc)
+
     compress_for_email(final_path)
     final_url = (
         f"{settings.app_base_url}/uploads/clips/{final_path.name}"
@@ -13170,6 +13217,53 @@ def calibrate_green_camera(
             "measure its own accuracy. Add a 5th marked point to get a real "
             "error estimate, or verify by clicking a ball you can pace out."
         ),
+    }
+
+
+@router.post("/cameras/{camera_id}/measure-rest")
+def measure_resting_ball(
+    camera_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """How far is a resting ball from the pin? Body: {"x": px, "y": px}
+
+    The pixel is a GREEN-camera one -- debug3's `rest_xy` for the swing,
+    or an operator's click on the green frame. Returns the feet, the
+    plate text, and why not when there is no answer: an operator who
+    gets nothing needs to know whether to calibrate, mark the pin, or
+    look at the clip again.
+    """
+    from ..services import ctp
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+    try:
+        xy = (float(payload["x"]), float(payload["y"]))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, 'body must be {"x": px, "y": px}')
+
+    cal = cam.green_homography or {}
+    pos = ctp.measure_rest(cal, xy)
+    if pos is None:
+        if not cal.get("homography"):
+            why = "camera is not calibrated"
+        elif (cal.get("purpose") or "measure") != "measure":
+            why = "this fit aims the tracer; it is not a measuring fit"
+        elif not (cal.get("pin") or {}).get("world"):
+            why = "no pin marked — set one before measuring"
+        else:
+            why = "that pixel does not land on the green's plane"
+        return {"measured": False, "reason": why}
+    return {
+        "measured": True,
+        "x_ft": pos["x_ft"],
+        "y_ft": pos["y_ft"],
+        "distance_from_pin_ft": pos["distance_from_pin_ft"],
+        "plate_text": ctp.plate_text(pos),
+        "pin_set_at": cal.get("pin_set_at"),
+        "rms_error_ft": cal.get("rms_error_ft"),
     }
 
 
