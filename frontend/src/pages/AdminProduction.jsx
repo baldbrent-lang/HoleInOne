@@ -5975,7 +5975,87 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
               <div className="tiny muted">{rep.reason}</div>
             )}
 
-            {/* 2b. THE GREEN AS A CLOCK */}
+            {/* 2b. REST + BURST — the only two things being measured */}
+            {(rep.rest_and_burst || []).length > 0 && (
+              <div style={{ margin: "12px 0" }}>
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <h4 style={{ margin: "12px 0 4px" }}>
+                    Rest &amp; burst — every candidate
+                  </h4>
+                  <span className={rep.n_swings_found ? "pill ok" : "pill warn"}>
+                    {rep.n_swings_found} swing(s) of{" "}
+                    {rep.rest_and_burst.length} candidate(s)
+                  </span>
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="tiny" style={{ borderCollapse: "collapse", width: "100%" }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", opacity: 0.7 }}>
+                        <th style={{ padding: "4px 8px" }}>spot</th>
+                        <th style={{ padding: "4px 8px" }}>ball there before</th>
+                        <th style={{ padding: "4px 8px" }}>left on</th>
+                        <th style={{ padding: "4px 8px" }}>burst peak</th>
+                        <th style={{ padding: "4px 8px" }}>fall</th>
+                        <th style={{ padding: "4px 8px" }}>verdict</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rep.rest_and_burst.map((r, i) => {
+                        const b = r.burst || {};
+                        const good = r.verdict === "swing";
+                        return (
+                          <tr
+                            key={i}
+                            style={{
+                              borderTop: "1px solid rgba(128,128,128,0.25)",
+                              background: good ? "rgba(0,160,80,0.10)" : "none",
+                            }}
+                            title={r.reason || ""}
+                          >
+                            <td style={{ padding: "4px 8px" }}>
+                              <b>({r.x}, {r.y})</b>
+                            </td>
+                            <td style={{ padding: "4px 8px" }}>
+                              {r.present_ratio_pre == null
+                                ? "—"
+                                : `${Math.round(r.present_ratio_pre * 100)}% of frames`}
+                            </td>
+                            <td style={{ padding: "4px 8px" }}>
+                              {r.impact_frame == null
+                                ? (r.late_departure_frame != null
+                                    ? `f${r.late_departure_frame} (too late to confirm)`
+                                    : "—")
+                                : `f${r.impact_frame} (${r.impact_sec}s)`}
+                            </td>
+                            <td style={{ padding: "4px 8px" }}>
+                              {b.peak == null ? "—" : `${b.peak}%`}
+                            </td>
+                            <td style={{ padding: "4px 8px" }}>
+                              {b.fall == null ? "—" : `${b.fall}x`}
+                              {b.verdict === "quiet" && " (quiet)"}
+                            </td>
+                            <td style={{ padding: "4px 8px" }}>
+                              <b style={{ color: good ? "#0a0" : undefined }}>
+                                {r.verdict}
+                              </b>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="tiny muted" style={{ marginTop: 6 }}>
+                  "ball there before" is how much of the second before it left
+                  actually showed a ball. "fall" is how far the motion around
+                  the spot dropped back after the peak — a strike is 50x or
+                  more, something walking away is under 4x. Hover a row for the
+                  full sentence.
+                </div>
+              </div>
+            )}
+
+            {/* 2c. THE GREEN AS A CLOCK */}
             {rep.green_descents && (
               <div
                 className="card"

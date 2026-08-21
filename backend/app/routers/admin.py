@@ -115,6 +115,7 @@ from ..services.ai_tracer import (
     detect_swings_from_ball,
     find_rest_spots_by_persistence,
     score_spots_by_club,
+    verify_rest_and_impact,
     detect_swings_from_ai_ball,
     classify_swing_shot,
     find_resting_ball,
@@ -14548,6 +14549,83 @@ def _tee_box_roi_fractions(src_path, db, row) -> dict:
     return out
 
 
+# FOCUS MODE. The swing test grew a lot of stages, and scored against
+# six labelled swings only two of them were carrying any weight: where
+# the ball rested, and when it stopped being there. The rest -- club
+# ranking, the green as a clock -- either measured nothing (club rate
+# was 0.0 on five of the six true rest positions) or answered a
+# different question. They are switched off here rather than deleted,
+# because turning one back on has to be a decision somebody makes with
+# a number in front of them.
+SWING_TEST_CLUB_RANKING = False
+SWING_TEST_GREEN_CLOCK = False
+
+
+def rest_and_burst_report(src_path, fps: float, spots: list,
+                          progress=None) -> list:
+    """For every candidate: did a ball sit here, when did it go, was it hit.
+
+    THE WHOLE TEST, and nothing else. A tracer needs two numbers -- the
+    rest position and the impact frame -- and everything that has been
+    built around finding them has been a way of guessing WHICH candidate
+    to trust. This stops guessing and just measures all of them, so the
+    answer and the evidence for it are the same object.
+
+    Every candidate is reported, including the ones that fail, because a
+    swing that goes missing is nearly always a spot that was found and
+    then discarded, and that is invisible if only the winners are shown.
+    """
+    rows: list[dict] = []
+    for i, sp in enumerate(spots or []):
+        if progress:
+            progress("Testing each candidate spot", i, len(spots))
+        x, y = float(sp.get("x") or 0.0), float(sp.get("y") or 0.0)
+        row: dict = {
+            "x": int(round(x)), "y": int(round(y)),
+            "votes": sp.get("votes"),
+            "last_seen_frame": sp.get("last_seen_frame"),
+            "verdict": None, "impact_frame": None, "impact_sec": None,
+            "rest_verified": None, "present_ratio_pre": None,
+            "burst": None, "reason": None,
+        }
+        lsf = sp.get("last_seen_frame")
+        approx = int(lsf) if lsf else 0
+        try:
+            v = verify_rest_and_impact(
+                src_path, (x, y), approx, fps,
+                window_sec=3.0, forward_sec=6.0,
+            )
+            row["rest_verified"] = bool(v.get("verified"))
+            row["present_ratio_pre"] = v.get("present_ratio_pre")
+            row["reason"] = v.get("reason")
+            row["burst"] = v.get("burst")
+            if v.get("rest_xy"):
+                row["x"] = int(round(float(v["rest_xy"][0])))
+                row["y"] = int(round(float(v["rest_xy"][1])))
+                row["snap_px"] = v.get("snap_px")
+            if v.get("impact_frame") is not None:
+                row["impact_frame"] = int(v["impact_frame"])
+                row["impact_sec"] = round(int(v["impact_frame"]) / max(1e-6, fps), 2)
+            if v.get("late_departure_frame") is not None:
+                row["late_departure_frame"] = int(v["late_departure_frame"])
+            bv = (v.get("burst") or {}).get("verdict")
+            if v.get("verified") and bv in ("strike", "quiet"):
+                row["verdict"] = "swing"
+            elif bv == "sustained":
+                row["verdict"] = "moved away"
+            elif v.get("impact_frame") is not None:
+                row["verdict"] = "left, not confirmed"
+            else:
+                row["verdict"] = "no departure"
+        except Exception as exc:  # noqa: BLE001
+            row["verdict"] = "failed"
+            row["reason"] = f"check failed: {exc}"
+        rows.append(row)
+    rows.sort(key=lambda r: (r["impact_frame"] is None,
+                             r.get("impact_frame") or 0))
+    return rows
+
+
 def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
     """Every resting-ball departure in this video, with the ROI used.
 
@@ -14645,23 +14723,26 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
         # same shaft. The loose ball, the tree line and a club the next
         # player was leaning on came in at 12% and below. 25% sits in
         # the gap with room on both sides.
-        _club = score_spots_by_club(src_path, _pspots, fps=fps)
-        _verified = [s for s in _pspots
-                     if float(s.get("club_rate") or 0.0) >= 0.25]
-        if _verified:
-            # Something was addressed. Everything else in that list is
-            # scenery, and adding it only gives the departure walk more
-            # grass to chase.
-            _pspots = _verified
+        # TURNED OFF, deliberately, not deleted. Scored against six
+        # labelled swings the club rate came back 0.0 on five of the six
+        # true rest positions -- it earns nothing here and it was
+        # NARROWING the list, so a spot it scored zero on could be
+        # dropped before the departure walk ever saw it. Everything now
+        # goes through to the rest/burst report, which is the only thing
+        # measuring up.
+        if SWING_TEST_CLUB_RANKING:
+            _club = score_spots_by_club(src_path, _pspots, fps=fps)
+            _verified = [s for s in _pspots
+                         if float(s.get("club_rate") or 0.0) >= 0.25]
+            _pspots = _verified if _verified else _pspots[:6]
+            _club_reason = _club.get("reason")
         else:
-            # No club was ever held still enough to be seen -- a quick
-            # player, or a shaft lost against a bright background. Fall
-            # back to the vote ranking rather than proposing nothing.
-            _pspots = _pspots[:6]
+            _club_reason = "club ranking is off — every spot goes through"
+            _verified = []
         out["persistence"] = {
             "reason": _pers.get("reason"),
             "n_samples": _pers.get("n_samples"),
-            "club": _club.get("reason"),
+            "club": _club_reason,
             "club_verified": len(_verified),
             "spots": _pspots,
         }
@@ -14696,7 +14777,7 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
         if _added:
             log.info(
                 "swing test: persistence added %d spot(s) the scan missed "
-                "(%s; %s)", _added, _pers.get("reason"), _club.get("reason"),
+                "(%s; %s)", _added, _pers.get("reason"), _club_reason,
             )
     except Exception as exc:  # noqa: BLE001
         # A second opinion is an improvement, not a dependency.
@@ -15394,6 +15475,8 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
         "n_cands_drawn": len(cands),
         "reason": rest.get("reason"),
         "green_descents": None,
+        "rest_and_burst": [],
+        "n_swings_found": 0,
         "area_image": None,
         "area_image_clean": None,
         "frame_w": None,
@@ -15528,7 +15611,7 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
     # miss the green entirely and still be a shot, and the two cameras
     # are only as aligned as their wall clocks.
     _green_name = getattr(row, "green_filename", None)
-    if _green_name:
+    if _green_name and SWING_TEST_GREEN_CLOCK:
         if progress:
             progress("Counting descents on the green", 0, 0)
         try:
@@ -15617,6 +15700,34 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             log.warning("swing test: green descent scan failed: %s", exc)
             rep["green_descents"] = {"reason": f"failed: {exc}",
                                      "n_descents": 0, "events": []}
+
+    # EVERY CANDIDATE, MEASURED. Two numbers decide whether the tracer
+    # has anything to work with -- where the ball sat and when it was
+    # hit -- so every spot the scan or persistence proposed is put
+    # through the same two tests and all of them are reported, passes
+    # and failures alike.
+    if progress:
+        progress("Testing each candidate spot", 0, 0)
+    try:
+        _cands = [{"x": d.get("x"), "y": d.get("y"),
+                   "votes": d.get("votes"),
+                   "last_seen_frame": (
+                       int(float(d["t"]) * fps) if d.get("t") else None)}
+                  for d in deps]
+        _seen_xy = {(int(c["x"] or 0), int(c["y"] or 0)) for c in _cands}
+        for _sp in ((rest.get("persistence") or {}).get("spots") or []):
+            if (int(_sp["x"]), int(_sp["y"])) not in _seen_xy:
+                _cands.append(dict(_sp))
+        rep["rest_and_burst"] = rest_and_burst_report(
+            src_path, fps, _cands, progress=progress,
+        )
+        rep["n_swings_found"] = sum(
+            1 for r in rep["rest_and_burst"] if r.get("verdict") == "swing")
+        log.info("swing test: rest/burst — %d candidate(s), %d swing(s)",
+                 len(rep["rest_and_burst"]), rep["n_swings_found"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("swing test: rest/burst report failed: %s", exc)
+        rep["rest_and_burst"] = []
 
     # DID IT LEAVE, AND WHEN. The scan samples at ~15Hz and its `t` is the
     # last frame the ball was SEEN, not the frame it went. Re-watch the
