@@ -114,6 +114,7 @@ from ..services.ai_tracer import (
     detect_swings_from_motion,
     detect_swings_from_ball,
     find_rest_spots_by_persistence,
+    score_spots_by_club,
     detect_swings_from_ai_ball,
     classify_swing_shot,
     find_resting_ball,
@@ -14173,22 +14174,65 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
     # alone, because persistence cannot tell a ball from a tee marker --
     # a marker is MORE persistent, and on that clip out-voted the ball
     # 60 to 52. What separates them is that the ball leaves, which the
-    # caller's departure walk already tests on every spot it is handed.
+    # caller's departure walk already tests on every spot it is handed,
+    # and that somebody stood over it with a club, which the club test
+    # below tests before anything is added at all.
     try:
+        # max_spots is deliberately wide here. Persistence ranks by
+        # votes, and the things that score 120 of 120 are the ones that
+        # never move at all -- specks in the tree line, a mower stripe,
+        # a sprinkler head. On a real clip the played ball came 11th.
+        # Truncating to six returns six pieces of background and no
+        # ball, so the list is left long and the club test below is what
+        # narrows it.
         _pers = find_rest_spots_by_persistence(
             src_path, fps=fps, roi=out["roi"], expect_radius_px=expect_r,
+            sample_hz=5.0, max_spots=400,
         )
+        _pspots = list(_pers.get("spots") or [])
+        # WHICH OF THESE IS HE ACTUALLY HITTING?
+        #
+        # Persistence answers "has this pixel been a ball", and on a tee
+        # that has more than one right answer: a loose ball lying on the
+        # turf is every bit as persistent as the one on the tee, and a
+        # bright enough tuft of grass passes too. On the clip this was
+        # built from the loose ball held 57 votes to the played ball's
+        # 45, so votes alone picked the wrong one.
+        #
+        # A club coming down and stopping at the pixel is what only the
+        # played ball has. Scored over the 2.5s before each spot emptied,
+        # on the whole 52-second reference clip with no ROI at all: the
+        # played ball scored 50% and 39% (its two clusters), and the
+        # best of the other 75 candidates 19% -- a point partway up that
+        # same shaft. The loose ball, the tree line and a club the next
+        # player was leaning on came in at 12% and below. 25% sits in
+        # the gap with room on both sides.
+        _club = score_spots_by_club(src_path, _pspots, fps=fps)
+        _verified = [s for s in _pspots
+                     if float(s.get("club_rate") or 0.0) >= 0.25]
+        if _verified:
+            # Something was addressed. Everything else in that list is
+            # scenery, and adding it only gives the departure walk more
+            # grass to chase.
+            _pspots = _verified
+        else:
+            # No club was ever held still enough to be seen -- a quick
+            # player, or a shaft lost against a bright background. Fall
+            # back to the vote ranking rather than proposing nothing.
+            _pspots = _pspots[:6]
         out["persistence"] = {
             "reason": _pers.get("reason"),
             "n_samples": _pers.get("n_samples"),
-            "spots": _pers.get("spots") or [],
+            "club": _club.get("reason"),
+            "club_verified": len(_verified),
+            "spots": _pspots,
         }
         _known = [
             (float(d.get("x") or 0.0), float(d.get("y") or 0.0))
             for d in out["deps"]
         ]
         _added = 0
-        for _sp in _pers.get("spots") or []:
+        for _sp in _pspots:
             _sx, _sy = float(_sp["x"]), float(_sp["y"])
             if any(((_sx - kx) ** 2 + (_sy - ky) ** 2) ** 0.5 <= 12.0
                    for kx, ky in _known):
@@ -14204,6 +14248,8 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
                 "rest_sec": None,
                 "source": "persistence",
                 "votes": _sp.get("votes"),
+                "club_hits": _sp.get("club_hits"),
+                "club_rate": _sp.get("club_rate"),
                 "n_samples": _sp.get("n_samples"),
             })
             _known.append((_sx, _sy))
@@ -14212,7 +14258,7 @@ def _rest_ball_departures(src_path, fps: float, db, row) -> dict:
         if _added:
             log.info(
                 "swing test: persistence added %d spot(s) the scan missed "
-                "(%s)", _added, _pers.get("reason"),
+                "(%s; %s)", _added, _pers.get("reason"), _club.get("reason"),
             )
     except Exception as exc:  # noqa: BLE001
         # A second opinion is an improvement, not a dependency.
@@ -15045,6 +15091,9 @@ def _swing_test_run(row, src_path, db, progress=None) -> dict:
             "frame": int(t * fps + 0.5),
             "x": int(round(x)), "y": int(round(y)),
             "rest_sec": d.get("rest_sec"),
+            "source": d.get("source"),
+            "votes": d.get("votes"),
+            "club_rate": d.get("club_rate"),
             "departed": None,
             "impact_frame": None,
             "impact_sec": None,

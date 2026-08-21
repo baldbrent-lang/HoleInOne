@@ -5986,7 +5986,16 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
                     style={{ margin: "8px 0", padding: 10 }}
                   >
                     <div className="row" style={{ justifyContent: "space-between" }}>
-                      <b>Ball {b.idx + 1} — rested {b.rest_sec}s at ({b.x}, {b.y})</b>
+                      <b>
+                        Ball {b.idx + 1} — rested {b.rest_sec}s at ({b.x}, {b.y})
+                        {b.club_rate != null && (
+                          <span className="tiny muted" style={{ marginLeft: 6 }}>
+                            · club at address on{" "}
+                            {Math.round(b.club_rate * 100)}% of the frames
+                            before it emptied
+                          </span>
+                        )}
+                      </b>
                       <span className={b.departed ? "pill ok" : "pill warn"}>
                         {b.departed
                           ? `left on frame ${b.impact_frame} (${b.impact_sec}s)`

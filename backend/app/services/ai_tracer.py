@@ -8228,11 +8228,256 @@ def ball_candidates_in_frame(
     return out
 
 
+# A club shaft is a BRIGHT thin line, not a dark one. This looks obvious
+# in a still and is easy to get backwards from memory -- a blackhat
+# (dark-line) filter on this footage returns nothing at all, on any
+# frame, because a chrome shaft in daylight is the brightest narrow thing
+# in the lower half of the picture. Top-hat is the operator; measured
+# response on a real address frame is 30-60 over the turf around it.
+_CLUB_KERNEL_PX = 9        # > shaft width (~4px at 1280 from behind the tee)
+_CLUB_TOPHAT_MIN = 12
+_CLUB_MIN_LEN_PX = 35
+_CLUB_NEAR_PX = 22.0
+_CLUB_ANGLE_LO_DEG = 20.0
+# A CLUB AT ADDRESS LEANS. The golfer stands to the side of the ball, so
+# from behind the tee the shaft comes in at a slant -- measured 56 deg on
+# the reference address. A club held vertical is one being LEANED ON
+# while its owner stands about, and that was the single worst false
+# positive on that clip: a shaft standing at 87 deg with no ball under it
+# scored higher than the real address. 75 separates them with room.
+_CLUB_ANGLE_HI_DEG = 75.0
+
+
+def club_segments_in_frame(
+    frame,
+    tophat_min: int = _CLUB_TOPHAT_MIN,
+    min_len_px: int = _CLUB_MIN_LEN_PX,
+) -> list[tuple[int, int, int, int]]:
+    """Every long bright straight line in the frame, as (x1,y1,x2,y2).
+
+    RUN THIS ON THE WHOLE FRAME. Cropping to the band around one
+    candidate is the obvious optimisation and it breaks the test:
+    HoughLinesP samples points at random, so on a small crop of dense
+    tree-line texture the speckle chains into "lines" that never survive
+    the competition of a full-frame accumulator. Measured on one clip, a
+    patch of trees went from 0 hits in 26 frames full-frame to 16 hits on
+    the crop. The Hough costs ~0.1s per 1280x720 frame; pay it, and share
+    one call between every spot asking about that frame.
+    """
+    if not HAS_CV or frame is None:
+        return []
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        k = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (_CLUB_KERNEL_PX, _CLUB_KERNEL_PX)
+        )
+        th = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, k)
+        _, mask = cv2.threshold(th, int(tophat_min), 255, cv2.THRESH_BINARY)
+        lines = cv2.HoughLinesP(
+            mask, 1, np.pi / 180.0,
+            threshold=25, minLineLength=int(min_len_px), maxLineGap=8,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    if lines is None:
+        return []
+    # OpenCV hands these back as (N,1,4); flatten so callers can unpack.
+    segs = [tuple(int(v) for v in seg) for seg in lines.reshape(-1, 4)]
+    return [_club_extend_down(mask, s) for s in segs]
+
+
+def _club_extend_down(mask, seg, max_reach: int = 70, gap: int = 4):
+    """Push a segment's lower end down the shaft until the brightness stops.
+
+    Hough returns whatever run of pixels crossed its threshold, which on
+    a shaft is usually a piece of the middle -- so the "lower end" it
+    reports can sit 140px above the clubhead. That matters, because the
+    whole test is "does this line STOP at the ball", and a line that
+    stops in mid-air will happily stop at whatever blob is up there.
+    Following the same mask down to where it actually runs out turns
+    every fragment of one shaft into the same answer: the clubhead.
+    """
+    x1, y1, x2, y2 = seg
+    (bx, by), (tx, ty) = ((x1, y1), (x2, y2)) if y1 > y2 else ((x2, y2), (x1, y1))
+    run = math.hypot(bx - tx, by - ty)
+    if run < 1.0:
+        return seg
+    dx, dy = (bx - tx) / run, (by - ty) / run
+    h, w = mask.shape[:2]
+    last, miss = 0, 0
+    for step in range(1, int(max_reach) + 1):
+        px, py = bx + dx * step, by + dy * step
+        lit = False
+        for o in (-2, -1, 0, 1, 2):
+            # Perpendicular of (dx, dy) is (-dy, dx).
+            ix, iy = int(round(px - dy * o)), int(round(py + dx * o))
+            if 0 <= ix < w and 0 <= iy < h and mask[iy, ix]:
+                lit = True
+                break
+        if lit:
+            last, miss = step, 0
+        else:
+            miss += 1
+            if miss > gap:
+                break
+    if not last:
+        return seg
+    return (int(tx), int(ty), int(round(bx + dx * last)), int(round(by + dy * last)))
+
+
+def club_points_at(
+    segments,
+    x: float,
+    y: float,
+    near_px: float = _CLUB_NEAR_PX,
+    min_len_px: float = _CLUB_MIN_LEN_PX,
+) -> int:
+    """How many of `segments` look like a club addressing the ball at (x,y).
+
+    A club at address is a long line whose LOWER end stops at the ball and
+    whose upper end is well away from it, leaning rather than vertical --
+    a golfer stands to the side, so the shaft comes in at 20-85 degrees
+    from horizontal. A mow stripe, a bunker edge or a shadow either fails
+    the lean test or does not end at the candidate.
+    """
+    n = 0
+    for x1, y1, x2, y2 in segments:
+        (bx, by), (tx, ty) = ((x1, y1), (x2, y2)) if y1 > y2 else ((x2, y2), (x1, y1))
+        run = math.hypot(tx - bx, ty - by)
+        if run < min_len_px:
+            continue
+        ang = abs(math.degrees(math.atan2(by - ty, abs(tx - bx) + 1e-9)))
+        if not (_CLUB_ANGLE_LO_DEG <= ang <= _CLUB_ANGLE_HI_DEG):
+            continue
+        if math.hypot(bx - x, by - y) <= near_px:
+            n += 1
+    return n
+
+
+def score_spots_by_club(
+    input_path: Path,
+    spots: list[dict],
+    fps: float | None = None,
+    # HOW LONG BEFORE THE BALL LEFT TO LOOK. The address is the last
+    # thing that happens to a ball before it is struck, so the window
+    # ends where the spot was last seen holding one. 2.5s covers a quick
+    # player (measured 1.2s standing over it on the reference clip) with
+    # room for the walk-in.
+    look_back_sec: float = 2.5,
+    sample_hz: float = 10.0,
+    max_frames_per_spot: int = 40,
+    near_px: float = _CLUB_NEAR_PX,
+) -> dict:
+    """Which of these spots had a club come down and stop on it.
+
+    THE PROBLEM THIS SOLVES. There is often more than one ball on a tee,
+    and persistence cannot tell them apart -- on the clip this was built
+    from, a ball lying loose on the turf held 57 votes of 120 while the
+    ball actually being played held 45, so votes alone picked the wrong
+    one. Neither is the wrong shape or the wrong colour. What makes one
+    of them the ball is that a golfer is standing over it with a club.
+
+    LOCAL, NOT GLOBAL, and this is the whole design. Asked as "was a club
+    ever seen at this pixel anywhere in the clip" the test fails: over a
+    52-second clip at 4Hz the played ball scored 8 hits and a bright
+    patch in the tree line scored 14, because a swing sweeps a shaft
+    across half the frame and 211 chances is enough for anything to be
+    hit once. Asked over the 2.5 seconds before THIS spot last held a
+    ball -- which is when its address would have to be, if it had one --
+    the played ball hits on a third of frames and the loose ball and the
+    scenery hit on none. Each spot is therefore scored in its own window,
+    on its own frames, and the number that matters is the RATE.
+
+    A SCORE, NOT A GATE. A ball can be teed and struck without the club
+    ever being held still enough to be seen, and a shot found with no
+    club is still a shot. This writes `club_hits`, `club_frames` and
+    `club_rate` onto each spot and sorts by rate; a caller that wants a
+    hard filter applies one, but nothing here throws a spot away.
+
+    Never raises.
+    """
+    out: dict = {"ok": False, "n_frames": 0, "reason": None}
+    if not HAS_CV or not spots:
+        out["reason"] = "opencv not installed" if not HAS_CV else "no spots"
+        return out
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        out["reason"] = "could not open video"
+        return out
+    for sp in spots:
+        sp["club_hits"] = 0
+        sp["club_frames"] = 0
+        sp["club_rate"] = 0.0
+    try:
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        _fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        if _fps <= 1.0:
+            _fps = 30.0
+        step = max(1, int(round(_fps / max(1.0, float(sample_hz)))))
+        span = int(round(float(look_back_sec) * _fps))
+
+        # One frame is usually wanted by several spots -- balls on the
+        # same tee leave at nearly the same time. Building the union
+        # first means the Hough runs once per frame however many spots
+        # asked for it, and the reads stay in forward order.
+        want: dict[int, list[dict]] = {}
+        for sp in spots:
+            lsf = sp.get("last_seen_frame")
+            if lsf is None:
+                continue
+            hi = int(lsf)
+            lo = max(0, hi - span)
+            idxs = list(range(lo, hi + 1, step))[-int(max_frames_per_spot):]
+            sp["club_frames"] = len(idxs)
+            for fi in idxs:
+                if 0 <= fi < max(1, n_frames):
+                    want.setdefault(fi, []).append(sp)
+
+        for fi in sorted(want):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            out["n_frames"] += 1
+            segs = club_segments_in_frame(frame)
+            if not segs:
+                continue
+            for sp in want[fi]:
+                if club_points_at(segs, sp.get("x", 0), sp.get("y", 0),
+                                  near_px=near_px):
+                    sp["club_hits"] += 1
+    finally:
+        cap.release()
+
+    for sp in spots:
+        n = int(sp.get("club_frames") or 0)
+        sp["club_rate"] = round(int(sp["club_hits"]) / n, 3) if n else 0.0
+    spots.sort(key=lambda z: (-float(z.get("club_rate") or 0.0),
+                              -int(z.get("votes") or 0)))
+    best = spots[0] if spots else None
+    out["ok"] = bool(best and best.get("club_hits"))
+    out["reason"] = (
+        f"club seen at ({best['x']},{best['y']}) on {best['club_hits']} of "
+        f"the {best['club_frames']} frame(s) before it emptied "
+        f"({best['club_rate']:.0%})"
+        if out["ok"] else
+        f"no club found at any of {len(spots)} spot(s)"
+    )
+    return out
+
+
 def find_rest_spots_by_persistence(
     input_path: Path,
     fps: float | None = None,
     window: tuple[int, int] | None = None,
     n_samples: int = 60,
+    # Pass this instead of n_samples to sample at a fixed CADENCE. A
+    # fixed count is wrong on a long clip: 60 samples over 52 seconds is
+    # one every 0.9s, and a ball that sits for four seconds gets four
+    # chances -- fewer than the minimum vote once a body crosses it. At
+    # 5Hz the same ball gets twenty.
+    sample_hz: float | None = None,
+    max_samples: int = 400,
     roi: dict | None = None,
     expect_radius_px: float | None = None,
     cluster_px: float = 6.0,
@@ -8284,6 +8529,12 @@ def find_rest_spots_by_persistence(
         f_lo = max(0, int(f_lo))
         f_hi = min(max(f_lo + 1, int(f_hi)), max(1, n_frames - 1))
         n = max(4, int(n_samples))
+        if sample_hz:
+            _fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
+            if _fps <= 1.0:
+                _fps = 30.0
+            n = int(round(((f_hi - f_lo) / _fps) * float(sample_hz))) + 1
+            n = max(4, min(n, int(max_samples)))
         idxs = [
             int(round(f_lo + (f_hi - f_lo) * i / float(n - 1)))
             for i in range(n)
