@@ -8768,6 +8768,153 @@ def people_mask_in_frame(frame, min_h_frac: float = 0.10):
         return None
 
 
+def _spot_obscured(frame, x: int, y: int, r: int = 4,
+                   drop: float = 18.0) -> bool:
+    """Is something sitting on this pixel that is not the grass?
+
+    Compares a small disc at the spot against a ring of turf around it.
+    Darker by `drop` grey levels means something is over it -- a club
+    sole, a shadow, a shoe. Never raises; a failure reads as "clear",
+    because the alternative is a watch that never ends.
+    """
+    try:
+        h, w = frame.shape[:2]
+        if not (r <= x < w - r and r <= y < h - r):
+            return False
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        inner = g[y - r:y + r + 1, x - r:x + r + 1]
+        R = 5 * r
+        y0, y1 = max(0, y - R), min(h, y + R + 1)
+        x0, x1 = max(0, x - R), min(w, x + R + 1)
+        ring = g[y0:y1, x0:x1]
+        if inner.size == 0 or ring.size == 0:
+            return False
+        return float(np.median(ring)) - float(np.median(inner)) >= drop
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
+                        max_frames: int = 150, fps: float = 30.0) -> None:
+    """Walk forward from each last sighting until the spot is clear AND empty.
+
+    Fills `gone_frame` / `gone_sec` (the first frame the ball can honestly
+    be called gone), `blocked_frames` (how long something stood in front
+    of it first), and `still_blocked` when the watch ran out with a body
+    still over the pixel. Mutates `spots`. Never raises.
+    """
+    if not HAS_CV or not spots:
+        return
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            return
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        for sp in spots:
+            sp["gone_frame"] = None
+            sp["gone_sec"] = None
+            sp["blocked_frames"] = 0
+            sp["still_blocked"] = False
+            start = int(sp.get("last_frame") or 0) + 1
+            if start >= n_frames or w <= 0 or h <= 0:
+                continue
+            # A patch around the spot, as fractions -- the detector sizes
+            # the ball off the frame it is handed, so it must be handed a
+            # whole frame with an roi and never a bare crop.
+            pad = 60
+            x0, y0 = max(0, sp["x"] - pad), max(0, sp["y"] - pad)
+            x1, y1 = min(w, sp["x"] + pad), min(h, sp["y"] + pad)
+            patch_roi = {"x": x0 / w, "y": y0 / h,
+                         "w": (x1 - x0) / w, "h": (y1 - y0) / h}
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+            blocked = 0
+            empty_run = 0
+            empty_from = start
+            covered = False
+            f = start
+            # The clock runs from the LAST sighting, not from the first,
+            # so a ball that blinks back into view buys another full
+            # watch rather than inheriting the remainder of the old one.
+            deadline = start + int(max_frames)
+            while f < min(n_frames, deadline):
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    break
+                pm = people_mask_in_frame(frame)
+                covered = bool(
+                    pm is not None
+                    and 0 <= sp["y"] < pm.shape[0] and 0 <= sp["x"] < pm.shape[1]
+                    and pm[sp["y"], sp["x"]]
+                )
+                # A CLUBHEAD IS NOT PERSON-SHAPED. The body of a golfer at
+                # address is above the ball, not on it -- what actually
+                # covers the pixel is the sole of the club, which the
+                # people mask has no reason to catch. Measured on a
+                # labelled clip that cost 104 frames: the spot read as
+                # clear and empty two seconds before the ball was struck.
+                #
+                # So the pixel also counts as blocked when it stops
+                # looking like the grass around it. Once the ball has
+                # really gone the spot is turf again and this lets go.
+                if not covered:
+                    covered = _spot_obscured(frame, sp["x"], sp["y"])
+                if covered:
+                    blocked += 1
+                    f += 1
+                    continue
+                here = [
+                    c for c in ball_candidates_in_frame(
+                        frame, roi=patch_roi,
+                        expect_radius_px=expect_radius_px)
+                    if ((c[0] - sp["x"]) ** 2 + (c[1] - sp["y"]) ** 2) <= 12 ** 2
+                ]
+                if here:
+                    # It was only hidden. Extend the sighting and keep going.
+                    sp["last_frame"] = f
+                    sp["last_sec"] = round(f / max(1e-6, fps), 2)
+                    sp["held_sec"] = round(
+                        (f - int(sp["first_frame"])) / max(1e-6, fps), 2)
+                    blocked = 0
+                    empty_run = 0
+                    deadline = f + int(max_frames)
+                    f += 1
+                    continue
+                # ONE MISSED FRAME IS NOT A DEPARTURE. The detector
+                # flickers on a three-pixel ball -- on a labelled clip a
+                # single dropped frame ended the watch 104 frames before
+                # the ball was actually struck, with the ball plainly
+                # visible again the next frame. Gone means gone for a
+                # run of clear frames, and the departure is the start of
+                # that run rather than whichever frame happened to miss.
+                # DO NOT STOP ON AN EMPTY RUN -- WATCH THE WHOLE WINDOW.
+                # A short run of empty frames means nothing. On a labelled
+                # clip the ball vanished at f344, stayed unfindable for
+                # fifty-six frames, and was back at f410 -- still sitting
+                # on the tee it was struck off at f448. Calling it gone
+                # after a quarter-second of silence was wrong by 104
+                # frames, and so was calling it gone after twelve.
+                #
+                # The run is recorded, never acted on. The ball is gone
+                # only if the ENTIRE remaining window passes without it
+                # returning, and the departure is the start of that final
+                # run rather than whichever frame first missed it.
+                if empty_run == 0:
+                    empty_from = f
+                empty_run += 1
+            # The window ran out. If it ended on a run of clear, empty
+            # frames, the start of that run is the departure.
+            if empty_run and not covered:
+                sp["gone_frame"] = int(empty_from)
+                sp["gone_sec"] = round(int(empty_from) / max(1e-6, fps), 2)
+            sp["blocked_frames"] = int(blocked)
+            sp["still_blocked"] = bool(sp["gone_frame"] is None and blocked)
+        cap.release()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("confirm departures failed: %s", exc)
+
+
 def scan_resting_balls(
     input_path: Path,
     roi: dict | None = None,
@@ -8781,6 +8928,11 @@ def scan_resting_balls(
     # this ends the sighting and starts a new one -- which is what makes
     # "first seen" and "last seen" mean anything.
     gap_sec: float = 3.0,
+    # How long to keep watching a spot after the ball stops being visible
+    # before accepting that it has gone. A clubhead at address hides it
+    # for as long as the player stands there; 150 frames is three seconds
+    # at 50fps, longer than any address measured.
+    confirm_frames: int = 150,
     min_votes: int = 3,
     max_spots: int = 24,
     expect_radius_px: float | None = None,
@@ -8882,6 +9034,25 @@ def scan_resting_balls(
     # a speck that flickers for a second is something else.
     spots.sort(key=lambda z: (-z["held_sec"], -z["votes"]))
     out["spots"] = spots[:int(max_spots)]
+
+    # IS IT GONE, OR IS SOMETHING STANDING IN FRONT OF IT?
+    #
+    # The last frame a ball was SEEN is not the frame it left. A golfer
+    # addressing it puts a clubhead behind it and their own body over
+    # it, and the ball stops being visible while it is still sitting
+    # there -- measured on labelled clips, up to 108 frames early, which
+    # is two seconds of a swing that had not happened yet.
+    #
+    # So after the last sighting we keep watching the pixel at full rate
+    # and wait for a frame that is BOTH clear of people and empty of
+    # ball. That frame is the first honest moment the ball can be called
+    # gone. If it reappears instead, the sighting simply continues.
+    if out["spots"]:
+        _confirm_departures(
+            input_path, out["spots"], roi=roi,
+            expect_radius_px=expect_radius_px,
+            max_frames=confirm_frames, fps=_fps,
+        )
     out["n_sampled"] = seen
     out["n_frames"] = n_frames
     out["fps"] = round(_fps, 2)

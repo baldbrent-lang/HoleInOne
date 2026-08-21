@@ -6836,6 +6836,77 @@ function BallScanModal({ state, onClose }) {
                 {rep.reason}
               </div>
             )}
+
+            {/* SUMMARY FIRST. The cards below are the evidence; this is
+                the answer, and it is what you read to decide whether a
+                clip is worth opening the pictures for. */}
+            {spots.length > 0 && (
+              <div style={{ overflowX: "auto", marginTop: 10 }}>
+                <table className="tiny"
+                       style={{ borderCollapse: "collapse", width: "100%" }}>
+                  <thead>
+                    <tr className="muted" style={{ textAlign: "left" }}>
+                      <th style={{ padding: "3px 8px" }}>#</th>
+                      <th style={{ padding: "3px 8px" }}>where</th>
+                      <th style={{ padding: "3px 8px" }}>first seen</th>
+                      <th style={{ padding: "3px 8px" }}>last seen</th>
+                      <th style={{ padding: "3px 8px" }}>sat</th>
+                      <th style={{ padding: "3px 8px" }}>gone</th>
+                      <th style={{ padding: "3px 8px" }}>blocked</th>
+                      <th style={{ padding: "3px 8px" }}>frames</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {spots.map((sp, i) => (
+                      <tr key={i}
+                          style={{ borderTop: "1px solid var(--line)" }}>
+                        <td style={{ padding: "3px 8px" }}>{i + 1}</td>
+                        <td style={{ padding: "3px 8px" }}>
+                          <b>{sp.x}, {sp.y}</b>
+                          <span className="muted"> r{sp.radius}</span>
+                        </td>
+                        <td style={{ padding: "3px 8px" }}>
+                          f{sp.first_frame}{" "}
+                          <span className="muted">({sp.first_sec}s)</span>
+                        </td>
+                        <td style={{ padding: "3px 8px" }}>
+                          f{sp.last_frame}{" "}
+                          <span className="muted">({sp.last_sec}s)</span>
+                        </td>
+                        <td style={{ padding: "3px 8px" }}>{sp.held_sec}s</td>
+                        <td style={{ padding: "3px 8px" }}>
+                          {sp.gone_frame != null ? (
+                            <b>f{sp.gone_frame}{" "}
+                              <span className="muted">({sp.gone_sec}s)</span>
+                            </b>
+                          ) : sp.still_blocked ? (
+                            <span className="pill warn"
+                                  title="the watch ran out with something still over the spot — it was never seen to be gone">
+                              still covered
+                            </span>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                        <td style={{ padding: "3px 8px" }}>
+                          {sp.blocked_frames
+                            ? `${sp.blocked_frames}f`
+                            : <span className="muted">—</span>}
+                        </td>
+                        <td style={{ padding: "3px 8px" }}>{sp.votes}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="tiny muted" style={{ marginTop: 6 }}>
+                  <b>last seen</b> is the last frame a ball was visible there.
+                  <b> gone</b> is the first frame after that where the spot was
+                  both clear of anything covering it and empty — a clubhead at
+                  address hides a ball that is still sitting there, so the two
+                  differ by however long the player stood over it.
+                </div>
+              </div>
+            )}
             {spots.map((sp, i) => (
               <div key={i} className="card"
                    style={{ margin: "10px 0", padding: 10 }}>
@@ -6846,6 +6917,15 @@ function BallScanModal({ state, onClose }) {
                 <div className="tiny muted" style={{ marginTop: 2 }}>
                   First seen f{sp.first_frame} ({sp.first_sec}s) · last seen
                   f{sp.last_frame} ({sp.last_sec}s) · sat {sp.held_sec}s
+                  {sp.gone_frame != null && (
+                    <> · <b>gone by f{sp.gone_frame} ({sp.gone_sec}s)</b>
+                      {sp.blocked_frames
+                        ? ` after ${sp.blocked_frames} frame(s) covered`
+                        : ""}</>
+                  )}
+                  {sp.gone_frame == null && sp.still_blocked && (
+                    <> · still covered when the watch ran out</>
+                  )}
                 </div>
                 <div className="row" style={{ gap: 10, marginTop: 8,
                                               flexWrap: "wrap" }}>
