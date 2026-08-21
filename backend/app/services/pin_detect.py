@@ -72,6 +72,19 @@ class PinDetection:
     y: float
     confidence: float
     method: str = "ridge"
+    # Top of the pole, in pixels. Carried because a flagstick is 7 ft of
+    # known vertical object, so base-to-top IS the scale of the frame at
+    # that spot -- which is what lets a camera calibrate itself from a
+    # picture of a pin. Without it the height would have to be guessed,
+    # and the horizon it fixes moves every distance in the frame.
+    # A PROPOSAL, not a measurement. Tuned tight the walk loses the
+    # pole; tuned loose it runs past the flag into the treeline behind.
+    # It exists so an operator has a number to accept or correct, and
+    # the horizon it implies must be eyeballed against the real one
+    # before any distance is built on it. Fortunately this is a
+    # once-per-camera question: the mount is fixed, so the horizon does
+    # not move when the pin does.
+    stick_top_y: Optional[float] = None
     green_box: Optional[tuple[int, int, int, int]] = None
     ridge_score: float = 0.0
     notes: list[str] = field(default_factory=list)
@@ -82,6 +95,10 @@ class PinDetection:
             "y": round(self.y, 5),
             "confidence": round(self.confidence, 3),
             "method": self.method,
+            "stick_top_y": self.stick_top_y,
+            "stick_px": (
+                None if self.stick_top_y is None else round(self.stick_top_y, 1)
+            ),
             "green_box": list(self.green_box) if self.green_box else None,
             "ridge_score": round(self.ridge_score, 1),
             "notes": self.notes,
@@ -161,6 +178,42 @@ def _walk_base(gray, x: int, y_from: int, y_max: int, win: int = 6,
     x_cur, last, misses = x, None, 0
     for y in range(max(0, y_from), min(y_max, h)):
         lo, hi = max(0, x_cur - win), min(w, x_cur + win + 1)
+        if hi - lo < 3:
+            break
+        row = gray[y, lo:hi].astype(np.int16)
+        med = float(np.median(row))
+        dev = np.abs(row - med)
+        j = int(np.argmax(dev))
+        if dev[j] < min_dev:
+            misses += 1
+            if misses > tolerate:
+                break
+            continue
+        misses = 0
+        x_cur, last = lo + j, y
+    return last
+
+
+def _walk_top(gray, x: int, y_from: int, y_min: int, win: int = 8,
+              min_dev: float = 10.0, tolerate: int = 10,
+              max_drift: int = 6) -> Optional[int]:
+    """Follow the pole UP from the base to the top of the assembly.
+
+    More tolerant than the downward walk: on the way up the pole crosses
+    the green's edge, the fringe, whatever is behind it, and finally the
+    cloth, which is wider than the pole and can sit off to one side in
+    wind. Stopping early here understates the stick's height, which
+    pushes the horizon down and makes every distance in the frame read
+    short.
+    """
+    import numpy as np
+
+    h, w = gray.shape[:2]
+    x0_anchor = x
+    x_cur, last, misses = x, None, 0
+    for y in range(min(y_from, h - 1), max(0, y_min) - 1, -1):
+        lo = max(0, max(x_cur - win, x0_anchor - max_drift))
+        hi = min(w, min(x_cur + win + 1, x0_anchor + max_drift + 1))
         if hi - lo < 3:
             break
         row = gray[y, lo:hi].astype(np.int16)
@@ -281,6 +334,7 @@ def detect_pin(
     if best is None:
         return None
     conf, cx, base, s = best
+    top = _walk_top(gray, cx, base - 2, max(0, band_top - 40))
     notes: list[str] = []
     if len(cands) > 1:
         notes.append(f"{len(cands)} pole-like columns; took the strongest")
@@ -292,6 +346,7 @@ def detect_pin(
 
     return PinDetection(
         x=fx, y=fy, confidence=round(conf, 3), method="ridge",
+        stick_top_y=(None if top is None else float(y0 + top)),
         green_box=(x0 + gx, y0 + gy, gw, gh), ridge_score=s, notes=notes,
     )
 

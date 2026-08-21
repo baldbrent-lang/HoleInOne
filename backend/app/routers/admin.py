@@ -13220,6 +13220,112 @@ def calibrate_green_camera(
     }
 
 
+@router.post("/cameras/{camera_id}/geo-calibrate")
+async def geo_calibrate_camera(
+    camera_id: int,
+    frame: UploadFile | None = File(None),
+    mount_height_ft: float = 8.0,
+    hfov_deg: float = 54.0,
+    stick_base_x: float | None = None,
+    stick_base_y: float | None = None,
+    stick_top_y: float | None = None,
+    save: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Calibrate a green camera from geometry instead of a tape measure.
+
+    Needs three things: how high the camera is mounted, the lens's
+    horizontal FOV (Pi HQ + 6mm is ~54 deg, per field-deployment.md),
+    and a flagstick -- 7 ft of known vertical object standing on the
+    plane we are mapping, which fixes the horizon.
+
+    The flagstick can be detected or given. DETECTION OF THE BASE IS
+    GOOD; detection of the TOP is a proposal, because the walk up the
+    pole either loses it or runs past the flag into the trees behind.
+    So pass stick_top_y once, from a frame you have looked at.
+
+    That is a once-per-camera question, not a daily one: the mount is
+    fixed, so the horizon never moves. Afterwards only the PIN moves,
+    and detect-pin handles that on its own.
+
+    save=false by default. This produces a mapping that decides who wins
+    a prize; look at the horizon it reports before trusting it.
+    """
+    import numpy as np
+
+    from ..services import geom_calibration as gcal
+    from ..services import pin_detect as pd
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    raw = await _frame_bytes_for(camera_id, frame)
+    import cv2
+
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "could not read that image")
+    fh, fw = img.shape[:2]
+
+    det = None
+    bx, by, top = stick_base_x, stick_base_y, stick_top_y
+    if bx is None or by is None or top is None:
+        det = pd.detect_pin(img)
+        if det is None and (bx is None or by is None):
+            raise HTTPException(
+                422, "no flagstick found — pass stick_base_x/y and "
+                     "stick_top_y from a frame you have looked at",
+            )
+        if det is not None:
+            if bx is None:
+                bx = det.x * fw
+            if by is None:
+                by = det.y * fh
+            if top is None:
+                top = det.stick_top_y
+    if top is None:
+        raise HTTPException(
+            422, "could not measure the flagstick's height — pass "
+                 "stick_top_y (the top of the flag) once for this camera",
+        )
+
+    stick_px = float(by) - float(top)
+    try:
+        cal = gcal.build_calibration(
+            fw, fh, mount_height_ft, hfov_deg, (float(bx), float(by)), stick_px,
+        )
+    except gcal.GeomError as exc:
+        raise HTTPException(400, str(exc))
+
+    out = {
+        "camera_id": camera_id,
+        "frame_size": [fw, fh],
+        "flagstick": {"base": [round(float(bx), 1), round(float(by), 1)],
+                      "top": round(float(top), 1),
+                      "height_px": round(stick_px, 1),
+                      "auto_detected": det is not None},
+        "geometry": cal["geometry"],
+        "pin_world_ft": cal["pin"]["world"],
+        "check": (
+            f"horizon lands at row {cal['geometry']['horizon_y']} of {fh} — "
+            f"look at the frame and confirm that is where the ground "
+            f"actually vanishes. If it is not, the mount height or the FOV "
+            f"is wrong, and every distance built on this will be too."
+        ),
+        "saved": False,
+    }
+    if save:
+        cam.green_homography = cal
+        db.add(AuditLog(
+            actor="admin", action="geo_calibrate", target=f"camera:{camera_id}",
+            detail=f"h={mount_height_ft}ft fov={hfov_deg} horizon={cal['geometry']['horizon_y']}",
+        ))
+        db.commit()
+        out["saved"] = True
+    return out
+
+
 @router.post("/cameras/{camera_id}/measure-rest")
 def measure_resting_ball(
     camera_id: int,
