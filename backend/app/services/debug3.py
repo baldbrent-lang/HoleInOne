@@ -1330,15 +1330,130 @@ DESCENT_RATE_HI = 3.0
 DESCENT_FLATTEN_FRAC = 0.4
 
 
+def _path_bend_px(pts: list) -> float:
+    """How far a track strays from a straight line, in pixels rms.
+
+    Fitted x against y rather than against time, because a descent is
+    mostly vertical: y is the long axis and is monotonic through the
+    fall, so the fit is well conditioned where fitting against time is
+    not when frames are dropped.
+    """
+    try:
+        ys = np.array([float(p["y"]) for p in pts], dtype=float)
+        xs = np.array([float(p["x"]) for p in pts], dtype=float)
+        if len(pts) < 3 or float(ys.max() - ys.min()) < 1.0:
+            return 0.0
+        coef = np.polyfit(ys, xs, 1)
+        return float(np.sqrt(np.mean((np.polyval(coef, ys) - xs) ** 2)))
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def detect_movers_by_plate(
+    input_path: Path,
+    f0: int,
+    f1: int,
+    plate_step: int = 8,
+    thr: int = 24,
+    edge_px: int = 30,
+    min_area: int = 3,
+    max_area: int = 900,
+    max_side: int = 70,
+) -> list:
+    """Ball-sized things that differ from a still picture of the scene.
+
+    WHY THIS EXISTS ALONGSIDE MOG2. `detect_ball_blobs` learns its
+    background as it goes, and that adaptation is exactly wrong for a
+    ball that crosses a busy band of the frame in a few frames: on a real
+    clip a shot that a person can see land produced ONE detection in the
+    whole descent, which no tracker can do anything with. The same ball
+    against the same footage gives four or five here, because a median
+    over the whole clip is a background that cannot be talked into
+    absorbing something that was only ever there for a tenth of a second.
+
+    It is not better than MOG2 in general -- it has no notion of a
+    moving camera and it lights up on anything that shifted -- so the
+    caller unions the two rather than choosing. Measured on two clips,
+    the union finds every descent a person can see and neither detector
+    finds all of them alone.
+
+    Solid blobs bigger than a ball are dropped: a person is filled in,
+    a ball smeared by its own speed is a thin streak.
+
+    Returns the same [{frame, x, y, area}] shape `detect_ball_blobs`
+    returns, so the two lists concatenate. Never raises.
+    """
+    out: list = []
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            return out
+        plate_frames = []
+        for f in range(int(f0), int(f1) + 1, max(1, int(plate_step))):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+            ok, im = cap.read()
+            if ok and im is not None:
+                plate_frames.append(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY))
+        if not plate_frames:
+            cap.release()
+            return out
+        plate = np.median(np.stack(plate_frames), axis=0).astype(np.int16)
+        h, w = plate.shape
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(f0))
+        f = int(f0)
+        while f <= int(f1):
+            ok, im = cap.read()
+            if not ok or im is None:
+                break
+            g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.int16)
+            d = np.abs(g - plate).astype(np.uint8)
+            _, mask = cv2.threshold(d, int(thr), 255, cv2.THRESH_BINARY)
+            n, _lab, st, cen = cv2.connectedComponentsWithStats(mask, 8)
+            for i in range(1, n):
+                a = int(st[i, cv2.CC_STAT_AREA])
+                bw = int(st[i, cv2.CC_STAT_WIDTH])
+                bh = int(st[i, cv2.CC_STAT_HEIGHT])
+                if not (min_area <= a <= max_area):
+                    continue
+                if bw > max_side or bh > max_side:
+                    continue
+                if max(bw, bh) > 14 and a > 0.55 * bw * bh:
+                    continue
+                x, y = float(cen[i][0]), float(cen[i][1])
+                if (x < edge_px or y < edge_px
+                        or x > w - edge_px or y > h - edge_px):
+                    continue
+                out.append({"frame": f, "x": x, "y": y, "area": a})
+            f += 1
+        cap.release()
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
 def find_descents(
     input_path: Path,
     fps: float | None = None,
     window: tuple[int, int] | None = None,
-    r: float = 12.0,
-    min_points: int = 4,
+    r: float = 14.0,
+    # THREE POINTS IS A DESCENT. Four was the first guess and it threw a
+    # real shot away: on a clip whose two landings a person can point at,
+    # the earlier one gave three detections and then nothing for the
+    # eleven frames before it hit the ground. That is not a tracking
+    # failure to tune around -- the ball genuinely is not in the picture
+    # in any way a detector can see. Three is enough because the
+    # fall-rate band does the discriminating, not the point count.
+    min_points: int = 3,
     min_drop_frac: float = 0.05,
     rate_lo: float = DESCENT_RATE_LO,
     rate_hi: float = DESCENT_RATE_HI,
+    # A FALLING BALL IS STRAIGHT. Over the half-second a descent lasts,
+    # gravity bends the path far less than the image is wide, so x against
+    # y is very nearly a line. A chain of unrelated speckles the tracker
+    # happened to link is not. Measured rms across three real descents on
+    # two clips: 0.1, 2.2 and 5.3 px. The two false positives: 17.6 and
+    # 21.7. This is the cleanest single discriminator of the lot.
+    max_bend_px: float = 10.0,
     merge_sec: float = 1.0,
     max_events: int = 20,
 ) -> dict:
@@ -1397,9 +1512,20 @@ def find_descents(
     f_lo = max(0, int(f_lo))
     f_hi = min(max(f_lo + 1, int(f_hi)), n_frames - 1)
 
+    # BOTH DETECTORS, unioned. Neither finds every descent alone --
+    # measured on two clips, MOG2 saw one of the two landings with a
+    # single detection and the plate saw the other with ten. Together
+    # they find both, and the fall-rate band below is what keeps the
+    # extra noise from the plate out of the answer.
     try:
         det = detect_ball_blobs(input_path, f_lo, f_hi)
-        tracks = build_tracks(det.get("dets") or [], r)
+        dets = list(det.get("dets") or [])
+        n_mog = len(dets)
+        dets.extend(detect_movers_by_plate(input_path, f_lo, f_hi))
+        dets.sort(key=lambda d: d["frame"])
+        out["n_dets"] = len(dets)
+        out["n_dets_mog2"] = n_mog
+        tracks = build_tracks(dets, r, min_len=int(min_points))
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"detection failed: {exc}"
         return out
@@ -1417,6 +1543,9 @@ def find_descents(
         span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
         rate = (drop / span_f) * _fps / frame_h
         if not (float(rate_lo) <= rate <= float(rate_hi)):
+            continue
+        bend = _path_bend_px(pts)
+        if bend > float(max_bend_px):
             continue
 
         # WHERE IT LANDED, not where the tracker gave up. The seed keeps
@@ -1447,6 +1576,7 @@ def find_descents(
             "n_points": len(pts),
             "drop_px": int(round(drop)),
             "fall_rate": round(rate, 3),
+            "bend_px": round(bend, 2),
             "peak_px_per_frame": round(peak, 1),
         })
 
