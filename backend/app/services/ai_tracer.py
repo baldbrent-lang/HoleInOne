@@ -5491,9 +5491,21 @@ _FIND_RESTING_BALL_PROMPT = (
 # plateau -- and timing: the burst from a strike is at the departure,
 # because the club is what causes both, while a shoe's motion peaks long
 # after the detector lost the blob.
-BURST_FALL_MIN = 6.0      # peak / what it settles back to. Strike 24, shoe 3.3
-BURST_WIDTH_MAX_SEC = 0.30  # strike 6 frames @50fps = 0.12s; shoe 25 = 0.50s
-BURST_LAG_MAX_SEC = 0.10    # strike peaks +1 frame; shoe +10
+# ONE MEASUREMENT, not three. The first version of this voted on fall,
+# width and lag, two of three carrying it, and that rule threw away a
+# real swing: on a labelled strike the fall was 868x -- the strongest
+# reading in the whole set -- and it lost 1-2 to a wide peak and a
+# 0.2s lag. Scored against six labelled strikes and two known false
+# positives, fall separates them on its own and the other two only add
+# ways to be wrong:
+#
+#   real strikes   868, 250, 124, 84, 50   (one more too quiet to score)
+#   shoe walking off                  3.6
+#   ball someone walked past          0.9
+#
+# 15 sits in the middle of a fourteen-fold gap. Width and lag are still
+# reported -- they are useful to look at -- but they no longer vote.
+BURST_FALL_MIN = 15.0
 
 
 def impact_burst_profile(
@@ -5638,26 +5650,20 @@ def judge_impact_burst(profile: dict, fps: float) -> dict:
         )
         return out
 
-    ok_fall = out["fall"] >= BURST_FALL_MIN
-    ok_width = out["width_sec"] <= BURST_WIDTH_MAX_SEC
-    ok_lag = abs(out["lag_sec"]) <= BURST_LAG_MAX_SEC
-    votes = sum((ok_fall, ok_width, ok_lag))
-    if votes >= 2:
-        _when = "at the departure" if ok_lag else f"{out['lag_sec']:+}s after it"
+    if out["fall"] >= BURST_FALL_MIN:
         out["verdict"] = "strike"
         out["reason"] = (
-            f"burst looks like a strike: peaks {out['peak']}% {_when}, "
-            f"settles back to {out['settle']}% ({out['fall']}x), "
-            f"{out['width_sec']}s wide"
+            f"burst looks like a strike: peaks {out['peak']}% of the box "
+            f"{out['lag_sec']:+}s from the departure and drops back to "
+            f"{out['settle']}% ({out['fall']}x), {out['width_sec']}s wide"
         )
     else:
         out["verdict"] = "sustained"
         out["reason"] = (
             f"motion here does not look like a strike: peaks {out['peak']}% "
-            f"{out['lag_sec']:+}s after the departure and is still "
-            f"{out['settle']}% later ({out['fall']}x), {out['width_sec']}s "
-            f"wide — a shoe, a hand or a club moving off rather than a ball "
-            f"being hit"
+            f"and is still {out['settle']}% twenty frames later — only "
+            f"{out['fall']}x down, where a strike is 50x or more. Something "
+            f"moved away rather than was hit"
         )
     return out
 
