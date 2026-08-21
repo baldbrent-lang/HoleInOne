@@ -6868,6 +6868,12 @@ function BallScanModal({ state, onClose }) {
                         <td style={{ padding: "3px 8px" }}>
                           f{sp.first_frame}{" "}
                           <span className="muted">({sp.first_sec}s)</span>
+                          {sp.merged_sightings > 1 && (
+                            <div className="tiny muted"
+                                 title="the sampler split this into separate sightings and the gap between them turned out to be short enough that they are one ball">
+                              {sp.merged_sightings} sightings joined
+                            </div>
+                          )}
                         </td>
                         <td style={{ padding: "3px 8px" }}>
                           f{sp.last_frame}{" "}

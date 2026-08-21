@@ -8812,6 +8812,54 @@ def _spot_obscured(frame, x: int, y: int, r: int = 4,
         return False
 
 
+def _merge_close_sightings(spots, cluster_px: float, gap_frames: int,
+                           fps: float) -> None:
+    """Join sightings of one ball that the sampler split in two.
+
+    Same position, and the second starts within `gap_frames` of the
+    first ending. Mutates and re-sorts `spots` in place.
+    """
+    if not spots:
+        return
+    merged = True
+    while merged:
+        merged = False
+        spots.sort(key=lambda z: int(z.get("first_frame") or 0))
+        for i in range(len(spots) - 1):
+            a = spots[i]
+            for j in range(i + 1, len(spots)):
+                b = spots[j]
+                if ((a["x"] - b["x"]) ** 2
+                        + (a["y"] - b["y"]) ** 2) ** 0.5 > cluster_px:
+                    continue
+                gap = int(b["first_frame"]) - int(a["last_frame"])
+                if not (0 <= gap <= gap_frames):
+                    continue
+                a["last_frame"] = max(int(a["last_frame"]),
+                                      int(b["last_frame"]))
+                a["last_sec"] = round(a["last_frame"] / max(1e-6, fps), 2)
+                a["votes"] = int(a["votes"]) + int(b["votes"])
+                a["held_sec"] = round(
+                    (a["last_frame"] - int(a["first_frame"]))
+                    / max(1e-6, fps), 2)
+                # The later sighting is the one that saw it go.
+                a["gone_frame"] = b.get("gone_frame")
+                a["gone_sec"] = b.get("gone_sec")
+                a["blocked_frames"] = int(b.get("blocked_frames") or 0)
+                a["still_blocked"] = bool(b.get("still_blocked"))
+                for k in ("first_image", "last_image"):
+                    if b.get(k) and not a.get(k):
+                        a[k] = b[k]
+                a["merged_sightings"] = int(a.get("merged_sightings") or 1) + 1
+                spots.pop(j)
+                merged = True
+                break
+            if merged:
+                break
+    spots.sort(key=lambda z: (-float(z.get("held_sec") or 0.0),
+                              -int(z.get("votes") or 0)))
+
+
 def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
                         max_frames: int = 150, fps: float = 30.0) -> None:
     """Walk forward from each last sighting until the spot is clear AND empty.
@@ -9013,6 +9061,10 @@ def scan_resting_balls(
     if not cap.isOpened():
         out["reason"] = "could not open video"
         return out
+    # Set before the try so the merge below cannot NameError on a scan
+    # that fell over partway through.
+    _fps = float(fps or 30.0) or 30.0
+    gap_frames = max(1, int(round(float(gap_sec) * _fps)))
     try:
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         _fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
@@ -9102,6 +9154,21 @@ def scan_resting_balls(
             expect_radius_px=expect_radius_px,
             max_frames=confirm_frames, fps=_fps,
         )
+        # MERGE AGAIN, NOW THAT THE FRAMES ARE RIGHT.
+        #
+        # The gap rule that separates two balls teed on one spot runs
+        # during clustering, on 5Hz samples, using whatever the sampler
+        # had last seen. The confirm pass then walks each sighting
+        # forward at full rate and moves its last frame -- so a pair
+        # split on what looked like a long gap can end up 94 frames
+        # apart in the table, which is INSIDE the rule they were split
+        # by, and reads (correctly) as a bug.
+        #
+        # Applying the same rule a second time against the corrected
+        # frames is what makes the table agree with the sentence printed
+        # underneath it.
+        _merge_close_sightings(out["spots"], cluster_px=cluster_px,
+                               gap_frames=gap_frames, fps=_fps)
     out["n_sampled"] = seen
     out["n_frames"] = n_frames
     out["fps"] = round(_fps, 2)
