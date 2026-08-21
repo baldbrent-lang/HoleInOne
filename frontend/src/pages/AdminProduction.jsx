@@ -5275,6 +5275,12 @@ export function SwingDetectPanel({ sd }) {
                   {r.dt != null && (
                     <span className="muted"> {r.dt}s apart</span>
                   )}
+                  {r.proposed_by_ball && (
+                    <div className="tiny muted"
+                         title="pose never fired here — the ball leaving proposed this swing, and it went through every stage on that basis">
+                      ran on the ball's evidence
+                    </div>
+                  )}
                 </td>
                 <td style={{ padding: "2px 4px" }}>
                   {r.pose ? (

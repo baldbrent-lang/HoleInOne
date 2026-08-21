@@ -18573,6 +18573,61 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
     except Exception as exc:  # noqa: BLE001
         log.warning("d3: tee-box reference frame failed: %s", exc)
 
+    # LET THE BALL PROPOSE SWINGS TOO.
+    #
+    # Every stage below stage 1 walked the POSE candidate list, so a ball
+    # that sat on the tee and then left -- with an exact impact frame and
+    # a measured position -- was never judged, never given a flight and
+    # never produced, because a wrist-speed burst had not fired within a
+    # second and a half of it. On the clip this was written against that
+    # cost a real swing: pose produced nine candidates, agreed with the
+    # ball on none of them, and the single ball departure was the one
+    # carrying a correct impact frame and a ball eight pixels from the
+    # labelled position.
+    #
+    # A departure that survived refinement is BETTER evidence than a pose
+    # peak, not worse: pose detects a motion, which a practice swing and
+    # a waggle also produce, while a ball leaving the tee is the thing
+    # itself. So the unmatched ones are appended as candidates in their
+    # own right, carrying the ball position they already measured -- and
+    # stage 2 does not have to go looking for what stage 0 already found.
+    _ball_cands = []
+    try:
+        _TOL = 1.5
+        for _d in (rest.get("deps") or []):
+            try:
+                _dt = float(_d.get("t") or 0.0)
+                _dx, _dy = float(_d.get("x") or 0.0), float(_d.get("y") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            _v = verify_rest_and_impact(
+                src_path, (_dx, _dy), int(_dt * fps + 0.5), fps,
+            )
+            if not _v.get("verified") or _v.get("impact_frame") is None:
+                continue
+            _isec = int(_v["impact_frame"]) / max(1e-6, fps)
+            if any(abs(float(c.get("peak_time_sec") or 0.0) - _isec) <= _TOL
+                   for c in cands):
+                continue          # pose already has this one
+            _rxy = _v.get("rest_xy") or [_dx, _dy]
+            _ball_cands.append({
+                "peak_time_sec": _isec,
+                "gate_status": "ball departure",
+                "gate_ok": True,
+                "from_ball": True,
+                # What stage 2 would otherwise have to guess at.
+                "ball_xy": [float(_rxy[0]), float(_rxy[1])],
+                "ball_reason": _v.get("reason"),
+                "impact_feet_xy": None, "impact_head_xy": None,
+            })
+        if _ball_cands:
+            cands = list(cands) + _ball_cands
+            log.info("d3: %d ball departure(s) pose missed, added as "
+                     "candidates", len(_ball_cands))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3: could not add ball-only candidates: %s", exc)
+    rep["ball_candidates_added"] = len(_ball_cands)
+
     n_flights = 0
     n_produced = 0
     n_judged_out = 0
@@ -18591,6 +18646,8 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         entry: dict = {
             "idx": i, "peak_time_sec": round(peak_t, 2),
             "impact_frame": imp_f, "window": [f_lo, f_hi],
+            # Proposed by the ball leaving rather than by a pose peak.
+            "from_ball": bool(c.get("from_ball")),
             # What stage 1's gates thought — a label now, not a verdict.
             # "rescued" candidates reach stages 2 and 3 exactly like the
             # rest; this only says which ones to look at twice.
@@ -18608,7 +18665,16 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         _t0 = time.perf_counter()
         _rest_xy = None
         _pre: dict = {}
-        if c.get("impact_feet_xy"):
+        if c.get("ball_xy"):
+            # STAGE 0 ALREADY MEASURED THIS. A ball-departure candidate
+            # carries the pixel the ball actually sat on, watched at full
+            # rate until it left. Re-deriving it from the bottom of the
+            # club arc would be replacing a measurement with an estimate.
+            _rest_xy = [float(c["ball_xy"][0]), float(c["ball_xy"][1])]
+            _pre = {"ok": True, "xy": _rest_xy,
+                    "reason": ("where the ball actually sat: "
+                               + (c.get("ball_reason") or "watched to rest"))}
+        elif c.get("impact_feet_xy"):
             from ..services.debug2 import club_bottom_ball
 
             try:
@@ -19002,13 +19068,47 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
         # one, and it is discarded because a wrist-speed burst did not
         # clear its gates. Saying so in the row is the smallest honest
         # thing; letting these into the pipeline is the real fix.
+        # A ball-only row is now processed in its own right, so match it
+        # to the candidate the departure produced and hang the same
+        # verdicts on it. Only a row with no entry at all is still
+        # un-asked, and that should now be rare enough to be a bug.
+        _from_ball = [e for e in (rep.get("swings") or []) if e.get("from_ball")]
         for _r in ((rep.get("swing_detect") or {}).get("rows") or []):
-            if _r.get("pose") is None and _r.get("ball"):
+            if _r.get("pose") is not None or not _r.get("ball"):
+                continue
+            _bt = (_r["ball"].get("impact_sec")
+                   if _r["ball"].get("impact_sec") is not None
+                   else _r["ball"].get("t"))
+            _e = min(
+                (e for e in _from_ball
+                 if abs(float(e.get("peak_time_sec") or 0.0)
+                        - float(_bt or 0.0)) <= 1.0),
+                key=lambda e: abs(float(e.get("peak_time_sec") or 0.0)
+                                  - float(_bt or 0.0)),
+                default=None,
+            )
+            if _e is None:
                 _r["not_processed"] = (
-                    "pose did not fire here, and stages 2-8 only run on "
-                    "pose candidates — so this departure was never judged "
-                    "or produced. It was not rejected; it was never asked."
+                    "this departure did not survive refinement, so it was "
+                    "not added as a candidate"
                 )
+                continue
+            _r["proposed_by_ball"] = True
+            _j = _e.get("judge") or {}
+            _r["judge"] = {
+                "verdict": _j.get("verdict"), "ai_judge": _j.get("ai_judge"),
+                "ai_reason": _j.get("ai_reason"),
+                "ai_confidence": _j.get("ai_confidence"),
+                "decided_by": _j.get("decided_by"),
+                "dropped": bool(_e.get("dropped_by_judge")),
+                "unsure": bool(_e.get("judge_unsure")),
+            }
+            _pr = _e.get("produce") or {}
+            _r["preview"] = {"ok": bool(_pr.get("ok")),
+                             "clip_url": _pr.get("clip_url"),
+                             "error": _pr.get("error")}
+            _r["ball_hint"] = _e.get("ball_hint")
+            _r["ball_final"] = _e.get("ball")
     except Exception as exc:  # noqa: BLE001
         log.warning("d3: could not join judge/preview onto the summary: %s", exc)
 
