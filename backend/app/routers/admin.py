@@ -114,6 +114,7 @@ from ..services.ai_tracer import (
     detect_swings_from_motion,
     detect_swings_from_ball,
     find_rest_spots_by_persistence,
+    scan_resting_balls as ai_scan_resting_balls,
     score_spots_by_club,
     verify_rest_and_impact,
     detect_swings_from_ai_ball,
@@ -15149,6 +15150,140 @@ def _json_safe(obj):
 @router.get("/long-uploads/{upload_id}/debug3/status")
 def debug3_status(upload_id: int):
     return _json_safe(_debugx_get("debug3", upload_id))
+
+
+# ── Ball scan ──────────────────────────────────────────────────────────
+# One question, asked of the whole clip: what sat still and looked like a
+# ball, where, and between which frames.
+#
+# It exists because a RESTING ball is invisible to everything else here.
+# Every other detector in this file is built on motion, and a ball on a
+# tee does not move -- so the panels fill with kept blobs on sleeves and
+# hat brims while the ball sits in plain sight, unremarked. This asks the
+# appearance question instead, inside the tee box, with the people taken
+# out, and reports every candidate rather than a winner.
+
+def _ball_scan_run(row, src_path, db, progress=None) -> dict:
+    """Every resting-ball candidate in the tee box, with pictures."""
+    rep: dict = {
+        "ok": False, "upload_id": getattr(row, "id", None),
+        "reason": None, "spots": [], "roi": None, "roi_source": None,
+        "roi_note": None, "hole": None, "day": None, "course_id": None,
+        "frame_url": None, "overview_url": None, "fps": None,
+        "n_frames": None, "n_sampled": None,
+    }
+    import cv2  # type: ignore
+
+    fps = float(probe_fps(src_path) or 0.0) or 30.0
+    rep["fps"] = round(fps, 2)
+    try:
+        _roi = _tee_box_roi_fractions(src_path, db, row)
+    except Exception as exc:  # noqa: BLE001
+        _roi = {"roi": None, "source": f"failed: {exc}", "note": None}
+    rep.update({
+        "roi": _roi.get("roi"), "roi_source": _roi.get("source"),
+        "roi_note": _roi.get("note"), "hole": _roi.get("hole"),
+        "day": _roi.get("day"), "course_id": getattr(row, "course_id", None),
+    })
+
+    if progress:
+        progress("Scanning every frame for a ball at rest", 0, 0)
+    try:
+        course = db.get(Course, row.course_id) if row.course_id else None
+    except Exception:  # noqa: BLE001
+        course = None
+    _cap = cv2.VideoCapture(str(src_path))
+    _fh = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    _cap.release()
+    expect_r = _ball_radius_px(course, _roi.get("hole") or 0, _fh) if course else None
+
+    res = ai_scan_resting_balls(
+        src_path, roi=_roi.get("roi"), fps=fps, expect_radius_px=expect_r,
+    )
+    rep["reason"] = res.get("reason")
+    rep["n_sampled"] = res.get("n_sampled")
+    rep["n_frames"] = res.get("n_frames")
+    spots = list(res.get("spots") or [])
+
+    # PICTURES, because a coordinate is not evidence. Each candidate gets
+    # a crop of the frame it was FIRST seen in and of the last one before
+    # it went, so "a ball was here and then it was not" can be checked by
+    # eye instead of believed.
+    if progress:
+        progress("Cutting a picture of each candidate", 0, len(spots))
+    tok = secrets.token_hex(4)
+    try:
+        cap = cv2.VideoCapture(str(src_path))
+        for i, sp in enumerate(spots):
+            if progress:
+                progress("Cutting a picture of each candidate", i, len(spots))
+            for which, fr_no in (("first", sp.get("first_frame")),
+                                 ("last", sp.get("last_frame"))):
+                if fr_no is None:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(fr_no))
+                ok, im = cap.read()
+                if not ok or im is None:
+                    continue
+                h, w = im.shape[:2]
+                half = 90
+                x0, y0 = max(0, sp["x"] - half), max(0, sp["y"] - half)
+                x1, y1 = min(w, sp["x"] + half), min(h, sp["y"] + half)
+                crop = im[y0:y1, x0:x1].copy()
+                if crop.size == 0:
+                    continue
+                crop = cv2.resize(crop, None, fx=2.0, fy=2.0,
+                                  interpolation=cv2.INTER_NEAREST)
+                cv2.circle(crop, ((sp["x"] - x0) * 2, (sp["y"] - y0) * 2),
+                           14, (0, 165, 255), 2)
+                nm = f"ballscan-{row.id}-{tok}-{i}-{which}.jpg"
+                cv2.imwrite(str(CLIPS_DIR / nm), crop,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+                sp[f"{which}_image"] = _clip_url_for(nm)
+        # One overview with every candidate marked, so two balls on one
+        # tee read as two balls rather than as two rows in a table.
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * fps))
+        ok, ref = cap.read()
+        if not ok or ref is None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, ref = cap.read()
+        if ok and ref is not None:
+            h, w = ref.shape[:2]
+            if _roi.get("roi"):
+                r = _roi["roi"]
+                cv2.rectangle(
+                    ref, (int(r["x"] * w), int(r["y"] * h)),
+                    (int((r["x"] + r["w"]) * w), int((r["y"] + r["h"]) * h)),
+                    (80, 220, 80), 2,
+                )
+            for i, sp in enumerate(spots):
+                cv2.circle(ref, (sp["x"], sp["y"]), 12, (0, 165, 255), 2)
+                cv2.putText(ref, str(i + 1), (sp["x"] + 14, sp["y"] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2,
+                            cv2.LINE_AA)
+            nm = f"ballscan-{row.id}-{tok}-all.jpg"
+            cv2.imwrite(str(CLIPS_DIR / nm), ref,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+            rep["overview_url"] = _clip_url_for(nm)
+            rep["frame_url"] = rep["overview_url"]
+        cap.release()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ball scan: pictures failed: %s", exc)
+
+    rep["spots"] = spots
+    rep["ok"] = bool(spots)
+    return rep
+
+
+@router.post("/long-uploads/{upload_id}/ball-scan")
+def ball_scan(upload_id: int):
+    """Find every resting-ball candidate. Poll /ball-scan/status."""
+    return _debugx_start("ballscan", upload_id, _ball_scan_run)
+
+
+@router.get("/long-uploads/{upload_id}/ball-scan/status")
+def ball_scan_status(upload_id: int):
+    return _json_safe(_debugx_get("ballscan", upload_id))
 
 
 # ── Swing test ─────────────────────────────────────────────────────────

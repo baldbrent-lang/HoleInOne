@@ -6769,6 +6769,112 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
 }
 
 
+/** Every resting-ball candidate in the tee box, with pictures.
+ *
+ * The one detector here that is not built on motion. A ball on a tee
+ * does not move, so MOG2 calls it background and every motion panel in
+ * this file fills with blobs on sleeves and hat brims while the ball
+ * sits in plain sight. This asks what SAT still and looked like a ball.
+ */
+function BallScanModal({ state, onClose }) {
+  const rep = state?.report;
+  const spots = rep?.spots || [];
+  return (
+    <div role="dialog" className="modal-back" onClick={onClose}
+         style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+                  zIndex: 60, overflow: "auto", padding: 24 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()}
+           style={{ maxWidth: 1100, margin: "0 auto", padding: 16 }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <b>⚪ Scan for ball — upload #{state.uploadId}</b>
+          <button className="btn ghost" onClick={onClose}>Close ✕</button>
+        </div>
+
+        {state.running && (
+          <div className="small" style={{ marginTop: 10 }}>
+            {state.stage || "Scanning…"}
+            {state.total > 0 && ` (${state.done}/${state.total})`}
+          </div>
+        )}
+        {state.error && (
+          <div className="err-text" style={{ marginTop: 10 }}>{state.error}</div>
+        )}
+
+        {rep && (
+          <>
+            <div className="small" style={{ marginTop: 10 }}>
+              <b>{spots.length}</b> resting-ball candidate(s) ·{" "}
+              {rep.n_sampled} frame(s) sampled of {rep.n_frames} ·{" "}
+              {rep.fps}fps
+            </div>
+            <div className="tiny muted" style={{ marginTop: 2 }}>
+              Looking in: {rep.roi_source || "the whole frame"}
+              {rep.roi && (
+                <> — x {Math.round(rep.roi.x * 100)}% y {Math.round(rep.roi.y * 100)}%,{" "}
+                  {Math.round(rep.roi.w * 100)}%×{Math.round(rep.roi.h * 100)}%</>
+              )}
+            </div>
+            {rep.roi_note && (
+              <div className="tiny" style={{ color: "var(--warn,#b45309)", marginTop: 4 }}>
+                {rep.roi_note}
+              </div>
+            )}
+            {rep.overview_url && (
+              <figure style={{ margin: "10px 0" }}>
+                <a href={rep.overview_url} target="_blank" rel="noreferrer">
+                  <img src={rep.overview_url} alt="all candidates"
+                       style={{ width: "100%", borderRadius: 6 }} />
+                </a>
+                <figcaption className="tiny muted">
+                  Green = the tee box searched. Orange = every candidate,
+                  numbered as in the table.
+                </figcaption>
+              </figure>
+            )}
+            {!spots.length && (
+              <div className="tiny muted" style={{ marginTop: 8 }}>
+                {rep.reason}
+              </div>
+            )}
+            {spots.map((sp, i) => (
+              <div key={i} className="card"
+                   style={{ margin: "10px 0", padding: 10 }}>
+                <div className="row" style={{ justifyContent: "space-between" }}>
+                  <b>{i + 1}. ({sp.x}, {sp.y}) · r {sp.radius}px</b>
+                  <span className="pill">{sp.votes} frame(s)</span>
+                </div>
+                <div className="tiny muted" style={{ marginTop: 2 }}>
+                  First seen f{sp.first_frame} ({sp.first_sec}s) · last seen
+                  f{sp.last_frame} ({sp.last_sec}s) · sat {sp.held_sec}s
+                </div>
+                <div className="row" style={{ gap: 10, marginTop: 8,
+                                              flexWrap: "wrap" }}>
+                  {[["first", sp.first_image, sp.first_frame],
+                    ["last", sp.last_image, sp.last_frame]].map(
+                    ([lab, url, fr]) => url ? (
+                      <figure key={lab} style={{ margin: 0, flex: "1 1 300px" }}>
+                        <a href={url} target="_blank" rel="noreferrer">
+                          <img src={url} alt={lab}
+                               style={{ width: "100%", borderRadius: 6 }} />
+                        </a>
+                        <figcaption className="tiny muted">
+                          {lab === "first" ? "first frame it appears"
+                                           : "last frame before it goes"} — f{fr}
+                        </figcaption>
+                      </figure>
+                    ) : null,
+                  )}
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 function Debug3Modal({ state, onClose }) {
   if (!state) return null;
   const rep = state.report;
@@ -11808,6 +11914,7 @@ export default function AdminProduction() {
   const [d3, setD3] = useState(null);
   // Swing test — the ball-departure detector alone. Read-only as well.
   const [swingTest, setSwingTest] = useState(null);
+  const [ballScan, setBallScan] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -11831,6 +11938,7 @@ export default function AdminProduction() {
     const statusCall =
       kind === "debug3" ? api.debug3Status
         : kind === "swingtest" ? api.swingTestStatus
+          : kind === "ballscan" ? api.ballScanStatus
           : api.debug2Status;
     const tick = async () => {
       try {
@@ -11874,6 +11982,24 @@ export default function AdminProduction() {
       pollDebugX("debug2", row.id, setD2);
     } catch (e) {
       setD2({
+        running: false, uploadId: row.id, report: null, error: e.message,
+      });
+      setBusyId((cur) => (cur === row.id ? null : cur));
+    }
+  }
+
+  // What sat still and looked like a ball, across the whole clip. No
+  // pose, no swing, no produce — the one question that everything else
+  // here assumes has already been answered.
+  async function handleBallScan(row) {
+    setBallScan({ running: true, uploadId: row.id, report: null, error: null });
+    busySinceRef.current = Date.now();
+    setBusyId(row.id);
+    try {
+      await api.ballScan(adminPassword, row.id);
+      pollDebugX("ballscan", row.id, setBallScan);
+    } catch (e) {
+      setBallScan({
         running: false, uploadId: row.id, report: null, error: e.message,
       });
       setBusyId((cur) => (cur === row.id ? null : cur));
@@ -12866,6 +12992,15 @@ export default function AdminProduction() {
                     ⛳ Swing test
                   </button>
                 )}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
+                    onClick={() => handleBallScan(row)}
+                    title="Dev: every resting-ball candidate in the tee box — where, first frame seen, last frame before it went, with pictures. People are masked out; motion is not used, because a resting ball does not move."
+                  >
+                    ⚪ Scan for ball
+                  </button>
+                )}
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
@@ -13035,6 +13170,9 @@ export default function AdminProduction() {
 
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
       {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
+      {ballScan && (
+        <BallScanModal state={ballScan} onClose={() => setBallScan(null)} />
+      )}
       {swingTest && (
         <SwingTestModal
           state={swingTest}

@@ -109,6 +109,45 @@ def _ball_windows(fx: int, fy: int, body: float, w: int, h: int,
     return [left, right]
 
 
+def _people_mask(frame, min_h_frac: float = 0.10):
+    """Where the people are, as a mask. None if nothing person-sized.
+
+    Not motion -- a golfer standing over the ball is not moving, and the
+    thing we most need to exclude is exactly that. This is shape and
+    colour: tall dark-or-saturated regions that are not turf.
+    """
+    if frame is None:
+        return None
+    try:
+        h, w = frame.shape[:2]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        # Turf is green and reasonably saturated; sky is bright and pale.
+        turf = ((H >= 25) & (H <= 90) & (S >= 40)).astype(np.uint8)
+        sky = (V >= 170) & (S <= 60)
+        not_ground = ((turf == 0) & (~sky)).astype(np.uint8) * 255
+        not_ground = cv2.morphologyEx(
+            not_ground, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8),
+        )
+        n, lab, st, _c = cv2.connectedComponentsWithStats(not_ground, 8)
+        out = np.zeros((h, w), np.uint8)
+        hit = False
+        for i in range(1, n):
+            bh = int(st[i, cv2.CC_STAT_HEIGHT])
+            bw = int(st[i, cv2.CC_STAT_WIDTH])
+            if bh >= min_h_frac * h and bh >= bw:      # tall, person-shaped
+                out[lab == i] = 255
+                hit = True
+        if not hit:
+            return None
+        # Generous, and downwards especially: the shoes and the shadow
+        # they cast are the blobs this exists to keep out.
+        return cv2.dilate(out, np.ones((9, 25), np.uint8))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("people mask failed: %s", exc)
+        return None
+
+
 def club_bottom_ball(
     input_path: Path,
     impact_frame: int,
@@ -271,6 +310,17 @@ def club_bottom_ball(
                 mask_before = mask_raw if mask_raw is not None else mask
                 rbox = np.zeros_like(mask)
                 rbox[ry0:ry1, rx0:rx1] = 255
+                # PUNCH THE PEOPLE OUT OF THE BOX. Anchoring the search to
+                # the golfer was the wrong shape of idea but the right
+                # instinct: shoes and their shadows are the blobs that beat
+                # a club head. Excluding them is a fact about the picture
+                # -- these pixels are a person -- rather than a guess about
+                # which player pose picked, and it leaves everything either
+                # side of them inside the box still searchable.
+                _people = _people_mask(base)
+                if _people is not None:
+                    rbox = cv2.bitwise_and(rbox, cv2.bitwise_not(_people))
+                    out["people_masked"] = True
                 mask = cv2.bitwise_and(mask_before, rbox)
                 out["roi_used"] = {"x": rx0, "y": ry0,
                                    "w": rx1 - rx0, "h": ry1 - ry0}
@@ -315,7 +365,7 @@ def club_bottom_ball(
                             (pose_wins[0][0], max(12, pose_wins[0][1] - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                             (150, 150, 150), 1, cv2.LINE_AA) if pose_wins else None
-            if ground_y is not None:
+            if ground_y is not None and feet_trusted:
                 # Only across the windows, not the whole frame — drawn edge
                 # to edge it read as a horizon and invited the question of
                 # what it was. It is the y of the pose feet, nothing more.
@@ -353,28 +403,29 @@ def club_bottom_ball(
             _render()
             return out
 
-        # ARE THESE THE RIGHT FEET? Both guards below measure the ball
-        # against the golfer -- drop the columns at the shoes, and reject
-        # an arc bottoming out too far from them. Both are sound when
-        # pose found the player at THIS tee box and actively harmful when
-        # it did not: with a tee box drawn round the golfer swinging and
-        # pose locked onto the one waiting to the right, the ball came
-        # out 2.46 body-heights from "the" feet and was thrown away as
-        # too far, having been located correctly to within seven pixels.
+        # THE FEET DO NOT GET A VOTE WHEN THERE IS A TEE BOX.
         #
-        # So the feet only get a vote when they are inside the box that
-        # says where a ball can be.
-        feet_trusted = ground_y is not None
-        if feet_trusted and roi_rect is not None:
-            _fx = int(feet_xy[0])
-            feet_trusted = (roi_rect[0] - 0.5 * (roi_rect[2] - roi_rect[0])
-                            <= _fx <=
-                            roi_rect[2] + 0.5 * (roi_rect[2] - roi_rect[0]))
-            if not feet_trusted:
-                out["feet_ignored"] = (
-                    "pose put the golfer outside the tee box, so the "
-                    "feet were not used to place or check the ball"
-                )
+        # Both guards below measure the ball against the golfer: drop the
+        # columns at the shoes, and reject an arc bottoming out too far
+        # from them. Both assume pose found the right person, and on a
+        # tee with more than one player it routinely does not -- the ball
+        # came out 2.46 body-heights from "the" feet and was thrown away
+        # as too far, having been located correctly to within seven
+        # pixels. Trusting the feet when they happened to fall inside the
+        # box was a half-measure: it still let a bad pose move the answer
+        # whenever it guessed a plausible-looking person.
+        #
+        # A drawn tee box is a better statement of where a ball can be
+        # than any inference about a person, so when there is one it is
+        # the only thing that decides. Shoes are dealt with by masking
+        # PEOPLE out of the box, which is a fact about the picture rather
+        # than about which golfer pose picked.
+        feet_trusted = ground_y is not None and roi_rect is None
+        if ground_y is not None and roi_rect is not None:
+            out["feet_ignored"] = (
+                "a tee box is set, so the ball was found inside it and "
+                "the golfer's feet were not used to place or check it"
+            )
         if feet_trusted:
             fx = int(feet_xy[0])
             # Drop the columns at the feet. The shoes shift and the shadow

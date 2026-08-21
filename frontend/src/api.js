@@ -683,6 +683,20 @@ export const api = {
       adminPassword: key,
     }),
 
+  // Ball scan — what SAT still and looked like a ball, and between
+  // which frames. The only detector here that is not built on motion,
+  // because a resting ball does not move.
+  ballScan: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ball-scan`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+
+  ballScanStatus: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ball-scan/status`, {
+      adminPassword: key,
+    }),
+
   // Swing test — the ball-departure detector on its own. Same
   // start-then-poll shape as Debug2/Debug3, for the same proxy-timeout
   // reason.

@@ -8728,6 +8728,172 @@ def score_spots_by_club(
     return out
 
 
+def people_mask_in_frame(frame, min_h_frac: float = 0.10):
+    """Where the people are in this frame, as a mask. None if none found.
+
+    NOT motion. The person who matters most here is a golfer standing
+    perfectly still over the ball, and a motion detector calls that
+    background. This is shape and colour instead: regions that are
+    neither turf nor sky, tall rather than wide, at least a tenth of the
+    frame high.
+
+    Dilated hard downwards, because the shoes and the shadow they cast
+    are the blobs that beat a golf ball in every vote it is entered in.
+    """
+    if not HAS_CV or frame is None:
+        return None
+    try:
+        h, w = frame.shape[:2]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        turf = (H >= 25) & (H <= 90) & (S >= 40)
+        sky = (V >= 170) & (S <= 60)
+        not_ground = ((~turf) & (~sky)).astype(np.uint8) * 255
+        not_ground = cv2.morphologyEx(
+            not_ground, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8),
+        )
+        n, lab, st, _c = cv2.connectedComponentsWithStats(not_ground, 8)
+        out = np.zeros((h, w), np.uint8)
+        hit = False
+        for i in range(1, n):
+            bh = int(st[i, cv2.CC_STAT_HEIGHT])
+            bw = int(st[i, cv2.CC_STAT_WIDTH])
+            if bh >= min_h_frac * h and bh >= bw:
+                out[lab == i] = 255
+                hit = True
+        if not hit:
+            return None
+        return cv2.dilate(out, np.ones((9, 25), np.uint8))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def scan_resting_balls(
+    input_path: Path,
+    roi: dict | None = None,
+    fps: float | None = None,
+    sample_hz: float = 5.0,
+    cluster_px: float = 8.0,
+    # TWO BALLS ON ONE SPOT ARE TWO BALLS. Golfers tee up in the same
+    # place all morning, so clustering on position alone merged a ball
+    # struck at f266 with a different one teed at f1100 and reported a
+    # single candidate that "sat" for twenty seconds. A gap longer than
+    # this ends the sighting and starts a new one -- which is what makes
+    # "first seen" and "last seen" mean anything.
+    gap_sec: float = 3.0,
+    min_votes: int = 3,
+    max_spots: int = 24,
+    expect_radius_px: float | None = None,
+    exclude_people: bool = True,
+) -> dict:
+    """Every ball that SAT somewhere: where, first seen, last seen.
+
+    A RESTING BALL IS INVISIBLE TO A MOTION DETECTOR. That is the whole
+    reason this exists separately. MOG2 calls anything that does not move
+    background, so a ball on a tee contributes nothing to it -- the
+    motion panel's kept blobs land on sleeves and hats and hat brims and
+    never once on the ball, which is sitting there in plain sight. This
+    asks the appearance question instead: a small whitish round thing on
+    green, in the same pixel, in many frames.
+
+    PEOPLE ARE EXCLUDED, NOT FOLLOWED. Earlier versions anchored the
+    search to the golfer's feet, which was the right instinct about the
+    wrong thing: shoes and their shadows are what beat a ball in any
+    vote, so they must go -- but anchoring to them means one bad guess
+    about which player is which moves the whole search. Masking people
+    out of the tee box removes the shoes and leaves everything either
+    side of them still searchable, and it does not care which golfer is
+    which.
+
+    Returns {ok, spots, n_sampled, reason}. Each spot carries `x`, `y`,
+    `radius`, `votes`, `first_frame`, `last_frame` and their seconds, so
+    "it appeared here and then it went" is a readable sentence rather
+    than an inference. Never raises.
+    """
+    out: dict = {"ok": False, "spots": [], "n_sampled": 0, "reason": None}
+    if not HAS_CV:
+        out["reason"] = "opencv not installed"
+        return out
+    cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        out["reason"] = "could not open video"
+        return out
+    try:
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        _fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        if _fps <= 1.0:
+            _fps = 30.0
+        step = max(1, int(round(_fps / max(0.5, float(sample_hz)))))
+        gap_frames = max(step, int(round(float(gap_sec) * _fps)))
+        # [sum_x, sum_y, sum_r, votes, first_frame, last_frame, closed]
+        clusters: list = []
+        f = seen = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            if f % step:
+                f += 1
+                continue
+            seen += 1
+            pm = people_mask_in_frame(frame) if exclude_people else None
+            for (x, y, r) in ball_candidates_in_frame(
+                    frame, roi=roi, expect_radius_px=expect_radius_px):
+                if pm is not None:
+                    iy, ix = int(round(y)), int(round(x))
+                    if (0 <= iy < pm.shape[0] and 0 <= ix < pm.shape[1]
+                            and pm[iy, ix]):
+                        continue
+                for cl in clusters:
+                    if cl[6]:
+                        continue        # already closed by a gap
+                    if (((cl[0] / cl[3] - x) ** 2
+                         + (cl[1] / cl[3] - y) ** 2) ** 0.5) <= cluster_px:
+                        if (f - cl[5]) > gap_frames:
+                            cl[6] = True          # that ball is gone
+                            continue
+                        cl[0] += x
+                        cl[1] += y
+                        cl[2] += r
+                        cl[3] += 1
+                        cl[5] = f
+                        break
+                else:
+                    clusters.append([x, y, r, 1.0, f, f, False])
+            f += 1
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"scan failed: {exc}"
+        return out
+    finally:
+        cap.release()
+
+    spots = [
+        {
+            "x": int(round(cl[0] / cl[3])), "y": int(round(cl[1] / cl[3])),
+            "radius": round(cl[2] / cl[3], 2), "votes": int(cl[3]),
+            "first_frame": int(cl[4]), "last_frame": int(cl[5]),
+            "first_sec": round(int(cl[4]) / _fps, 2),
+            "last_sec": round(int(cl[5]) / _fps, 2),
+            "held_sec": round((int(cl[5]) - int(cl[4])) / _fps, 2),
+        }
+        for cl in clusters if cl[3] >= min_votes
+    ]
+    # Longest sit first. A teed ball waits while its owner addresses it;
+    # a speck that flickers for a second is something else.
+    spots.sort(key=lambda z: (-z["held_sec"], -z["votes"]))
+    out["spots"] = spots[:int(max_spots)]
+    out["n_sampled"] = seen
+    out["n_frames"] = n_frames
+    out["fps"] = round(_fps, 2)
+    out["ok"] = bool(out["spots"])
+    out["reason"] = (
+        f"{len(out['spots'])} resting-ball candidate(s) across {seen} "
+        f"sampled frame(s)" if out["spots"] else
+        f"nothing sat still and ball-shaped in {seen} sampled frame(s)"
+    )
+    return out
+
+
 def find_rest_spots_by_persistence(
     input_path: Path,
     fps: float | None = None,
