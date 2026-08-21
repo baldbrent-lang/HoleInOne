@@ -13173,6 +13173,195 @@ def calibrate_green_camera(
     }
 
 
+@router.post("/cameras/{camera_id}/detect-pin")
+async def detect_camera_pin(
+    camera_id: int,
+    frame: UploadFile | None = File(None),
+    save: bool = False,
+    roi_x: float | None = None,
+    roi_y: float | None = None,
+    roi_w: float | None = None,
+    roi_h: float | None = None,
+    h_lo: int | None = None, s_lo: int | None = None, v_lo: int | None = None,
+    h_hi: int | None = None, s_hi: int | None = None, v_hi: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Find today's flagstick base, and optionally make it the origin.
+
+    Upload a frame, or omit it to use the camera's latest live frame.
+    The pin moves daily and the calibration's origin does not move with
+    it, so this is the piece that keeps closest-to-the-pin honest
+    overnight without anyone driving out to click a picture.
+
+    save=true writes it into the calibration as the new pin. It does NOT
+    save on its own, and deliberately so: a mis-detected pin does not
+    produce a visibly wrong picture, it produces a plausible distance
+    that hands a prize to the wrong golfer. Look at the preview first.
+
+    The HSV and ROI overrides exist so this can be tuned against real
+    frames in the field rather than against a guess made indoors.
+    """
+    import numpy as np
+
+    from ..services import green_calibration as gc
+    from ..services import pin_detect as pd
+
+    cam = db.get(Camera, camera_id)
+    if not cam:
+        raise HTTPException(404, "camera not found")
+
+    raw = await _frame_bytes_for(camera_id, frame)
+    import cv2
+
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "could not read that image")
+
+    roi = None
+    if None not in (roi_x, roi_y, roi_w, roi_h):
+        roi = (roi_x, roi_y, roi_w, roi_h)
+
+    lo = (h_lo if h_lo is not None else pd.DEFAULT_HSV_LO[0],
+          s_lo if s_lo is not None else pd.DEFAULT_HSV_LO[1],
+          v_lo if v_lo is not None else pd.DEFAULT_HSV_LO[2])
+    hi = (h_hi if h_hi is not None else pd.DEFAULT_HSV_HI[0],
+          s_hi if s_hi is not None else pd.DEFAULT_HSV_HI[1],
+          v_hi if v_hi is not None else pd.DEFAULT_HSV_HI[2])
+
+    prev = None
+    cal = cam.green_homography or {}
+    prev_img = (cal.get("pin") or {}).get("image")
+    if prev_img:
+        h, w = img.shape[:2]
+        prev = (float(prev_img[0]) / w, float(prev_img[1]) / h)
+
+    det = pd.detect_pin(img, roi=roi, prev=prev, hsv_lo=lo, hsv_hi=hi)
+    if det is None:
+        return {
+            "found": False,
+            "reason": "no flag-coloured object of a plausible size was found",
+            "hint": "check the HSV range against a real frame, or pass an roi",
+        }
+
+    h, w = img.shape[:2]
+    px, py = det.x * w, det.y * h
+    out = {"found": True, "detection": det.as_dict(), "image_px": [round(px, 1), round(py, 1)],
+           "frame_size": [w, h]}
+
+    # Where that lands on the green, when the camera can answer.
+    world = gc.image_to_green(cal, px, py) if cal.get("homography") else None
+    out["world"] = world
+    if world is None and cal.get("homography"):
+        out["warning"] = (
+            "the detected base does not project onto the green's plane — "
+            "that usually means the detection is above the horizon, so "
+            "treat it as wrong rather than as a measurement"
+        )
+
+    if save:
+        if not cal.get("homography"):
+            raise HTTPException(409, "camera is not calibrated; nothing to save the pin against")
+        if world is None:
+            raise HTTPException(422, "detected point does not land on the green's plane")
+        cal = dict(cal)
+        cal["pin"] = {"image": [round(px, 1), round(py, 1)],
+                      "world": [world["x_ft"], world["y_ft"]]}
+        cal["pin_set_at"] = _utcnow_naive().isoformat()
+        cal["pin_source"] = f"auto:{det.method}"
+        cam.green_homography = cal
+        db.add(AuditLog(actor="admin", action="detect_pin", target=f"camera:{camera_id}",
+                        detail=f"conf={det.confidence} method={det.method}"))
+        db.commit()
+        out["saved"] = True
+
+    return out
+
+
+@router.post("/cameras/{camera_id}/detect-pin/preview")
+async def detect_camera_pin_preview(
+    camera_id: int,
+    frame: UploadFile | None = File(None),
+    roi_x: float | None = None, roi_y: float | None = None,
+    roi_w: float | None = None, roi_h: float | None = None,
+    h_lo: int | None = None, s_lo: int | None = None, v_lo: int | None = None,
+    h_hi: int | None = None, s_hi: int | None = None, v_hi: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """The same detection, drawn on the frame, as a JPEG.
+
+    Looking at it is the only honest way to tune this. A number in a JSON
+    body cannot tell you the detector locked onto a yellow bag; a
+    crosshair sitting on a yellow bag can.
+    """
+    import cv2
+    import numpy as np
+
+    from ..services import pin_detect as pd
+
+    if not db.get(Camera, camera_id):
+        raise HTTPException(404, "camera not found")
+    raw = await _frame_bytes_for(camera_id, frame)
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(400, "could not read that image")
+
+    roi = None
+    if None not in (roi_x, roi_y, roi_w, roi_h):
+        roi = (roi_x, roi_y, roi_w, roi_h)
+    lo = (h_lo if h_lo is not None else pd.DEFAULT_HSV_LO[0],
+          s_lo if s_lo is not None else pd.DEFAULT_HSV_LO[1],
+          v_lo if v_lo is not None else pd.DEFAULT_HSV_LO[2])
+    hi = (h_hi if h_hi is not None else pd.DEFAULT_HSV_HI[0],
+          s_hi if s_hi is not None else pd.DEFAULT_HSV_HI[1],
+          v_hi if v_hi is not None else pd.DEFAULT_HSV_HI[2])
+
+    det = pd.detect_pin(img, roi=roi, hsv_lo=lo, hsv_hi=hi)
+    h, w = img.shape[:2]
+    if roi:
+        cv2.rectangle(
+            img, (int(roi[0] * w), int(roi[1] * h)),
+            (int((roi[0] + roi[2]) * w), int((roi[1] + roi[3]) * h)),
+            (255, 200, 0), 2,
+        )
+    if det:
+        if det.flag_box:
+            bx, by, bw, bh = det.flag_box
+            cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (0, 200, 255), 2)
+        px, py = int(det.x * w), int(det.y * h)
+        cv2.drawMarker(img, (px, py), (0, 0, 255), cv2.MARKER_CROSS, 40, 3)
+        cv2.circle(img, (px, py), 14, (0, 0, 255), 2)
+        cv2.putText(
+            img, f"{det.method} conf={det.confidence:.2f}", (px + 20, py - 12),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2, cv2.LINE_AA,
+        )
+    else:
+        cv2.putText(img, "NO FLAG FOUND", (30, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 3, cv2.LINE_AA)
+
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        raise HTTPException(500, "could not encode the preview")
+    return Response(content=bytes(buf), media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
+async def _frame_bytes_for(camera_id: int, frame) -> bytes:
+    """An uploaded frame if given, otherwise the camera's live one."""
+    if frame is not None:
+        data = await frame.read()
+        if data:
+            return data
+    with _LIVE_LOCK:
+        slot = _LIVE_FRAMES.get(camera_id)
+    if not slot:
+        raise HTTPException(
+            409,
+            "no frame: upload one, or open the camera's live view first so "
+            "a frame is cached",
+        )
+    return slot[0]
+
+
 @router.get("/cameras/{camera_id}/calibration")
 def get_green_calibration(camera_id: int, db: Session = Depends(get_db)):
     """Stored calibration, or nulls if the camera has never been done."""
