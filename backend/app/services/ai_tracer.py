@@ -8933,6 +8933,19 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
                 if empty_run == 0:
                     empty_from = f
                 empty_run += 1
+                # 150 EMPTY FRAMES IS THE ANSWER, and the walk has to end
+                # there. Extending the deadline on ANY later sighting let
+                # the watch absorb the NEXT ball teed on the same spot and
+                # run to the end of the clip: measured 1,582 iterations to
+                # resolve a departure seventeen frames away, which is
+                # where this scan's time was going. It is also wrong --
+                # that later sighting is a different ball, which is
+                # exactly what the gap rule in the main scan exists to
+                # separate.
+                if empty_run >= int(max_frames):
+                    sp["gone_frame"] = int(empty_from)
+                    sp["gone_sec"] = round(int(empty_from) / max(1e-6, fps), 2)
+                    break
             # The window ran out. If it ended on a run of clear, empty
             # frames, the start of that run is the departure.
             if empty_run and not covered:
