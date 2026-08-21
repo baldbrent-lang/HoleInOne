@@ -202,6 +202,8 @@ def club_bottom_ball(
         # gave them to us, because that is what "the base of where the club
         # hits the ground" actually means.
         wins: list = []       # (x_lo, y_lo, x_hi, y_hi) each, for the draw
+        pose_wins: list = []  # what pose asked for, kept for the picture
+        mask_raw = None       # the arc before any window was applied
         ground_y = None
         body = 0.0
         if feet_xy and len(feet_xy) == 2:
@@ -218,9 +220,14 @@ def club_bottom_ball(
             # in the gap between them, which is still far better than the
             # single wide band that used to span both.
             wins = _ball_windows(fx, fy, body, w, h, ball_side)
+            pose_wins = list(wins)
             box = np.zeros_like(mask)
             for _x0, _y0, _x1, _y1 in wins:
                 box[_y0:_y1, _x0:_x1] = 255
+            # Keep the unrestricted arc: if a tee box turns up below it
+            # supersedes this, and it has to be applied to the motion
+            # rather than to what the pose window left of it.
+            mask_raw = mask.copy()
             mask = cv2.bitwise_and(mask, box)
         elif hint_xy and len(hint_xy) == 2:
             # Legacy fallback: a symmetric box around the wrist. Keeps the
@@ -248,15 +255,27 @@ def club_bottom_ball(
                 ry1 = max(ry0 + 2, min(h, int((float(roi["y"])
                                                + float(roi["h"])) * h)))
                 roi_rect = (rx0, ry0, rx1, ry1)
+                # THE TEE BOX REPLACES THE POSE WINDOW, it does not
+                # intersect with it. Intersecting sounds safer and is
+                # not: pose picks one person out of several on a tee and
+                # regularly picks the wrong one, and on a real frame its
+                # two windows sat over the golfer WAITING while the box
+                # sat over the golfer SWINGING. The intersection of
+                # those is empty, so the stage found nothing at all --
+                # a wrong guess silently vetoing a right one.
+                #
+                # The box is the better constraint on its own terms: it
+                # is where a teed ball can be on this hole today, drawn
+                # by someone who looked, and it does not move when the
+                # detector mistakes which player is which.
+                mask_before = mask_raw if mask_raw is not None else mask
                 rbox = np.zeros_like(mask)
                 rbox[ry0:ry1, rx0:rx1] = 255
-                mask = cv2.bitwise_and(mask, rbox)
+                mask = cv2.bitwise_and(mask_before, rbox)
                 out["roi_used"] = {"x": rx0, "y": ry0,
                                    "w": rx1 - rx0, "h": ry1 - ry0}
-                if not wins:
-                    # No pose window at all -- then the tee box IS the
-                    # window, which beats searching the whole frame.
-                    wins = [roi_rect]
+                out["window_source"] = "tee box"
+                wins = [roi_rect]
             except (TypeError, ValueError) as exc:
                 log.debug("club_bottom_ball: bad roi %r: %s", roi, exc)
 
@@ -279,14 +298,23 @@ def club_bottom_ball(
                                  * np.array([255, 120, 0])).astype(np.uint8)
             # Show the constraint, not just the answer — when the ball lands
             # somewhere silly the window is usually why.
+            # What actually constrained the search, in solid red.
             for _r in wins:
                 cv2.rectangle(img, (_r[0], _r[1]), (_r[2], _r[3]),
                               (60, 60, 235), 2)
-            # The tee box in green, so a window that lost most of itself
-            # to the intersection is obvious rather than mysterious.
+            # What pose ASKED for, when the tee box overruled it: thin
+            # and grey, so it is visible as context without reading as a
+            # constraint. Drawing these solid was the whole confusion --
+            # two red boxes over the wrong golfer that no longer had any
+            # say in the answer.
             if roi_rect is not None:
-                cv2.rectangle(img, (roi_rect[0], roi_rect[1]),
-                              (roi_rect[2], roi_rect[3]), (80, 220, 80), 2)
+                for _r in pose_wins:
+                    cv2.rectangle(img, (_r[0], _r[1]), (_r[2], _r[3]),
+                                  (150, 150, 150), 1)
+                cv2.putText(img, "pose window (not used)",
+                            (pose_wins[0][0], max(12, pose_wins[0][1] - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                            (150, 150, 150), 1, cv2.LINE_AA) if pose_wins else None
             if ground_y is not None:
                 # Only across the windows, not the whole frame — drawn edge
                 # to edge it read as a horizon and invited the question of
@@ -325,7 +353,29 @@ def club_bottom_ball(
             _render()
             return out
 
-        if ground_y is not None:
+        # ARE THESE THE RIGHT FEET? Both guards below measure the ball
+        # against the golfer -- drop the columns at the shoes, and reject
+        # an arc bottoming out too far from them. Both are sound when
+        # pose found the player at THIS tee box and actively harmful when
+        # it did not: with a tee box drawn round the golfer swinging and
+        # pose locked onto the one waiting to the right, the ball came
+        # out 2.46 body-heights from "the" feet and was thrown away as
+        # too far, having been located correctly to within seven pixels.
+        #
+        # So the feet only get a vote when they are inside the box that
+        # says where a ball can be.
+        feet_trusted = ground_y is not None
+        if feet_trusted and roi_rect is not None:
+            _fx = int(feet_xy[0])
+            feet_trusted = (roi_rect[0] - 0.5 * (roi_rect[2] - roi_rect[0])
+                            <= _fx <=
+                            roi_rect[2] + 0.5 * (roi_rect[2] - roi_rect[0]))
+            if not feet_trusted:
+                out["feet_ignored"] = (
+                    "pose put the golfer outside the tee box, so the "
+                    "feet were not used to place or check the ball"
+                )
+        if feet_trusted:
             fx = int(feet_xy[0])
             # Drop the columns at the feet. The shoes shift and the shadow
             # moves with them, and both are far bigger blobs than a club
@@ -378,7 +428,11 @@ def club_bottom_ball(
                 f"the feet)"
             )
         else:
-            # Legacy path: lowest band of the whole box, median x.
+            # No trustworthy feet: the lowest band of whatever window we
+            # do have. With a tee box that is a real answer, because the
+            # box is a deliberate statement about where a ball can be.
+            # With only the legacy wrist box it is a guess, and the
+            # reason string says which of the two this was.
             y_bot = int(np.percentile(ys, 99.0))
             band = ys >= (y_bot - max(3, int(0.006 * h)))
             bx = int(np.median(xs[band]))
@@ -386,6 +440,10 @@ def club_bottom_ball(
             out["ok"] = True
             out["xy"] = [bx, by]
             out["reason"] = (
+                f"bottom of a {xs.size}px club arc inside the tee box"
+                + (f" — {out['feet_ignored']}" if out.get("feet_ignored")
+                   else " (no pose feet)")
+                if roi_rect is not None else
                 f"bottom of a {xs.size}px club arc (no pose feet — "
                 f"wrist box, less reliable)"
             )

@@ -18990,6 +18990,25 @@ def _debug3_run(row, src_path, db, progress=None, debug_artifacts=True,
             # departure detector's and worth seeing next to it.
             _r["ball_hint"] = _e.get("ball_hint")
             _r["ball_final"] = _e.get("ball")
+        # WHY A BALL-ONLY ROW HAS NOTHING AFTER IT. Every stage below
+        # stage 1 walks the POSE candidate list, so a departure pose did
+        # not fire on is never judged, never given a flight and never
+        # produced -- it appears in this table and then stops, with no
+        # indication that it was not so much rejected as never asked.
+        #
+        # That is not a display problem. On the clip this was written
+        # against the ball-only row IS a real swing: it carries an exact
+        # impact frame and a ball position eight pixels from the labelled
+        # one, and it is discarded because a wrist-speed burst did not
+        # clear its gates. Saying so in the row is the smallest honest
+        # thing; letting these into the pipeline is the real fix.
+        for _r in ((rep.get("swing_detect") or {}).get("rows") or []):
+            if _r.get("pose") is None and _r.get("ball"):
+                _r["not_processed"] = (
+                    "pose did not fire here, and stages 2-8 only run on "
+                    "pose candidates — so this departure was never judged "
+                    "or produced. It was not rejected; it was never asked."
+                )
     except Exception as exc:  # noqa: BLE001
         log.warning("d3: could not join judge/preview onto the summary: %s", exc)
 

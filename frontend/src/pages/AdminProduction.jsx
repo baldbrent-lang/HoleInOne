@@ -5346,7 +5346,11 @@ export function SwingDetectPanel({ sd }) {
                     : <span className="muted">—</span>}
                 </td>
                 <td style={{ padding: "2px 4px" }}>
-                  {!r.judge ? (
+                  {r.not_processed ? (
+                    <span className="pill warn" title={r.not_processed}>
+                      never judged
+                    </span>
+                  ) : !r.judge ? (
                     <span className="muted">—</span>
                   ) : r.judge.ai_judge == null ? (
                     <span className="muted" title={r.judge.ai_reason || r.judge.verdict || ""}>
@@ -5365,7 +5369,11 @@ export function SwingDetectPanel({ sd }) {
                   )}
                 </td>
                 <td style={{ padding: "2px 4px" }}>
-                  {!r.preview ? (
+                  {r.not_processed ? (
+                    <span className="tiny muted" title={r.not_processed}>
+                      pose never fired here
+                    </span>
+                  ) : !r.preview ? (
                     <span className="muted">—</span>
                   ) : r.preview.clip_url ? (
                     <a href={r.preview.clip_url} target="_blank" rel="noreferrer">
@@ -6613,40 +6621,53 @@ function SwingTestModal({ state, onClose, adminPassword, onRerun }) {
  * not offer.
  */
 function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
-  const [drag, setDrag] = useState(null);      // {x,y,w,h} fractions
+  // TWO pieces of state, not one. The first version used the box itself
+  // as the "am I dragging" flag, so releasing the mouse never ended the
+  // drag and a box could never be finished -- which is exactly what it
+  // did: the hint stayed on "drag to set the box" and Save stayed
+  // disabled however carefully you dragged. The anchor is its own thing.
+  const [dragFrom, setDragFrom] = useState(null);
+  const [draft, setDraft] = useState(null);   // {x,y,w,h} fractions
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const imgRef = useRef(null);
   if (!tb) return null;
 
-  const box = drag || tb.roi || null;
+  const box = draft || tb.roi || null;
   const canDraw = !!(tb.frame_url && tb.course_id && tb.hole && tb.day);
 
-  const frac = (e) => {
-    const r = imgRef.current.getBoundingClientRect();
+  function frac(e) {
+    const r = imgRef.current?.getBoundingClientRect();
+    if (!r || !r.width || !r.height) return null;
     return {
       x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
       y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
     };
-  };
-  const onDown = (e) => {
+  }
+  function onDown(e) {
     if (!canDraw) return;
+    const p = frac(e);
+    if (!p) return;
     e.preventDefault();
+    setDragFrom(p);
+    setDraft({ x: p.x, y: p.y, w: 0, h: 0 });
+    setMsg(null);
+  }
+  function onMove(e) {
+    if (!dragFrom) return;
     const p = frac(e);
-    setDrag({ x: p.x, y: p.y, w: 0, h: 0, _ax: p.x, _ay: p.y });
-  };
-  const onMove = (e) => {
-    if (!drag) return;
-    const p = frac(e);
-    setDrag((d) => ({
-      ...d,
-      x: Math.min(d._ax, p.x), y: Math.min(d._ay, p.y),
-      w: Math.abs(p.x - d._ax), h: Math.abs(p.y - d._ay),
-    }));
-  };
-  const onUp = () => {
-    if (drag && (drag.w < 0.01 || drag.h < 0.01)) setDrag(null);
-  };
+    if (!p) return;
+    setDraft({
+      x: Math.min(dragFrom.x, p.x), y: Math.min(dragFrom.y, p.y),
+      w: Math.abs(p.x - dragFrom.x), h: Math.abs(p.y - dragFrom.y),
+    });
+  }
+  function onUp() {
+    if (!dragFrom) return;
+    setDragFrom(null);
+    // A click rather than a drag: leave whatever was there alone.
+    setDraft((d) => (d && (d.w < 0.01 || d.h < 0.01) ? null : d));
+  }
 
   const save = async (roi) => {
     setBusy(true);
@@ -6656,7 +6677,7 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
         { hole: tb.hole, day: tb.day, roi });
       setMsg(roi ? "Saved. Re-run to search inside it."
                  : "Cleared. Re-run to search the fallback box.");
-      if (!roi) setDrag(null);
+      if (!roi) setDraft(null);
     } catch (err) {
       setMsg(`Could not save: ${err.message || err}`);
     } finally {
@@ -6697,7 +6718,7 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
                   position: "absolute",
                   left: `${box.x * 100}%`, top: `${box.y * 100}%`,
                   width: `${box.w * 100}%`, height: `${box.h * 100}%`,
-                  border: `2px solid ${drag ? "#22c55e" : "#3b82f6"}`,
+                  border: `2px solid ${draft ? "#22c55e" : "#3b82f6"}`,
                   background: "rgba(59,130,246,0.10)",
                   pointerEvents: "none",
                 }}
@@ -6706,15 +6727,16 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
           </div>
           <div className="row" style={{ gap: 8, marginTop: 8, flexWrap: "wrap" }}>
             <span className="tiny muted">
-              {drag
-                ? `New box: x ${Math.round(drag.x * 100)}% y ${Math.round(drag.y * 100)}%, `
-                  + `${Math.round(drag.w * 100)}%×${Math.round(drag.h * 100)}%`
+              {draft
+                ? `New box: x ${Math.round(draft.x * 100)}% y ${Math.round(draft.y * 100)}%, `
+                  + `${Math.round(draft.w * 100)}%×${Math.round(draft.h * 100)}%`
                 : "Drag on the frame to set the box for this hole today."}
             </span>
             <button
               className="btn tiny"
-              disabled={!drag || busy}
-              onClick={() => save({ x: drag.x, y: drag.y, w: drag.w, h: drag.h })}
+              disabled={!draft || busy}
+              onClick={() => save({ x: draft.x, y: draft.y,
+                                    w: draft.w, h: draft.h })}
             >
               {busy ? "Saving…" : `Save box for hole ${tb.hole} on ${tb.day}`}
             </button>
