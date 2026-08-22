@@ -1051,6 +1051,27 @@ function ClickToPlotModal({
   // Which green frame the map is showing, so a placed landing carries
   // the instant it was seen at and not just the pixel.
   const [greenViewFrame, setGreenViewFrame] = useState(null);
+  const loadGreenFrame = useCallback(
+    async (f) => {
+      const r = await api.getLongUploadFrame(adminPassword, row.id, f, "green");
+      return r?.image_url;
+    },
+    [adminPassword, row.id],
+  );
+  const cometPoints = Object.entries(greenMarks)
+    .map(([f, pt]) => ({ frame: parseInt(f, 10), x: pt.x, y: pt.y }))
+    .sort((a, b) => a.frame - b.frame);
+  const landing = cometPoints.length
+    ? cometPoints[cometPoints.length - 1] : null;
+  const comet = cometPoints.length > 1 ? { points: cometPoints } : null;
+
+  // AFTER `landing` IS DECLARED, and that is the whole point of it
+  // being here rather than up with the other landing state. A
+  // dependency array is evaluated DURING RENDER, so an effect that
+  // lists `landing?.x` above the `const landing` line reads a
+  // const in its temporal dead zone -- "Cannot access 'X' before
+  // initialization", thrown on every render of this modal, which
+  // with no error boundary took the whole page white.
   // Where the current landing sits in the tee frame, asked of the
   // server because the homography lives there. Re-asked whenever the
   // landing moves on the green side, so the two pictures agree.
@@ -1111,19 +1132,6 @@ function ClickToPlotModal({
     }
   }
 
-  const loadGreenFrame = useCallback(
-    async (f) => {
-      const r = await api.getLongUploadFrame(adminPassword, row.id, f, "green");
-      return r?.image_url;
-    },
-    [adminPassword, row.id],
-  );
-  const cometPoints = Object.entries(greenMarks)
-    .map(([f, pt]) => ({ frame: parseInt(f, 10), x: pt.x, y: pt.y }))
-    .sort((a, b) => a.frame - b.frame);
-  const landing = cometPoints.length
-    ? cometPoints[cometPoints.length - 1] : null;
-  const comet = cometPoints.length > 1 ? { points: cometPoints } : null;
   // What the green half has to say, as one line. It lives over the
   // picture rather than on the toolbar: on the toolbar a sentence this
   // long is squeezed into a narrow column, wraps to a dozen lines, and
