@@ -15573,15 +15573,27 @@ BALLSCAN_DESCENT_MAX_BEND_PX = 6.0
 # descent the scan did not accept.
 BALLSCAN_DESCENT_LOOSE_POINTS = 3
 BALLSCAN_DESCENT_LOOSE_BEND_PX = 16.0
-# A SHORT CHAIN CAN STILL BE PROOF, if it is better in the ways that
-# matter. The detector loses a falling ball against the tree line for a
-# few frames at a time, so how many points it links is partly a fact
-# about the background rather than about the ball -- which makes a flat
-# count the wrong test on its own. Three points that fall a long way
-# almost perfectly straight are stronger than four that wander.
+# A SHORT CHAIN CAN STILL BE PROOF, if it is straight enough.
+#
+# The detector loses a falling ball against the tree line for a few
+# frames at a time, so how many points it links is partly a fact about
+# the background rather than about the ball. Measured on upload 653: the
+# ball's descent is plainly there and a deeper hand-scan of the same
+# window turns up nine points along it -- f443 through f452 -- while
+# `find_descents` linked three of them. The ball was never the problem.
+#
+# DROP IS NOT A SECOND TEST, it is the same one twice. A three-point
+# chain spans less time, so of course it falls a shorter distance; a
+# gate on absolute drop therefore punishes a chain for being short
+# having already counted that. And how fast it fell is gated upstream by
+# `find_descents` in frame-heights per second, which is the version of
+# that question that does not depend on chain length.
+#
+# So what is left for a short chain to prove is that it is a LINE.
+# Measured: the real descent bends 0.12px over three points. Noise the
+# tracker happened to link bends 4.2px and up.
 BALLSCAN_DESCENT_SHORT_POINTS = 3
-BALLSCAN_DESCENT_SHORT_BEND_PX = 5.0
-BALLSCAN_DESCENT_SHORT_DROP_PX = 40
+BALLSCAN_DESCENT_SHORT_BEND_PX = 2.5
 
 
 def _ball_scan_descents(row, db, spots, progress=None) -> dict:
@@ -15664,18 +15676,15 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
             # point by being straighter AND having fallen further.
             _n = int(e.get("n_points") or 0)
             _b = float(e.get("bend_px") or 999.0)
-            _d = float(e.get("drop_px") or 0.0)
             if _n >= BALLSCAN_DESCENT_MIN_POINTS:
                 return _b <= BALLSCAN_DESCENT_MAX_BEND_PX
             if _n >= BALLSCAN_DESCENT_SHORT_POINTS:
-                return (_b <= BALLSCAN_DESCENT_SHORT_BEND_PX
-                        and _d >= BALLSCAN_DESCENT_SHORT_DROP_PX)
+                return _b <= BALLSCAN_DESCENT_SHORT_BEND_PX
             return False
 
         def _why_not(e):
             _n = int(e.get("n_points") or 0)
             _b = float(e.get("bend_px") or 999.0)
-            _d = float(e.get("drop_px") or 0.0)
             if _strict(e):
                 return "accepted"
             if _n < BALLSCAN_DESCENT_SHORT_POINTS:
@@ -15685,15 +15694,9 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                 return (f"{_n} points but bends {_b}px, and "
                         f"{BALLSCAN_DESCENT_MAX_BEND_PX}px is the limit at "
                         f"that length")
-            bits = []
-            if _b > BALLSCAN_DESCENT_SHORT_BEND_PX:
-                bits.append(f"bends {_b}px (a {_n}-point chain has to be "
-                            f"within {BALLSCAN_DESCENT_SHORT_BEND_PX}px)")
-            if _d < BALLSCAN_DESCENT_SHORT_DROP_PX:
-                bits.append(f"fell only {int(_d)}px (a {_n}-point chain has "
-                            f"to fall {BALLSCAN_DESCENT_SHORT_DROP_PX}px)")
-            return (f"{_n} points and " + " and ".join(bits)) if bits else \
-                f"{_n} points, {_b}px bend, {int(_d)}px drop"
+            return (f"{_n} points bending {_b}px — a {_n}-point chain has "
+                    f"to be within {BALLSCAN_DESCENT_SHORT_BEND_PX}px of a "
+                    f"straight line to count on its own")
 
         evs = [e for e in _all_evs if _strict(e)]
         _keys = ("last_descent_frame", "last_descent_sec", "landing_xy",
@@ -15709,6 +15712,8 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         out["gates"] = {
             "min_points": BALLSCAN_DESCENT_MIN_POINTS,
             "max_bend_px": BALLSCAN_DESCENT_MAX_BEND_PX,
+            "short_points": BALLSCAN_DESCENT_SHORT_POINTS,
+            "short_bend_px": BALLSCAN_DESCENT_SHORT_BEND_PX,
             "searched_from_points": BALLSCAN_DESCENT_LOOSE_POINTS,
             "searched_to_bend_px": BALLSCAN_DESCENT_LOOSE_BEND_PX,
         }
@@ -15877,8 +15882,10 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
         cv2.putText(
             im,
             f"{len(all_evs)} descent(s) seen - green = accepted "
-            f"(>={BALLSCAN_DESCENT_MIN_POINTS} pts, bend "
-            f"<={BALLSCAN_DESCENT_MAX_BEND_PX}px), grey = rejected",
+            f"({BALLSCAN_DESCENT_MIN_POINTS}+ pts within "
+            f"{BALLSCAN_DESCENT_MAX_BEND_PX}px of straight, or "
+            f"{BALLSCAN_DESCENT_SHORT_POINTS} within "
+            f"{BALLSCAN_DESCENT_SHORT_BEND_PX}px), grey = rejected",
             (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2,
             cv2.LINE_AA)
         name = f"ballscan-{row.id}-descents.jpg"

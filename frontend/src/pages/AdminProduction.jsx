@@ -7529,13 +7529,15 @@ function BallScanModal({ state, onClose }) {
                 <figcaption className="tiny muted">
                   Every descent found on the green camera —{" "}
                   {rep.descents.n_accepted} of {rep.descents.n_seen} strong
-                  enough to confirm a swing. Searched from{" "}
-                  {rep.descents.gates?.searched_from_points} points and{" "}
-                  {rep.descents.gates?.searched_to_bend_px}px of bend;
-                  accepted at {rep.descents.gates?.min_points} points and{" "}
-                  {rep.descents.gates?.max_bend_px}px. A candidate claims the
-                  one landing in its own flight window, and each descent can
-                  only be claimed once.
+                  enough to confirm a swing. Accepted at{" "}
+                  {rep.descents.gates?.min_points}+ points within{" "}
+                  {rep.descents.gates?.max_bend_px}px of a straight line, or{" "}
+                  {rep.descents.gates?.short_points} points within{" "}
+                  {rep.descents.gates?.short_bend_px}px — a shorter chain has
+                  to be straighter, because how many points get linked is
+                  partly about the tree line behind the ball. A candidate
+                  claims the one landing in its own flight window, and each
+                  descent can only be claimed once.
                 </figcaption>
               </figure>
             )}
