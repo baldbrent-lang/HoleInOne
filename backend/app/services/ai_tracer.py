@@ -8959,15 +8959,74 @@ def _spot_obscured(frame, x: int, y: int, r: int = 4,
         return False
 
 
+# HOW CLOSE IS THE SAME BALL, when the two sightings END TOGETHER.
+#
+# The position clusterer runs at 8px on a running mean, so a ball whose
+# detected centre drifts a few pixels while it sits can spawn a second
+# cluster a shade further than that -- and then a third. Measured on one
+# clip: (618,575), (610,575) and (610,577) were three candidates for one
+# ball, spanning 8px, all departing on f5945.
+#
+# A ball is 2-3px across here, so this is a couple of ball widths. Two
+# DIFFERENT balls that close together, both leaving on the same frame,
+# is not a thing that happens on a tee.
+_SAME_BALL_PX = 14.0
+# And how nearly together "together" is. One frame of slack, because the
+# departure walk starts from each sighting's own last frame.
+_SAME_GONE_FRAMES = 2
+
+
 def _merge_close_sightings(spots, cluster_px: float, gap_frames: int,
                            fps: float) -> None:
-    """Join sightings of one ball that the sampler split in two.
+    """Join sightings of one ball that the scan split into several.
 
-    Same position, and the second starts within `gap_frames` of the
-    first ending. Mutates and re-sorts `spots` in place.
+    TWO WAYS TO BE THE SAME BALL, and only one of them was handled.
+
+    SEQUENTIAL: the ball blinks out and comes back, so the second
+    sighting starts after the first ends. That is the `gap` test.
+
+    OVERLAPPING: the ball never went anywhere, but its detected centre
+    drifted a few pixels and the clusterer opened a second cluster
+    alongside the first. Then the two sightings run CONCURRENTLY and the
+    gap is negative, so the sequential test skipped them and the table
+    showed one ball three times -- (618,575), (610,575) and (610,577),
+    all departing on f5945.
+
+    Overlapping sightings that end on the same frame are one ball. The
+    departure frame is what makes that safe to say: two balls a few
+    pixels apart that both leave on the same frame is not a thing that
+    happens on a tee, whereas one ball detected three times is exactly
+    what a drifting centroid looks like.
+
+    Mutates and re-sorts `spots` in place.
     """
     if not spots:
         return
+
+    def _same_ball(a, b):
+        _d = ((a["x"] - b["x"]) ** 2 + (a["y"] - b["y"]) ** 2) ** 0.5
+        # Sequential: close, and the second picks up where the first
+        # left off.
+        if _d <= cluster_px:
+            _gap = int(b["first_frame"]) - int(a["last_frame"])
+            if 0 <= _gap <= gap_frames:
+                return "sequential"
+        # IN BALL WIDTHS, NOT PIXELS. A fixed number is wrong on the
+        # next camera: the same drift is twice the pixels when the
+        # camera is half the distance away. Five ball widths, floored at
+        # the constant so a tiny measured radius cannot make it useless.
+        _r = max(float(a.get("radius") or 0.0), float(b.get("radius") or 0.0))
+        if _d > max(_SAME_BALL_PX, 5.0 * _r):
+            return None
+        # Overlapping, and gone at the same moment.
+        _ov = (int(b["first_frame"]) <= int(a["last_frame"])
+               and int(a["first_frame"]) <= int(b["last_frame"]))
+        _ga, _gb = a.get("gone_frame"), b.get("gone_frame")
+        if _ov and _ga is not None and _gb is not None \
+                and abs(int(_ga) - int(_gb)) <= _SAME_GONE_FRAMES:
+            return "overlapping"
+        return None
+
     merged = True
     while merged:
         merged = False
@@ -8976,12 +9035,23 @@ def _merge_close_sightings(spots, cluster_px: float, gap_frames: int,
             a = spots[i]
             for j in range(i + 1, len(spots)):
                 b = spots[j]
-                if ((a["x"] - b["x"]) ** 2
-                        + (a["y"] - b["y"]) ** 2) ** 0.5 > cluster_px:
+                _how = _same_ball(a, b)
+                if _how is None:
                     continue
-                gap = int(b["first_frame"]) - int(a["last_frame"])
-                if not (0 <= gap <= gap_frames):
-                    continue
+                # THE LONGER SIGHTING IS THE BALL. On an overlapping
+                # pair the shorter one is the drift -- a few frames the
+                # detector spent calling the same ball a slightly
+                # different pixel -- so the position and the first
+                # sighting come from whichever saw it for longer, not
+                # from whichever happened to sort first.
+                if _how == "overlapping" and int(b.get("votes") or 0) > int(
+                        a.get("votes") or 0):
+                    a["x"], a["y"] = b["x"], b["y"]
+                    a["radius"] = b.get("radius", a.get("radius"))
+                a["first_frame"] = min(int(a["first_frame"]),
+                                       int(b["first_frame"]))
+                a["first_sec"] = round(
+                    a["first_frame"] / max(1e-6, fps), 2)
                 a["last_frame"] = max(int(a["last_frame"]),
                                       int(b["last_frame"]))
                 a["last_sec"] = round(a["last_frame"] / max(1e-6, fps), 2)
@@ -8989,11 +9059,17 @@ def _merge_close_sightings(spots, cluster_px: float, gap_frames: int,
                 a["held_sec"] = round(
                     (a["last_frame"] - int(a["first_frame"]))
                     / max(1e-6, fps), 2)
-                # The later sighting is the one that saw it go.
-                a["gone_frame"] = b.get("gone_frame")
-                a["gone_sec"] = b.get("gone_sec")
-                a["blocked_frames"] = int(b.get("blocked_frames") or 0)
-                a["still_blocked"] = bool(b.get("still_blocked"))
+                # The later sighting is the one that saw it go -- and
+                # on an overlapping pair they saw it go together, so
+                # either answer is the same answer.
+                if b.get("gone_frame") is not None:
+                    a["gone_frame"] = b.get("gone_frame")
+                    a["gone_sec"] = b.get("gone_sec")
+                    a["blocked_frames"] = int(b.get("blocked_frames") or 0)
+                    a["still_blocked"] = bool(b.get("still_blocked"))
+                if b.get("descent") and not a.get("descent"):
+                    a["descent"] = b["descent"]
+                    a["confirmed_swing"] = True
                 for k in ("first_image", "last_image"):
                     if b.get(k) and not a.get(k):
                         a[k] = b[k]
