@@ -3523,6 +3523,128 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=12.0,
     return out
 
 
+# HOW LONG A TEE SHOT IS IN THE AIR when nothing measured it. A par-3
+# tee shot hangs for five to seven seconds; six is the middle of that
+# and the error either way is a second, which on a tracer that has left
+# the frame is invisible. It is only ever a fallback: a marked landing
+# on the green camera makes the flight time arithmetic, and that always
+# wins.
+FREE_FLIGHT_SEC = 6.0
+
+
+def _freeflight_tail(pts, fps, width, height, flight_frames=None,
+                     max_sec: float = 12.0):
+    """Keep flying the measured parabola when there is nothing to aim at.
+
+    WITHOUT THIS THE TRACER'S WHOLE LIFE IS THE BLOB DETECTOR'S. The
+    detector holds a ball for about half a second; the ball is in the
+    air for six. So on any swing with no landing marked and no target
+    saved, the line was drawn over ~25 frames and then sat frozen for
+    the rest of the clip -- which does not read as a slow tracer, it
+    reads as a tracer that sprints off the tee and stops dead. Measured
+    on a real clip: the line reached the top of the frame 0.27s after
+    impact and did not move again for six seconds.
+
+    The fix is not to slow the drawing down. The tracked points are the
+    ball's real positions at their real frames and they are already
+    right; what was missing is the REST of the flight. Continue the same
+    fitted parabola one point per frame -- the ball's own decaying pace,
+    because that is what the fit encodes -- until either the flight time
+    is up or the ball leaves the picture.
+
+    Which is also the answer to "the tracer should go all the way out of
+    screen": it does, because the flight does, and the line now has
+    frames to carry it there. `_clip_point_to_frame` puts the last
+    sample exactly on the border rather than at the last whole pixel
+    inside it.
+
+    Returns [(frame, x, y), ...] after the last tracked point, or None
+    when there is not enough track to extend.
+    """
+    import numpy as np
+
+    if len(pts) < 4:
+        return None
+    f_a = pts[-1][0]
+    win = list(pts[-60:])
+    if len(win) < 6:
+        return None
+    t = np.array([p[0] - f_a for p in win], dtype=float)
+    if t[-1] - t[0] < 8.0:
+        return None
+    try:
+        cy = np.polyfit(t, [float(p[2]) for p in win], 2)
+        cx = np.polyfit(t, [float(p[1]) for p in win], 2)
+    except Exception:  # noqa: BLE001
+        return None
+    x_a, y_a = float(cx[2]), float(cy[2])
+    vx0, vy0 = float(cx[1]), float(cy[1])
+    if math.hypot(vx0, vy0) < 0.4:
+        return None
+
+    _fps = float(fps or 30.0)
+    n = int(round(flight_frames if flight_frames is not None
+                  else FREE_FLIGHT_SEC * _fps))
+    n = max(2, min(n, int(max_sec * _fps)))
+
+    # THE HORIZONTAL MAY NOT DOUBLE BACK. A quadratic fitted over a
+    # noisy window absorbs the perspective decay of a ball flying away
+    # by bending, and asked to run for six seconds instead of half of
+    # one it bends right around and comes back -- the hairpin. Vertical
+    # curvature is the flight and must be kept; horizontal curvature
+    # past its own turning point is an artefact of the fit, so x is held
+    # linear from there on.
+    ax, bx_ = float(cx[0]), float(cx[1])
+    x_turn = (-bx_ / (2.0 * ax)) if abs(ax) > 1e-9 else None
+
+    # THE APEX IS WHERE AN UNANCHORED FLIGHT HAS TO STOP.
+    #
+    # The targeted tail is allowed to turn over and come down, because a
+    # marked landing says where down IS. This one has no such anchor,
+    # and the vertical curvature it would descend on is fitted over a
+    # third of a second of two-pixel blob -- far too short a lever arm
+    # to run for six seconds. Measured on a real swing: the extrapolated
+    # parabola crested at the top of the frame and then dived back to
+    # y=719, the BOTTOM of the picture, a few feet in front of the
+    # golfer. No golf ball does that, and drawing it confidently is
+    # worse than drawing nothing.
+    #
+    # So: climb at the measured pace until the ball leaves the picture,
+    # and stop if it turns over first. That is the whole of what the
+    # measurement supports, and it is also what the operator asked for
+    # -- the line runs all the way out of the screen, because that is
+    # what the ball was doing.
+    vy_turn = (-float(cy[1]) / (2.0 * float(cy[0]))
+               if abs(float(cy[0])) > 1e-9 else None)
+
+    out = []
+    prev = None
+    for i in range(1, n + 1):
+        s = float(i)
+        if vy_turn is not None and 0.0 < vy_turn < s:
+            break                      # past the apex, with nothing to fall to
+        if x_turn is not None and 0.0 < x_turn < s:
+            # Past the turn: carry on at the speed it had there.
+            _xs = x_turn
+            bx = (float(cx[0]) * _xs * _xs + float(cx[1]) * _xs + float(cx[2])
+                  + (2.0 * float(cx[0]) * _xs + float(cx[1])) * (s - _xs))
+        else:
+            bx = float(cx[0]) * s * s + float(cx[1]) * s + x_a
+        by = float(cy[0]) * s * s + float(cy[1]) * s + y_a
+        if not (0 <= bx < width and 0 <= by < height):
+            # RUN IT TO THE EDGE, not to the last whole pixel inside,
+            # and stop there: off the picture is the end of what can
+            # honestly be drawn without a landing to come back down to.
+            if prev is not None:
+                ex, ey = _clip_point_to_frame(
+                    prev[0], prev[1], bx, by, width, height)
+                out.append((f_a + i, int(round(ex)), int(round(ey))))
+            break
+        out.append((f_a + i, int(round(bx)), int(round(by))))
+        prev = (bx, by)
+    return out if len(out) >= 2 else None
+
+
 def _vertical_time(cy, y_a, ty):
     """Frames until the ball falls back to the landing's height.
 
@@ -3796,8 +3918,26 @@ def _extend_to_target(pts, target_xy, fps, width, height,
     tracer stopping exactly where it always had, however carefully the
     aim had been computed upstream.
     """
-    if target_xy is None or len(pts) < 2:
+    if len(pts) < 2:
         return [], None
+    # NOTHING TO AIM AT IS NOT NOTHING TO DRAW. With no landing and no
+    # target the tracer used to stop where the blob detector did --
+    # about half a second of a six-second flight -- and then sit frozen
+    # for the rest of the clip. The ball did not stop; only the
+    # measurement did. Keep flying the same parabola for the flight time
+    # instead, which is both the right speed (it is the ball's own) and
+    # the reason the line now reaches the edge of the frame.
+    if target_xy is None:
+        tail = _freeflight_tail(pts, fps, width, height,
+                                flight_frames=(
+                                    (land_frame - pts[-1][0])
+                                    if land_frame is not None else None))
+        if not tail:
+            return [], None
+        # NOT shaped: apex_lift/apex_at are the operator dragging the
+        # high point of an arc that ENDS somewhere. This one has no end
+        # to hold, and lifting a free flight would just tilt it.
+        return tail, "freeflight"
     tail = _ballistic_tail(pts, target_xy, fps, width, height,
                            land_frame=land_frame)
     kind = "ballistic"
@@ -4421,8 +4561,9 @@ def render_tracer_video(
                 "frames": len(_tail),
                 "from_frame": int(_tail[0][0] - 1),
                 "to_frame": int(_tail[-1][0]),
-                "target": [round(float(target_xy[0]), 1),
-                           round(float(target_xy[1]), 1)],
+                "target": ([round(float(target_xy[0]), 1),
+                            round(float(target_xy[1]), 1)]
+                           if target_xy is not None else None),
                 "land_frame": (int(target_frame)
                                if target_frame is not None else None),
                 "apex_y": int(min(p[2] for p in _tail)),
@@ -4434,9 +4575,11 @@ def render_tracer_video(
                 + [[int(_tail[-1][1]), int(_tail[-1][2])]],
             }
             log.info(
-                "tracer tail (manual): %s, %d frames from f%d toward "
-                "(%.0f, %.0f)", _bt, len(_tail), pts[-1][0],
-                float(target_xy[0]), float(target_xy[1]),
+                "tracer tail (manual): %s, %d frames from f%d toward %s",
+                _bt, len(_tail), pts[-1][0],
+                (f"({target_xy[0]:.0f}, {target_xy[1]:.0f})"
+                 if target_xy is not None
+                 else "no target — free flight to the frame edge"),
             )
 
         last_kept_frame_global = (
@@ -4693,8 +4836,9 @@ def render_tracer_video(
                     "frames": len(_tail),
                     "from_frame": int(_tail[0][0] - 1),
                     "to_frame": int(_tail[-1][0]),
-                    "target": [round(float(target_xy[0]), 1),
-                               round(float(target_xy[1]), 1)],
+                    "target": ([round(float(target_xy[0]), 1),
+                                round(float(target_xy[1]), 1)]
+                               if target_xy is not None else None),
                     "land_frame": (int(target_frame)
                                    if target_frame is not None else None),
                     "apex_y": int(min(p[2] for p in _tail)),
@@ -4710,17 +4854,20 @@ def render_tracer_video(
                     + [[int(_tail[-1][1]), int(_tail[-1][2])]],
                 }
                 log.info(
-                    "tracer tail (fit): %s, %d frames f%d->f%d toward "
-                    "(%.0f, %.0f), land_frame=%s, apex y=%d",
+                    "tracer tail (fit): %s, %d frames f%d->f%d toward %s, "
+                    "land_frame=%s, apex y=%d",
                     _bt, len(_tail), _tail[0][0] - 1, _tail[-1][0],
-                    float(target_xy[0]), float(target_xy[1]),
+                    (f"({target_xy[0]:.0f}, {target_xy[1]:.0f})"
+                     if target_xy is not None
+                     else "no target — free flight to the frame edge"),
                     target_frame, info["tail"]["apex_y"],
                 )
             elif target_xy is not None:
                 info["tail"] = {
                     "kind": None, "frames": 0,
-                    "target": [round(float(target_xy[0]), 1),
-                               round(float(target_xy[1]), 1)],
+                    "target": ([round(float(target_xy[0]), 1),
+                                round(float(target_xy[1]), 1)]
+                               if target_xy is not None else None),
                     "land_frame": (int(target_frame)
                                    if target_frame is not None else None),
                 }

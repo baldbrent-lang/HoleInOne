@@ -967,6 +967,23 @@ function ClickToPlotModal({
   // leaving it.
   const [cometReason, setCometReason] = useState(null);
   const [cometBusy, setCometBusy] = useState(false);
+  // MARK THE LANDING ANYWHERE, not only on a dot the scan happened to
+  // find. Clicking dots is the fast path when the descent was detected;
+  // when it was not -- a ball landing in shadow, against the trees, or
+  // simply missed -- there was no way to say where it came down at all,
+  // and the landing is what gives the tracer its aim AND its flight
+  // time. Same gesture as the tee side's ball placement.
+  const [placingLanding, setPlacingLanding] = useState(false);
+  // Which green frame the map is showing, so a placed landing carries
+  // the instant it was seen at and not just the pixel.
+  const [greenViewFrame, setGreenViewFrame] = useState(null);
+  const loadGreenFrame = useCallback(
+    async (f) => {
+      const r = await api.getLongUploadFrame(adminPassword, row.id, f, "green");
+      return r?.image_url;
+    },
+    [adminPassword, row.id],
+  );
   const cometPoints = Object.entries(greenMarks)
     .map(([f, pt]) => ({ frame: parseInt(f, 10), x: pt.x, y: pt.y }))
     .sort((a, b) => a.frame - b.frame);
@@ -1720,6 +1737,15 @@ function ClickToPlotModal({
                 </button>
                 <button
                   type="button"
+                  className={placingLanding ? "small" : "ghost small"}
+                  style={{ width: "auto" }}
+                  onClick={() => setPlacingLanding((v) => !v)}
+                  title="Click anywhere on the green picture to say the ball came down THERE — no detected dot needed. The landing gives the tracer both its aim and its flight time, so a shot with one drawn is paced over the real seconds it was in the air instead of stopping where the blob detector lost it."
+                >
+                  {placingLanding ? "📍 Click the landing…" : "📍 Landing spot"}
+                </button>
+                <button
+                  type="button"
                   className="ghost small"
                   style={{ width: "auto" }}
                   disabled={!cometPoints.length}
@@ -1834,6 +1860,26 @@ function ClickToPlotModal({
                 frameW={green.width}
                 frameH={green.height}
                 marks={greenMarks}
+                // Step the green camera the same way the tee steps, over
+                // the whole green clip — the descent is a second or two
+                // and the frame it starts on is not knowable in advance.
+                loadFrame={loadGreenFrame}
+                frameLo={0}
+                frameHi={Math.max(0, (green.total_frames || 1) - 1)}
+                startFrame={landing?.frame ?? green.frame ?? 0}
+                onViewFrame={setGreenViewFrame}
+                // PLACE THE LANDING ANYWHERE. It lands in `greenMarks`
+                // like a clicked dot does, so everything downstream —
+                // the comet, the saved landing_spot/landing_frame, the
+                // tracer's aim and its flight time — is fed by the one
+                // mechanism and cannot disagree with itself.
+                placingBall={placingLanding}
+                onPlaceBall={(pt) => {
+                  const f = greenViewFrame ?? green.frame ?? 0;
+                  setGreenMarks((m) => ({ ...m, [f]: { x: pt.x, y: pt.y } }));
+                  setPlacingLanding(false);
+                  setCometReason(null);
+                }}
                 track={[]}
                 comet={comet}
                 note={cometStatus}
@@ -8601,7 +8647,7 @@ function PlotHeatCanvas({
   // a single instant impossible to see. `loadFrame(n)` fetches the
   // actual frame n, so the operator can walk the strike frame by frame
   // and see the ball itself rather than the trail it left.
-  loadFrame, frameLo, frameHi, startFrame,
+  loadFrame, frameLo, frameHi, startFrame, onViewFrame,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -8660,6 +8706,10 @@ function PlotHeatCanvas({
     })();
     return () => { live = false; };
   }, [canStep, viewFrame, loadFrame, frameHi]);
+  // WHICH FRAME IS ON SCREEN, upward. A landing marked on the green
+  // camera is a place AND an instant, and the instant is whichever
+  // frame the operator was looking at when they clicked it.
+  useEffect(() => { onViewFrame?.(viewFrame); }, [viewFrame, onViewFrame]);
   const stepFrame = (d) => setViewFrame((f) => {
     if (f == null) return null;
     return Math.max(frameLo, Math.min(frameHi, f + d));
