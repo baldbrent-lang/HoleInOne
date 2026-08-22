@@ -17,11 +17,78 @@
  * clips from. `swing_count` survives only as the Edit wizard's shape
  * switch (see isMulti); it is no longer an operator choice.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useRef, useState }
+  from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
 import { useInfiniteList } from "../hooks/useInfiniteList.js";
+
+/**
+ * A CRASH IN ONE MODAL MUST NOT TAKE THE PAGE WITH IT.
+ *
+ * React unmounts the whole tree when a render throws and nothing
+ * catches it, so a single bad value inside a dialog left the operator
+ * looking at a blank white browser window -- no error, no page, nothing
+ * to report but "it went white". That is the worst possible failure
+ * mode: the one piece of information needed to fix it is the one thing
+ * destroyed by it.
+ *
+ * This keeps the page, shows what actually threw, and logs the stack to
+ * the console so it can be copied.
+ */
+class Boundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { err: null };
+  }
+
+  static getDerivedStateFromError(err) {
+    return { err };
+  }
+
+  componentDidCatch(err, info) {
+    // eslint-disable-next-line no-console
+    console.error(`[${this.props.name || "panel"}] render failed`, err, info);
+  }
+
+  render() {
+    if (!this.state.err) return this.props.children;
+    const msg = this.state.err?.message || String(this.state.err);
+    return (
+      <div
+        role="dialog"
+        onClick={this.props.onClose}
+        style={{
+          position: "fixed", inset: 0, zIndex: 1400,
+          background: "rgba(0,0,0,0.75)", display: "flex",
+          alignItems: "center", justifyContent: "center", padding: 16,
+        }}
+      >
+        <div className="card" onClick={(e) => e.stopPropagation()}
+             style={{ margin: 0, padding: 18, maxWidth: 620 }}>
+          <div className="row" style={{ justifyContent: "space-between",
+                                        gap: 12 }}>
+            <b>{this.props.name || "This panel"} could not be drawn</b>
+            {this.props.onClose && (
+              <button className="btn ghost" style={{ width: "auto" }}
+                      onClick={this.props.onClose}>Close ✕</button>
+            )}
+          </div>
+          <div className="err-text small" style={{ marginTop: 10 }}>{msg}</div>
+          <div className="tiny muted" style={{ marginTop: 8 }}>
+            The rest of the page is fine — close this and carry on. The
+            full stack is in the browser console.
+          </div>
+          <pre className="tiny" style={{
+            marginTop: 8, maxHeight: 220, overflow: "auto",
+            whiteSpace: "pre-wrap", opacity: 0.75,
+          }}>{this.state.err?.stack || ""}</pre>
+        </div>
+      </div>
+    );
+  }
+}
 import { parseApiDate } from "../time.js";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
@@ -14031,70 +14098,76 @@ export default function AdminProduction() {
       )}
 
       {editingRow && (
-        <EditWizard
-          row={editingRow}
-          focusClipId={editingRow.__focusClipId ?? null}
-          startNewSwing={!!editingRow.__startNewSwing}
-          adminPassword={adminPassword}
-          onClose={() => { setEditingRow(null); refreshAll(); }}
-          onSaved={refreshAll}
-          onProducing={(on) => {
-            if (on === false) {
-              // Nothing was queued: put the row back the way it was.
+        <Boundary name="Edit wizard"
+                  onClose={() => { setEditingRow(null); refreshAll(); }}>
+          <EditWizard
+            row={editingRow}
+            focusClipId={editingRow.__focusClipId ?? null}
+            startNewSwing={!!editingRow.__startNewSwing}
+            adminPassword={adminPassword}
+            onClose={() => { setEditingRow(null); refreshAll(); }}
+            onSaved={refreshAll}
+            onProducing={(on) => {
+              if (on === false) {
+                // Nothing was queued: put the row back the way it was.
+                patchRow(editingRow.id, {
+                  processing_status: editingRow.processing_status,
+                  produce_stage: editingRow.produce_stage ?? null,
+                });
+                setBusyId((cur) => (cur === editingRow.id ? null : cur));
+                return;
+              }
+              busySinceRef.current = Date.now();
+              setBusyId(editingRow.id);
+              // ...and say it in the row, which is what the card actually
+              // renders from. The server claims the row before its POST
+              // returns, so this is what the next refresh reports anyway
+              // -- we are only refusing to wait for it.
               patchRow(editingRow.id, {
-                processing_status: editingRow.processing_status,
-                produce_stage: editingRow.produce_stage ?? null,
+                processing_status: "processing",
+                produce_stage: null,
+                produce_done: 0,
+                produce_total: 0,
               });
-              setBusyId((cur) => (cur === editingRow.id ? null : cur));
-              return;
-            }
-            busySinceRef.current = Date.now();
-            setBusyId(editingRow.id);
-            // ...and say it in the row, which is what the card actually
-            // renders from. The server claims the row before its POST
-            // returns, so this is what the next refresh reports anyway
-            // -- we are only refusing to wait for it.
-            patchRow(editingRow.id, {
-              processing_status: "processing",
-              produce_stage: null,
-              produce_done: 0,
-              produce_total: 0,
-            });
-          }}
-          onProduceError={(msg) => setError(msg)}
-        />
+            }}
+            onProduceError={(msg) => setError(msg)}
+          />
+        </Boundary>
       )}
 
       {plotModal && (
-        <ClickToPlotModal
-          row={plotModal.row}
-          swingPos={plotModal.swingPos}
-          adminPassword={adminPassword}
-          onClose={() => setPlotModal(null)}
-          // The save runs after this modal has closed, so its progress
-          // belongs on the card: greyed, named stage, held until the new
-          // video is actually in.
-          onBackground={(msg) => {
-            const id = plotModal.row.id;
-            busySinceRef.current = Date.now();
-            setBusyLabel(msg);
-            setBusyId(id);
-            patchRow(id, {
-              processing_status: "processing",
-              produce_stage: null,
-              produce_done: 0,
-              produce_total: 0,
-            });
-          }}
-          onDone={async (ok, err) => {
-            if (!ok) setError(err);
-            // Only now: the card stays greyed until the re-rendered
-            // video is on the row, not until the first call returns.
-            await refreshAll();
-            setBusyLabel(null);
-            setBusyId((cur) => (cur === plotModal.row.id ? null : cur));
-          }}
-        />
+        <Boundary name="Click-to-plot"
+                  onClose={() => setPlotModal(null)}>
+          <ClickToPlotModal
+            row={plotModal.row}
+            swingPos={plotModal.swingPos}
+            adminPassword={adminPassword}
+            onClose={() => setPlotModal(null)}
+            // The save runs after this modal has closed, so its progress
+            // belongs on the card: greyed, named stage, held until the new
+            // video is actually in.
+            onBackground={(msg) => {
+              const id = plotModal.row.id;
+              busySinceRef.current = Date.now();
+              setBusyLabel(msg);
+              setBusyId(id);
+              patchRow(id, {
+                processing_status: "processing",
+                produce_stage: null,
+                produce_done: 0,
+                produce_total: 0,
+              });
+            }}
+            onDone={async (ok, err) => {
+              if (!ok) setError(err);
+              // Only now: the card stays greyed until the re-rendered
+              // video is on the row, not until the first call returns.
+              await refreshAll();
+              setBusyLabel(null);
+              setBusyId((cur) => (cur === plotModal.row.id ? null : cur));
+            }}
+          />
+        </Boundary>
       )}
 
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
