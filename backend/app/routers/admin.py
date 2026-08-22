@@ -18392,6 +18392,13 @@ D3_LANDING_LEAD_SEC = 1.5    # green starts this far before the touchdown
 # clip that stops on the instant of touchdown reads as a cut mistake --
 # the viewer never sees the result of the shot, which is the thing they
 # were waiting for.
+# WHAT A TEE SHOT ACTUALLY DOES, as a sanity band on a computed flight
+# time. A par-3 tee shot hangs for roughly five to seven seconds; the
+# band is wide enough to hold a towering long iron and a punched wedge
+# and nothing else. It is not a preference -- it is the check that stops
+# a mis-converted landing frame from being drawn as a flight.
+D3_MIN_FLIGHT_SEC = 1.5
+D3_MAX_FLIGHT_SEC = 11.0
 D3_GREEN_TAIL_SEC = 1.5
 D3_GREEN_SEC = 6.0
 # Floor for an operator-trimmed green side. Below about a second the cut
@@ -18910,6 +18917,41 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         _target_frame = int(round(_tf))
                 except (TypeError, ValueError):
                     _target_frame = None
+            # A GOLF SHOT IS NOT IN THE AIR FOR FOURTEEN SECONDS.
+            #
+            # The landing frame reaches here through a chain of
+            # conversions -- a green frame index, over the green fps, on
+            # to the tee clock via a delta that is MEASURED when both
+            # Pis stamped their start and ASSUMED ZERO when they did
+            # not -- and every link is a chance to be wrong. When it is
+            # wrong the tail does not fail; it draws. `_ballistic_tail`
+            # must reach the landing in S frames whatever S is, so an S
+            # of twice the truth makes the ball decelerate absurdly, the
+            # along-flight quadratic turns over, and the line loops back
+            # on itself. Measured on this swing: a 6.5s flight timed as
+            # 14s, and a tracer that hooks over and comes back down.
+            #
+            # So the duration is checked before it is used, against what
+            # a golf ball actually does. Outside the band the number is
+            # not believed and no landing frame is passed on -- the tail
+            # then derives its own duration from the flight it can
+            # measure, which is the honest fallback, and the log says
+            # the timing was refused rather than leaving a loop to be
+            # explained.
+            if _target_frame is not None and fps:
+                _flight = (int(_target_frame) - int(launch_f)) / float(fps)
+                if not (D3_MIN_FLIGHT_SEC <= _flight <= D3_MAX_FLIGHT_SEC):
+                    log.warning(
+                        "d3 produce: swing %s REFUSING a %.1fs flight "
+                        "(impact f%d -> landing f%d at %.0ffps, green "
+                        "%.2fs + delta %.2fs from %s). A tee shot is in "
+                        "the air %.1f-%.1fs; this timing is wrong and "
+                        "drawing to it would loop the tracer.",
+                        i, _flight, int(launch_f), int(_target_frame), fps,
+                        float(landing["sec"]), float(delta), delta_src,
+                        D3_MIN_FLIGHT_SEC, D3_MAX_FLIGHT_SEC,
+                    )
+                    _target_frame = None
             if _target_frame is not None:
                 log.info(
                     "d3 produce: swing %s lands at tee frame %d "
@@ -18939,8 +18981,14 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                     # a table -- so this only fills the gap.
                     _fs = _em_s.get("tracer_flight_sec")
                     if _target_frame is None and _fs and fps:
+                        # THE SAME BAND. A 0.5s or 20s flight typed into
+                        # a table draws the same loop a mis-converted
+                        # landing frame does, and the clamp that was
+                        # here allowed both.
                         _target_frame = int(round(
-                            launch_f + max(0.5, min(20.0, float(_fs))) * fps))
+                            launch_f
+                            + max(D3_MIN_FLIGHT_SEC,
+                                  min(D3_MAX_FLIGHT_SEC, float(_fs))) * fps))
                         log.info(
                             "d3 produce: swing %s timing its tail from the "
                             "operator's %.1fs flight -> tee frame %d",

@@ -3813,13 +3813,75 @@ def _extend_to_target(pts, target_xy, fps, width, height,
     tail = _ballistic_tail(pts, target_xy, fps, width, height,
                            land_frame=land_frame)
     kind = "ballistic"
+    if _turns_back_on_itself(tail):
+        log.info("tracer tail: the ballistic arc curls back on itself — "
+                 "trying the arc through the chord instead")
+        tail = None
     if not tail:
         tail = _arc_tail(pts, target_xy, fps, width, height,
                          land_frame=land_frame)
         kind = "arc"
+        if _turns_back_on_itself(tail):
+            log.warning("tracer tail: both models curl back on themselves "
+                        "— drawing no continuation rather than a loop")
+            tail = None
     if not tail:
         return [], None
     return _shape_tail(tail, apex_lift, apex_at), kind
+
+
+# A BALL DOES NOT FLY IN A LOOP.
+#
+# A parabola turns one way and keeps turning it, so the tangent of a
+# real flight sweeps monotonically and never far. 200 degrees is chosen
+# to allow the one big turn a flight genuinely makes -- a steep shot seen
+# from behind the tee climbs away and comes back down almost the same
+# line, which is a reversal of nearly 180 -- while rejecting the curl.
+#
+# This exists because the models are SOLVERS: `_ballistic_tail` has to
+# reach the landing in S frames whatever S is, so a wrong duration does
+# not make it fail, it makes it draw something absurd. The horizontal
+# guard inside it only fires when the landing is more than a few pixels
+# sideways, so on a shot straight up the frame -- exactly the shape this
+# went wrong on -- nothing was watching.
+_TAIL_MAX_TURN_DEG = 200.0
+
+
+def _turns_back_on_itself(tail, max_turn_deg: float = _TAIL_MAX_TURN_DEG):
+    """Does this polyline curl back on itself?
+
+    NET turning, not the sum of the absolute turns, and measured on a
+    COARSE sample of the line. Both of those matter and the first
+    version got both wrong, rejecting an ordinary parabola.
+
+    The points are whole pixels, so on a slow stretch consecutive steps
+    are a staircase and each little step's direction jitters by tens of
+    degrees. Summing absolute turns accumulates that jitter into
+    hundreds of degrees of "turning" that is nothing but rounding.
+    Signed turning cancels it -- the jitter is symmetric -- and a curve
+    that genuinely bends one way still adds up.
+
+    Sampling coarsely removes most of it before it starts: over a chord
+    spanning a twentieth of the line, quantisation is a rounding error
+    on a long vector rather than the whole vector.
+    """
+    if not tail or len(tail) < 8:
+        return False
+    step = max(1, len(tail) // 24)
+    pts = tail[::step]
+    if len(pts) < 4:
+        return False
+    total = 0.0
+    prev = None
+    for a, b in zip(pts, pts[1:]):
+        dx, dy = float(b[1] - a[1]), float(b[2] - a[2])
+        if math.hypot(dx, dy) < 1e-6:
+            continue
+        ang = math.degrees(math.atan2(dy, dx))
+        if prev is not None:
+            total += (ang - prev + 180.0) % 360.0 - 180.0
+        prev = ang
+    return abs(total) > max_turn_deg
 
 
 def _clip_point_to_frame(ax, ay, bx, by, w, h):
