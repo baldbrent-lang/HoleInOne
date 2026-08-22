@@ -703,11 +703,18 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
 // Frames of clickable detections either side of impact. A few frames of
 // lead-in covers an impact frame estimated slightly late (the assumed-
 // impact path pins it to the pose peak, which can sit a frame or two off
-// the strike); 100 frames after is ~2s of flight at 50fps, by which point
-// the ball is long gone and every remaining dot is the golfer walking off,
-// a cart, or wind in the trees.
+// the strike).
+//
+// FORTY AFTER, NOT A HUNDRED, and the number comes from what MOG2
+// actually produces rather than from how long a ball is in the air. The
+// detector realistically yields no more than about forty usable points
+// past the strike; everything beyond that is the golfer walking off, a
+// cart, or wind in the trees. At a hundred, sixty frames of that noise
+// were on the map -- every one of them a dot that can only ever be a
+// wrong pick, and all of them competing for the cursor with the handful
+// of real ones.
 const PLOT_WINDOW_PRE = 5;
-const PLOT_WINDOW_POST = 100;
+const PLOT_WINDOW_POST = 40;
 
 /**
  * Standalone click-to-plot modal, opened from a production card's
@@ -726,8 +733,9 @@ function ClickToPlotModal({
   // this map, and so is everything long after the ball has gone — the
   // golfer walking off, a cart, wind in the trees. Both crowd the map with
   // dots that can only ever be wrong picks. Show impact-5 (a few frames of
-  // lead-in, in case impact is estimated a touch late) through impact+100,
-  // which at 50fps is two seconds of flight.
+  // lead-in, in case impact is estimated a touch late) through impact+40,
+  // which is about as many points as MOG2 realistically yields past the
+  // strike -- so impact f500 shows f495-f540 and nothing after.
   // IMPACT FRAME, editable here. It drives the flight window below AND
   // where the rendered tracer line starts, so when it is wrong (pinned to
   // a waggle rather than the strike) the map hides the real flight and the
@@ -9741,13 +9749,22 @@ function TracerStep({
                 || tracer?.rawMotionFramesUrl
                 || tracer?.mog2OverlayUrl
               }
+              // THE SAME WINDOW THE STANDALONE PLOT USES. This one had
+              // a floor at impact and no ceiling at all, so every dot
+              // MOG2 found for the rest of the clip was on the map --
+              // the golfer walking off, a cart, wind in the trees --
+              // and none of it can ever be a right pick. Forty frames is
+              // about as many points as the detector realistically
+              // yields past the strike.
               dots={(tracer?.timedPoints || []).filter(
                 (p) => draft?.impactFrame == null
-                  || p.frame >= draft.impactFrame,
+                  || (p.frame >= draft.impactFrame
+                      && p.frame <= draft.impactFrame + PLOT_WINDOW_POST),
               )}
               denseDots={(tracer?.candidates || []).filter(
                 (p) => draft?.impactFrame == null
-                  || p.frame >= draft.impactFrame,
+                  || (p.frame >= draft.impactFrame
+                      && p.frame <= draft.impactFrame + PLOT_WINDOW_POST),
               )}
               frameW={frameW}
               frameH={frameH}
