@@ -15289,6 +15289,54 @@ def ball_scan_status(upload_id: int):
     return _json_safe(_debugx_get("ballscan", upload_id))
 
 
+@router.get("/long-uploads/{upload_id}/tee-box")
+def get_tee_box(upload_id: int, db: Session = Depends(get_db)):
+    """The hitting area for this clip, with a frame to draw it on.
+
+    Separate from any scan on purpose. Drawing the box is the thing you
+    do BEFORE running anything -- having to sit through a two-minute
+    scan to reach the control that would have made the scan worth
+    running is the wrong way round.
+    """
+    import cv2  # type: ignore
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row or not row.tee_filename:
+        raise HTTPException(404, "upload not found")
+    src_path = _local_tee(row)
+    if not src_path or not src_path.exists():
+        raise HTTPException(404, "the tee video is missing on disk")
+    try:
+        roi = _tee_box_roi_fractions(src_path, db, row)
+    except Exception as exc:  # noqa: BLE001
+        roi = {"roi": None, "source": f"failed: {exc}", "note": None}
+    out = {
+        "roi": roi.get("roi"), "source": roi.get("source"),
+        "note": roi.get("note"), "hole": roi.get("hole"),
+        "day": roi.get("day"), "course_id": getattr(row, "course_id", None),
+        "frame_url": None, "frame_w": None, "frame_h": None,
+    }
+    try:
+        fps = float(probe_fps(src_path) or 0.0) or 30.0
+        cap = cv2.VideoCapture(str(src_path))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(2.0 * fps))
+        ok, ref = cap.read()
+        if not ok or ref is None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, ref = cap.read()
+        cap.release()
+        if ok and ref is not None:
+            h, w = ref.shape[:2]
+            nm = f"teebox-{upload_id}.jpg"
+            cv2.imwrite(str(CLIPS_DIR / nm), ref,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+            out.update({"frame_url": _clip_url_for(nm),
+                        "frame_w": int(w), "frame_h": int(h)})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("tee box frame failed for %s: %s", upload_id, exc)
+    return out
+
+
 def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
     """Trace every candidate that sat long enough to be a teed ball.
 
@@ -15308,14 +15356,40 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
     min_held = float((getattr(row, "edit_metrics", None) or {})
                      .get("ball_scan_min_held_sec") or 7.0)
     rep: dict = {"ok": False, "min_held_sec": min_held, "clips": [],
-                 "n_candidates": 0, "n_traced": 0, "reason": None}
+                 "n_candidates": 0, "n_traced": 0, "reason": None,
+                 "stages": []}
+
+    def _stage(n, title, detail, count=None, units=None, secs=None):
+        """Same shape Debug3 uses: what this step did, and to how much."""
+        rep["stages"].append({
+            "n": n, "title": title, "detail": detail,
+            "count": count, "counts": units, "seconds": round(secs or 0.0, 2),
+        })
+
     fps = float(probe_fps(src_path) or 0.0) or 30.0
+    _t = time.perf_counter()
     scan = _ball_scan_run(row, src_path, db, progress=progress)
     rep["scan"] = {k: scan.get(k) for k in
                    ("reason", "roi", "roi_source", "overview_url", "spots")}
-    spots = [sp for sp in (scan.get("spots") or [])
+    _all = list(scan.get("spots") or [])
+    _stage(1, "Resting-ball scan",
+           "Appearance, not motion: a small whitish round thing on green, "
+           "in the same pixel across many frames, inside the tee box and "
+           "with the people masked out. " + str(scan.get("reason") or ""),
+           len(_all), "candidates", time.perf_counter() - _t)
+
+    _t = time.perf_counter()
+    spots = [sp for sp in _all
              if float(sp.get("held_sec") or 0.0) >= min_held]
+    _stage(2, f"Sat {min_held:.0f}s or longer",
+           "A ball waits on a tee while its owner walks up, picks a club "
+           "and addresses it. Anything that appeared and vanished inside a "
+           "few seconds is a speck, or a marker being moved. Dropped: "
+           + (", ".join(f"({sp['x']},{sp['y']}) {sp.get('held_sec')}s"
+                        for sp in _all if sp not in spots) or "none"),
+           len(spots), "kept", time.perf_counter() - _t)
     rep["n_candidates"] = len(spots)
+    _tflight = _trender = 0.0
     if not spots:
         rep["reason"] = (
             f"no candidate sat {min_held:.0f}s or longer — nothing here "
@@ -15340,12 +15414,14 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                        "held_sec": sp.get("held_sec"), "ok": False,
                        "clip_url": None, "reason": None}
         try:
+            _t = time.perf_counter()
             fl = _d3.find_flight(
                 src_path, fps, impact_frame=int(imp),
                 rest_ball={"ok": True, "xy": [float(sp["x"]), float(sp["y"])],
                            "reason": "measured by the ball scan"},
                 ball_locked=True,
             ) or {}
+            _tflight += time.perf_counter() - _t
             entry["flight_ok"] = bool(fl.get("ok"))
             entry["flight_reason"] = fl.get("reason")
             pts = [{"frame": int(q["frame"]), "x": float(q["x"]),
@@ -15357,6 +15433,7 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                     f"no flight from this ball: {fl.get('reason')}")
                 rep["clips"].append(entry)
                 continue
+            _t = time.perf_counter()
             out = CLIPS_DIR / f"ballscan-{row.id}-{tok}-{i}.mp4"
             rv = render_tracer_video(
                 src_path, out,
@@ -15374,10 +15451,23 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                 transcode_for_web(out)
                 entry["clip_url"] = _clip_url_for(out.name)
                 rep["n_traced"] += 1
+            _trender += time.perf_counter() - _t
         except Exception as exc:  # noqa: BLE001
             log.warning("ball scan produce failed on %s: %s", row.id, exc)
             entry["reason"] = f"failed: {exc}"
         rep["clips"].append(entry)
+
+    _n_flight = sum(1 for c in rep["clips"] if c.get("n_points"))
+    _stage(3, "Flight from the measured ball",
+           "find_flight, anchored on the rest position the scan measured "
+           "and locked to it, starting at the frame the spot was first "
+           "both clear and empty. No pose peak and no club arc: those "
+           "exist to guess these two numbers, and they are already known.",
+           _n_flight, "with a flight", _tflight)
+    _stage(4, "Tracer clip",
+           "render_tracer_video over the strike, then an h264 transcode "
+           "so a browser will actually play it.",
+           rep["n_traced"], "clips", _trender)
 
     rep["ok"] = rep["n_traced"] > 0
     rep["reason"] = (

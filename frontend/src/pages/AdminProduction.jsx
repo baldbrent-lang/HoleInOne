@@ -6751,9 +6751,21 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
               <input
                 type="range" min={-45} max={45} step={0.5} value={angle}
                 onChange={(e) => setAngle(Number(e.target.value))}
-                style={{ width: 130 }}
+                style={{ width: 110 }}
               />
-              <b>{angle}°</b>
+              <input
+                type="number" min={-45} max={45} step={0.5} value={angle}
+                onChange={(e) => {
+                  // Typed, so it can be an exact number rather than
+                  // whatever a 130-pixel slider happened to land on.
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v)) {
+                    setAngle(Math.max(-45, Math.min(45, v)));
+                  }
+                }}
+                style={{ width: 62 }}
+              />
+              °
               {angle !== 0 && (
                 <button className="btn tiny ghost"
                         onClick={() => setAngle(0)}>reset</button>
@@ -6773,10 +6785,12 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
                     onClick={() => save(null)}>
               Clear this day's box
             </button>
-            <button className="btn tiny" disabled={busy}
-                    onClick={() => onRerun && onRerun()}>
-              Re-run Debug3
-            </button>
+            {onRerun && (
+              <button className="btn tiny" disabled={busy}
+                      onClick={onRerun}>
+                Re-run Debug3
+              </button>
+            )}
           </div>
           {msg && <div className="tiny" style={{ marginTop: 6 }}>{msg}</div>}
         </>
@@ -6799,6 +6813,54 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
  * this file fills with blobs on sleeves and hat brims while the ball
  * sits in plain sight. This asks what SAT still and looked like a ball.
  */
+/** The hitting area on its own: view it, draw it, tilt it, save it.
+ *
+ * The drawer used to live inside the scan report, which meant the only
+ * way to reach the control that decides where the scan looks was to
+ * first sit through a two-minute scan looking in the wrong place.
+ */
+function HittingAreaModal({ state, onClose, adminPassword }) {
+  const [tb, setTb] = useState(null);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api.getTeeBox(adminPassword, state.uploadId)
+      .then((r) => live && setTb(r))
+      .catch((e) => live && setErr(e.message));
+    return () => { live = false; };
+  }, [adminPassword, state.uploadId]);
+  return (
+    <div role="dialog" className="modal-back" onClick={onClose}
+         style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+                  zIndex: 60, overflow: "auto", padding: 24 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()}
+           style={{ maxWidth: 1100, margin: "0 auto", padding: 16 }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <b>⬛ Hitting area — upload #{state.uploadId}</b>
+          <button className="btn ghost" onClick={onClose}>Close ✕</button>
+        </div>
+        {err && <div className="err-text" style={{ marginTop: 10 }}>{err}</div>}
+        {!tb && !err && (
+          <div className="small" style={{ marginTop: 10 }}>Loading the frame…</div>
+        )}
+        {tb && (
+          <>
+            <div className="tiny muted" style={{ margin: "8px 0" }}>
+              Everything that looks for a ball on the tee looks here and
+              nowhere else. Drag to set it, tilt it to match the deck — a
+              slanted tee inside an upright box means the box has to be tall
+              enough to hold both ends, and every extra row of turf is
+              somewhere a false candidate comes from.
+            </div>
+            <D3TeeBox tb={tb} adminPassword={adminPassword} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 function BallScanModal({ state, onClose }) {
   const rep = state?.report;
   // Scan-and-produce nests the scan under `scan`; a plain scan is flat.
@@ -6837,6 +6899,22 @@ function BallScanModal({ state, onClose }) {
               {rep.min_held_sec}s or longer, which is what a ball waiting to
               be hit does and a speck does not.
             </div>
+            {(rep.stages || []).map((st) => (
+              <div key={st.n} className="tiny"
+                   style={{ marginTop: 6, paddingLeft: 4,
+                            borderLeft: "3px solid var(--line)" }}>
+                <b>{st.n} · {st.title}</b>
+                {st.count != null && (
+                  <span className="pill" style={{ marginLeft: 6 }}>
+                    {st.count} {st.counts}
+                  </span>
+                )}
+                {st.seconds ? (
+                  <span className="muted"> · {st.seconds}s</span>
+                ) : null}
+                <div className="muted" style={{ marginTop: 2 }}>{st.detail}</div>
+              </div>
+            ))}
             {rep.clips.map((c, i) => (
               <div key={i} className="tiny"
                    style={{ marginTop: 6, borderTop: "1px solid var(--line)",
@@ -12067,6 +12145,7 @@ export default function AdminProduction() {
   // Swing test — the ball-departure detector alone. Read-only as well.
   const [swingTest, setSwingTest] = useState(null);
   const [ballScan, setBallScan] = useState(null);
+  const [hitArea, setHitArea] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -13178,6 +13257,15 @@ export default function AdminProduction() {
                 {produceDebug.enabled && (
                   <button
                     className="small ghost"
+                    onClick={() => setHitArea({ uploadId: row.id })}
+                    title="View and draw the hitting area for this hole and day — the box every ball search is restricted to. Tilt it to match the tee deck."
+                  >
+                    ⬛ Hitting area
+                  </button>
+                )}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
                     onClick={() => handleBallScanProduce(row)}
                     title="Dev: scan for resting balls, then trace every candidate that sat 7s or longer — straight from the measured rest position and the frame it went, with no pose, club arc or judge in between."
                   >
@@ -13355,6 +13443,10 @@ export default function AdminProduction() {
       {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
       {ballScan && (
         <BallScanModal state={ballScan} onClose={() => setBallScan(null)} />
+      )}
+      {hitArea && (
+        <HittingAreaModal state={hitArea} adminPassword={adminPassword}
+                          onClose={() => setHitArea(null)} />
       )}
       {swingTest && (
         <SwingTestModal

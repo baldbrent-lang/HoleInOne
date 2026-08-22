@@ -697,6 +697,13 @@ export const api = {
       adminPassword: key,
     }),
 
+  // The hitting area on its own, with a frame to draw it on. Separate
+  // from any scan: drawing the box is what you do BEFORE running one.
+  getTeeBox: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/tee-box`, {
+      adminPassword: key,
+    }),
+
   // Scan, then trace every candidate that sat long enough to be a ball.
   ballScanProduce: (key, uploadId) =>
     request(`/api/admin/long-uploads/${uploadId}/ball-scan/produce`, {
