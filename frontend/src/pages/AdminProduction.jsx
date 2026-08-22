@@ -797,6 +797,195 @@ function PlotField({ label, value, hint, children, accent }) {
   );
 }
 
+/**
+ * BOTH CAMERAS, ONE CLOCK, ONE PLAY BUTTON.
+ *
+ * The two files do not start together and do not run at the same frame
+ * rate -- 50fps on the tee, 30 on the green, and whatever gap there was
+ * between the two Pis pressing record. Playing them side by side from
+ * 0:00 therefore shows two different moments, which is worse than
+ * useless for judging a flight: the whole question is what the green
+ * was doing at the instant the tee saw impact.
+ *
+ * So the transport is in WALL-CLOCK seconds, and each element is seeked
+ * to that instant in its own timeline. `delta` is (green start - tee
+ * start), the same number the produce cut is made on, so what is on
+ * screen here is what the composite will splice.
+ *
+ * Frame numbers are shown for both, because a frame is what every other
+ * screen in this tool talks in.
+ */
+function RawSyncPlayer({ teeUrl, greenUrl, teeFps, greenFps, deltaSec,
+                         teeStartedAt, greenStartedAt, measured }) {
+  const teeRef = useRef(null);
+  const grnRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const [rate, setRate] = useState(1);
+  const [t, setT] = useState(0);              // tee-clock seconds
+  const [dur, setDur] = useState(0);
+  const _d = Number(deltaSec) || 0;
+  const _tf = Number(teeFps) || 30;
+  const _gf = Number(greenFps) || 30;
+
+  // ONE SEEK FUNCTION, so the two can never be set from different
+  // ideas of "now". Tee time is the master because it is where the
+  // swing is; the green is that same instant minus the offset.
+  const seek = useCallback((sec) => {
+    const s = Math.max(0, sec);
+    setT(s);
+    if (teeRef.current) teeRef.current.currentTime = s;
+    if (grnRef.current) grnRef.current.currentTime = Math.max(0, s - _d);
+  }, [_d]);
+
+  useEffect(() => {
+    const v = teeRef.current;
+    if (!v) return undefined;
+    const onTime = () => setT(v.currentTime);
+    const onMeta = () => setDur(v.duration || 0);
+    v.addEventListener("timeupdate", onTime);
+    v.addEventListener("loadedmetadata", onMeta);
+    return () => {
+      v.removeEventListener("timeupdate", onTime);
+      v.removeEventListener("loadedmetadata", onMeta);
+    };
+  }, []);
+
+  // DRIFT CORRECTION. Two <video> elements played independently walk
+  // apart -- different decoders, different buffering, and one of them
+  // is 30fps against the other's 50. Left alone they were half a second
+  // out inside ten seconds. The green is nudged back onto the tee's
+  // clock whenever it strays more than a frame.
+  useEffect(() => {
+    if (!playing) return undefined;
+    const id = setInterval(() => {
+      const a = teeRef.current, b = grnRef.current;
+      if (!a || !b) return;
+      const want = Math.max(0, a.currentTime - _d);
+      if (Math.abs(b.currentTime - want) > (1.0 / _gf)) {
+        b.currentTime = want;
+      }
+    }, 250);
+    return () => clearInterval(id);
+  }, [playing, _d, _gf]);
+
+  function play() {
+    setPlaying(true);
+    [teeRef, grnRef].forEach((r) => {
+      if (r.current) { r.current.playbackRate = rate; r.current.play(); }
+    });
+  }
+  function pause() {
+    setPlaying(false);
+    [teeRef, grnRef].forEach((r) => r.current && r.current.pause());
+  }
+  function setSpeed(x) {
+    setRate(x);
+    [teeRef, grnRef].forEach((r) => {
+      if (r.current) r.current.playbackRate = Math.abs(x);
+    });
+  }
+  // BACKWARDS IS NOT A PLAYBACK RATE. HTML video will not play in
+  // reverse, so rewind is a timer that steps the clock back -- which is
+  // what an operator means by it anyway.
+  const rewindRef = useRef(null);
+  function rewind() {
+    pause();
+    setPlaying(true);
+    clearInterval(rewindRef.current);
+    rewindRef.current = setInterval(() => {
+      const a = teeRef.current;
+      if (!a) return;
+      const nx = a.currentTime - (3 / 10);
+      if (nx <= 0) { stopRewind(); seek(0); return; }
+      seek(nx);
+    }, 100);
+  }
+  function stopRewind() {
+    clearInterval(rewindRef.current);
+    rewindRef.current = null;
+    setPlaying(false);
+  }
+  useEffect(() => () => clearInterval(rewindRef.current), []);
+
+  const btn = { width: "auto", padding: "0 10px" };
+  const teeFrame = Math.round(t * _tf);
+  const grnFrame = Math.round(Math.max(0, t - _d) * _gf);
+  const _clock = (base, sec) => {
+    if (!base) return null;
+    try {
+      const d = new Date(new Date(base).getTime() + sec * 1000);
+      return d.toTimeString().slice(0, 8)
+        + "." + String(d.getMilliseconds()).padStart(3, "0");
+    } catch { return null; }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8,
+                  width: "100%", minHeight: 0 }}>
+      <div className="row" style={{ gap: 8, alignItems: "stretch" }}>
+        {[["Tee", teeUrl, teeRef, teeFrame, _tf, _clock(teeStartedAt, t)],
+          ["Green", greenUrl, grnRef, grnFrame, _gf,
+           _clock(greenStartedAt, Math.max(0, t - _d))]].map(
+          ([lab, url, ref, fr, fps, clk]) => (
+            <div key={lab} style={{ flex: 1, minWidth: 0 }}>
+              <div className="tiny upper muted">
+                {lab} · f{fr} · {fps}fps{clk ? ` · ${clk}` : ""}
+              </div>
+              {url ? (
+                <video ref={ref} src={url} muted playsInline preload="auto"
+                       style={{ width: "100%", borderRadius: 6,
+                                background: "#000" }} />
+              ) : (
+                <div className="muted small"
+                     style={{ padding: 24, textAlign: "center" }}>
+                  no {lab.toLowerCase()} video
+                </div>
+              )}
+            </div>
+          ))}
+      </div>
+
+      <div className="row" style={{ gap: 6, alignItems: "center",
+                                    flexWrap: "wrap" }}>
+        <button type="button" className="ghost small" style={btn}
+                onClick={() => { stopRewind(); seek(t - 1 / _tf); }}
+                title="Back one tee frame">⏮ 1f</button>
+        <button type="button" className="ghost small" style={btn}
+                onClick={rewind} title="Rewind at 3×">⏪ 3×</button>
+        {playing ? (
+          <button type="button" className="small" style={btn}
+                  onClick={() => { stopRewind(); pause(); }}>⏸ Pause</button>
+        ) : (
+          <button type="button" className="small" style={btn}
+                  onClick={() => { setSpeed(1); play(); }}>▶ Play</button>
+        )}
+        <button type="button" className="ghost small" style={btn}
+                onClick={() => { stopRewind(); setSpeed(3); play(); }}
+                title="Forward at 3×">⏩ 3×</button>
+        <button type="button" className="ghost small" style={btn}
+                onClick={() => { stopRewind(); seek(t + 1 / _tf); }}
+                title="Forward one tee frame">1f ⏭</button>
+        <input type="range" min={0} max={Math.max(0.1, dur)} step={1 / _tf}
+               value={Math.min(t, dur || t)}
+               onChange={(e) => { stopRewind(); seek(Number(e.target.value)); }}
+               style={{ flex: 1, minWidth: 140 }} />
+        <span className="tiny muted" style={{ minWidth: 96 }}>
+          {t.toFixed(2)}s{rate !== 1 ? ` · ${rate}×` : ""}
+        </span>
+      </div>
+      <div className="tiny muted">
+        Locked to the wall clock: the green is held at the tee's instant
+        minus {_d >= 0 ? "" : "−"}{Math.abs(_d).toFixed(3)}s
+        {measured
+          ? " — measured from what each camera reported for its first frame."
+          : " — ASSUMED, because neither camera reported when its first "
+            + "frame was captured. The two halves may not be showing the "
+            + "same moment."}
+      </div>
+    </div>
+  );
+}
+
 // Frames of clickable detections either side of impact. A few frames of
 // lead-in covers an impact frame estimated slightly late (the assumed-
 // impact path pins it to the pose peak, which can sit a frame or two off
@@ -1083,6 +1272,27 @@ function ClickToPlotModal({
   const [pinTee, setPinTee] = useState(null);       // {x, y}, derived
   const [pinNote, setPinNote] = useState(null);
   const [placingPin, setPlacingPin] = useState(null); // 'green' | 'tee'
+  // THE OFFSET BETWEEN THE TWO CAMERAS, in the same order the produce
+  // cut uses it: each Pi's own first-frame stamp, then whatever a
+  // previous run established, then an assumption of zero. Worked out
+  // here rather than fetched because both stamps are already on the row
+  // — and `measured` is carried separately, because "they started
+  // together" and "nobody knows" are the same number and must not look
+  // the same on screen.
+  const rawDelta = useMemo(() => {
+    const a_ = row.tee_recording_started_at;
+    const b_ = row.green_recording_started_at;
+    if (a_ && b_) {
+      const d = (new Date(b_).getTime() - new Date(a_).getTime()) / 1000;
+      if (Number.isFinite(d)) return { sec: d, measured: true };
+    }
+    const saved = row.edit_metrics?.tee_green_delta_sec;
+    if (saved != null && Number.isFinite(Number(saved))) {
+      return { sec: Number(saved), measured: true };
+    }
+    return { sec: 0, measured: false };
+  }, [row.tee_recording_started_at, row.green_recording_started_at,
+      row.edit_metrics?.tee_green_delta_sec]);
   // THE LANDING, IN THE TEE PICTURE. Stored in green pixels because
   // that is the camera that sees it land, but the tee view is where the
   // tracer is drawn and so where "the ball finished THERE" is easiest
@@ -1742,7 +1952,7 @@ function ClickToPlotModal({
               needs one click — the landing — and finds its own path
               back from it. */}
           <div className="row" style={{ gap: 4, alignItems: "center" }}>
-            {["tee", "tracer", "green"].map((w) => (
+            {["tee", "green", "raw"].map((w) => (
               <button
                 key={w}
                 type="button"
@@ -1753,14 +1963,15 @@ function ClickToPlotModal({
                 title={
                   w === "tee"
                     ? "The tee camera's motion heat — plot the tracer's ball points"
-                    : w === "tracer"
-                      ? "The line those points produce. Drag where it finishes, and drag its high point to raise or lower the arc."
+                    : w === "raw"
+                      ? "Both raw videos, locked to the wall clock and driven by one set of transport buttons"
                       : row.green_filename
                         ? "The green camera at the end of the clip — click where the ball lands and the comet is found from there"
                         : "This upload has no green video"
                 }
               >
-                {w === "tee" ? "tee" : w === "tracer" ? "⌒ tracer" : "☄ green"}
+                {w === "tee" ? "tee view"
+                  : w === "green" ? "☄ green view" : "▶ raw video"}
               </button>
             ))}
           </div>
@@ -2061,7 +2272,20 @@ function ClickToPlotModal({
           flex: 1, minWidth: 0, minHeight: 0, display: "flex",
           alignItems: "stretch", justifyContent: "center",
         }}>
-          {cam === "tracer" ? (
+          {cam === "raw" ? (
+            <RawSyncPlayer
+              teeUrl={row.tee_url}
+              greenUrl={row.dual_camera ? row.green_url : null}
+              teeFps={row.tee_fps}
+              greenFps={row.green_fps}
+              deltaSec={rawDelta?.sec ?? 0}
+              teeStartedAt={row.tee_recording_started_at
+                || row.base_captured_at}
+              greenStartedAt={row.green_recording_started_at
+                || row.base_captured_at}
+              measured={!!rawDelta?.measured}
+            />
+          ) : cam === "tracer" ? (
             bgUrl ? (
               <PlotHeatCanvas
                 // THE SAME PICTURE AS THE TEE MAP, because the tracer
