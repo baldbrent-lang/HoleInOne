@@ -7977,10 +7977,46 @@ def _finalize_green_comet(upload_id, swing_no, green_path, green_cut,
         return None
 
 
-def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx):
+def _saved_green_track(row, slot: int):
+    """The descent this swing's operator plotted by hand, or None.
+
+    One reader, because three places need it -- whether to hold the clip
+    open for it, what to draw, and what not to overwrite -- and three
+    different spellings of "look it up" is how they came to disagree.
+    """
+    try:
+        for _s in ((row.edit_metrics or {}).get("swings") or []):
+            if isinstance(_s, dict) and int(_s.get("idx", -1)) == int(slot):
+                _t = _s.get("green_track")
+                _t = [p for p in (_t or [])
+                      if isinstance(p, dict) and p.get("frame") is not None
+                      and p.get("x") is not None and p.get("y") is not None]
+                return _t or None
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("saved green track for slot %s: %s", slot, exc)
+        return None
+
+
+def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx,
+                        saved_track=None):
     """Draw the ball's descent on the cut green segment, if it is there.
 
-    Returns the chain that was drawn, or None. Everything about this is
+    THE OPERATOR'S OWN COMET WINS. `saved_track` is the path they
+    plotted by hand in click-to-plot, and it is the answer -- not a hint
+    to be re-derived. This used to re-run `find_path` from the marked
+    landing on every produce and ignore the plotted points entirely, so
+    an operator who plotted a descent BECAUSE the search could not find
+    one watched their work vanish the moment they re-produced: the
+    search failed again, exactly as it had the first time, and the clip
+    came back with no comet on it.
+
+    It also no longer needs a landing. A plotted track already says
+    where the ball came down -- its last point -- so requiring a
+    separately-marked landing spot before drawing it asked for the same
+    fact twice and dropped the comet when only one of them was given.
+
+    Returns the chain that was drawn, or None. The search half stays
     best-effort: a swing with no obvious path on the green simply does
     not get a comet, and a failure here must never cost the clip -- the
     tee tracer is the product, this is the flourish.
@@ -7991,8 +8027,29 @@ def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx):
         _gfps = float(probe_fps(green_path) or 0.0)
         if _gfps <= 0:
             return None
-        _lf = int(round(float(land_sec) * _gfps))
-        pts, why = gf.find_path(green_path, _lf, land_xy, _gfps)
+        pts = None
+        if saved_track:
+            pts = [
+                {"frame": int(p["frame"]),
+                 "x": float(p["x"]), "y": float(p["y"])}
+                for p in saved_track
+                if isinstance(p, dict) and p.get("frame") is not None
+                and p.get("x") is not None and p.get("y") is not None
+            ]
+            pts.sort(key=lambda q: q["frame"])
+            if pts:
+                log.info(
+                    "d3 produce: swing %s green comet from the operator's "
+                    "own %d plotted frames f%d..f%d — not re-searched",
+                    idx, len(pts), pts[0]["frame"], pts[-1]["frame"],
+                )
+        if not pts:
+            if land_sec is None or not land_xy:
+                log.info("d3 produce: swing %s no green comet — nothing "
+                         "plotted and no landing to search from", idx)
+                return None
+            _lf = int(round(float(land_sec) * _gfps))
+            pts, why = gf.find_path(green_path, _lf, land_xy, _gfps)
         if not pts:
             log.info("d3 produce: swing %s no green comet — %s", idx, why)
             return None
@@ -8006,8 +8063,8 @@ def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx):
             return None
         log.info(
             "d3 produce: swing %s green comet — %d frames f%d..f%d "
-            "into the landing at f%d",
-            idx, len(pts), pts[0]["frame"], pts[-1]["frame"], _lf,
+            "(segment starts at f%d)",
+            idx, len(pts), pts[0]["frame"], pts[-1]["frame"], _first,
         )
         return pts
     except Exception as exc:  # noqa: BLE001
@@ -18303,7 +18360,14 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
         # The landing is the operator's too, and produce has nothing to
         # say about it -- a run that does not know about one must not
         # erase it from under the wizard.
-        for _k in ("landing_frame", "landing_spot"):
+        #
+        # `green_track` belongs on that list for the same reason and was
+        # missing from it. Produce writes whatever comet it drew, or
+        # None when it drew none -- so a swing whose descent the
+        # operator had plotted by hand lost those points to the first
+        # produce that could not find one itself, which is every
+        # produce, since not finding one is why they were plotted.
+        for _k in ("landing_frame", "landing_spot", "green_track"):
             if prior and prior.get(_k) is not None and rec.get(_k) is None:
                 merged[_k] = prior[_k]
         swings = [s for s in swings if int(s.get("idx", -1)) != idx]
@@ -18450,6 +18514,11 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
         log.warning("d3 produce: could not clear prior clips: %s", exc)
 
     tok = secrets.token_hex(4)
+    # `landing` is rebound per swing below (a plotted comet supplies one
+    # when the caller did not), so the caller's own value has to survive
+    # the loop rather than be overwritten by the first swing that has a
+    # comet and inherited by every swing after it.
+    _landing_arg = landing
     for i, sw in enumerate(swings):
         # WHICH SWING SLOT THIS IS, in edit_metrics. Position in `rep`
         # and position in the upload's swing list are the same thing
@@ -18488,6 +18557,27 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             #
             # That is why the tracer "never changed" however it was
             # computed. The line was right; nobody could see it.
+            # A PLOTTED COMET IS A LANDING. Its last point says where
+            # and when the ball came down, which is the same fact the
+            # `landing` argument carries -- so a swing with one no
+            # longer needs the landing marked separately before the
+            # clip is held open long enough to show it. Without this a
+            # hand-plotted descent could be drawn onto a green cut that
+            # had already ended before the ball arrived, which looks
+            # exactly like not drawing it at all.
+            landing = _landing_arg
+            if not landing and _saved_green_track(row, _slot) and green_path:
+                _gt = _saved_green_track(row, _slot)
+                _gfps_l = float(probe_fps(green_path) or 0.0)
+                if _gfps_l > 0:
+                    _last = max(_gt, key=lambda q: int(q["frame"]))
+                    landing = {"sec": int(_last["frame"]) / _gfps_l,
+                               "xy": [float(_last["x"]), float(_last["y"])]}
+                    log.info(
+                        "d3 produce: swing %s taking its landing from the "
+                        "operator's plotted comet — f%d, %.2fs green-clock",
+                        i, int(_last["frame"]), landing["sec"],
+                    )
             _land_tee = None
             if landing and landing.get("sec") is not None:
                 try:
@@ -18742,17 +18832,29 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                             "— tee-only", i,
                         )
                         green_seg = None
-                    elif landing and landing.get("xy"):
+                    else:
                         # THE BALL COMING DOWN, ON THE CAMERA THAT SEES
                         # IT. The tee tracer shows where the ball went;
-                        # this shows it arriving. Only drawn when a
-                        # chain of blobs actually walks back from the
-                        # marked landing -- no chain, no comet, because
-                        # a fabricated one over grass would be worse
-                        # than nothing.
+                        # this shows it arriving.
+                        #
+                        # ALWAYS TRIED, because the operator may have
+                        # plotted the descent by hand. This used to run
+                        # only when a landing spot had been marked, and
+                        # then only ever from the search -- so a comet
+                        # plotted in click-to-plot (which is what an
+                        # operator does precisely BECAUSE the search
+                        # found nothing) was thrown away on every
+                        # re-produce. Their points go in first; the
+                        # search is the fallback, and still only draws
+                        # when a real chain walks back from a marked
+                        # landing, because a fabricated one over grass
+                        # would be worse than nothing.
+                        _saved_gt = _saved_green_track(row, _slot)
                         _gcomet = _render_green_comet(
                             green_path, green_seg, g0,
-                            landing.get("sec"), landing.get("xy"), i,
+                            (landing or {}).get("sec"),
+                            (landing or {}).get("xy"), i,
+                            saved_track=_saved_gt,
                         )
                         if _gcomet:
                             _green_track = _gcomet
