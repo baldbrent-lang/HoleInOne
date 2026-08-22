@@ -9520,6 +9520,17 @@ def wizard_produce(
     except (TypeError, ValueError):
         hole_number = None
 
+    # THE WIZARD WAS OPEN ON ONE CLIP. ✎ Edit and ＋ Add both send this,
+    # and it decides whether Produce means "this clip" or "this upload".
+    # Defaults to False, so nothing that does not ask for it changes.
+    solo = bool(payload.get("solo"))
+    try:
+        swing_idx = int(payload.get("swing_idx") or 0)
+    except (TypeError, ValueError):
+        swing_idx = 0
+    if swing_idx < 0:
+        swing_idx = 0
+
     # Remember what the operator chose, so re-opening the wizard shows the
     # ball where they put it rather than back at the detector's guess.
     try:
@@ -9559,13 +9570,15 @@ def wizard_produce(
     threading.Thread(
         target=run_wizard_produce_job,
         args=(upload_id, (bx, by), impact_frame, hole_number,
-              landing_frame, landing_spot),
+              landing_frame, landing_spot, solo, swing_idx),
         daemon=True,
         name=f"wizard-produce-{upload_id}",
     ).start()
     log.info(
-        "wizard produce: upload=%s queued with ball=(%.0f,%.0f) impact=f%d",
-        upload_id, bx, by, impact_frame,
+        "wizard produce: upload=%s queued with ball=(%.0f,%.0f) impact=f%d "
+        "(%s)", upload_id, bx, by, impact_frame,
+        f"swing {swing_idx} only, keeping the other clips" if solo
+        else "replacing every clip on the upload",
     )
     return {"ok": True, "started": True, "upload_id": upload_id,
             "ball": [bx, by], "impact_frame": impact_frame,
@@ -17792,6 +17805,10 @@ def run_wizard_produce_job(
     hole_number: int | None = None,
     landing_frame: int | None = None,
     landing_spot=None,
+    # The wizard was opened on ONE clip (✎ Edit) or on a new one
+    # (＋ Add). Produce then means "this clip", not "this upload".
+    solo: bool = False,
+    swing_idx: int = 0,
 ) -> dict:
     """Stages 4-8, from the operator's ball and impact frame.
 
@@ -17906,7 +17923,7 @@ def run_wizard_produce_job(
             # `_d3_fast_produce` reads swings off a Debug3 report, so hand
             # it one with the single swing the operator pointed at.
             rep = {"swings": [{
-                "idx": 0,
+                "idx": int(swing_idx),
                 # Belt and braces: find_flight is locked to the operator's
                 # ball above, so this is the same value -- but the clip is
                 # rendered from THIS number, and it must not be able to
@@ -17944,6 +17961,12 @@ def run_wizard_produce_job(
             out = _d3_fast_produce(
                 row, src_path, db, rep, fps,
                 progress=_prog, hole_number=hole_number,
+                # A SINGLE-CLIP PRODUCE KEEPS THE OTHERS. Without this,
+                # adding a clip to an upload that had ten left it with
+                # one -- the renderer clears the upload's clips before
+                # it writes, which is right for a re-produce of the whole
+                # thing and catastrophic for "and now there is one more".
+                replace=not solo,
                 end_green_sec=_end_sec,
                 landing=(
                     {"sec": _land_sec, "xy": list(landing_spot)}
@@ -18304,7 +18327,7 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
 
 def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                      hole_number=None, end_green_sec=None,
-                     landing=None) -> dict:
+                     landing=None, replace=True) -> dict:
     """Build the shipped clip STRAIGHT from Debug3's numbers.
 
     Stage 8 used to re-run the whole production pipeline
@@ -18385,15 +18408,38 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
     course = db.get(Course, row.course_id) if row.course_id else None
     # Re-produce REPLACES: drop this upload's prior clips first, same as
     # the full pipeline does.
+    #
+    # UNLESS THIS IS ABOUT ONE SWING. `replace=False` is the edit
+    # wizard opened on a single clip, or on a new one -- and there,
+    # replacing everything is not a re-produce, it is data loss. An
+    # operator who clicks ＋ Add on an upload with ten clips and then
+    # Produce means "and now there are eleven", not "and now there is
+    # one". Only the clip belonging to the swing being produced is
+    # dropped, because that one really is being replaced.
     try:
-        _old = db.query(VideoClip).filter(
-            VideoClip.long_upload_id == row.id,
-        ).all()
+        _q = db.query(VideoClip).filter(VideoClip.long_upload_id == row.id)
+        _all_old = _q.all()
         # The caller's hole wins (a camera covers one par-3 and knows
         # which); otherwise inherit from the clips being replaced.
         _hole = int(hole_number) if hole_number else next(
-            (int(c.hole_number) for c in _old if c.hole_number), 1,
+            (int(c.hole_number) for c in _all_old if c.hole_number), 1,
         )
+        if replace:
+            _old = _all_old
+        else:
+            _slots = {int(sw.get("idx", i)) for i, sw in enumerate(swings)}
+            _mine = {
+                int(_s["clip_id"])
+                for _s in ((row.edit_metrics or {}).get("swings") or [])
+                if isinstance(_s, dict) and _s.get("clip_id") is not None
+                and int(_s.get("idx", -1)) in _slots
+            }
+            _old = [c for c in _all_old if c.id in _mine]
+            log.info(
+                "d3 produce: single-swing produce for slot(s) %s — keeping "
+                "%d other clip(s) on upload %s",
+                sorted(_slots), len(_all_old) - len(_old), row.id,
+            )
         for _c in _old:
             db.delete(_c)
         if _old:
@@ -18405,6 +18451,13 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
 
     tok = secrets.token_hex(4)
     for i, sw in enumerate(swings):
+        # WHICH SWING SLOT THIS IS, in edit_metrics. Position in `rep`
+        # and position in the upload's swing list are the same thing
+        # only when producing all of them. A single-swing produce hands
+        # over one swing that may be number seven, and saving it at
+        # index 0 would overwrite a different swing's record with this
+        # one's clip.
+        _slot = int(sw.get("idx", i))
         if progress:
             progress(f"Building clip {i + 1} of {len(swings)}",
                      i, len(swings))
@@ -18782,7 +18835,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 src_path, launch_f, f"d3plotbg-{row.id}-{tok}-{i}.jpg",
             )
             _sw_rec = {
-                "idx": i,
+                "idx": _slot,
                 "clip_id": clip.id,
                 "fps": round(fps, 2),
                 "start_frame": int(round(t0 * fps)),
@@ -18831,7 +18884,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                     f"{settings.app_base_url}/uploads/clips/{_bg}"
                     f"?v={int((CLIPS_DIR / _bg).stat().st_mtime)}"
                 )
-            _d3_save_swing(db, row.id, i, _sw_rec, delta)
+            _d3_save_swing(db, row.id, _slot, _sw_rec, delta)
 
             out["clips"].append({
                 "clip_id": clip.id,

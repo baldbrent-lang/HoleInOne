@@ -2154,7 +2154,12 @@ function EditWizard({
     return p >= 0 ? p : 0;
   });
   // Single-clip edit: no selector bar, and Produce is about this swing.
-  const soloClip = focusClipId != null;
+  // ONE CLIP ON SCREEN, whichever way the wizard was opened for one.
+  // ＋ Add is the clearer case: an operator who asked to add a clip is
+  // shown a blank one, not a rank of eleven existing swings -- three of
+  // them duplicates of each other -- with the new one hidden off the
+  // right-hand end of a scrollbar.
+  const soloClip = focusClipId != null || startNewSwing;
   // Mirror of selectedSwing readable inside async callbacks without
   // re-creating them, so a render that finishes after the operator
   // switched tabs only updates the display if they're still on that swing.
@@ -2594,6 +2599,12 @@ function EditWizard({
       landing_spot: draft.landingSpot
         ? [draft.landingSpot.x, draft.landingSpot.y]
         : null,
+      // THIS CLIP, NOT THIS UPLOAD. The wizard opened on one clip (✎
+      // Edit) or on a new one (＋ Add), so Produce must leave the
+      // upload's other clips alone. Without it, adding a clip to an
+      // upload that had ten left it with one.
+      solo: soloClip,
+      swing_idx: swings[selectedSwing]?.idx ?? selectedSwing,
     };
     setProducing(true);
     // GREY THE CARD ON THE CLICK, not two round trips later...
@@ -2932,9 +2943,13 @@ function EditWizard({
             <h3 style={{ margin: 0 }}>Edit wizard</h3>
             <div className="small muted">
               Upload #{row.id} · {row.course_name || `course ${row.course_id}`} ·{" "}
-              {isMulti
-                ? `multi-swing${swings.length ? ` (${swings.length})` : ""}`
-                : "single swing"}
+              {startNewSwing
+                ? "new clip"
+                : soloClip
+                  ? "editing one clip"
+                  : isMulti
+                    ? `multi-swing${swings.length ? ` (${swings.length})` : ""}`
+                    : "single swing"}
             </div>
           </div>
           <button
