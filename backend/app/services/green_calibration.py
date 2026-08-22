@@ -398,6 +398,47 @@ def map_to_tee(view_map: dict, x: float, y: float,
     return (pt[0] * float(tw), pt[1] * float(th))
 
 
+def map_to_green(view_map: dict, x: float, y: float,
+                 green_size=None, tee_size=None):
+    """A tee-camera pixel -> the green camera's pixel for the same spot.
+
+    The inverse of `map_to_tee`, and the piece that lets a landing be
+    DRAGGED in the tee view. The operator is looking at the picture the
+    tracer is drawn on, so that is the picture in which "the ball
+    finished there" is easiest to say -- but a landing is stored in
+    green pixels, because that is the camera that measures it and the
+    one a re-calibration corrects.
+
+    A homography is invertible, so this is the same mapping read the
+    other way rather than a second fit that could disagree with the
+    first. Returns (x, y) or None when there is no mapping or the point
+    projects to the horizon -- an honest answer for a drag into the sky.
+    """
+    H = (view_map or {}).get("homography")
+    if not H:
+        return None
+    gw, gh = view_map.get("green_size") or (0, 0)
+    tw, th = view_map.get("tee_size") or (0, 0)
+    if green_size and min(green_size) > 0:
+        gw, gh = float(green_size[0]), float(green_size[1])
+    if tee_size and min(tee_size) > 0:
+        tw, th = float(tee_size[0]), float(tee_size[1])
+    if min(gw, gh, tw, th) <= 0:
+        return None
+    try:
+        import numpy as np
+
+        Hi = np.linalg.inv(np.asarray(H, dtype=np.float64))
+        if not np.all(np.isfinite(Hi)):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    pt = _apply(Hi.tolist(), float(x) / float(tw), float(y) / float(th))
+    if pt is None:
+        return None
+    return (pt[0] * float(gw), pt[1] * float(gh))
+
+
 def _feet_display(d: float) -> str:
     if d < 1:
         return "inside 1 ft"

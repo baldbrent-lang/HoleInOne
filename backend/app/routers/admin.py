@@ -8480,6 +8480,96 @@ def save_upload_view_map(
     }
 
 
+@router.post("/long-uploads/{upload_id}/landing-from-tee")
+def landing_from_tee(
+    upload_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """A point dragged in the TEE view -> the green pixel it means.
+
+    Body: {"tee": [x, y], "tee_size": [w, h], "green_size": [w, h]}
+
+    The landing lives in green pixels -- that is the camera that sees it
+    land and the one a re-calibration corrects -- but the tee view is
+    the picture the tracer is drawn on, so it is where "the ball
+    finished THERE" is easiest to say. This reads the hole's existing
+    homography backwards; it is not a second fit and cannot disagree
+    with the forward one.
+
+    Returns the green pixel, and the pair as a CALIBRATION CANDIDATE.
+    An operator dragging the mapped landing onto the spot they can see
+    is stating a correspondence between the two views -- the same thing
+    the calibrator asks for by clicking a bunker corner in both. It is
+    reported, not stored: a mapping that silently re-fitted itself from
+    a drag would be a mapping nobody could reason about, and the whole
+    reason this hole's aim can be wrong is that a calibration changed
+    under someone without their say-so.
+    """
+    from ..services import green_calibration as gc
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    # BOTH DIRECTIONS, ONE ENDPOINT. Send a tee point to learn the green
+    # pixel it means (a drag in the tee view); send a green point to
+    # learn where it sits in the tee frame (drawing the handle in the
+    # first place). Same homography read forwards or backwards, so the
+    # two answers cannot drift apart the way two endpoints would.
+    _side = "tee" if payload.get("tee") is not None else "green"
+    try:
+        _in = payload[_side]
+        ix, iy = float(_in[0]), float(_in[1])
+    except (KeyError, TypeError, ValueError, IndexError):
+        raise HTTPException(
+            400, 'body must be {"tee": [x, y]} or {"green": [x, y]}')
+    course, hole, vm = _view_map_for(db, row)
+    if not vm or not vm.get("homography"):
+        raise HTTPException(
+            409,
+            f"hole {hole} has no green→tee mapping yet — calibrate the two "
+            f"views once and a landing can be dragged in either picture",
+        )
+    _ts = payload.get("tee_size") or None
+    _gs = payload.get("green_size") or None
+    if _side == "tee":
+        tx, ty = ix, iy
+        xy = gc.map_to_green(vm, tx, ty, green_size=_gs, tee_size=_ts)
+    else:
+        xy = (ix, iy)
+        _t = gc.map_to_tee(vm, ix, iy, green_size=_gs, tee_size=_ts)
+        if _t is None:
+            raise HTTPException(
+                422,
+                "that green pixel does not map into the tee camera's view "
+                "— it projects to the horizon",
+            )
+        tx, ty = _t
+    if xy is None:
+        raise HTTPException(
+            422,
+            "that point does not map onto the green camera's view — it "
+            "projects to the horizon, which is what a drag into the sky "
+            "does",
+        )
+    _back = gc.map_to_tee(vm, xy[0], xy[1], green_size=_gs, tee_size=_ts)
+    return {
+        "ok": True,
+        "hole": hole,
+        "green": [round(float(xy[0]), 1), round(float(xy[1]), 1)],
+        "tee": [round(float(tx), 1), round(float(ty), 1)],
+        # What the forward mapping does with the answer. Equal to the
+        # input when the homography is sound; a long way off when it is
+        # not, which is worth seeing on the screen where it is used.
+        "tee_roundtrip": ([round(float(_back[0]), 1),
+                           round(float(_back[1]), 1)]
+                          if _back else None),
+        "calibration_pair": {"tee": [round(tx, 1), round(ty, 1)],
+                             "green": [round(float(xy[0]), 1),
+                                       round(float(xy[1]), 1)]},
+    }
+
+
 @router.post("/long-uploads/{upload_id}/hole-pin")
 def save_hole_pin(
     upload_id: int,

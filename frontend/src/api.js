@@ -531,6 +531,23 @@ export const api = {
       adminPassword: key,
       timeoutMs: 20_000,
     }),
+  mapLandingToTee: (key, uploadId, payload = {}) =>
+    // The other direction: a green pixel -> where it sits in the tee
+    // frame, so the landing can be drawn (and grabbed) on the tee map.
+    request(`/api/admin/long-uploads/${uploadId}/landing-from-tee`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
+  landingFromTee: (key, uploadId, payload = {}) =>
+    // A point dragged in the TEE view -> the green pixel it means.
+    // The landing is stored in green pixels; the tee view is only the
+    // easier place to say where it went.
+    request(`/api/admin/long-uploads/${uploadId}/landing-from-tee`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
   saveEditMetrics: (key, uploadId, patch) =>
     request(`/api/admin/long-uploads/${uploadId}/edit-metrics`, {
       method: "POST",

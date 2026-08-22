@@ -974,9 +974,76 @@ function ClickToPlotModal({
   // and the landing is what gives the tracer its aim AND its flight
   // time. Same gesture as the tee side's ball placement.
   const [placingLanding, setPlacingLanding] = useState(false);
+  // THE LANDING, IN THE TEE PICTURE. Stored in green pixels because
+  // that is the camera that sees it land, but the tee view is where the
+  // tracer is drawn and so where "the ball finished THERE" is easiest
+  // to say. Dragged here, it is read back through the hole's homography
+  // and the green-side landing follows.
+  const [teeLandingXY, setTeeLandingXY] = useState(null);
+  const [teeLandingNote, setTeeLandingNote] = useState(null);
   // Which green frame the map is showing, so a placed landing carries
   // the instant it was seen at and not just the pixel.
   const [greenViewFrame, setGreenViewFrame] = useState(null);
+  // Where the current landing sits in the tee frame, asked of the
+  // server because the homography lives there. Re-asked whenever the
+  // landing moves on the green side, so the two pictures agree.
+  useEffect(() => {
+    if (!landing) { setTeeLandingXY(null); return undefined; }
+    let live = true;
+    (async () => {
+      try {
+        const out = await api.mapLandingToTee(adminPassword, row.id, {
+          green: [landing.x, landing.y],
+        });
+        if (!live) return;
+        setTeeLandingXY(out?.tee ? { x: out.tee[0], y: out.tee[1] } : null);
+        setTeeLandingNote(out?.tee ? null : (out?.reason || null));
+      } catch (e) {
+        if (live) {
+          setTeeLandingXY(null);
+          setTeeLandingNote(e?.message || String(e));
+        }
+      }
+    })();
+    return () => { live = false; };
+  }, [landing?.x, landing?.y, adminPassword, row.id]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Dragged in the tee view: read it back to a green pixel and move the
+  // landing there. The landing keeps its frame -- a drag says where the
+  // ball finished, not when.
+  async function dropTeeLanding(pt) {
+    if (!pt) return;
+    setTeeLandingXY(pt);
+    try {
+      const out = await api.landingFromTee(adminPassword, row.id, {
+        tee: [pt.x, pt.y],
+        tee_size: [frameW, frameH],
+        green_size: green ? [green.width, green.height] : null,
+      });
+      const g = out?.green;
+      if (!g) return;
+      const f = landing?.frame ?? greenViewFrame ?? green?.frame ?? 0;
+      setGreenMarks((m) => ({
+        ...m, [f]: { x: Math.round(g[0]), y: Math.round(g[1]) },
+      }));
+      // HOW WELL THE MAPPING HOLDS, said out loud. The round trip is
+      // exact when the homography is sound; a long way off when it is
+      // not, and this is the screen where that matters.
+      const rt = out?.tee_roundtrip;
+      const err = rt
+        ? Math.hypot(rt[0] - pt.x, rt[1] - pt.y) : null;
+      setTeeLandingNote(
+        `landing → green (${Math.round(g[0])}, ${Math.round(g[1])})`
+        + (err != null && err > 2
+          ? ` · the mapping is ${err.toFixed(0)}px out here — worth`
+            + " re-calibrating this hole"
+          : "")
+      );
+    } catch (e) {
+      setTeeLandingNote(e?.message || String(e));
+    }
+  }
+
   const loadGreenFrame = useCallback(
     async (f) => {
       const r = await api.getLongUploadFrame(adminPassword, row.id, f, "green");
@@ -1903,6 +1970,26 @@ function ClickToPlotModal({
                 setBallAtRest(pt);
                 setPlacingBall(false);
               }}
+              // THE LANDING, GRABBABLE IN THE TEE PICTURE. It is stored
+              // in green pixels, but this is the picture the tracer is
+              // drawn on, so it is the one where the operator can see
+              // whether the line finishes where the ball did.
+              handles={teeLandingXY ? [{
+                id: "landing", x: teeLandingXY.x, y: teeLandingXY.y,
+                colour: "#f472b6",
+                title: "Where the ball finished, shown in the tee frame. "
+                  + "Drag it onto the spot you can actually see and the "
+                  + "landing on the green camera follows — the two are the "
+                  + "same point read through this hole's calibration.",
+              }] : []}
+              onHandleDrag={(id, pt) => {
+                if (id === "landing" && pt) setTeeLandingXY(pt);
+              }}
+              onHandleDrop={(id, pt) => {
+                if (id === "landing") dropTeeLanding(pt);
+              }}
+              note={teeLandingNote}
+              noteColour="#f472b6"
               scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
@@ -9065,9 +9152,15 @@ function PlotHeatCanvas({
               transform: "translate(-50%, -50%)",
               borderRadius: "50%",
               border: `2px solid ${h.colour || "#67e8f9"}`,
-              background: dragId === h.id
-                ? "rgba(103,232,249,0.55)"
-                : "rgba(103,232,249,0.18)",
+              // TINTED WITH ITS OWN COLOUR. Hard-coded cyan made every
+              // handle look like the tracer's end handle, which is the
+              // one thing a second draggable point must not be mistaken
+              // for.
+              background: h.colour
+                ? `${h.colour}${dragId === h.id ? "99" : "33"}`
+                : (dragId === h.id
+                  ? "rgba(103,232,249,0.55)"
+                  : "rgba(103,232,249,0.18)"),
               boxShadow: "0 0 0 2px rgba(0,0,0,0.55)",
               cursor: h.axis === "y" ? "ns-resize" : "move",
               touchAction: "none",
