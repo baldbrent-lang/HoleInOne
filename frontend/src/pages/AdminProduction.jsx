@@ -7070,9 +7070,11 @@ function BallScanModal({ state, onClose }) {
                     )}
                     <div className="row" style={{ gap: 8, marginTop: 6,
                                                   flexWrap: "wrap" }}>
-                      {[["every ball-sized blob", c.dets_image_url],
-                        ["tracks", c.tracks_image_url],
-                        ["the chosen flight", c.flight_image_url]].map(
+                      {[["the frame it worked from", c.frame_image_url],
+                        ["every ball-sized blob kept", c.dets_image_url],
+                        ["tracks, one colour each", c.tracks_image_url],
+                        ["the chosen flight", c.flight_image_url],
+                        ["the ball it started from", c.rest_image_url]].map(
                         ([lab, url]) => url ? (
                           <figure key={lab}
                                   style={{ margin: 0, flex: "1 1 260px" }}>
@@ -7144,8 +7146,8 @@ function BallScanModal({ state, onClose }) {
                        style={{ width: "100%", borderRadius: 6 }} />
                 </a>
                 <figcaption className="tiny muted">
-                  Green = the tee box searched. Orange = every candidate,
-                  numbered as in the table.
+                  Green = the tee box searched. Each candidate is ringed in
+                  its own colour, matching its row in the table.
                 </figcaption>
               </figure>
             )}
@@ -7178,7 +7180,15 @@ function BallScanModal({ state, onClose }) {
                     {spots.map((sp, i) => (
                       <tr key={i}
                           style={{ borderTop: "1px solid var(--line)" }}>
-                        <td style={{ padding: "3px 8px" }}>{i + 1}</td>
+                        <td style={{ padding: "3px 8px" }}>
+                          <span style={{
+                            display: "inline-block", width: 10, height: 10,
+                            borderRadius: "50%", marginRight: 5,
+                            background: sp.color || "#f59e0b",
+                            verticalAlign: "middle",
+                          }} />
+                          {i + 1}
+                        </td>
                         <td style={{ padding: "3px 8px" }}>
                           <b>{sp.x}, {sp.y}</b>
                           <span className="muted"> r{sp.radius}</span>
@@ -7235,7 +7245,15 @@ function BallScanModal({ state, onClose }) {
               <div key={i} className="card"
                    style={{ margin: "10px 0", padding: 10 }}>
                 <div className="row" style={{ justifyContent: "space-between" }}>
-                  <b>{i + 1}. ({sp.x}, {sp.y}) · r {sp.radius}px</b>
+                  <b>
+                    <span style={{
+                      display: "inline-block", width: 11, height: 11,
+                      borderRadius: "50%", marginRight: 6,
+                      background: sp.color || "#f59e0b",
+                      verticalAlign: "middle",
+                    }} />
+                    {i + 1}. ({sp.x}, {sp.y}) · r {sp.radius}px
+                  </b>
                   <span className="pill">{sp.votes} frame(s)</span>
                 </div>
                 <div className="tiny muted" style={{ marginTop: 2 }}>

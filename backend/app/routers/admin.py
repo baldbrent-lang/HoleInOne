@@ -15213,6 +15213,10 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
     if progress:
         progress("Cutting a picture of each candidate", 0, len(spots))
     tok = secrets.token_hex(4)
+    from ..services.debug3 import TRACK_COLORS as _TC0
+
+    for i, sp in enumerate(spots):
+        sp["color"] = _TC0[i % len(_TC0)]
     try:
         cap = cv2.VideoCapture(str(src_path))
         for i, sp in enumerate(spots):
@@ -15235,8 +15239,10 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
                     continue
                 crop = cv2.resize(crop, None, fx=2.0, fy=2.0,
                                   interpolation=cv2.INTER_NEAREST)
+                _hex = sp.get("color") or "#ffa500"
+                _rgb = tuple(int(_hex[k:k + 2], 16) for k in (1, 3, 5))
                 cv2.circle(crop, ((sp["x"] - x0) * 2, (sp["y"] - y0) * 2),
-                           14, (0, 165, 255), 2)
+                           14, (_rgb[2], _rgb[1], _rgb[0]), 2)
                 nm = f"ballscan-{row.id}-{tok}-{i}-{which}.jpg"
                 cv2.imwrite(str(CLIPS_DIR / nm), crop,
                             [int(cv2.IMWRITE_JPEG_QUALITY), 88])
@@ -15259,10 +15265,20 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
                      for px, py in _corners(_roi["roi"], w, h)], _np.int32,
                 )
                 cv2.polylines(ref, [_pts], True, (80, 220, 80), 2)
+            # ONE COLOUR PER CANDIDATE, the same palette Debug3 uses for
+            # tracks, so a row in the table and a ring on the picture can
+            # be matched by eye. All-orange numbering made you read a
+            # coordinate, find it in the list, then look back.
+            from ..services.debug3 import TRACK_COLORS as _TC
+
             for i, sp in enumerate(spots):
-                cv2.circle(ref, (sp["x"], sp["y"]), 12, (0, 165, 255), 2)
+                _hex = _TC[i % len(_TC)]
+                _rgb = tuple(int(_hex[k:k + 2], 16) for k in (1, 3, 5))
+                _bgr = (_rgb[2], _rgb[1], _rgb[0])
+                sp["color"] = _hex
+                cv2.circle(ref, (sp["x"], sp["y"]), 12, _bgr, 2)
                 cv2.putText(ref, str(i + 1), (sp["x"] + 14, sp["y"] - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, _bgr, 2,
                             cv2.LINE_AA)
             nm = f"ballscan-{row.id}-{tok}-all.jpg"
             cv2.imwrite(str(CLIPS_DIR / nm), ref,
@@ -15448,7 +15464,11 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                               (_fdbg.get("detect") or {}).get("images", {})
                               .get("dets")),
                              ("tracks_image_url", _fdbg.get("tracks_image")),
-                             ("flight_image_url", _fdbg.get("flight_image"))):
+                             ("flight_image_url", _fdbg.get("flight_image")),
+                             ("frame_image_url",
+                              (_fdbg.get("detect") or {}).get("images", {})
+                              .get("frame")),
+                             ("rest_image_url", _fdbg.get("rest_check_image"))):
                 entry[_k] = _clip_url_for(_src)
             # find_flight returns the chosen path as `points`. There is
             # no top-level `fit` on it -- Debug3 builds one of its own
