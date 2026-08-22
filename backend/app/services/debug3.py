@@ -1578,6 +1578,16 @@ def find_descents(
             "fall_rate": round(rate, 3),
             "bend_px": round(bend, 2),
             "peak_px_per_frame": round(peak, 1),
+            # THE CHAIN ITSELF, up to the frame it stopped falling.
+            # Callers that only want to know a ball came down are served
+            # by the summary above; a caller that wants to DRAW the
+            # descent needs the points, and re-finding them from the
+            # landing is both slower and capable of a different answer.
+            "points": [
+                {"frame": int(q["frame"]),
+                 "x": int(round(q["x"])), "y": int(round(q["y"]))}
+                for q in pts[:last_i + 1]
+            ],
         })
 
     # One descent can arrive as two tracks when the ball blinks out

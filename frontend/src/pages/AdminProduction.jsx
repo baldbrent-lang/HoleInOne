@@ -7530,6 +7530,7 @@ function BallScanModal({ state, onClose }) {
                       <th style={{ padding: "3px 8px" }}>gone</th>
                       <th style={{ padding: "3px 8px" }}>blocked</th>
                       <th style={{ padding: "3px 8px" }}>frames</th>
+                      <th style={{ padding: "3px 8px" }}>descent</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -7584,11 +7585,33 @@ function BallScanModal({ state, onClose }) {
                             : <span className="muted">—</span>}
                         </td>
                         <td style={{ padding: "3px 8px" }}>{sp.votes}</td>
+                        <td style={{ padding: "3px 8px" }}>
+                          {sp.descent ? (
+                            <span className="pill ok"
+                                  title={`The green camera saw a ball come down ${sp.descent.flight_sec}s after this spot emptied — ${sp.descent.n_points} points falling, bending only ${sp.descent.bend_px}px. That is this swing, seen from the other end.`}>
+                              ✓ {sp.descent.n_points} pts ·{" "}
+                              {sp.descent.flight_sec}s
+                            </span>
+                          ) : (
+                            <span className="muted"
+                                  title={sp.descent_reason
+                                    || "no green camera on this upload"}>
+                              —
+                            </span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
                 <div className="tiny muted" style={{ marginTop: 6 }}>
+                  <b>descent</b> is the green camera's verdict: a chain of at
+                  least four points falling nearly straight down, landing in
+                  the window a shot struck here would land in. A candidate
+                  with one is a swing — it gets produced however briefly it
+                  sat, and its descent becomes the clip's landing and its
+                  green comet.
+                  <br />
                   <b>last seen</b> is the last frame a ball was visible there.
                   <b> gone</b> is the first frame after that where the spot was
                   both clear of anything covering it and empty — a clubhead at
@@ -7625,6 +7648,41 @@ function BallScanModal({ state, onClose }) {
                     <> · still covered when the watch ran out</>
                   )}
                 </div>
+                {/* THE GREEN CAMERA'S VERDICT, AS A PICTURE. "Four
+                    points falling nearly straight down" is a sentence;
+                    whether THIS chain is a ball or the tree line is only
+                    answerable by looking at it. */}
+                {sp.descent ? (
+                  <div style={{ marginTop: 8 }}>
+                    <div className="tiny" style={{ color: "#3ee37a" }}>
+                      ✓ Confirmed by the green camera — a ball came down{" "}
+                      {sp.descent.flight_sec}s after this spot emptied,
+                      landing at ({sp.descent.landing_xy[0]},{" "}
+                      {sp.descent.landing_xy[1]}) on f
+                      {sp.descent.landing_frame}. {sp.descent.n_points} points,
+                      falling {sp.descent.drop_px}px and bending only{" "}
+                      {sp.descent.bend_px}px off a straight line.
+                    </div>
+                    {sp.descent_image_url && (
+                      <figure style={{ margin: "6px 0 0" }}>
+                        <a href={sp.descent_image_url} target="_blank"
+                           rel="noreferrer">
+                          <img src={sp.descent_image_url} alt="descent"
+                               style={{ width: "100%", borderRadius: 6 }} />
+                        </a>
+                        <figcaption className="tiny muted">
+                          The chain the detector linked, on the frame the
+                          ball landed in. White ring = the landing; this
+                          becomes the clip's green comet.
+                        </figcaption>
+                      </figure>
+                    )}
+                  </div>
+                ) : sp.descent_reason ? (
+                  <div className="tiny muted" style={{ marginTop: 8 }}>
+                    No descent: {sp.descent_reason}
+                  </div>
+                ) : null}
                 <div className="row" style={{ gap: 10, marginTop: 8,
                                               flexWrap: "wrap" }}>
                   {[["first", sp.first_image, sp.first_frame],

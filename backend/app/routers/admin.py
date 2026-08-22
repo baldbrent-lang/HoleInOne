@@ -15555,6 +15555,212 @@ def debug3_status(upload_id: int):
 # appearance question instead, inside the tee box, with the people taken
 # out, and reports every candidate rather than a winner.
 
+# A DESCENT IS FOUR POINTS FALLING NEARLY STRAIGHT DOWN. Three is
+# enough for `find_descents` on its own, where the fall-rate band does
+# the discriminating -- but here the descent is being used as PROOF that
+# a candidate is a real swing, and proof should cost more than a hint.
+# Four linked points that fall and barely bend is not something the tree
+# line produces.
+BALLSCAN_DESCENT_MIN_POINTS = 4
+# How straight. `find_descents` measures the chain's bend as the rms of
+# x against y in pixels; a real descent measured 0.1, 2.2 and 5.3px
+# across three shots on two clips, and its false positives 17.6 and
+# 21.7. Six is inside the real ones and well clear of both.
+BALLSCAN_DESCENT_MAX_BEND_PX = 6.0
+
+
+def _ball_scan_descents(row, db, spots, progress=None) -> dict:
+    """Match each resting-ball candidate to a descent on the green camera.
+
+    THE OTHER CAMERA IS THE WITNESS. A candidate from the tee scan is a
+    small pale dot that sat still and then stopped being there, which is
+    what a struck ball looks like and also what a picked-up ball, a
+    moved marker and a passing gull look like. The green camera settles
+    it: if a ball fell out of the sky onto this green five to eight
+    seconds after that spot emptied, the spot was a golf shot.
+    Otherwise it was not, whatever it looked like on the tee.
+
+    ONE PASS FOR ALL THE CANDIDATES. `find_descents` segments every
+    frame of the window it is given, so running it per candidate would
+    scan the same green clip a dozen times over. It is run ONCE across
+    the whole clip and the events are handed out by time -- a candidate
+    claims the descent that lands inside its own flight window.
+
+    Fills `descent` on each spot it can, and returns a summary. Never
+    raises: this confirms candidates, and a failure here should leave
+    them unconfirmed rather than take the scan down.
+    """
+    out = {"ok": False, "events": [], "n_matched": 0, "reason": None}
+    if not spots:
+        out["reason"] = "no candidates to match"
+        return out
+    if not row.green_filename:
+        out["reason"] = "no green camera on this upload — nothing to confirm"
+        return out
+    try:
+        storage.ensure_local(CLIPS_DIR, row.green_filename)
+        gp = CLIPS_DIR / row.green_filename
+        if not gp.exists():
+            out["reason"] = f"green file missing on disk: {row.green_filename}"
+            return out
+        from ..services import debug3 as _d3
+
+        gfps = float(probe_fps(gp) or 0.0)
+        tfps = float(probe_fps(CLIPS_DIR / row.tee_filename) or 0.0)
+        if gfps <= 0 or tfps <= 0:
+            out["reason"] = "could not read both cameras' frame rates"
+            return out
+        delta, delta_src = _d3_green_delta_sec(db, row)
+        out["green_fps"] = round(gfps, 3)
+        out["delta_sec"] = round(delta, 4)
+        out["delta_source"] = delta_src
+        if progress:
+            progress("Looking for ball descents on the green camera", 0, 1)
+        rep = _d3.find_descents(
+            gp, gfps,
+            min_points=BALLSCAN_DESCENT_MIN_POINTS,
+            max_bend_px=BALLSCAN_DESCENT_MAX_BEND_PX,
+        ) or {}
+        evs = list(rep.get("events") or [])
+        out["events"] = [
+            {k: e.get(k) for k in
+             ("last_descent_frame", "last_descent_sec", "landing_xy",
+              "n_points", "drop_px", "fall_rate", "bend_px")}
+            for e in evs
+        ]
+        out["scan_reason"] = rep.get("reason")
+        if not evs:
+            out["reason"] = (
+                "no descent found anywhere on the green camera — "
+                + str(rep.get("reason") or ""))
+            return out
+
+        _taken: set[int] = set()
+        for sp in spots:
+            _imp = sp.get("gone_frame")
+            if _imp is None:
+                continue
+            # The strike, on the GREEN clock. green_time = tee_time - delta.
+            _imp_green = (float(_imp) / tfps) - float(delta)
+            _lo = _imp_green + FLIGHT_LO_SEC
+            _hi = _imp_green + FLIGHT_HI_SEC
+            _best, _best_d = None, None
+            for k, e in enumerate(evs):
+                if k in _taken:
+                    continue
+                _t = float(e.get("last_descent_sec") or 0.0)
+                if not (_lo <= _t <= _hi):
+                    continue
+                # Nearest the middle of the window, then most points.
+                _d = abs(_t - (_lo + _hi) / 2.0)
+                if _best_d is None or _d < _best_d:
+                    _best, _best_d = k, _d
+            if _best is None:
+                sp["descent"] = None
+                sp["descent_reason"] = (
+                    f"nothing came down on the green between "
+                    f"{_lo:.1f}s and {_hi:.1f}s, where a ball struck here "
+                    f"would have landed")
+                continue
+            _taken.add(_best)
+            e = evs[_best]
+            sp["descent"] = {
+                "landing_frame": int(e["last_descent_frame"]),
+                "landing_sec": float(e["last_descent_sec"]),
+                "landing_xy": list(e["landing_xy"]),
+                "n_points": int(e["n_points"]),
+                "bend_px": e.get("bend_px"),
+                "drop_px": e.get("drop_px"),
+                "fall_rate": e.get("fall_rate"),
+                "points": e.get("points") or [],
+                "flight_sec": round(
+                    float(e["last_descent_sec"]) - _imp_green, 2),
+            }
+            sp["descent_reason"] = None
+            # A DESCENT IS THE CONFIRMATION. Everything else about a
+            # candidate is circumstantial; a ball falling onto the green
+            # in the right window is the shot itself, seen from the
+            # other end.
+            sp["confirmed_swing"] = True
+            out["n_matched"] += 1
+        out["ok"] = out["n_matched"] > 0
+        out["reason"] = (
+            f"{out['n_matched']} of {len(spots)} candidate(s) matched to a "
+            f"descent ({len(evs)} descent(s) on the green clip)")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ball scan: descent match failed on %s: %s", row.id, exc)
+        out["reason"] = f"failed: {exc}"
+        return out
+
+
+def _ball_scan_descent_images(row, spots, tok, rep) -> None:
+    """Draw each matched descent on the green frame it landed in.
+
+    SHOW WHAT IT LOOKED FOR. "Four points falling nearly straight down"
+    is a sentence; the operator's question is whether THIS chain is a
+    ball or the tree line, and only the picture answers that. The frame
+    is the one the ball came down in, the chain is drawn point to point
+    with each frame number, and the landing is ringed.
+    """
+    if not row.green_filename:
+        return
+    try:
+        import cv2  # type: ignore
+
+        gp = CLIPS_DIR / row.green_filename
+        if not gp.exists():
+            return
+        cap = cv2.VideoCapture(str(gp))
+        if not cap.isOpened():
+            return
+        try:
+            for i, sp in enumerate(spots):
+                d = sp.get("descent")
+                if not d or not d.get("points"):
+                    continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(d["landing_frame"]))
+                ok, im = cap.read()
+                if not ok or im is None:
+                    continue
+                _pts = d["points"]
+                _col = _hex_to_bgr(sp.get("color") or "#38bdf8")
+                for a_, b_ in zip(_pts, _pts[1:]):
+                    cv2.line(im, (a_["x"], a_["y"]), (b_["x"], b_["y"]),
+                             _col, 2, cv2.LINE_AA)
+                for q in _pts:
+                    cv2.circle(im, (q["x"], q["y"]), 6, _col, 2, cv2.LINE_AA)
+                    cv2.putText(im, f"f{q['frame']}", (q["x"] + 9, q["y"] - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.42, _col, 1,
+                                cv2.LINE_AA)
+                _lx, _ly = d["landing_xy"]
+                cv2.circle(im, (int(_lx), int(_ly)), 15, (255, 255, 255), 2,
+                           cv2.LINE_AA)
+                cv2.putText(
+                    im,
+                    f"{d['n_points']} pts, bend {d.get('bend_px')}px, "
+                    f"{d.get('flight_sec')}s after the strike",
+                    (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (255, 255, 255), 2, cv2.LINE_AA)
+                name = f"ballscan-{row.id}-{tok}-{i}-descent.jpg"
+                if cv2.imwrite(str(CLIPS_DIR / name), im,
+                               [int(cv2.IMWRITE_JPEG_QUALITY), 85]):
+                    sp["descent_image_url"] = _clip_url_for(name)
+        finally:
+            cap.release()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: descent images failed on %s: %s", row.id, exc)
+
+
+def _hex_to_bgr(h: str):
+    """'#38bdf8' -> (248, 189, 56). Falls back to a blue on anything odd."""
+    try:
+        h = str(h).lstrip("#")
+        return (int(h[4:6], 16), int(h[2:4], 16), int(h[0:2], 16))
+    except Exception:  # noqa: BLE001
+        return (248, 189, 56)
+
+
 def _ball_scan_run(row, src_path, db, progress=None) -> dict:
     """Every resting-ball candidate in the tee box, with pictures."""
     rep: dict = {
@@ -15608,6 +15814,11 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
 
     for i, sp in enumerate(spots):
         sp["color"] = _TC0[i % len(_TC0)]
+
+    # THE OTHER CAMERA'S VERDICT. Done before the crops so the pictures
+    # below can show which candidates it confirmed.
+    rep["descents"] = _ball_scan_descents(row, db, spots, progress=progress)
+    _ball_scan_descent_images(row, spots, tok, rep)
     try:
         cap = cv2.VideoCapture(str(src_path))
         for i, sp in enumerate(spots):
@@ -15777,7 +15988,9 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
     _t = time.perf_counter()
     scan = _ball_scan_run(row, src_path, db, progress=progress)
     rep["scan"] = {k: scan.get(k) for k in
-                   ("reason", "roi", "roi_source", "overview_url", "spots")}
+                   ("reason", "roi", "roi_source", "overview_url", "spots",
+                    "descents")}
+    rep["descents"] = scan.get("descents")
     _all = list(scan.get("spots") or [])
     _stage(1, "Resting-ball scan",
            "Appearance, not motion: a small whitish round thing on green, "
@@ -15786,12 +15999,29 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
            len(_all), "candidates", time.perf_counter() - _t)
 
     _t = time.perf_counter()
+    # A DESCENT OVERRULES THE SIT. The held-time rule is a proxy for "was
+    # this a ball waiting to be hit", and a ball seen falling onto the
+    # green five to eight seconds later is not a proxy for anything -- it
+    # is the shot. So a confirmed candidate is produced however briefly
+    # it sat, and an unconfirmed one still has to earn its place the old
+    # way.
     spots = [sp for sp in _all
-             if float(sp.get("held_sec") or 0.0) >= min_held]
-    _stage(2, f"Sat {min_held:.0f}s or longer",
+             if sp.get("confirmed_swing")
+             or float(sp.get("held_sec") or 0.0) >= min_held]
+    _n_conf = sum(1 for sp in spots if sp.get("confirmed_swing"))
+    _rescued = [sp for sp in spots
+                if sp.get("confirmed_swing")
+                and float(sp.get("held_sec") or 0.0) < min_held]
+    _stage(2, f"Sat {min_held:.0f}s or longer, or confirmed by a descent",
            "A ball waits on a tee while its owner walks up, picks a club "
            "and addresses it. Anything that appeared and vanished inside a "
-           "few seconds is a speck, or a marker being moved. Dropped: "
+           "few seconds is a speck, or a marker being moved — UNLESS the "
+           "green camera saw a ball come down in the window a shot from "
+           "here would land in, which settles it whatever the tee looked "
+           "like. Confirmed: " + str(_n_conf)
+           + (f" (of which {len(_rescued)} kept on the descent alone)"
+              if _rescued else "")
+           + ". Dropped: "
            + (", ".join(f"({sp['x']},{sp['y']}) {sp.get('held_sec')}s"
                         for sp in _all if sp not in spots) or "none"),
            len(spots), "kept", time.perf_counter() - _t)
@@ -15907,14 +16137,26 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
             # `run_wizard_produce_job` builds, so the clip that comes out
             # is the clip the wizard would have produced.
             _swing_of[len(_swings)] = len(rep["clips"])
-            _swings.append({
+            _sw = {
                 "idx": len(_swings),
                 "ball": [float(sp["x"]), float(sp["y"])],
                 "launch_frame": fl.get("launch_frame"),
                 "flight": pts,
                 "impact_frame": int(imp),
                 "candidates": fl.get("candidates") or [],
-            })
+            }
+            # THE DESCENT TRAVELS WITH THE SWING. It is the landing (so
+            # the tee tracer is aimed and paced by it) and it is the
+            # comet (so the green half shows the ball arriving) -- both
+            # from the one chain the green camera actually saw, rather
+            # than from a search that would have to find it again.
+            _d = sp.get("descent")
+            if _d:
+                _sw["green_track"] = _d.get("points") or []
+                _sw["landing_frame"] = int(_d["landing_frame"])
+                _sw["landing_spot"] = {"x": int(_d["landing_xy"][0]),
+                                       "y": int(_d["landing_xy"][1])}
+            _swings.append(_sw)
         except Exception as exc:  # noqa: BLE001
             log.warning("ball scan produce failed on %s: %s", row.id, exc)
             entry["reason"] = f"failed: {exc}"
@@ -15928,10 +16170,28 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
     if _swings:
         _t = time.perf_counter()
         try:
+            # `_d3_fast_produce` reads the comet and the landing off
+            # the upload's saved swings, so they have to be there before
+            # it runs. Written here rather than threaded through as
+            # arguments, because that is the same place the wizard and
+            # click-to-plot leave them and there should be one place to
+            # look.
+            for _s in _swings:
+                if _s.get("green_track"):
+                    _d3_save_swing(db, row.id, int(_s["idx"]), {
+                        "idx": int(_s["idx"]),
+                        "green_track": _s["green_track"],
+                        "landing_frame": _s["landing_frame"],
+                        "landing_spot": _s["landing_spot"],
+                    }, 0.0)
             _out = _d3_fast_produce(
                 row, src_path, db, {"swings": _swings}, fps,
                 progress=progress,
                 hole_number=_hole_for_upload(db, row),
+                # No `landing=` argument: it is a single value and there
+                # can be several candidates here, each with its own. The
+                # renderer takes each swing's landing from the comet
+                # saved above, which is per-swing and cannot be mixed up.
             ) or {}
             for _si, _c in enumerate(_out.get("clips") or []):
                 _ei = _swing_of.get(_si)

@@ -181,6 +181,12 @@ def find_path(video: Path, landing_frame: int, landing_xy, fps: float,
              "y": round(float(p["y"]), 1)} for p in chain], None
 
 
+# How long the resting ball takes to reach full brightness, in frames.
+# Short enough to be there when the viewer looks, long enough that it
+# settles rather than pops.
+_REST_FADE_FRAMES = 6
+
+
 def render_comet(src: Path, out: Path, points, first_frame: int,
                  tail_frames: int = 15) -> bool:
     """Draw a comet along `points` onto `src`, writing `out`.
@@ -256,6 +262,10 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
 
     _CORE = np.array(TRACER_CORE_BGR, dtype=np.float32)
     _HOT = np.array(TRACER_INNER_BGR, dtype=np.float32)
+    # Where the ball came to rest, and when it got there: the last
+    # plotted point. Everything after that frame gets the resting glow.
+    _last_f = max(by_frame)
+    _rest_xy = by_frame[_last_f]
     idx = 0
     try:
         while True:
@@ -319,6 +329,44 @@ def render_comet(src: Path, out: Path, points, first_frame: int,
                     col = _CORE + (_HOT - _CORE) * (a ** 2)
                     roi[:] = np.clip(
                         roi.astype(np.float32) * (1.0 - a) + col * a,
+                        0, 255,
+                    ).astype(np.uint8)
+            elif _rest_xy is not None and f > _last_f:
+                # THE BALL, SITTING WHERE IT FINISHED.
+                #
+                # The comet ends and the green half runs on for another
+                # second or two, and until now that tail was of an empty
+                # green -- the shot arrives and then vanishes, which is
+                # the moment the viewer is actually looking for. A small
+                # glow left on the last plotted point holds the answer
+                # on screen: the ball is THERE.
+                #
+                # Drawn the same way the comet is, through a blurred
+                # mask, so it reads as the same graphic settling rather
+                # than a marker appearing. It fades UP over a few frames
+                # for the same reason -- a hard cut-in looks like a
+                # different object.
+                _age = f - _last_f
+                _in = min(1.0, _age / max(1.0, _REST_FADE_FRAMES))
+                _rx, _ry = _rest_xy
+                _pad2 = 4 * _r
+                x0 = max(0, int(_rx) - _pad2)
+                x1b = min(W, int(_rx) + _pad2)
+                y0 = max(0, int(_ry) - _pad2)
+                y1b = min(H, int(_ry) + _pad2)
+                if x1b > x0 and y1b > y0:
+                    m2 = np.zeros((H, W), np.uint8)
+                    cv2.circle(m2, (int(round(_rx)), int(round(_ry))),
+                               max(2, int(round(_r * 0.55))), 255, -1,
+                               cv2.LINE_AA)
+                    _k2 = max(3, ((_r * 2) | 1))
+                    m2 = cv2.GaussianBlur(m2, (_k2, _k2), 0)
+                    roi = frame[y0:y1b, x0:x1b]
+                    a2 = ((m2[y0:y1b, x0:x1b].astype(np.float32) / 255.0)
+                          * _in)[:, :, None]
+                    col2 = _CORE + (_HOT - _CORE) * (a2 ** 2)
+                    roi[:] = np.clip(
+                        roi.astype(np.float32) * (1.0 - a2) + col2 * a2,
                         0, 255,
                     ).astype(np.uint8)
             vw.write(frame)
