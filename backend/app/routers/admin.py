@@ -15414,6 +15414,20 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
         return rep
 
     tok = secrets.token_hex(4)
+    # THE EDIT WIZARD'S PRODUCE, VERBATIM. The scan hands over the same
+    # two numbers an operator types into the wizard -- rest position and
+    # impact frame -- and the wizard turns those into an accurate tracer
+    # every time. This used to call `render_tracer_video` directly with
+    # a bare find_flight, which drew nothing: find_flight ran without
+    # `frame_w`/`frame_h`/`ball_side`, and the raw renderer is not the
+    # stage that builds a shipped clip. So do what the wizard does --
+    # find_flight with the same arguments, then `_d3_fast_produce`, the
+    # renderer stage 8 uses -- rather than a second, parallel path that
+    # can drift from it.
+    _fw, _fh = _probe_frame_size(src_path)
+    _side = _wizard_ball_side(db, row)
+    _swings: list[dict] = []      # what _d3_fast_produce will render
+    _swing_of: dict[int, int] = {}   # swing index -> rep["clips"] index
     for i, sp in enumerate(spots):
         if progress:
             progress(f"Tracing candidate {i + 1} of {len(spots)}", i, len(spots))
@@ -15434,6 +15448,12 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
             _fdbg: dict = {}
             fl = _d3.find_flight(
                 src_path, fps, impact_frame=int(imp),
+                # The wizard passes the frame size and the camera's ball
+                # side. Without them find_flight has no aim reference and
+                # no idea which way the ball leaves, which is most of the
+                # reason this path used to come back with no line at all.
+                frame_w=_fw, frame_h=_fh,
+                ball_side=_side,
                 rest_ball={"ok": True, "xy": [float(sp["x"]), float(sp["y"])],
                            "reason": "measured by the ball scan"},
                 ball_locked=True,
@@ -15488,29 +15508,64 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                     f"no flight from this ball: {fl.get('reason')}")
                 rep["clips"].append(entry)
                 continue
-            _t = time.perf_counter()
-            out = CLIPS_DIR / f"ballscan-{row.id}-{tok}-{i}.mp4"
-            rv = render_tracer_video(
-                src_path, out,
-                (float(sp["x"]), float(sp["y"])), int(imp), pts,
-                write_start=max(0, int(imp) - int(round(0.6 * fps))),
-                write_end=int(imp) + int(round(2.6 * fps)),
-                # The rest position was measured, not inferred, so the
-                # renderer's relocation guards have nothing better to
-                # offer than the number they would be second-guessing.
-                rest_verified=True,
-            ) or {}
-            entry["ok"] = bool(rv.get("ok"))
-            entry["reason"] = rv.get("error")
-            if rv.get("ok") and out.exists():
-                transcode_for_web(out)
-                entry["clip_url"] = _clip_url_for(out.name)
-                rep["n_traced"] += 1
-            _trender += time.perf_counter() - _t
+            if fl.get("launch_frame") is None:
+                entry["reason"] = "a flight, but no launch frame to cut from"
+                rep["clips"].append(entry)
+                continue
+            # Queue it for the wizard's renderer. Same swing record
+            # `run_wizard_produce_job` builds, so the clip that comes out
+            # is the clip the wizard would have produced.
+            _swing_of[len(_swings)] = len(rep["clips"])
+            _swings.append({
+                "idx": len(_swings),
+                "ball": [float(sp["x"]), float(sp["y"])],
+                "launch_frame": fl.get("launch_frame"),
+                "flight": pts,
+                "impact_frame": int(imp),
+                "candidates": fl.get("candidates") or [],
+            })
         except Exception as exc:  # noqa: BLE001
             log.warning("ball scan produce failed on %s: %s", row.id, exc)
             entry["reason"] = f"failed: {exc}"
         rep["clips"].append(entry)
+
+    # ── the wizard's renderer, once, over every candidate ──────────
+    # `_d3_fast_produce` takes a whole report and REPLACES this upload's
+    # produced clips, so it is called once with all the candidates rather
+    # than once per candidate — calling it in the loop would leave only
+    # the last one standing.
+    if _swings:
+        _t = time.perf_counter()
+        try:
+            _out = _d3_fast_produce(
+                row, src_path, db, {"swings": _swings}, fps,
+                progress=progress,
+                hole_number=_hole_for_upload(db, row),
+            ) or {}
+            for _si, _c in enumerate(_out.get("clips") or []):
+                _ei = _swing_of.get(_si)
+                if _ei is None:
+                    continue
+                _entry = rep["clips"][_ei]
+                if _c.get("clip_id"):
+                    _entry["ok"] = True
+                    _entry["clip_id"] = _c["clip_id"]
+                    _entry["clip_url"] = _c.get("url")
+                    _entry["tee_window_sec"] = _c.get("tee_window_sec")
+                    _entry["green"] = _c.get("green")
+                    rep["n_traced"] += 1
+                else:
+                    _entry["reason"] = _c.get("error") or "the renderer made no clip"
+            rep["produce_error"] = _out.get("error")
+            if _out.get("error"):
+                log.warning("ball scan produce: renderer said %s",
+                            _out.get("error"))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("ball scan produce: the renderer crashed: %s", exc)
+            rep["produce_error"] = f"{exc}"
+            for _ei in _swing_of.values():
+                rep["clips"][_ei].setdefault("reason", f"render failed: {exc}")
+        _trender += time.perf_counter() - _t
 
     _n_flight = sum(1 for c in rep["clips"] if c.get("n_points"))
     _stage(3, "Flight from the measured ball",
@@ -15520,8 +15575,11 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
            "exist to guess these two numbers, and they are already known.",
            _n_flight, "with a flight", _tflight)
     _stage(4, "Tracer clip",
-           "render_tracer_video over the strike, then an h264 transcode "
-           "so a browser will actually play it.",
+           "_d3_fast_produce — the same renderer the edit wizard's Produce "
+           "runs: tracer over the tee shot, cut to the green camera, and "
+           "committed to Produced Clips."
+           + (f" Renderer: {rep.get('produce_error')}"
+              if rep.get("produce_error") else ""),
            rep["n_traced"], "clips", _trender)
 
     rep["ok"] = rep["n_traced"] > 0
