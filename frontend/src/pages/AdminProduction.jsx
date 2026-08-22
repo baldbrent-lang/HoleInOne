@@ -441,7 +441,7 @@ function Thumb({ src, alt, missing, placeholder, onClick }) {
 
 function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
                      startsAt, missing, notUploaded, qualityLabel, width, height,
-                     videoUrl, recordingStartedAt, onOpenViewer }) {
+                     videoUrl, recordingStartedAt, onOpenViewer, footer }) {
   // When the tile has no underlying source (file missing or never
   // uploaded), every meta row renders blank — the labels stay so the
   // tiles in the row line up visually.
@@ -484,11 +484,18 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
             : ""}
         />
       </div>
+      {/* THE CONTROL LIVES UNDER THE PICTURE IT ACTS ON. The hitting
+          area is a thing drawn on the tee camera's frame and the
+          tee<->green map is a thing measured between the two cameras'
+          frames; both used to sit in the column of generic row buttons,
+          where nothing said which camera they were about. */}
+      {footer && <div style={{ marginTop: 6 }}>{footer}</div>}
     </div>
   );
 }
 
-function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip }) {
+function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
+                        onDeleteClip, onEditClip, onAddClip }) {
   // Right-most tile on the Production card: thumbnail + summary of every
   // produced clip cut from this upload. With multiple swings, toggle
   // through each produced clip (◀/▶); the thumbnail + play follow the
@@ -645,6 +652,43 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot, onDeleteClip
             ? ` (+${curSwing.mog2_stats.n_added} added)`
             : ""}
         </button>
+      )}
+      {/* EDIT THE CLIP YOU ARE LOOKING AT. Edit used to be a row-level
+          button that opened the wizard on a swing selector -- so the
+          operator picked a clip here with the arrows, clicked Edit, and
+          then had to find that same clip again in a second, differently
+          ordered list. This passes the selected clip straight through:
+          the wizard opens on ITS swing with no selector at all. */}
+      {(onEditClip || onAddClip) && (
+        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+          {onEditClip && (
+            <button
+              type="button"
+              className="small ghost"
+              style={{ flex: 1, width: "auto" }}
+              onClick={() => onEditClip(cur, curSwing, idx)}
+              disabled={!has}
+              title={has
+                ? `Edit clip ${idx + 1}${
+                    cur?.hole_number != null ? ` (hole ${cur.hole_number})` : ""
+                  } — ball, impact frame, landing and tracer for THIS clip only.`
+                : "Nothing produced yet to edit"}
+            >
+              ✎ Edit
+            </button>
+          )}
+          {onAddClip && (
+            <button
+              type="button"
+              className="small ghost"
+              style={{ flex: 1, width: "auto" }}
+              onClick={() => onAddClip()}
+              title="Add a clip the detector missed — opens the edit wizard on a new, blank swing spanning the upload, ready for its start, impact and end frames."
+            >
+              ＋ Add clip
+            </button>
+          )}
+        </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
         <MetaRow k="Clips" v={has ? clips.length : ""} />
@@ -1975,6 +2019,16 @@ function ClickToPlotModal({
  */
 function EditWizard({
   row, adminPassword, onClose, onSaved, onProducing, onProduceError,
+  // ONE CLIP AT A TIME, when the operator asked for one clip. Opened
+  // from a produced clip's own ✎ Edit, `focusClipId` names the clip they
+  // were looking at: the wizard lands on that clip's swing and hides the
+  // swing selector, because a picker that offers the other swings is
+  // exactly the thing they had already navigated past.
+  focusClipId = null,
+  // Opened from ＋ Add clip: seed a new blank swing on mount and land on
+  // it. Same `addSwing` the selector bar calls -- this only spares the
+  // operator having to go and find the button inside the wizard.
+  startNewSwing = false,
 }) {
   // Hydrate from whatever was already persisted: only auto-detect on
   // the very first Edit. Subsequent re-opens skip the AI call and
@@ -2013,7 +2067,19 @@ function EditWizard({
   // wizard. Both unused for single-swing rows.
   const isMulti = row?.swing_count === "multiple";
   const [swings, setSwings] = useState([]);
-  const [selectedSwing, setSelectedSwing] = useState(0);
+  // WHICH SWING TO OPEN ON, decided before the first render rather than
+  // in an effect afterwards -- hydration reads this to pick the draft it
+  // fills in, so a later correction would show the wrong clip's numbers
+  // for a beat and re-fire the auto-render on the wrong swing.
+  const [selectedSwing, setSelectedSwing] = useState(() => {
+    if (focusClipId == null) return 0;
+    const arr = row?.edit_metrics?.swings || [];
+    const p = arr.findIndex(
+      (s) => s?.clip_id != null && s.clip_id === focusClipId);
+    return p >= 0 ? p : 0;
+  });
+  // Single-clip edit: no selector bar, and Produce is about this swing.
+  const soloClip = focusClipId != null;
   // Mirror of selectedSwing readable inside async callbacks without
   // re-creating them, so a render that finishes after the operator
   // switched tabs only updates the display if they're still on that swing.
@@ -2164,6 +2230,18 @@ function EditWizard({
       totalFrames: row.tee_nb_frames || null,
     });
   }, [row, adminPassword]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ＋ Add clip: seed the new swing once the existing ones are loaded.
+  // It has to wait for hydration -- `addSwing` appends to `swings`, and
+  // running it against the empty initial array would throw away every
+  // swing already on the row.
+  const seededNewSwing = useRef(false);
+  useEffect(() => {
+    if (!startNewSwing || seededNewSwing.current) return;
+    if (!isMulti || swings.length === 0) return;
+    seededNewSwing.current = true;
+    addSwing();
+  }, [startNewSwing, isMulti, swings.length]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Multi-swing: re-hydrate the draft whenever the operator picks a
   // different swing from the selector bar.
@@ -2815,7 +2893,7 @@ function EditWizard({
               switch the Tracer engine below.
             </div>
           )}
-          {isMulti && swings.length > 0 && (
+          {isMulti && !soloClip && swings.length > 0 && (
             <SwingSelectorBar
               swings={swings}
               selectedSwing={selectedSwing}
@@ -12338,6 +12416,10 @@ export default function AdminProduction() {
   const [swingTest, setSwingTest] = useState(null);
   const [ballScan, setBallScan] = useState(null);
   const [hitArea, setHitArea] = useState(null);
+  // Tee <-> green calibration, opened from under the green raw video.
+  // { uploadId, tee, green, existing, scope } once the two frames and
+  // any saved map are in hand; { uploadId, loading } while fetching.
+  const [greenCal, setGreenCal] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -12841,12 +12923,54 @@ export default function AdminProduction() {
     })();
   }
 
-  function handleEdit(row) {
-    // Both single-swing and multi-swing uploads open the EditWizard.
-    // The wizard switches its internal flow based on row.swing_count
-    // — single uses the flat edit_metrics; multi works on a per-swing
-    // edit_metrics.swings[] array with a swing-selector bar at the top.
-    setEditingRow(row);
+  function handleEdit(row, opts = {}) {
+    // Opens the EditWizard. `focusClipId` edits ONE produced clip and
+    // hides the swing selector; `startNewSwing` opens on a fresh blank
+    // swing. Neither is a second wizard -- both are the same component
+    // told where to land, which is why an edit made from a clip and an
+    // edit made from the row cannot drift apart.
+    setEditingRow({
+      ...row,
+      __focusClipId: opts.focusClipId ?? null,
+      __startNewSwing: !!opts.startNewSwing,
+    });
+  }
+
+  async function openGreenCal(row) {
+    // THE SAME CALIBRATOR THE WIZARD OPENS, reachable without one. It
+    // is a property of the two CAMERAS -- clicking the same ground
+    // features in a tee frame and a green frame fits one homography per
+    // hole, and every swing those cameras ever record is aimed by it --
+    // so needing to be part-way through editing a swing to get at it was
+    // an accident of where the button happened to live.
+    //
+    // The frames are only backdrops to click on, so any pair will do:
+    // the first produced swing's impact frame when there is one, else
+    // frame 0 on both.
+    const sw = (row.edit_metrics?.swings || [])[0] || row.edit_metrics || {};
+    const teeF = sw.impact_frame ?? 0;
+    const greenF = sw.landing_frame ?? 0;
+    setGreenCal({ uploadId: row.id, loading: true });
+    try {
+      const [t, g, vm] = await Promise.all([
+        api.getLongUploadFrame(adminPassword, row.id, teeF, "tee"),
+        api.getLongUploadFrame(adminPassword, row.id, greenF, "green",
+                               sw.impact_frame ?? null),
+        api.getViewMap(adminPassword, row.id).catch(() => null),
+      ]);
+      setGreenCal({
+        uploadId: row.id,
+        tee: { ...t, frame: teeF },
+        green: { ...g, frame: greenF },
+        existing: vm?.view_map || null,
+        // Worth saying out loud: this is saved against the HOLE, not
+        // this upload, so it is about to change every swing recorded
+        // there -- not only the one the operator opened it from.
+        scope: vm?.course_name ? `${vm.course_name} · hole ${vm.hole}` : null,
+      });
+    } catch (e) {
+      setGreenCal({ uploadId: row.id, error: e?.message || String(e) });
+    }
   }
 
   async function handleProduce(row) {
@@ -13221,6 +13345,16 @@ export default function AdminProduction() {
                   videoUrl={row.tee_url}
                   recordingStartedAt={row.tee_recording_started_at}
                   onOpenViewer={openViewer}
+                  footer={(
+                    <button
+                      className="small ghost"
+                      style={{ width: "100%" }}
+                      onClick={() => setHitArea({ uploadId: row.id })}
+                      title="View and draw the hitting area for this hole and day — the box every ball search on this camera is restricted to. Tilt it to match the tee deck."
+                    >
+                      ⬛ Hitting area
+                    </button>
+                  )}
                 />
                 <VideoTile
                   label="Green Angle (Raw Video)"
@@ -13238,6 +13372,19 @@ export default function AdminProduction() {
                   videoUrl={row.dual_camera ? row.green_url : null}
                   recordingStartedAt={row.dual_camera ? row.green_recording_started_at : null}
                   onOpenViewer={openViewer}
+                  footer={(
+                    <button
+                      className="small ghost"
+                      style={{ width: "100%" }}
+                      disabled={!row.dual_camera}
+                      onClick={() => openGreenCal(row)}
+                      title={row.dual_camera
+                        ? "Map the green camera's view onto the tee camera's, by clicking the same ground features in both. Done ONCE per hole — every swing these two cameras record afterwards is aimed by it."
+                        : "No green camera on this upload"}
+                    >
+                      ⊹ Calibrate green
+                    </button>
+                  )}
                 />
                 <ProducedTile
                   clips={producedClips}
@@ -13253,6 +13400,9 @@ export default function AdminProduction() {
                       swingPos: pos >= 0 ? pos : swingIdx,
                     });
                   }}
+                  onEditClip={(clip) =>
+                    handleEdit(row, { focusClipId: clip?.id ?? null })}
+                  onAddClip={() => handleEdit(row, { startNewSwing: true })}
                   onDeleteClip={(clip, clipIdx) => {
                     const label = clip.hole_number != null
                       ? `clip ${clipIdx + 1} (hole ${clip.hole_number})`
@@ -13375,13 +13525,10 @@ export default function AdminProduction() {
                     Queued
                   </span>
                 )}
-                <button
-                  className="small"
-                  onClick={() => handleEdit(row)}
-                  disabled={greyed || busy}
-                >
-                  Edit
-                </button>
+                {/* Edit moved under Produced Video, where the clip it
+                    edits is on screen and can be handed straight to it.
+                    Add clip is beside it, for the swing the detector
+                    missed. */}
                 {state === "produced" ? (
                   <button
                     className="small"
@@ -13444,15 +13591,6 @@ export default function AdminProduction() {
                     title="Dev: every resting-ball candidate in the tee box — where, first frame seen, last frame before it went, with pictures. People are masked out; motion is not used, because a resting ball does not move."
                   >
                     ⚪ Scan for ball
-                  </button>
-                )}
-                {produceDebug.enabled && (
-                  <button
-                    className="small ghost"
-                    onClick={() => setHitArea({ uploadId: row.id })}
-                    title="View and draw the hitting area for this hole and day — the box every ball search is restricted to. Tilt it to match the tee deck."
-                  >
-                    ⬛ Hitting area
                   </button>
                 )}
                 {produceDebug.enabled && (
@@ -13569,6 +13707,8 @@ export default function AdminProduction() {
       {editingRow && (
         <EditWizard
           row={editingRow}
+          focusClipId={editingRow.__focusClipId ?? null}
+          startNewSwing={!!editingRow.__startNewSwing}
           adminPassword={adminPassword}
           onClose={() => { setEditingRow(null); refreshAll(); }}
           onSaved={refreshAll}
@@ -13640,6 +13780,43 @@ export default function AdminProduction() {
         <HittingAreaModal state={hitArea} adminPassword={adminPassword}
                           onClose={() => setHitArea(null)} />
       )}
+      {greenCal && (greenCal.loading || greenCal.error ? (
+        <div
+          role="dialog"
+          onClick={() => setGreenCal(null)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 1200,
+            background: "rgba(0,0,0,0.75)", display: "flex",
+            alignItems: "center", justifyContent: "center", padding: 16,
+          }}
+        >
+          <div className="card" onClick={(e) => e.stopPropagation()}
+               style={{ margin: 0, padding: 18, maxWidth: 460 }}>
+            <div className="row" style={{ justifyContent: "space-between",
+                                          gap: 12 }}>
+              <b>⊹ Calibrate green</b>
+              <button className="btn ghost" style={{ width: "auto" }}
+                      onClick={() => setGreenCal(null)}>Close ✕</button>
+            </div>
+            <div style={{ marginTop: 10 }}>
+              {greenCal.error
+                ? <div className="err-text small">{greenCal.error}</div>
+                : <div className="small">Fetching a frame from each camera…</div>}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <ViewMapModal
+          uploadId={greenCal.uploadId}
+          adminPassword={adminPassword}
+          teeFrame={greenCal.tee}
+          greenFrame={greenCal.green}
+          existing={greenCal.existing}
+          scope={greenCal.scope}
+          onClose={() => setGreenCal(null)}
+          onSaved={() => { setGreenCal(null); refreshAll(); }}
+        />
+      ))}
       {swingTest && (
         <SwingTestModal
           state={swingTest}
