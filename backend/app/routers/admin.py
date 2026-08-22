@@ -15415,19 +15415,54 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                        "clip_url": None, "reason": None}
         try:
             _t = time.perf_counter()
+            _fdbg: dict = {}
             fl = _d3.find_flight(
                 src_path, fps, impact_frame=int(imp),
                 rest_ball={"ok": True, "xy": [float(sp["x"]), float(sp["y"])],
                            "reason": "measured by the ball scan"},
                 ball_locked=True,
+                debug_dir=CLIPS_DIR,
+                debug_prefix=f"ballscan-{row.id}-{tok}-{i}",
             ) or {}
             _tflight += time.perf_counter() - _t
             entry["flight_ok"] = bool(fl.get("ok"))
             entry["flight_reason"] = fl.get("reason")
+            # THE SAME WORKING DEBUG3 SHOWS. A produced clip is a claim
+            # about where a ball went, and the only way to disagree with
+            # it is to see what else was on offer and why this won.
+            _fdbg = fl.get("debug") or {}
+            _fit = _fdbg.get("flight") or {}
+            entry["n_tracks"] = _fdbg.get("n_tracks")
+            entry["tracks_preview"] = _fdbg.get("tracks_preview") or []
+            entry["tried"] = _fit.get("tried")
+            entry["fit"] = {
+                "n_inliers": _fit.get("n_inliers"),
+                "rms_px": _fit.get("rms_px"),
+                "at_impact": _fit.get("at_impact"),
+                "x_degree": _fit.get("x_degree"),
+                "aim_px": _fit.get("aim_px"),
+                "aim_basis": _fit.get("aim_basis"),
+            }
+            entry["detect_stats"] = (_fdbg.get("detect") or {}).get("stats")
+            for _k, _src in (("dets_image_url",
+                              (_fdbg.get("detect") or {}).get("images", {})
+                              .get("dets")),
+                             ("tracks_image_url", _fdbg.get("tracks_image")),
+                             ("flight_image_url", _fdbg.get("flight_image"))):
+                entry[_k] = _clip_url_for(_src)
+            # find_flight returns the chosen path as `points`. There is
+            # no top-level `fit` on it -- Debug3 builds one of its own
+            # from exactly this list, and reading `fl["fit"]` here found
+            # nothing and would have rendered no clip at all while
+            # reporting a flight it had genuinely found.
             pts = [{"frame": int(q["frame"]), "x": float(q["x"]),
                     "y": float(q["y"])}
-                   for q in ((fl.get("fit") or {}).get("inliers") or [])]
+                   for q in (fl.get("points") or [])]
             entry["n_points"] = len(pts)
+            entry["flight_points"] = [
+                {"frame": q["frame"], "x": round(q["x"], 1),
+                 "y": round(q["y"], 1)} for q in pts
+            ]
             if not pts:
                 entry["reason"] = (
                     f"no flight from this ball: {fl.get('reason')}")

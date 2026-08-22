@@ -6932,6 +6932,180 @@ function BallScanModal({ state, onClose }) {
                   <span className="muted"> · {c.reason
                     || c.flight_reason || "no clip"}</span>
                 )}
+
+                {/* WHAT ELSE WAS ON OFFER. A produced clip is a claim
+                    about where a ball went; the only way to disagree
+                    with it is to see the paths it beat. */}
+                {(c.tried || []).length > 0 && (
+                  <details style={{ marginTop: 4 }}>
+                    <summary className="muted">
+                      {c.n_tracks} track(s) found, {c.tried.length} fitted —
+                      every path considered and why it lost
+                    </summary>
+                    <div style={{ overflowX: "auto", marginTop: 4 }}>
+                      <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
+                        <thead>
+                          <tr className="muted" style={{ textAlign: "left" }}>
+                            <th style={{ padding: "2px 6px" }}>#</th>
+                            <th style={{ padding: "2px 6px" }}>frames</th>
+                            <th style={{ padding: "2px 6px" }}>pts</th>
+                            <th style={{ padding: "2px 6px" }}>inliers</th>
+                            <th style={{ padding: "2px 6px" }}>rms</th>
+                            <th style={{ padding: "2px 6px" }}>rise</th>
+                            <th style={{ padding: "2px 6px" }}>aims</th>
+                            <th style={{ padding: "2px 6px" }}>score</th>
+                            <th style={{ padding: "2px 6px" }}>verdict</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {c.tried.map((t) => {
+                            const won = /^accepted/.test(t.verdict || "");
+                            return (
+                              <tr key={t.idx}
+                                  style={{
+                                    borderTop: "1px solid var(--line)",
+                                    background: won
+                                      ? "rgba(0,160,80,0.12)" : "none",
+                                  }}
+                                  title={t.aim_basis || ""}>
+                                <td style={{ padding: "2px 6px" }}>{t.idx}</td>
+                                <td style={{ padding: "2px 6px" }}>
+                                  f{t.frames?.[0]}–{t.frames?.[1]}
+                                </td>
+                                <td style={{ padding: "2px 6px" }}>{t.n_points}</td>
+                                <td style={{ padding: "2px 6px" }}>{t.n_inliers}</td>
+                                <td style={{ padding: "2px 6px" }}>{t.rms_px}</td>
+                                <td style={{ padding: "2px 6px" }}>
+                                  {Math.round(t.rise_px)}
+                                </td>
+                                <td style={{ padding: "2px 6px" }}>
+                                  {t.aim_px != null ? `${Math.round(t.aim_px)}px` : "—"}
+                                </td>
+                                <td style={{ padding: "2px 6px" }}>
+                                  {t.score != null ? <b>{t.score}</b> : "—"}
+                                </td>
+                                <td style={{ padding: "2px 6px" }}>
+                                  {won ? <b>{t.verdict}</b> : t.verdict}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="muted" style={{ marginTop: 4 }}>
+                      <b>aims</b> is how far the path passes from the ball when
+                      run down to its height — the test that separates a real
+                      flight from a bird, a cart and a sleeve. Hover a row for
+                      how that distance was measured.
+                    </div>
+                  </details>
+                )}
+
+                {(c.tracks_preview || []).length > 0 && (
+                  <details style={{ marginTop: 4 }}>
+                    <summary className="muted">
+                      The {c.tracks_preview.length} track(s) drawn on the pictures
+                    </summary>
+                    <div style={{ overflowX: "auto", marginTop: 4 }}>
+                      <table style={{ borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr className="muted" style={{ textAlign: "left" }}>
+                            <th style={{ padding: "2px 8px" }}>#</th>
+                            <th style={{ padding: "2px 8px" }}>why</th>
+                            <th style={{ padding: "2px 8px" }}>pts</th>
+                            <th style={{ padding: "2px 8px" }}>frames</th>
+                            <th style={{ padding: "2px 8px" }}>span</th>
+                            <th style={{ padding: "2px 8px" }}>rise</th>
+                            <th style={{ padding: "2px 8px" }}>density</th>
+                            <th style={{ padding: "2px 8px" }}>from → to</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {c.tracks_preview.map((t) => (
+                            <tr key={t.idx}
+                                style={{ borderTop: "1px solid var(--line)" }}>
+                              <td style={{ padding: "2px 8px" }}>
+                                <span style={{
+                                  display: "inline-block", width: 9, height: 9,
+                                  borderRadius: 2, marginRight: 5,
+                                  background: Array.isArray(t.color)
+                                    ? `rgb(${t.color[2]},${t.color[1]},${t.color[0]})`
+                                    : "#888",
+                                }} />
+                                {t.idx}
+                              </td>
+                              <td style={{ padding: "2px 8px" }}>{t.why}</td>
+                              <td style={{ padding: "2px 8px" }}>{t.n}</td>
+                              <td style={{ padding: "2px 8px" }}>
+                                f{t.frames?.[0]}–{t.frames?.[1]}
+                              </td>
+                              <td style={{ padding: "2px 8px" }}>
+                                {Math.round(t.span_px)}
+                              </td>
+                              <td style={{ padding: "2px 8px" }}>
+                                {Math.round(t.rise_px)}
+                              </td>
+                              <td style={{ padding: "2px 8px" }}>
+                                {t.density?.toFixed?.(2) ?? t.density}
+                              </td>
+                              <td style={{ padding: "2px 8px" }}>
+                                ({t.from?.[0]},{t.from?.[1]}) → ({t.to?.[0]},{t.to?.[1]})
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {c.fit && (
+                      <div className="muted" style={{ marginTop: 4 }}>
+                        <b>Winner:</b> {c.fit.n_inliers} inlier(s), rms{" "}
+                        {c.fit.rms_px}px, x degree {c.fit.x_degree}
+                        {c.fit.aim_px != null && (
+                          <> · run down to the ball&apos;s height it passes{" "}
+                            <b>{c.fit.aim_px}px</b> from it
+                            {c.fit.aim_basis ? ` (${c.fit.aim_basis})` : ""}</>
+                        )}
+                      </div>
+                    )}
+                    <div className="row" style={{ gap: 8, marginTop: 6,
+                                                  flexWrap: "wrap" }}>
+                      {[["every ball-sized blob", c.dets_image_url],
+                        ["tracks", c.tracks_image_url],
+                        ["the chosen flight", c.flight_image_url]].map(
+                        ([lab, url]) => url ? (
+                          <figure key={lab}
+                                  style={{ margin: 0, flex: "1 1 260px" }}>
+                            <a href={url} target="_blank" rel="noreferrer">
+                              <img src={url} alt={lab}
+                                   style={{ width: "100%", borderRadius: 6 }} />
+                            </a>
+                            <figcaption className="muted">{lab}</figcaption>
+                          </figure>
+                        ) : null,
+                      )}
+                    </div>
+                  </details>
+                )}
+
+                {(c.flight_points || []).length > 0 && (
+                  <details style={{ marginTop: 4 }}>
+                    <summary className="muted">
+                      {c.flight_points.length} flight point(s) — the path the
+                      tracer drew
+                    </summary>
+                    <div className="muted"
+                         style={{ marginTop: 4, fontFamily: "monospace",
+                                  fontSize: 11, maxHeight: 160,
+                                  overflow: "auto" }}>
+                      {c.flight_points.map((q) => (
+                        <div key={q.frame}>
+                          f{q.frame}: {q.x}, {q.y}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
               </div>
             ))}
           </div>
