@@ -18253,6 +18253,11 @@ D3_LANDING_LEAD_SEC = 1.5    # green starts this far before the touchdown
 # — the tee half is the swing, the green half is the result. One constant
 # drives all three consumers (the audio bed rendered under the green
 # half, the green cut itself, and the splice), so they cannot drift.
+# How long the green half runs on AFTER the ball has come to rest. A
+# clip that stops on the instant of touchdown reads as a cut mistake --
+# the viewer never sees the result of the shot, which is the thing they
+# were waiting for.
+D3_GREEN_TAIL_SEC = 1.5
 D3_GREEN_SEC = 6.0
 # Floor for an operator-trimmed green side. Below about a second the cut
 # reads as a glitch rather than a shot landing, and an end frame that
@@ -18613,6 +18618,28 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                     _g_start,
                     max(0.0, float(landing["sec"]) - D3_LANDING_LEAD_SEC),
                 )
+            # BRACKET THE COMET. Where the descent is drawn is known
+            # exactly when the operator plotted it, so the green half
+            # has no excuse for cutting across it. Measured on a real
+            # clip: a seven-frame comet ended up in the last 0.4s of a
+            # 3.9s green half -- the ball arrived as the clip stopped,
+            # which is the one moment it must not.
+            #
+            # `_g_start` above takes the EARLIER of the cutover and
+            # lead-in before touchdown, and the cutover can be a long
+            # way earlier, so the landing drifts to the end. Start no
+            # later than a lead-in before the comet's FIRST frame, and
+            # make sure the length below reaches past its last.
+            _comet_span = None
+            if green_path is not None:
+                _gt_b = _saved_green_track(row, _slot)
+                _gfps_b = float(probe_fps(green_path) or 0.0)
+                if _gt_b and _gfps_b > 0:
+                    _c0 = min(int(q["frame"]) for q in _gt_b) / _gfps_b
+                    _c1 = max(int(q["frame"]) for q in _gt_b) / _gfps_b
+                    _comet_span = (_c0, _c1)
+                    _g_start = min(
+                        _g_start, max(0.0, _c0 - D3_LANDING_LEAD_SEC))
 
             # How much green follows the cutover. Normally D3_GREEN_SEC;
             # when the operator set an end frame in the wizard, the
@@ -18636,6 +18663,20 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         "the operator's end frame (default %.1fs)",
                         i, _green_sec, D3_GREEN_SEC,
                     )
+            # ...and never so short that it cuts the comet off. An end
+            # frame the operator set BEFORE plotting a descent is not a
+            # decision to hide the descent; it is an older answer to a
+            # different question.
+            if _comet_span is not None:
+                _need = (_comet_span[1] + D3_LANDING_HOLD_SEC
+                         + D3_GREEN_TAIL_SEC) - _g_start
+                if _need > _green_sec:
+                    log.info(
+                        "d3 produce: swing %s green side %.2fs -> %.2fs so "
+                        "the plotted descent (%.2fs..%.2fs) is inside it",
+                        i, _green_sec, _need, _comet_span[0], _comet_span[1],
+                    )
+                    _green_sec = _need
 
             # The tee file must also carry the audio bed under the green
             # half, so render past the cutover even though that footage
