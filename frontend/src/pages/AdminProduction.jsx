@@ -1473,10 +1473,19 @@ function ClickToPlotModal({
         .map((p) => ({ frame: p.frame, x: p.x, y: p.y }))
         .sort((a, b) => a.frame - b.frame);
       await api.wizardProduce(adminPassword, row.id, {
+        // NO BALL AT REST IS NORMAL HERE. Click-to-plot is often used on
+        // exactly the swings where the rest ball was never found -- the
+        // operator plots the flight off the motion map instead. The
+        // first plotted point is where the line starts, so it stands in;
+        // sending null rejected the save with a 400 and the whole plot
+        // went nowhere.
         ball: ballAtRest
           ? [ballAtRest.x, ballAtRest.y]
-          : (swing.ball ? [swing.ball.x, swing.ball.y] : null),
-        impact_frame: impactFrame ?? swing.impact_frame ?? null,
+          : (swing.ball
+            ? [swing.ball.x, swing.ball.y]
+            : (plotted.length ? [plotted[0].x, plotted[0].y] : null)),
+        impact_frame: impactFrame ?? swing.impact_frame
+          ?? (plotted.length ? plotted[0].frame : null),
         landing_frame: landing?.frame ?? null,
         landing_spot: landing ? [landing.x, landing.y] : null,
         hole_number: holeNumber,

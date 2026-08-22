@@ -9617,15 +9617,58 @@ def wizard_produce(
     if not row:
         raise HTTPException(404, "long upload not found")
 
+    # THE PLOTTED TRACK, read FIRST because the ball can come out of it.
+    points = payload.get("points")
+    if points is not None and not isinstance(points, list):
+        raise HTTPException(400, "points must be a list of {frame, x, y}")
+    _pts_ok = []
+    for _p in (points or []):
+        try:
+            _pts_ok.append((int(_p["frame"]), float(_p["x"]), float(_p["y"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    _pts_ok.sort()
+
     ball = payload.get("ball")
+    if (not isinstance(ball, (list, tuple)) or len(ball) < 2) and _pts_ok:
+        # NO REST BALL, BUT A LINE. Click-to-plot can be used on a swing
+        # whose ball at rest was never found -- the operator plots the
+        # flight from the motion map and the renderer starts the line at
+        # "the extrapolated launch origin", which is exactly this point.
+        # Requiring the ball anyway rejected the save with a 400 and the
+        # operator's whole plot went nowhere; the produce ran on every
+        # OTHER swing, so it read as click-to-plot silently not working.
+        ball = [_pts_ok[0][1], _pts_ok[0][2]]
+        log.info(
+            "wizard produce: upload=%s has no ball at rest — starting the "
+            "tracer at the first plotted point (%.0f, %.0f) f%d",
+            upload_id, ball[0], ball[1], _pts_ok[0][0],
+        )
     if (not isinstance(ball, (list, tuple)) or len(ball) < 2):
-        raise HTTPException(400, "ball must be [x, y]")
+        raise HTTPException(
+            400,
+            "ball must be [x, y] — this swing has no ball at rest and no "
+            "plotted track to start the line from. Place the ball on the "
+            "tee map, or plot at least two points.",
+        )
     try:
         bx, by = float(ball[0]), float(ball[1])
     except (TypeError, ValueError):
         raise HTTPException(400, "ball must be two numbers")
+    if payload.get("impact_frame") is None and _pts_ok:
+        # Same reasoning: the first plotted frame is when the line
+        # starts, which is the only thing impact_frame is used for here.
+        payload = {**payload, "impact_frame": _pts_ok[0][0]}
+        log.info(
+            "wizard produce: upload=%s has no impact frame — taking the "
+            "first plotted frame, f%d", upload_id, _pts_ok[0][0],
+        )
     if payload.get("impact_frame") is None:
-        raise HTTPException(400, "impact_frame is required")
+        raise HTTPException(
+            400,
+            "impact_frame is required — set it on the tee map, or plot at "
+            "least two points and the first one is used.",
+        )
     try:
         impact_frame = int(payload["impact_frame"])
     except (TypeError, ValueError):
@@ -9670,11 +9713,8 @@ def wizard_produce(
     # THE WIZARD WAS OPEN ON ONE CLIP. ✎ Edit and ＋ Add both send this,
     # and it decides whether Produce means "this clip" or "this upload".
     # Defaults to False, so nothing that does not ask for it changes.
-    # THE OPERATOR'S PLOTTED TRACK, from click-to-plot's Save & close.
-    # With it, produce renders their line; without it, it finds its own.
-    points = payload.get("points")
-    if points is not None and not isinstance(points, list):
-        raise HTTPException(400, "points must be a list of {frame, x, y}")
+    # (`points` was parsed at the top -- the ball and impact frame can be
+    # derived from it, so it has to be read before they are validated.)
     try:
         launch_frame = payload.get("launch_frame")
         launch_frame = (int(launch_frame)
