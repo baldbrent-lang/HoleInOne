@@ -1311,81 +1311,40 @@ function ClickToPlotModal({
             }
           : {}),
       });
-      // 2. Re-finalize with the swing's saved graphics + frame window.
-      // `swing` gives this swing its OWN final file so it can't clobber
-      // the video behind another swing's committed clip.
-      stage("Applying the graphics…");
-      const fin = await api.finalizeWizardVideo(adminPassword, row.id, {
-        player_name: swing.finalized_player_name || "Brent Baldwin",
-        hole_number: holeNumber,
-        yardage: swing.finalized_yardage ?? null,
-        start_frame: swing.start_frame ?? null,
-        end_frame: swing.end_frame ?? null,
-        cut_frame: swing.cut_frame ?? null,
-        // WITHOUT THIS THE CLIP STOPS CUTTING TO THE GREEN. finalize
-        // decides the cutover from cut_frame, falling back to
-        // impact_frame + 2.5s when there is no explicit cut. Produce
-        // never persists a per-swing cut_frame, so that fallback is the
-        // only thing that puts the green in — and it needs an impact
-        // frame. Omitting it meant _pick_frame fell through to the
-        // TOP-LEVEL edit_metrics, which on a multi-swing upload has no
-        // impact_frame at all, so cut_src_sec came out None and the
-        // finalize silently produced a tee-only clip.
+      // 2. PRODUCE, the same way the edit wizard's Produce does.
+      //
+      // This used to be three legacy calls -- render-tracer-fast, then
+      // finalize, then commit-clip -- while the wizard's Produce went
+      // through find_flight + _d3_fast_produce. Two paths, and they had
+      // drifted: the wizard's tracer flew and held for the whole tee
+      // half while a clip saved from here came back with a short stub.
+      // One renderer, so they cannot disagree again.
+      //
+      // The plotted points go WITH the request. That is the whole
+      // difference between the two callers: produce normally finds its
+      // own flight, and here the operator has just overruled it by
+      // hand, so their line is handed over and find_flight is skipped.
+      stage("Producing the clip…");
+      const plotted = (fast.ball_track_frames || [])
+        .filter((p) => p && p.found !== false
+          && p.x != null && p.y != null && p.frame != null)
+        .map((p) => ({ frame: p.frame, x: p.x, y: p.y }))
+        .sort((a, b) => a.frame - b.frame);
+      await api.wizardProduce(adminPassword, row.id, {
+        ball: ballAtRest
+          ? [ballAtRest.x, ballAtRest.y]
+          : (swing.ball ? [swing.ball.x, swing.ball.y] : null),
         impact_frame: impactFrame ?? swing.impact_frame ?? null,
-        swing: swing.idx ?? swingPos,
-        // THE COMET SURVIVES THE SAVE. finalize composites the green
-        // camera into the clip, and without these it composites the RAW
-        // one — so a save here used to wipe the comet produce had drawn.
-        // The chain if one has been found, else the landing to walk back
-        // from; either way this decides the green half.
-        green_track: (cometPoints.length > 1 ? cometPoints : null)
-          || swing.green_track || null,
         landing_frame: landing?.frame ?? null,
         landing_spot: landing ? [landing.x, landing.y] : null,
+        hole_number: holeNumber,
+        // THIS SWING ONLY. Click-to-plot is opened on one clip, so a
+        // save from it must not clear the upload's other clips.
+        solo: true,
+        swing_idx: swing.idx ?? swingPos,
+        points: plotted.length >= 2 ? plotted : null,
+        launch_frame: plotted.length ? plotted[0].frame : null,
       });
-      nextSwings = nextSwings.map((s, i) =>
-        i === swingPos
-          ? {
-              ...s,
-              finalized_video_url: fin.final_video_url,
-              finalized_hole_number: holeNumber,
-              finalized_player_name:
-                swing.finalized_player_name || "Brent Baldwin",
-            }
-          : s
-      );
-      await api.saveEditMetrics(adminPassword, row.id, { swings: nextSwings });
-      // 3. Commit to Produced Clips — target THIS swing's clip. Prefer
-      // the clip id recorded on the swing (survives clip deletions that
-      // shift positions); fall back to position (clip order matches
-      // swing order on an untouched row). Without clip_id the backend
-      // updates the upload's most recent clip, i.e. some other swing.
-      stage("Updating Produced Clips…");
-      // ONLY A CLIP THAT STILL EXISTS. The id recorded on the swing
-      // outlives the clip: delete the produced clip and the swing keeps
-      // pointing at it, so the commit came back 404 "clip not found on
-      // this upload" and the whole save died at the last step. If the
-      // recorded clip is not among the row's clips any more, commit
-      // without it and let the backend make a new one.
-      const liveIds = new Set((row.produced_clips || []).map((c) => c.id));
-      const clipId =
-        swing.clip_id != null && liveIds.has(swing.clip_id)
-          ? swing.clip_id
-          : clipForSwing?.id ?? null;
-      const committed = await api.commitWizardClip(
-        adminPassword, row.id,
-        clipId != null ? { clip_id: clipId } : {},
-      );
-      // Remember which clip this swing committed into so later saves
-      // target it directly even after other clips are deleted.
-      if (committed?.clip_id != null) {
-        const withClip = nextSwings.map((s, i) =>
-          i === swingPos ? { ...s, clip_id: committed.clip_id } : s
-        );
-        await api.saveEditMetrics(adminPassword, row.id, {
-          swings: withClip,
-        });
-      }
       onDone?.(true, null);
     } catch (e) {
       // The modal is gone, so the failure has to surface on the card.

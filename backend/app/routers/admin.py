@@ -9580,6 +9580,18 @@ def wizard_produce(
     # THE WIZARD WAS OPEN ON ONE CLIP. ✎ Edit and ＋ Add both send this,
     # and it decides whether Produce means "this clip" or "this upload".
     # Defaults to False, so nothing that does not ask for it changes.
+    # THE OPERATOR'S PLOTTED TRACK, from click-to-plot's Save & close.
+    # With it, produce renders their line; without it, it finds its own.
+    points = payload.get("points")
+    if points is not None and not isinstance(points, list):
+        raise HTTPException(400, "points must be a list of {frame, x, y}")
+    try:
+        launch_frame = payload.get("launch_frame")
+        launch_frame = (int(launch_frame)
+                        if launch_frame is not None else None)
+    except (TypeError, ValueError):
+        launch_frame = None
+
     solo = bool(payload.get("solo"))
     try:
         swing_idx = int(payload.get("swing_idx") or 0)
@@ -9627,7 +9639,8 @@ def wizard_produce(
     threading.Thread(
         target=run_wizard_produce_job,
         args=(upload_id, (bx, by), impact_frame, hole_number,
-              landing_frame, landing_spot, solo, swing_idx),
+              landing_frame, landing_spot, solo, swing_idx,
+              points, launch_frame),
         daemon=True,
         name=f"wizard-produce-{upload_id}",
     ).start()
@@ -17866,6 +17879,11 @@ def run_wizard_produce_job(
     # (＋ Add). Produce then means "this clip", not "this upload".
     solo: bool = False,
     swing_idx: int = 0,
+    # THE OPERATOR'S OWN TRACK, from click-to-plot. When given, this IS
+    # the flight: find_flight is not run, because re-deriving the line
+    # from blobs is exactly what the operator just overruled by hand.
+    points=None,
+    launch_frame: int | None = None,
 ) -> dict:
     """Stages 4-8, from the operator's ball and impact frame.
 
@@ -17920,20 +17938,47 @@ def run_wizard_produce_job(
                 "ok": True, "xy": [_bx, _by],
                 "reason": "placed by the operator in the edit wizard",
             }
-            _prog("Tracking the ball and fitting the flight", 0, 1)
-            _ff = d3.find_flight(
-                src_path, fps, impact_frame=_imp,
-                frame_w=_fw, frame_h=_fh,
-                ball_side=_wizard_ball_side(db, row),
-                rest_ball=_rest,
-                # THE OPERATOR PLACED IT. Without this the club-arc pass
-                # re-measures the ball at the launch frame and its answer
-                # wins -- so the placement moved, sometimes by tens of
-                # pixels, and the tracer started somewhere the operator
-                # did not put it. A control that gets silently overruled
-                # is worse than no control.
-                ball_locked=True,
-            )
+            _plotted = []
+            for _p in (points or []):
+                try:
+                    _plotted.append({"frame": int(_p["frame"]),
+                                     "x": float(_p["x"]),
+                                     "y": float(_p["y"])})
+                except (KeyError, TypeError, ValueError):
+                    continue
+            _plotted.sort(key=lambda q: q["frame"])
+            if len(_plotted) >= 2:
+                # STRAIGHT TO THE RENDERER. The points came off the
+                # motion map under the operator's cursor; running
+                # find_flight over them again would answer a question
+                # nobody asked and could easily answer it differently.
+                _prog("Rendering the clip", 0, 1)
+                _lf = (int(launch_frame) if launch_frame is not None
+                       else _plotted[0]["frame"])
+                log.info(
+                    "wizard produce: upload=%s using the operator's %d "
+                    "plotted points f%d..f%d, launch f%d — find_flight "
+                    "skipped", upload_id, len(_plotted),
+                    _plotted[0]["frame"], _plotted[-1]["frame"], _lf,
+                )
+                _ff = {"ok": True, "launch_frame": _lf,
+                       "points": _plotted, "candidates": []}
+            else:
+                _prog("Tracking the ball and fitting the flight", 0, 1)
+                _ff = d3.find_flight(
+                    src_path, fps, impact_frame=_imp,
+                    frame_w=_fw, frame_h=_fh,
+                    ball_side=_wizard_ball_side(db, row),
+                    rest_ball=_rest,
+                    # THE OPERATOR PLACED IT. Without this the club-arc
+                    # pass re-measures the ball at the launch frame and
+                    # its answer wins -- so the placement moved,
+                    # sometimes by tens of pixels, and the tracer started
+                    # somewhere the operator did not put it. A control
+                    # that gets silently overruled is worse than no
+                    # control.
+                    ball_locked=True,
+                )
             if not _ff.get("ok"):
                 _err = _ff.get("reason") or "no flight found"
                 log.info("wizard produce: upload=%s no flight (%s)",
