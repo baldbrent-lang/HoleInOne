@@ -14407,6 +14407,7 @@ def _daily_tee_box(db, course, hole: int, day: str):
         return {
             "x": float(entry["x"]), "y": float(entry["y"]),
             "w": float(entry["w"]), "h": float(entry["h"]),
+            "angle": float(entry.get("angle") or 0.0),
         }
     except (KeyError, TypeError, ValueError) as exc:
         log.debug("daily tee box read failed (hole=%s day=%s): %s", hole, day, exc)
@@ -15250,12 +15251,14 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
         if ok and ref is not None:
             h, w = ref.shape[:2]
             if _roi.get("roi"):
-                r = _roi["roi"]
-                cv2.rectangle(
-                    ref, (int(r["x"] * w), int(r["y"] * h)),
-                    (int((r["x"] + r["w"]) * w), int((r["y"] + r["h"]) * h)),
-                    (80, 220, 80), 2,
+                import numpy as _np
+
+                from ..services.ai_tracer import roi_corners_px as _corners
+                _pts = _np.array(
+                    [[int(px), int(py)]
+                     for px, py in _corners(_roi["roi"], w, h)], _np.int32,
                 )
+                cv2.polylines(ref, [_pts], True, (80, 220, 80), 2)
             for i, sp in enumerate(spots):
                 cv2.circle(ref, (sp["x"], sp["y"]), 12, (0, 165, 255), 2)
                 cv2.putText(ref, str(i + 1), (sp["x"] + 14, sp["y"] - 8),
@@ -15284,6 +15287,115 @@ def ball_scan(upload_id: int):
 @router.get("/long-uploads/{upload_id}/ball-scan/status")
 def ball_scan_status(upload_id: int):
     return _json_safe(_debugx_get("ballscan", upload_id))
+
+
+def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
+    """Trace every candidate that sat long enough to be a teed ball.
+
+    THE TWO NUMBERS ARE ALREADY IN HAND. The scan measured where the
+    ball rested and watched it until the spot was clear and empty, which
+    is the impact frame. Everything the tracer needs it now has, without
+    a pose peak, a club arc or a judge in the way -- so this goes
+    straight from those two numbers to a flight and a clip.
+
+    Only candidates that sat longer than `min_held_sec` are traced. A
+    ball waits on a tee while its owner walks up, chooses a club and
+    addresses it; anything that appeared and vanished inside a few
+    seconds is a speck, a marker being moved, or a ball being picked up.
+    """
+    from ..services import debug3 as _d3
+
+    min_held = float((getattr(row, "edit_metrics", None) or {})
+                     .get("ball_scan_min_held_sec") or 7.0)
+    rep: dict = {"ok": False, "min_held_sec": min_held, "clips": [],
+                 "n_candidates": 0, "n_traced": 0, "reason": None}
+    fps = float(probe_fps(src_path) or 0.0) or 30.0
+    scan = _ball_scan_run(row, src_path, db, progress=progress)
+    rep["scan"] = {k: scan.get(k) for k in
+                   ("reason", "roi", "roi_source", "overview_url", "spots")}
+    spots = [sp for sp in (scan.get("spots") or [])
+             if float(sp.get("held_sec") or 0.0) >= min_held]
+    rep["n_candidates"] = len(spots)
+    if not spots:
+        rep["reason"] = (
+            f"no candidate sat {min_held:.0f}s or longer — nothing here "
+            f"looks like a ball waiting to be hit"
+        )
+        return rep
+
+    tok = secrets.token_hex(4)
+    for i, sp in enumerate(spots):
+        if progress:
+            progress(f"Tracing candidate {i + 1} of {len(spots)}", i, len(spots))
+        # The frame the spot was first clear AND empty is the strike.
+        imp = sp.get("gone_frame")
+        if imp is None:
+            rep["clips"].append({
+                "spot": [sp["x"], sp["y"]], "ok": False,
+                "reason": "never seen to go — nothing to trace from",
+            })
+            continue
+        entry: dict = {"spot": [sp["x"], sp["y"]], "impact_frame": int(imp),
+                       "impact_sec": round(int(imp) / fps, 2),
+                       "held_sec": sp.get("held_sec"), "ok": False,
+                       "clip_url": None, "reason": None}
+        try:
+            fl = _d3.find_flight(
+                src_path, fps, impact_frame=int(imp),
+                rest_ball={"ok": True, "xy": [float(sp["x"]), float(sp["y"])],
+                           "reason": "measured by the ball scan"},
+                ball_locked=True,
+            ) or {}
+            entry["flight_ok"] = bool(fl.get("ok"))
+            entry["flight_reason"] = fl.get("reason")
+            pts = [{"frame": int(q["frame"]), "x": float(q["x"]),
+                    "y": float(q["y"])}
+                   for q in ((fl.get("fit") or {}).get("inliers") or [])]
+            entry["n_points"] = len(pts)
+            if not pts:
+                entry["reason"] = (
+                    f"no flight from this ball: {fl.get('reason')}")
+                rep["clips"].append(entry)
+                continue
+            out = CLIPS_DIR / f"ballscan-{row.id}-{tok}-{i}.mp4"
+            rv = render_tracer_video(
+                src_path, out,
+                (float(sp["x"]), float(sp["y"])), int(imp), pts,
+                write_start=max(0, int(imp) - int(round(0.6 * fps))),
+                write_end=int(imp) + int(round(2.6 * fps)),
+                # The rest position was measured, not inferred, so the
+                # renderer's relocation guards have nothing better to
+                # offer than the number they would be second-guessing.
+                rest_verified=True,
+            ) or {}
+            entry["ok"] = bool(rv.get("ok"))
+            entry["reason"] = rv.get("error")
+            if rv.get("ok") and out.exists():
+                transcode_for_web(out)
+                entry["clip_url"] = _clip_url_for(out.name)
+                rep["n_traced"] += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ball scan produce failed on %s: %s", row.id, exc)
+            entry["reason"] = f"failed: {exc}"
+        rep["clips"].append(entry)
+
+    rep["ok"] = rep["n_traced"] > 0
+    rep["reason"] = (
+        f"{rep['n_traced']} of {len(spots)} candidate(s) traced "
+        f"(sat {min_held:.0f}s or longer)"
+    )
+    return rep
+
+
+@router.post("/long-uploads/{upload_id}/ball-scan/produce")
+def ball_scan_produce(upload_id: int):
+    """Scan, then trace every candidate that sat long enough to be a ball."""
+    return _debugx_start("ballscanproduce", upload_id, _ball_scan_produce_run)
+
+
+@router.get("/long-uploads/{upload_id}/ball-scan/produce/status")
+def ball_scan_produce_status(upload_id: int):
+    return _json_safe(_debugx_get("ballscanproduce", upload_id))
 
 
 # ── Swing test ─────────────────────────────────────────────────────────
@@ -16296,10 +16408,14 @@ def set_daily_tee_box(course_id: int, payload: dict, db: Session = Depends(get_d
             y = max(0.0, min(1.0, float(roi["y"])))
             w = max(0.01, min(1.0 - x, float(roi["w"])))
             h = max(0.01, min(1.0 - y, float(roi["h"])))
+            # A tee deck runs away from a camera set beside it, so the
+            # box that fits it is slanted. Clamped hard: this is a tilt,
+            # and anything past 45 degrees is a mis-drag, not a tee box.
+            ang = max(-45.0, min(45.0, float(roi.get("angle") or 0.0)))
         except (KeyError, TypeError, ValueError):
-            raise HTTPException(400, "roi must be {x,y,w,h} fractions")
+            raise HTTPException(400, "roi must be {x,y,w,h[,angle]} fractions")
         by_day[day] = {
-            "x": x, "y": y, "w": w, "h": h,
+            "x": x, "y": y, "w": w, "h": h, "angle": ang,
             "set_at": _utcnow_naive().isoformat(),
         }
 

@@ -697,6 +697,18 @@ export const api = {
       adminPassword: key,
     }),
 
+  // Scan, then trace every candidate that sat long enough to be a ball.
+  ballScanProduce: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ball-scan/produce`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+
+  ballScanProduceStatus: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ball-scan/produce/status`, {
+      adminPassword: key,
+    }),
+
   // Swing test — the ball-departure detector on its own. Same
   // start-then-poll shape as Debug2/Debug3, for the same proxy-timeout
   // reason.

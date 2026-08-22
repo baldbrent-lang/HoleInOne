@@ -6634,6 +6634,7 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
   // disabled however carefully you dragged. The anchor is its own thing.
   const [dragFrom, setDragFrom] = useState(null);
   const [draft, setDraft] = useState(null);   // {x,y,w,h} fractions
+  const [angle, setAngle] = useState(tb?.roi?.angle || 0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const imgRef = useRef(null);
@@ -6726,6 +6727,11 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
                   width: `${box.w * 100}%`, height: `${box.h * 100}%`,
                   border: `2px solid ${draft ? "#22c55e" : "#3b82f6"}`,
                   background: "rgba(59,130,246,0.10)",
+                  // A tee deck runs away from a camera set beside it, so
+                  // the box that fits it is slanted. Rotated about its
+                  // own centre, which is what the backend does too.
+                  transform: `rotate(${angle}deg)`,
+                  transformOrigin: "center center",
                   pointerEvents: "none",
                 }}
               />
@@ -6738,11 +6744,28 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
                   + `${Math.round(draft.w * 100)}%×${Math.round(draft.h * 100)}%`
                 : "Drag on the frame to set the box for this hole today."}
             </span>
+            <label className="tiny muted"
+                   style={{ display: "flex", alignItems: "center", gap: 6 }}
+                   title="Tilt the box to match the tee deck. An upright box over a slanted tee has to be tall enough to hold both ends, and every extra row of turf it covers is somewhere a false candidate can come from.">
+              tilt
+              <input
+                type="range" min={-45} max={45} step={0.5} value={angle}
+                onChange={(e) => setAngle(Number(e.target.value))}
+                style={{ width: 130 }}
+              />
+              <b>{angle}°</b>
+              {angle !== 0 && (
+                <button className="btn tiny ghost"
+                        onClick={() => setAngle(0)}>reset</button>
+              )}
+            </label>
             <button
               className="btn tiny"
-              disabled={!draft || busy}
-              onClick={() => save({ x: draft.x, y: draft.y,
-                                    w: draft.w, h: draft.h })}
+              disabled={(!draft && angle === (tb?.roi?.angle || 0)) || busy}
+              onClick={() => {
+                const b = draft || tb.roi;
+                save({ x: b.x, y: b.y, w: b.w, h: b.h, angle });
+              }}
             >
               {busy ? "Saving…" : `Save box for hole ${tb.hole} on ${tb.day}`}
             </button>
@@ -6778,7 +6801,8 @@ function D3TeeBox({ tb, uploadId, adminPassword, onRerun }) {
  */
 function BallScanModal({ state, onClose }) {
   const rep = state?.report;
-  const spots = rep?.spots || [];
+  // Scan-and-produce nests the scan under `scan`; a plain scan is flat.
+  const spots = rep?.spots || rep?.scan?.spots || [];
   return (
     <div role="dialog" className="modal-back" onClick={onClose}
          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
@@ -6800,6 +6824,41 @@ function BallScanModal({ state, onClose }) {
           <div className="err-text" style={{ marginTop: 10 }}>{state.error}</div>
         )}
 
+        {rep?.clips && (
+          <div className="card" style={{ margin: "10px 0", padding: 10 }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <b>Traced from the ball, not the golfer</b>
+              <span className={rep.n_traced ? "pill ok" : "pill warn"}>
+                {rep.n_traced} of {rep.n_candidates} produced
+              </span>
+            </div>
+            <div className="tiny muted" style={{ marginTop: 2 }}>
+              {rep.reason} — a candidate qualifies by sitting{" "}
+              {rep.min_held_sec}s or longer, which is what a ball waiting to
+              be hit does and a speck does not.
+            </div>
+            {rep.clips.map((c, i) => (
+              <div key={i} className="tiny"
+                   style={{ marginTop: 6, borderTop: "1px solid var(--line)",
+                            paddingTop: 6 }}>
+                <b>({c.spot[0]}, {c.spot[1]})</b>
+                {c.impact_frame != null && (
+                  <> · impact f{c.impact_frame} ({c.impact_sec}s)</>
+                )}
+                {c.held_sec != null && <> · sat {c.held_sec}s</>}
+                {c.n_points != null && <> · {c.n_points} flight point(s)</>}
+                {c.clip_url ? (
+                  <> · <a href={c.clip_url} target="_blank" rel="noreferrer">
+                    clip</a></>
+                ) : (
+                  <span className="muted"> · {c.reason
+                    || c.flight_reason || "no clip"}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         {rep && (
           <>
             <div className="small" style={{ marginTop: 10 }}>
@@ -6808,21 +6867,28 @@ function BallScanModal({ state, onClose }) {
               {rep.fps}fps
             </div>
             <div className="tiny muted" style={{ marginTop: 2 }}>
-              Looking in: {rep.roi_source || "the whole frame"}
-              {rep.roi && (
-                <> — x {Math.round(rep.roi.x * 100)}% y {Math.round(rep.roi.y * 100)}%,{" "}
-                  {Math.round(rep.roi.w * 100)}%×{Math.round(rep.roi.h * 100)}%</>
-              )}
+              Looking in: {(rep.roi_source ?? rep.scan?.roi_source)
+                            || "the whole frame"}
+              {(rep.roi || rep.scan?.roi) && (() => {
+                const r = rep.roi || rep.scan.roi;
+                return (
+                  <> — x {Math.round(r.x * 100)}% y {Math.round(r.y * 100)}%,{" "}
+                    {Math.round(r.w * 100)}%×{Math.round(r.h * 100)}%
+                    {r.angle ? `, tilted ${r.angle}°` : ""}</>
+                );
+              })()}
             </div>
             {rep.roi_note && (
               <div className="tiny" style={{ color: "var(--warn,#b45309)", marginTop: 4 }}>
                 {rep.roi_note}
               </div>
             )}
-            {rep.overview_url && (
+            {(rep.overview_url || rep.scan?.overview_url) && (
               <figure style={{ margin: "10px 0" }}>
-                <a href={rep.overview_url} target="_blank" rel="noreferrer">
-                  <img src={rep.overview_url} alt="all candidates"
+                <a href={rep.overview_url || rep.scan.overview_url}
+                   target="_blank" rel="noreferrer">
+                  <img src={rep.overview_url || rep.scan.overview_url}
+                       alt="all candidates"
                        style={{ width: "100%", borderRadius: 6 }} />
                 </a>
                 <figcaption className="tiny muted">
@@ -12025,6 +12091,7 @@ export default function AdminProduction() {
       kind === "debug3" ? api.debug3Status
         : kind === "swingtest" ? api.swingTestStatus
           : kind === "ballscan" ? api.ballScanStatus
+            : kind === "ballscanproduce" ? api.ballScanProduceStatus
           : api.debug2Status;
     const tick = async () => {
       try {
@@ -12084,6 +12151,27 @@ export default function AdminProduction() {
     try {
       await api.ballScan(adminPassword, row.id);
       pollDebugX("ballscan", row.id, setBallScan);
+    } catch (e) {
+      setBallScan({
+        running: false, uploadId: row.id, report: null, error: e.message,
+      });
+      setBusyId((cur) => (cur === row.id ? null : cur));
+    }
+  }
+
+  // Straight from the two numbers the scan measured -- rest position and
+  // impact frame -- to a traced clip, for every candidate that sat long
+  // enough to have been a ball waiting to be hit.
+  async function handleBallScanProduce(row) {
+    setBallScan({
+      running: true, uploadId: row.id, report: null, error: null,
+      producing: true,
+    });
+    busySinceRef.current = Date.now();
+    setBusyId(row.id);
+    try {
+      await api.ballScanProduce(adminPassword, row.id);
+      pollDebugX("ballscanproduce", row.id, setBallScan);
     } catch (e) {
       setBallScan({
         running: false, uploadId: row.id, report: null, error: e.message,
@@ -13085,6 +13173,15 @@ export default function AdminProduction() {
                     title="Dev: every resting-ball candidate in the tee box — where, first frame seen, last frame before it went, with pictures. People are masked out; motion is not used, because a resting ball does not move."
                   >
                     ⚪ Scan for ball
+                  </button>
+                )}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
+                    onClick={() => handleBallScanProduce(row)}
+                    title="Dev: scan for resting balls, then trace every candidate that sat 7s or longer — straight from the measured rest position and the frame it went, with no pose, club arc or judge in between."
+                  >
+                    ⚪▶ Scan &amp; produce
                   </button>
                 )}
                 {(() => {

@@ -8728,6 +8728,72 @@ def score_spots_by_club(
     return out
 
 
+def roi_corners_px(roi: dict, frame_w: int, frame_h: int):
+    """The four corners of a tee box in pixels, honouring `angle`.
+
+    A tee box is a rectangle on the GROUND, and the ground is not
+    parallel to the bottom of the frame -- a camera set up beside the
+    tee sees the deck running away at a slant. An upright box that
+    covers a slanted tee has to be tall enough to hold both ends, and
+    everything it gains in height it spends on turf nobody tees off,
+    which is where the false candidates come from.
+
+    `angle` is degrees clockwise about the box centre. Absent or zero
+    gives the plain upright rectangle, so every box drawn before this
+    existed still means what it meant.
+    """
+    x = float(roi.get("x", 0.0)) * frame_w
+    y = float(roi.get("y", 0.0)) * frame_h
+    w = float(roi.get("w", 1.0)) * frame_w
+    h = float(roi.get("h", 1.0)) * frame_h
+    cx, cy = x + w / 2.0, y + h / 2.0
+    a = math.radians(float(roi.get("angle") or 0.0))
+    ca, sa = math.cos(a), math.sin(a)
+    pts = []
+    for dx, dy in ((-w / 2, -h / 2), (w / 2, -h / 2),
+                   (w / 2, h / 2), (-w / 2, h / 2)):
+        pts.append((cx + dx * ca - dy * sa, cy + dx * sa + dy * ca))
+    return pts
+
+
+def roi_bbox_fractions(roi: dict) -> dict:
+    """The upright box that CONTAINS a possibly-angled one, as fractions.
+
+    Cropping and upscaling want an axis-aligned rectangle; the angle is
+    then applied as a test on what comes back, so the detector still
+    sees a normal patch and nothing has to learn about rotation.
+    """
+    if not roi or not float(roi.get("angle") or 0.0):
+        return roi
+    pts = roi_corners_px(roi, 1000, 1000)
+    xs = [p[0] / 1000.0 for p in pts]
+    ys = [p[1] / 1000.0 for p in pts]
+    x0, x1 = max(0.0, min(xs)), min(1.0, max(xs))
+    y0, y1 = max(0.0, min(ys)), min(1.0, max(ys))
+    return {"x": x0, "y": y0,
+            "w": max(0.01, x1 - x0), "h": max(0.01, y1 - y0)}
+
+
+def roi_contains_px(roi: dict, px: float, py: float,
+                    frame_w: int, frame_h: int) -> bool:
+    """Is this pixel inside the tee box, angle and all?"""
+    if not roi:
+        return True
+    ang = float(roi.get("angle") or 0.0)
+    x = float(roi.get("x", 0.0)) * frame_w
+    y = float(roi.get("y", 0.0)) * frame_h
+    w = float(roi.get("w", 1.0)) * frame_w
+    h = float(roi.get("h", 1.0)) * frame_h
+    if not ang:
+        return x <= px <= x + w and y <= py <= y + h
+    cx, cy = x + w / 2.0, y + h / 2.0
+    a = math.radians(-ang)          # rotate the POINT back, not the box
+    dx, dy = px - cx, py - cy
+    rx = dx * math.cos(a) - dy * math.sin(a)
+    ry = dx * math.sin(a) + dy * math.cos(a)
+    return abs(rx) <= w / 2.0 and abs(ry) <= h / 2.0
+
+
 def people_mask_in_frame(frame, min_h_frac: float = 0.10,
                          work_scale: float = 0.5):
     """Where the people are in this frame, as a mask. None if none found.
@@ -9018,12 +9084,19 @@ def scan_resting_balls(
     # single candidate that "sat" for twenty seconds. A gap longer than
     # this ends the sighting and starts a new one -- which is what makes
     # "first seen" and "last seen" mean anything.
+    # Only used when confirm_frames is 0; otherwise the gap follows the
+    # watch. Two numbers that mean "the same ball, briefly hidden" are
+    # one number, and keeping them apart is how the table came to
+    # contradict its own caption.
     gap_sec: float = 3.0,
     # How long to keep watching a spot after the ball stops being visible
     # before accepting that it has gone. A clubhead at address hides it
-    # for as long as the player stands there; 150 frames is three seconds
-    # at 50fps, longer than any address measured.
-    confirm_frames: int = 150,
+    # for as long as the player stands there, and 150 frames -- three
+    # seconds at 50fps -- turned out to be tight: a player who waits out
+    # a group ahead can stand over the ball longer than that. 300 gives
+    # six seconds, which also sets the gap below, so one number decides
+    # both "still hidden" and "same ball".
+    confirm_frames: int = 300,
     min_votes: int = 3,
     max_spots: int = 24,
     expect_radius_px: float | None = None,
@@ -9064,14 +9137,20 @@ def scan_resting_balls(
     # Set before the try so the merge below cannot NameError on a scan
     # that fell over partway through.
     _fps = float(fps or 30.0) or 30.0
-    gap_frames = max(1, int(round(float(gap_sec) * _fps)))
+    gap_frames = max(1, int(confirm_frames)
+                     or int(round(float(gap_sec) * _fps)))
     try:
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         _fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
         if _fps <= 1.0:
             _fps = 30.0
         step = max(1, int(round(_fps / max(0.5, float(sample_hz)))))
-        gap_frames = max(step, int(round(float(gap_sec) * _fps)))
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        angled = bool(roi and float(roi.get("angle") or 0.0))
+        crop_roi = roi_bbox_fractions(roi) if angled else roi
+        gap_frames = max(step, int(confirm_frames)
+                         or int(round(float(gap_sec) * _fps)))
         # [sum_x, sum_y, sum_r, votes, first_frame, last_frame, closed]
         clusters: list = []
         f = seen = 0
@@ -9091,7 +9170,12 @@ def scan_resting_balls(
             seen += 1
             pm = people_mask_in_frame(frame) if exclude_people else None
             for (x, y, r) in ball_candidates_in_frame(
-                    frame, roi=roi, expect_radius_px=expect_radius_px):
+                    frame, roi=crop_roi, expect_radius_px=expect_radius_px):
+                # The crop was the upright box that CONTAINS the tee
+                # box; if the tee box is angled, the corners of that
+                # crop are turf nobody tees off.
+                if angled and not roi_contains_px(roi, x, y, fw, fh):
+                    continue
                 if pm is not None:
                     iy, ix = int(round(y)), int(round(x))
                     if (0 <= iy < pm.shape[0] and 0 <= ix < pm.shape[1]
