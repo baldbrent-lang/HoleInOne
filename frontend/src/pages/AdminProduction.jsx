@@ -470,6 +470,11 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
                                !recordingStartedAt && !!startsAt)
           : undefined}
       />
+      {/* DIRECTLY UNDER THE PICTURE, above the meta rows. The control
+          acts on what is in the frame above it; six rows of file
+          statistics in between made it read as a footnote to the
+          statistics instead. */}
+      {footer && <div style={{ margin: "6px 0" }}>{footer}</div>}
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <MetaRow k="Quality" v={hasSource ? qualityText(qualityLabel, width, height) : ""} />
         <MetaRow k="Length" v={durationSec != null ? fmtDuration(durationSec) : ""} />
@@ -484,12 +489,6 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
             : ""}
         />
       </div>
-      {/* THE CONTROL LIVES UNDER THE PICTURE IT ACTS ON. The hitting
-          area is a thing drawn on the tee camera's frame and the
-          tee<->green map is a thing measured between the two cameras'
-          frames; both used to sit in the column of generic row buttons,
-          where nothing said which camera they were about. */}
-      {footer && <div style={{ marginTop: 6 }}>{footer}</div>}
     </div>
   );
 }
@@ -556,53 +555,92 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
         placeholder={has ? "No preview" : "Not produced"}
         onClick={cur?.video_url ? () => play(cur) : undefined}
       />
-      {has && (clips.length > 1 || onDeleteClip) && (
+      {has && clips.length > 1 && (
         <div
           style={{
             display: "flex", alignItems: "center", justifyContent: "center",
             gap: 8, marginTop: 4,
           }}
         >
-          {clips.length > 1 && (
-            <button
-              type="button"
-              className="ghost"
-              style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
-              onClick={() => nav(-1)}
-              title="Previous clip"
-            >
-              ◀
-            </button>
-          )}
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
+            onClick={() => nav(-1)}
+            title="Previous clip"
+          >
+            ◀
+          </button>
           <span className="tiny">
             clip {idx + 1}/{clips.length}
             {cur?.hole_number != null ? ` · hole ${cur.hole_number}` : ""}
           </span>
-          {clips.length > 1 && (
+          <button
+            type="button"
+            className="ghost"
+            style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
+            onClick={() => nav(1)}
+            title="Next clip"
+          >
+            ▶
+          </button>
+        </div>
+      )}
+      {has && clips.length === 1 && cur?.hole_number != null && (
+        <div className="tiny" style={{ textAlign: "center", marginTop: 4 }}>
+          hole {cur.hole_number}
+        </div>
+      )}
+      {/* ONE BAND, THREE BUTTONS, ALL THE SAME SHAPE. Delete used to be
+          a bare 🗑 wedged into the clip pager, where it was both a
+          different size from everything else and one slip away from the
+          ▶ that only changes which clip is on screen. It is an action on
+          the selected clip, exactly like Edit -- so it sits with Edit,
+          and only its colour says it is the dangerous one. */}
+      {(onEditClip || onAddClip || onDeleteClip) && (
+        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+          {onEditClip && (
             <button
               type="button"
-              className="ghost"
-              style={{ width: "auto", padding: "1px 8px", fontSize: "0.9rem" }}
-              onClick={() => nav(1)}
-              title="Next clip"
+              className="small ghost"
+              style={{ flex: 1, width: "auto" }}
+              onClick={() => onEditClip(cur, curSwing, idx)}
+              disabled={!has}
+              title={has
+                ? `Edit clip ${idx + 1}${
+                    cur?.hole_number != null ? ` (hole ${cur.hole_number})` : ""
+                  } — ball, impact frame, landing and tracer for THIS clip only.`
+                : "Nothing produced yet to edit"}
             >
-              ▶
+              ✎ Edit
             </button>
           )}
-          {onDeleteClip && cur && (
+          {onAddClip && (
             <button
               type="button"
-              className="ghost"
-              style={{
-                width: "auto", padding: "1px 6px", fontSize: "0.9rem",
-                color: "var(--danger)",
-              }}
-              onClick={() => onDeleteClip(cur, idx)}
-              title={`Delete this produced clip (clip ${idx + 1}${
-                cur?.hole_number != null ? ` · hole ${cur.hole_number}` : ""
-              }), its files and the swing it was cut from. The raw upload and other clips stay.`}
+              className="small ghost"
+              style={{ flex: 1, width: "auto" }}
+              onClick={() => onAddClip()}
+              title="Add a clip the detector missed — opens the edit wizard on a new, blank swing spanning the upload, ready for its start, impact and end frames."
             >
-              🗑
+              ＋ Add
+            </button>
+          )}
+          {onDeleteClip && (
+            <button
+              type="button"
+              className="small ghost"
+              style={{ flex: 1, width: "auto", color: "var(--danger)",
+                       borderColor: "var(--danger)" }}
+              onClick={() => cur && onDeleteClip(cur, idx)}
+              disabled={!has}
+              title={has
+                ? `Delete clip ${idx + 1}${
+                    cur?.hole_number != null ? ` · hole ${cur.hole_number}` : ""
+                  }, its files and the swing it was cut from. The raw upload and the other clips stay.`
+                : "Nothing produced yet to delete"}
+            >
+              🗑 Delete
             </button>
           )}
         </div>
@@ -652,43 +690,6 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
             ? ` (+${curSwing.mog2_stats.n_added} added)`
             : ""}
         </button>
-      )}
-      {/* EDIT THE CLIP YOU ARE LOOKING AT. Edit used to be a row-level
-          button that opened the wizard on a swing selector -- so the
-          operator picked a clip here with the arrows, clicked Edit, and
-          then had to find that same clip again in a second, differently
-          ordered list. This passes the selected clip straight through:
-          the wizard opens on ITS swing with no selector at all. */}
-      {(onEditClip || onAddClip) && (
-        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-          {onEditClip && (
-            <button
-              type="button"
-              className="small ghost"
-              style={{ flex: 1, width: "auto" }}
-              onClick={() => onEditClip(cur, curSwing, idx)}
-              disabled={!has}
-              title={has
-                ? `Edit clip ${idx + 1}${
-                    cur?.hole_number != null ? ` (hole ${cur.hole_number})` : ""
-                  } — ball, impact frame, landing and tracer for THIS clip only.`
-                : "Nothing produced yet to edit"}
-            >
-              ✎ Edit
-            </button>
-          )}
-          {onAddClip && (
-            <button
-              type="button"
-              className="small ghost"
-              style={{ flex: 1, width: "auto" }}
-              onClick={() => onAddClip()}
-              title="Add a clip the detector missed — opens the edit wizard on a new, blank swing spanning the upload, ready for its start, impact and end frames."
-            >
-              ＋ Add clip
-            </button>
-          )}
-        </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
         <MetaRow k="Clips" v={has ? clips.length : ""} />
