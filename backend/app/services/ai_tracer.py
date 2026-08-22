@@ -9004,16 +9004,24 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
                 # really gone the spot is turf again and this lets go.
                 if not covered:
                     covered = _spot_obscured(frame, sp["x"], sp["y"])
-                if covered:
-                    blocked += 1
-                    f += 1
-                    continue
                 here = [
                     c for c in ball_candidates_in_frame(
                         frame, roi=patch_roi,
                         expect_radius_px=expect_radius_px)
                     if ((c[0] - sp["x"]) ** 2 + (c[1] - sp["y"]) ** 2) <= 12 ** 2
                 ]
+                # LOOK FOR THE BALL FIRST, ALWAYS. The covered tests
+                # above are guesses about whether something is in the
+                # way; SEEING the ball is not a guess. Testing covered
+                # first and skipping the ball check when it fired meant
+                # a ball plainly visible during the backswing never got
+                # the chance to reset the watch -- the spot reads as
+                # slightly dark while the club is near it, so the frames
+                # where the ball comes back were exactly the frames the
+                # ball was never looked for. Measured on a labelled
+                # swing: 56 frames counted as blocked, the ball findable
+                # in several of them, and the departure reported 65
+                # frames before the strike.
                 if here:
                     # It was only hidden. Extend the sighting and keep going.
                     sp["last_frame"] = f
@@ -9044,10 +9052,26 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
                 # only if the ENTIRE remaining window passes without it
                 # returning, and the departure is the start of that final
                 # run rather than whichever frame first missed it.
+                if covered:
+                    # Nothing visible, and something is over the spot --
+                    # that is not evidence of a departure either way.
+                    blocked += 1
+                    f += 1
+                    continue
                 if empty_run == 0:
                     empty_from = f
                 empty_run += 1
-                # 150 EMPTY FRAMES IS THE ANSWER, and the walk has to end
+                # AND MOVE ON. Every other path out of this loop
+                # increments f before its `continue`; this one fell
+                # through to the bottom of the while body, where there
+                # was nothing. So the moment the ball went missing the
+                # frame counter froze while the reads carried on, and
+                # every later frame was attributed to the frame it
+                # stopped on -- which is why a ball plainly visible
+                # again through the backswing could never move
+                # `last_frame` past the frame it first vanished on.
+                f += 1
+                # 300 EMPTY FRAMES IS THE ANSWER, and the walk has to end
                 # there. Extending the deadline on ANY later sighting let
                 # the watch absorb the NEXT ball teed on the same spot and
                 # run to the end of the clip: measured 1,582 iterations to
