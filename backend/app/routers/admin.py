@@ -7977,6 +7977,133 @@ def _finalize_green_comet(upload_id, swing_no, green_path, green_cut,
         return None
 
 
+def _green_rest_for_swing(db, row, slot: int):
+    """Where the ball finished on the GREEN camera, and which camera saw it.
+
+    This is the input the closest-to-the-pin measurement has been
+    waiting for. `ctp.measure_rest` takes a green-camera pixel and the
+    camera's calibration and answers in feet from the pin; the pixel was
+    the missing half, because nothing in the pipeline ever wrote one
+    down. It exists now -- the descent search and click-to-plot both end
+    on the frame the ball came down in, at the point it came down on.
+
+    WHICH POINT, AND HOW HONEST IT IS. Two sources, and they are not the
+    same thing:
+
+      operator  the last point of a comet the operator plotted by hand.
+                They watched the ball and stopped clicking where it
+                stopped, so this is a resting position.
+      descent   the last frame of an automatic descent chain, which is
+                where the ball stopped FALLING -- the pitch mark. A ball
+                bounces and rolls from there, so this is where it
+                ARRIVED rather than where it finished.
+
+    The difference decides prizes, so the source travels with the answer
+    and nothing here pretends the second is the first.
+
+    Returns {"xy": [x, y], "camera_id": int, "source": str} or None.
+    """
+    try:
+        _t_id, g_id = _camera_pair_for(db, row)
+        if not g_id:
+            return None
+        for _s in ((row.edit_metrics or {}).get("swings") or []):
+            if not isinstance(_s, dict) or int(_s.get("idx", -1)) != int(slot):
+                continue
+            _src = "descent" if _s.get("descent_auto") else "operator"
+            _gt = [q for q in (_s.get("green_track") or [])
+                   if isinstance(q, dict) and q.get("x") is not None]
+            if _gt:
+                _last = max(_gt, key=lambda q: int(q.get("frame") or 0))
+                return {"xy": [float(_last["x"]), float(_last["y"])],
+                        "camera_id": int(g_id), "source": _src}
+            _ls = _s.get("landing_spot")
+            if _ls:
+                _x = _ls.get("x") if isinstance(_ls, dict) else _ls[0]
+                _y = _ls.get("y") if isinstance(_ls, dict) else _ls[1]
+                if _x is not None and _y is not None:
+                    return {"xy": [float(_x), float(_y)],
+                            "camera_id": int(g_id), "source": _src}
+            return None
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("green rest for upload %s slot %s: %s",
+                  getattr(row, "id", None), slot, exc)
+        return None
+
+
+def _apply_distance_plate(db, row, clip, final, slot, rep=None,
+                          rest_at_sec=None):
+    """Measure the shot and put the number on the clip, or say why not.
+
+    Best-effort in every direction but one: it will not invent a
+    distance. An uncalibrated camera, a camera calibrated only to aim a
+    tracer, an unmarked pin, or a pixel that projects off the green's
+    plane all end in silence, because a plate carrying a guess is worse
+    than no plate -- it looks like a measurement, it ships to the
+    player, and nobody can tell it from a real one.
+
+    Returns the reason it did nothing, or None when it worked.
+    """
+    try:
+        from ..services import ctp as _ctp
+
+        _rest = _green_rest_for_swing(db, row, slot)
+        if not _rest:
+            return "no resting position on the green camera for this swing"
+        cam = db.get(Camera, int(_rest["camera_id"]))
+        if cam is None:
+            return f"green camera {_rest['camera_id']} not found"
+        _cal = cam.green_homography or {}
+        pos = _ctp.measure_rest(_cal, _rest["xy"])
+        if pos is None:
+            if not _cal.get("homography"):
+                return (f"green camera {cam.id} is not calibrated — "
+                        f"calibrate it on the Cameras page and the distance "
+                        f"appears by itself")
+            if (_cal.get("purpose") or "measure") != "measure":
+                return (f"green camera {cam.id} is calibrated to aim the "
+                        f"tracer, not to measure — that fit is not a yardage")
+            if not (_cal.get("pin") or {}).get("world"):
+                return (f"green camera {cam.id} has no pin marked — mark it "
+                        f"during calibration and the distance appears")
+            return "that pixel does not project onto the green's plane"
+        _text = _ctp.plate_text(pos)
+        if not _text:
+            return "measured, but with no distance to print"
+        # WHEN THE BALL STOPS, not when the clip starts. The plate is a
+        # caption on a moment, and a number sitting there through the
+        # tee shot answers a question nobody has asked yet.
+        if not apply_distance_plate_inplace(
+                final, _text,
+                rest_at_sec=(float(rest_at_sec)
+                             if rest_at_sec is not None else None)):
+            return "the plate would not render onto the clip"
+        try:
+            clip.distance_from_pin_feet = int(round(
+                float(pos["distance_from_pin_ft"])))
+            db.add(clip)
+        except (TypeError, ValueError, KeyError):
+            pass
+        log.info(
+            "d3 produce: swing %s measured %s from the pin (%s), source=%s",
+            slot, _text, f"camera {cam.id}", _rest["source"],
+        )
+        if rep is not None:
+            rep.setdefault("distances", []).append({
+                "swing": int(slot), "text": _text,
+                "feet": pos.get("distance_from_pin_ft"),
+                "source": _rest["source"],
+                "green_xy": [round(_rest["xy"][0], 1),
+                             round(_rest["xy"][1], 1)],
+            })
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("d3 produce: distance plate failed on swing %s: %s",
+                    slot, exc)
+        return f"failed: {exc}"
+
+
 def _saved_green_track(row, slot: int):
     """The descent this swing's operator plotted by hand, or None.
 
@@ -9406,6 +9533,18 @@ def finalize_wizard_video(
         if _plate is None:
             _rest_xy = payload.get("green_rest_xy") or saved.get("green_rest_xy")
             _cam_id = payload.get("green_camera_id") or saved.get("green_camera_id")
+            # NOBODY WAS EVER PASSING THESE. Both keys were read here and
+            # written nowhere -- not by the wizard, not by click-to-plot,
+            # not by produce -- so this branch could not fire and the
+            # measurement never reached a clip. The two facts it wants
+            # are on the swing: where the ball finished on the green
+            # camera, and which camera that was.
+            if not (_rest_xy and _cam_id):
+                _gr = _green_rest_for_swing(
+                    db, row, int(payload.get("swing") or 0))
+                if _gr:
+                    _rest_xy = _rest_xy or _gr["xy"]
+                    _cam_id = _cam_id or _gr["camera_id"]
             if _rest_xy and _cam_id:
                 from ..services import ctp as _ctp
 
@@ -16657,6 +16796,12 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                 _sw["landing_frame"] = int(_d["landing_frame"])
                 _sw["landing_spot"] = {"x": int(_d["landing_xy"][0]),
                                        "y": int(_d["landing_xy"][1])}
+                # WHERE IT STOPPED FALLING, NOT WHERE IT FINISHED. An
+                # automatic descent ends at the pitch mark; the ball
+                # bounces and rolls from there. The distance measured
+                # from it is honest about arriving, not about resting,
+                # and the flag is what lets anything downstream say so.
+                _sw["descent_auto"] = True
             _swings.append(_sw)
         except Exception as exc:  # noqa: BLE001
             log.warning("ball scan produce failed on %s: %s", row.id, exc)
@@ -16684,6 +16829,7 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                         "green_track": _s["green_track"],
                         "landing_frame": _s["landing_frame"],
                         "landing_spot": _s["landing_spot"],
+                        "descent_auto": bool(_s.get("descent_auto")),
                     }, 0.0)
             _out = _d3_fast_produce(
                 row, src_path, db, {"swings": _swings}, fps,
@@ -16709,6 +16855,9 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
                 else:
                     _entry["reason"] = _c.get("error") or "the renderer made no clip"
             rep["produce_error"] = _out.get("error")
+            # CLOSEST TO THE PIN, if the green camera could measure it.
+            rep["distances"] = _out.get("distances") or []
+            rep["distance_notes"] = _out.get("distance_notes") or []
             if _out.get("error"):
                 log.warning("ball scan produce: renderer said %s",
                             _out.get("error"))
@@ -20074,6 +20223,29 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 par=_par,
                 yardage=_yardage,
             )
+
+            # CLOSEST TO THE PIN, when the green camera can measure it.
+            # After the intro overlay so the plate is not painted over,
+            # and before the thumbnail so the card's still frame is of
+            # the clip that ships.
+            # The landing, on the FINISHED clip's own clock: the tee
+            # half, then however far into the green half the ball came
+            # down. The plate has to be timed against the composite, not
+            # against either source.
+            _rest_at = None
+            if landing and landing.get("sec") is not None and green_seg:
+                try:
+                    _rest_at = (float(tee_video_dur)
+                                + max(0.0, float(landing["sec"]) - _g_start))
+                except (TypeError, ValueError):
+                    _rest_at = None
+            _dist_why = _apply_distance_plate(db, row, clip, final, _slot,
+                                              rep=out, rest_at_sec=_rest_at)
+            if _dist_why:
+                log.info("d3 produce: swing %s no distance plate — %s",
+                         i, _dist_why)
+                out.setdefault("distance_notes", []).append(
+                    {"swing": int(_slot), "reason": _dist_why})
 
             # Thumbnail AFTER the overlay so the card's still frame
             # matches the clip that ships.

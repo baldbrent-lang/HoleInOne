@@ -7281,6 +7281,21 @@ function BallScanModal({ state, onClose }) {
                 )}
                 {c.held_sec != null && <> · sat {c.held_sec}s</>}
                 {c.n_points != null && <> · {c.n_points} flight point(s)</>}
+                {(rep.distances || []).filter((d) => d.swing === i).map((d) => (
+                  <span key="d" className="pill ok" style={{ marginLeft: 6 }}
+                        title={d.source === "descent"
+                          ? `Measured from where the ball stopped FALLING — the pitch mark. It bounces and rolls from there, so this is where the shot arrived, not where it finished.`
+                          : "Measured from the last point of the comet you plotted — where the ball came to rest."}>
+                    📏 {d.text}
+                    {d.source === "descent" ? " (pitch mark)" : ""}
+                  </span>
+                ))}
+                {(rep.distance_notes || []).filter((n) => n.swing === i)
+                  .map((n) => (
+                    <div key="dn" className="tiny muted">
+                      No distance: {n.reason}
+                    </div>
+                  ))}
                 {c.clip_url ? (
                   <> · <a href={c.clip_url} target="_blank" rel="noreferrer">
                     clip</a></>
