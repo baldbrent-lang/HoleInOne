@@ -18615,9 +18615,50 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
         return out
 
     fps = float(fps or 30.0)
+    # THE CUT IS MADE ON THE WALL CLOCK.
+    #
+    # `delta` is (green first-frame instant - tee first-frame instant),
+    # so a moment at tee time T is at green time T - delta. Every
+    # boundary below is worked out in seconds on one camera's clock and
+    # carried to the other's by that subtraction -- which IS the wall
+    # clock, provided delta came from one. `_d3_green_delta_sec` now
+    # reads the CameraEvent's stamps, then the upload's own, then a
+    # saved override, and only then assumes zero.
+    #
+    # An assumed zero is not a small error here: it is however far apart
+    # the two recordings actually started, and it lands directly on the
+    # frame the green half is cut from. So it is logged at WARNING, with
+    # the instants when they exist, rather than passing as a number like
+    # any other.
     delta, delta_src = _d3_green_delta_sec(db, row)
+    _t_start = getattr(row, "tee_recording_started_at", None)
+    _g_start_wall = getattr(row, "green_recording_started_at", None)
+    if delta_src == "assumed_zero":
+        log.warning(
+            "d3 produce: upload %s is cutting on an ASSUMED tee/green "
+            "offset of zero — neither camera reported when its first "
+            "frame was captured. Every green boundary in this clip is "
+            "out by however far apart the two recordings really started.",
+            row.id,
+        )
+    else:
+        log.info(
+            "d3 produce: upload %s tee/green offset %+.3fs from %s%s",
+            row.id, delta, delta_src,
+            (f" (tee first frame {_t_start.isoformat()}, green "
+             f"{_g_start_wall.isoformat()})"
+             if _t_start and _g_start_wall else ""),
+        )
     out["green_delta_sec"] = round(delta, 4)
     out["green_delta_source"] = delta_src
+    # Surfaced, not just logged: "the green half is early" and "the two
+    # cameras were never clocked" look identical in the finished clip.
+    out["green_clock"] = {
+        "tee_first_frame_at": (_t_start.isoformat() if _t_start else None),
+        "green_first_frame_at": (_g_start_wall.isoformat()
+                                 if _g_start_wall else None),
+        "measured": delta_src != "assumed_zero",
+    }
     green_path = None
     if row.green_filename:
         storage.ensure_local(CLIPS_DIR, row.green_filename)
@@ -19034,6 +19075,11 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 _apex_lift, _apex_at = 0.0, 0.5
 
             _green_track = None
+            # Initialised HERE, not in the branch that sets them: the
+            # swing record below reads both unconditionally, and a
+            # tee-only swing (no green file, or a cut that failed)
+            # never enters that branch.
+            _comet_src, _comet_why = "none", "no green camera on this clip"
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
             _rv = render_tracer_video(
                 src_path, _tee,
@@ -19109,6 +19155,34 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         )
                         if _gcomet:
                             _green_track = _gcomet
+                        # WHERE THE COMET CAME FROM, ON THE RECORD.
+                        # "the descent is missing" has three different
+                        # causes -- nothing was plotted, something was
+                        # plotted but this run could not see it, or it
+                        # was drawn onto a cut that does not contain it
+                        # -- and they are indistinguishable in the
+                        # finished clip. Reading the log to tell them
+                        # apart is not something anyone at a course can
+                        # do, so the answer travels with the swing.
+                        _comet_src = (
+                            "operator" if (_gcomet and _saved_gt)
+                            else "search" if _gcomet
+                            else "none")
+                        _comet_why = (
+                            None if _gcomet
+                            else "nothing plotted and no landing to search "
+                                 "from" if not _saved_gt and not landing
+                            else "plotted points found but the renderer "
+                                 "drew nothing" if _saved_gt
+                            else "the search found no descent from the "
+                                 "marked landing")
+                        log.info(
+                            "d3 produce: swing %s comet source=%s%s "
+                            "(green cut %.2fs..%.2fs, %d plotted point(s))",
+                            i, _comet_src,
+                            f" — {_comet_why}" if _comet_why else "",
+                            g0, g0 + _green_sec, len(_saved_gt or []),
+                        )
 
             if green_seg is not None:
                 if not splice_impact_clip(
@@ -19212,6 +19286,8 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 # re-scanning, and so "why is there no comet" has an
                 # answer that is not a shrug.
                 "green_track": _green_track,
+                "green_comet_source": _comet_src,
+                "green_comet_reason": _comet_why,
                 "persisted_at": round(time.time(), 2),
                 "track_frame_width": _src_w,
                 "track_frame_height": _src_h,
