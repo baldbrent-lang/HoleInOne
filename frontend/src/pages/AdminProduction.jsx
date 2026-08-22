@@ -7625,6 +7625,9 @@ function BallScanModal({ state, onClose }) {
                                   title={`The green camera saw a ball come down ${sp.descent.flight_sec}s after this spot emptied — ${sp.descent.n_points} points falling, bending only ${sp.descent.bend_px}px. That is this swing, seen from the other end.`}>
                               ✓ {sp.descent.n_points} pts ·{" "}
                               {sp.descent.flight_sec}s
+                              {sp.descent.refined_from
+                                ? ` (deep +${sp.descent.n_points
+                                    - sp.descent.refined_from})` : ""}
                             </span>
                           ) : (sp.descent_near || []).length ? (
                             <span className="pill warn"
@@ -7701,6 +7704,11 @@ function BallScanModal({ state, onClose }) {
                       {sp.descent.landing_frame}. {sp.descent.n_points} points,
                       falling {sp.descent.drop_px}px and bending only{" "}
                       {sp.descent.bend_px}px off a straight line.
+                      {sp.descent.refined_from ? (
+                        <> The tracker linked only{" "}
+                          {sp.descent.refined_from} of them; a deeper
+                          re-scan of this window found the rest.</>
+                      ) : null}
                     </div>
                     {sp.descent_image_url && (
                       <figure style={{ margin: "6px 0 0" }}>

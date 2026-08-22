@@ -15754,6 +15754,53 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                          if _lo <= float(e.get("last_descent_sec") or 0.0)
                          <= _hi]
                 sp["descent_window"] = [round(_lo, 2), round(_hi, 2)]
+                # LOOK HARDER, BUT ONLY HERE. A near-miss is the tracker
+                # saying "something fell about there and I could not
+                # link enough of it" -- which is a specific place and a
+                # specific moment, so a deeper pass over that corridor
+                # costs a fraction of a second and is aimed at the one
+                # thing that might be a ball. This is the same detector
+                # the operator reaches for with 🔍 Scan, run
+                # automatically at the point they would have run it.
+                for _k, _e in enumerate(_all_evs):
+                    if not (_lo <= float(_e.get("last_descent_sec") or 0.0)
+                            <= _hi):
+                        continue
+                    if _k in _taken:
+                        continue
+                    _ref = _ball_scan_refine_descent(gp, _e, gfps)
+                    if _ref is None or not _strict(_ref):
+                        continue
+                    log.info(
+                        "ball scan: descent at %.2fs refined from %d to %d "
+                        "points (bend %.2f -> %.2f) by a deeper look — "
+                        "accepted", _ref["last_descent_sec"],
+                        _ref.get("refined_from"), _ref["n_points"],
+                        float(_e.get("bend_px") or 0.0), _ref["bend_px"],
+                    )
+                    _all_evs[_k] = _ref
+                    evs.append(_ref)
+                    _taken.add(len(evs) - 1)
+                    sp["descent"] = {
+                        "landing_frame": int(_ref["last_descent_frame"]),
+                        "landing_sec": float(_ref["last_descent_sec"]),
+                        "landing_xy": list(_ref["landing_xy"]),
+                        "n_points": int(_ref["n_points"]),
+                        "bend_px": _ref.get("bend_px"),
+                        "drop_px": _ref.get("drop_px"),
+                        "fall_rate": _ref.get("fall_rate"),
+                        "points": _ref.get("points") or [],
+                        "refined_from": _ref.get("refined_from"),
+                        "flight_sec": round(
+                            float(_ref["last_descent_sec"]) - _imp_green, 2),
+                    }
+                    sp["descent_reason"] = None
+                    sp["confirmed_swing"] = True
+                    out["n_matched"] += 1
+                    out["n_refined"] = int(out.get("n_refined") or 0) + 1
+                    break
+                if sp.get("descent"):
+                    continue
                 sp["descent_near"] = [
                     {"sec": e.get("last_descent_sec"),
                      "frame": e.get("last_descent_frame"),
@@ -15894,6 +15941,207 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
             out["overview_url"] = _clip_url_for(name)
     except Exception as exc:  # noqa: BLE001
         log.debug("ball scan: descent overview failed on %s: %s", row.id, exc)
+
+
+def _deep_region_dots(path, x, y, w, h, start, end, sens=3):
+    """Frame-diff every blob in a region, at the deep-scan sensitivity.
+
+    The same detector the operator gets from the map's 🔍 Scan button,
+    lifted out so the descent search can use it too. It is a plain
+    frame difference rather than MOG2: no background model to learn,
+    nothing to be confused by a camera that has been running for two
+    minutes, and generous enough to see a two-pixel ball against a tree
+    line -- which is exactly where the tracker loses it.
+
+    Returns [{frame, x, y}] in the SOURCE's pixel and frame numbering.
+    """
+    import cv2  # type: ignore
+
+    _THRESH, _PER_FRAME, _AREA_MAX, _CAP = {
+        1: (12, 6, 600, 1200),
+        2: (8, 10, 900, 2000),
+        3: (5, 16, 1400, 3000),
+    }[int(sens)]
+    out: list[dict] = []
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        return out
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, float(max(0, start)))
+        prev = None
+        for f in range(max(0, start), int(end) + 1):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            crop = frame[y:y + h, x:x + w]
+            gray = cv2.GaussianBlur(
+                cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+            if prev is not None:
+                diff = cv2.absdiff(gray, prev)
+                _, th = cv2.threshold(diff, _THRESH, 255, cv2.THRESH_BINARY)
+                th = cv2.dilate(th, None, iterations=1)
+                n, _l, stats, cents = cv2.connectedComponentsWithStats(th)
+                hits = []
+                for i in range(1, n):
+                    _a = int(stats[i, cv2.CC_STAT_AREA])
+                    if 1 <= _a <= _AREA_MAX:
+                        hits.append((_a, float(cents[i][0]),
+                                     float(cents[i][1])))
+                hits.sort(reverse=True)
+                for _a, cx, cy in hits[:_PER_FRAME]:
+                    out.append({"frame": int(f), "x": int(round(x + cx)),
+                                "y": int(round(y + cy))})
+            prev = gray
+            if len(out) >= _CAP:
+                break
+    finally:
+        cap.release()
+    return out
+
+
+# How far off the seed's own line a deep-scan dot may sit and still be
+# taken as the same ball, in pixels. The seed is already known to be
+# straight to within a couple of pixels, so this is about the frame-diff
+# centroid wandering on a two-pixel blob rather than about the flight
+# bending.
+_REFINE_CORRIDOR_PX = 12.0
+
+
+def _ball_scan_refine_descent(gp, seed, gfps):
+    """Look harder along a descent the tracker only part-saw.
+
+    THE SEED SAYS WHERE TO LOOK, WHICH IS WHY THIS IS AFFORDABLE. A
+    general "scan everything deeper" pass would be slow and would return
+    every leaf in the wind; this runs only on a window a near-miss has
+    already pointed at, over a corridor around the line that near-miss
+    drew. Measured on upload 653: the tracker linked three points of a
+    descent a hand-scan finds nine of, f443 through f452.
+
+    Dots are accepted onto the chain when they sit within a corridor of
+    the seed's line AND continue downward in time -- one per frame, the
+    nearest to the line. A ball falling through a tree line is the only
+    thing in that window that does both.
+
+    Returns a new event dict shaped like `find_descents` produces, or
+    None when the deeper look found nothing better than the seed.
+    """
+    _pts = seed.get("points") or []
+    if len(_pts) < 2:
+        return None
+    try:
+        import numpy as _np
+
+        _f0 = min(q["frame"] for q in _pts)
+        _f1 = int(seed.get("last_descent_frame") or max(
+            q["frame"] for q in _pts))
+        # BACKWARDS ONLY. The missing points are the ones BEFORE the
+        # tracker picked the ball up -- it loses a small blob against
+        # the tree line on the way down and finds it again over the
+        # green. Reaching forwards instead found two more dots after the
+        # ball had already landed and moved the landing twenty frames
+        # late, turning a 146px descent into a 16px one: that is the
+        # ball sitting still, not the flight.
+        #
+        # Where it came DOWN is the one thing the seed already knows.
+        _span = max(6, int(round(1.2 * float(gfps or 30.0))))
+        _s, _e = max(0, _f0 - _span), _f1
+        _xs = [q["x"] for q in _pts]
+        _ys = [q["y"] for q in _pts]
+        # HIGH ENOUGH TO HOLD THE MISSING POINTS. A fixed pad is fine
+        # sideways -- a descent barely moves in x -- and useless
+        # upwards, where the whole question is how far above the seed
+        # the ball was on the frames the tracker did not link. Reach up
+        # by the fall rate times the frames being walked back, capped so
+        # a fast descent does not ask for the whole frame.
+        _sorted0 = sorted(_pts, key=lambda q: q["frame"])
+        _st0 = [(b_["y"] - a_["y"]) / max(1, b_["frame"] - a_["frame"])
+                for a_, b_ in zip(_sorted0, _sorted0[1:])]
+        _rate = max(1.0, sorted(_st0)[len(_st0) // 2] if _st0 else 1.0)
+        _up = int(min(500, max(90, _rate * _span * 1.2)))
+        _pad = 90
+        _x0 = max(0, min(_xs) - _pad)
+        _y0 = max(0, min(_ys) - _up)
+        _w = (max(_xs) - min(_xs)) + 2 * _pad
+        _h = (max(_ys) - min(_ys)) + _up + _pad
+        dots = _deep_region_dots(gp, _x0, _y0, _w, _h, _s, _e, sens=3)
+        if not dots:
+            return None
+        # THE SEED'S OWN POINTS ARE NOT UP FOR REVISION. They came off
+        # the tracker, which followed the ball; the deep scan is a frame
+        # difference, which follows anything that moved. Letting it
+        # choose a dot at a frame the seed already has put the tree line
+        # where the ball was -- measured: at f158-160 it offered y=324
+        # for a ball the tracker had at 365 and 412, which broke the
+        # chain in half and lost the whole descent.
+        #
+        # So this only ever ADDS, and only BACKWARDS: walk out from the
+        # seed's earliest point one frame at a time, taking the dot in
+        # the corridor that continues the fall.
+        _cx = _np.polyfit(_np.array(_ys, dtype=float),
+                          _np.array(_xs, dtype=float), 1)
+        by_frame: dict[int, tuple] = {}
+        for d in dots:
+            if d["frame"] >= _f0:
+                continue            # the seed already speaks for these
+            _want = float(_np.polyval(_cx, float(d["y"])))
+            _off = abs(float(d["x"]) - _want)
+            if _off > _REFINE_CORRIDOR_PX:
+                continue
+            _cur = by_frame.get(d["frame"])
+            if _cur is None or _off < _cur[0]:
+                by_frame[d["frame"]] = (_off, d)
+
+        # How fast it was falling, per frame, from the part we trust.
+        _sorted = sorted(_pts, key=lambda q: q["frame"])
+        _steps = [
+            (b["y"] - a["y"]) / max(1, b["frame"] - a["frame"])
+            for a, b in zip(_sorted, _sorted[1:])
+        ]
+        _step = sorted(_steps)[len(_steps) // 2] if _steps else 0.0
+        if _step <= 1.0:
+            return None
+
+        added: list[dict] = []
+        _top = _sorted[0]
+        for f in range(_f0 - 1, _s - 1, -1):
+            _c = by_frame.get(f)
+            if _c is None:
+                continue
+            d = _c[1]
+            _gap = _top["frame"] - f
+            _rise = _top["y"] - d["y"]
+            # Going back in time the ball is HIGHER, by roughly the fall
+            # rate times the gap. Anything level or below is not it.
+            if not (2.0 <= _rise <= 3.0 * _step * _gap):
+                continue
+            added.append(d)
+            _top = d
+        if not added:
+            return None
+        best = sorted(added + list(_sorted), key=lambda q: q["frame"])
+        _by = [float(q["y"]) for q in best]
+        _bx = [float(q["x"]) for q in best]
+        _fit = _np.polyfit(_np.array(_by), _np.array(_bx), 1)
+        _bend = float(_np.sqrt(_np.mean(
+            (_np.polyval(_fit, _np.array(_by)) - _np.array(_bx)) ** 2)))
+        return {
+            **seed,
+            "first_frame": int(best[0]["frame"]),
+            "last_frame": int(best[-1]["frame"]),
+            "last_descent_frame": int(best[-1]["frame"]),
+            "last_descent_sec": round(
+                int(best[-1]["frame"]) / max(1e-6, float(gfps or 30.0)), 2),
+            "landing_xy": [int(best[-1]["x"]), int(best[-1]["y"])],
+            "n_points": len(best),
+            "drop_px": int(round(max(_by) - min(_by))),
+            "bend_px": round(_bend, 2),
+            "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
+                        "y": int(q["y"])} for q in best],
+            "refined_from": int(seed.get("n_points") or 0),
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: descent refine failed: %s", exc)
+        return None
 
 
 def _ball_scan_near_image(row, gp, sp, near) -> None:
