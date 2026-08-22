@@ -15573,6 +15573,15 @@ BALLSCAN_DESCENT_MAX_BEND_PX = 6.0
 # descent the scan did not accept.
 BALLSCAN_DESCENT_LOOSE_POINTS = 3
 BALLSCAN_DESCENT_LOOSE_BEND_PX = 16.0
+# A SHORT CHAIN CAN STILL BE PROOF, if it is better in the ways that
+# matter. The detector loses a falling ball against the tree line for a
+# few frames at a time, so how many points it links is partly a fact
+# about the background rather than about the ball -- which makes a flat
+# count the wrong test on its own. Three points that fall a long way
+# almost perfectly straight are stronger than four that wander.
+BALLSCAN_DESCENT_SHORT_POINTS = 3
+BALLSCAN_DESCENT_SHORT_BEND_PX = 5.0
+BALLSCAN_DESCENT_SHORT_DROP_PX = 40
 
 
 def _ball_scan_descents(row, db, spots, progress=None) -> dict:
@@ -15639,21 +15648,52 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         _all_evs = list(rep.get("events") or [])
 
         def _strict(e):
-            return (int(e.get("n_points") or 0) >= BALLSCAN_DESCENT_MIN_POINTS
-                    and float(e.get("bend_px") or 999.0)
-                    <= BALLSCAN_DESCENT_MAX_BEND_PX)
+            # FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR NEED TO BE.
+            #
+            # A flat count was the wrong shape of test. The detector
+            # loses a falling ball against the tree line for a few
+            # frames at a time, so the number of points it links is
+            # partly about the background -- and a three-point chain
+            # that falls a long way almost perfectly straight is
+            # stronger evidence than four points wandering 6px off a
+            # line. Measured on upload 653: a real descent at f447 was
+            # thrown out for having three points while passing the bend
+            # gate outright.
+            #
+            # So a shorter chain is allowed, and pays for the missing
+            # point by being straighter AND having fallen further.
+            _n = int(e.get("n_points") or 0)
+            _b = float(e.get("bend_px") or 999.0)
+            _d = float(e.get("drop_px") or 0.0)
+            if _n >= BALLSCAN_DESCENT_MIN_POINTS:
+                return _b <= BALLSCAN_DESCENT_MAX_BEND_PX
+            if _n >= BALLSCAN_DESCENT_SHORT_POINTS:
+                return (_b <= BALLSCAN_DESCENT_SHORT_BEND_PX
+                        and _d >= BALLSCAN_DESCENT_SHORT_DROP_PX)
+            return False
 
         def _why_not(e):
             _n = int(e.get("n_points") or 0)
             _b = float(e.get("bend_px") or 999.0)
+            _d = float(e.get("drop_px") or 0.0)
+            if _strict(e):
+                return "accepted"
+            if _n < BALLSCAN_DESCENT_SHORT_POINTS:
+                return (f"only {_n} points — fewer than "
+                        f"{BALLSCAN_DESCENT_SHORT_POINTS} is not a chain")
+            if _n >= BALLSCAN_DESCENT_MIN_POINTS:
+                return (f"{_n} points but bends {_b}px, and "
+                        f"{BALLSCAN_DESCENT_MAX_BEND_PX}px is the limit at "
+                        f"that length")
             bits = []
-            if _n < BALLSCAN_DESCENT_MIN_POINTS:
-                bits.append(f"only {_n} points "
-                            f"(need {BALLSCAN_DESCENT_MIN_POINTS})")
-            if _b > BALLSCAN_DESCENT_MAX_BEND_PX:
-                bits.append(f"bends {_b}px "
-                            f"(need {BALLSCAN_DESCENT_MAX_BEND_PX} or less)")
-            return " and ".join(bits) or "accepted"
+            if _b > BALLSCAN_DESCENT_SHORT_BEND_PX:
+                bits.append(f"bends {_b}px (a {_n}-point chain has to be "
+                            f"within {BALLSCAN_DESCENT_SHORT_BEND_PX}px)")
+            if _d < BALLSCAN_DESCENT_SHORT_DROP_PX:
+                bits.append(f"fell only {int(_d)}px (a {_n}-point chain has "
+                            f"to fall {BALLSCAN_DESCENT_SHORT_DROP_PX}px)")
+            return (f"{_n} points and " + " and ".join(bits)) if bits else \
+                f"{_n} points, {_b}px bend, {int(_d)}px drop"
 
         evs = [e for e in _all_evs if _strict(e)]
         _keys = ("last_descent_frame", "last_descent_sec", "landing_xy",
@@ -15720,12 +15760,23 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                     for e in _near
                 ]
                 if _near:
+                    # THE NUMBERS, NOT JUST THE VERDICT. "Only 3 points"
+                    # says which gate it failed and nothing about
+                    # whether it deserved to.
                     sp["descent_reason"] = (
                         f"{len(_near)} thing(s) fell between {_lo:.1f}s and "
                         f"{_hi:.1f}s but none was convincing enough: "
                         + "; ".join(
-                            f"f{e.get('last_descent_frame')} — {_why_not(e)}"
+                            f"f{e.get('last_descent_frame')} "
+                            f"({e.get('last_descent_sec')}s) at "
+                            f"{e.get('landing_xy')} — {e.get('n_points')} "
+                            f"points, {e.get('drop_px')}px drop, "
+                            f"{e.get('bend_px')}px bend: {_why_not(e)}"
                             for e in _near))
+                    # ...AND A PICTURE OF IT. A rejected descent is
+                    # exactly the case where the operator needs to see
+                    # the chain to judge whether the gate was right.
+                    _ball_scan_near_image(row, gp, sp, _near)
                 elif _taken and any(
                         _lo <= float(evs[k].get("last_descent_sec") or 0.0)
                         <= _hi for k in _taken):
@@ -15825,7 +15876,7 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.46, _col, 1, cv2.LINE_AA)
         cv2.putText(
             im,
-            f"{len(all_evs)} descent(s) seen — green = accepted "
+            f"{len(all_evs)} descent(s) seen - green = accepted "
             f"(>={BALLSCAN_DESCENT_MIN_POINTS} pts, bend "
             f"<={BALLSCAN_DESCENT_MAX_BEND_PX}px), grey = rejected",
             (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2,
@@ -15836,6 +15887,57 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
             out["overview_url"] = _clip_url_for(name)
     except Exception as exc:  # noqa: BLE001
         log.debug("ball scan: descent overview failed on %s: %s", row.id, exc)
+
+
+def _ball_scan_near_image(row, gp, sp, near) -> None:
+    """Draw the descents that landed in this candidate's window but were
+    turned away, on the frame the first of them landed in."""
+    if not near:
+        return
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(gp))
+        if not cap.isOpened():
+            return
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES,
+                    int(near[0].get("last_descent_frame") or 0))
+            ok, im = cap.read()
+        finally:
+            cap.release()
+        if not ok or im is None:
+            return
+        im = (im.astype("float32") * 0.75).astype("uint8")
+        for e in near:
+            _pts = e.get("points") or []
+            for a_, b_ in zip(_pts, _pts[1:]):
+                cv2.line(im, (a_["x"], a_["y"]), (b_["x"], b_["y"]),
+                         (60, 170, 245), 2, cv2.LINE_AA)
+            for q in _pts:
+                cv2.circle(im, (q["x"], q["y"]), 6, (60, 170, 245), 2,
+                           cv2.LINE_AA)
+                cv2.putText(im, f"f{q['frame']}", (q["x"] + 9, q["y"] - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (60, 170, 245),
+                            1, cv2.LINE_AA)
+            _lx, _ly = e.get("landing_xy") or [0, 0]
+            cv2.circle(im, (int(_lx), int(_ly)), 15, (255, 255, 255), 2,
+                       cv2.LINE_AA)
+            cv2.putText(
+                im,
+                f"{e.get('n_points')}pts  {e.get('drop_px')}px drop  "
+                f"bend {e.get('bend_px')}px",
+                (int(_lx) + 19, int(_ly) + 5), cv2.FONT_HERSHEY_SIMPLEX,
+                0.5, (60, 170, 245), 1, cv2.LINE_AA)
+        cv2.putText(im, "turned away - is this a ball coming down?",
+                    (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                    (255, 255, 255), 2, cv2.LINE_AA)
+        name = f"ballscan-{row.id}-near-{sp['x']}-{sp['y']}.jpg"
+        if cv2.imwrite(str(CLIPS_DIR / name), im,
+                       [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
+            sp["descent_near_image_url"] = _clip_url_for(name)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: near-miss image failed on %s: %s", row.id, exc)
 
 
 def _ball_scan_descent_images(row, spots, tok, rep) -> None:

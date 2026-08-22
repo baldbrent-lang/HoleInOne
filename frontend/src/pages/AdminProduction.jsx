@@ -7720,12 +7720,21 @@ function BallScanModal({ state, onClose }) {
                         color: (sp.descent_near || []).length
                           ? "#f59e0b" : "var(--muted)" }}>
                     No descent: {sp.descent_reason}
-                    {(sp.descent_near || []).length > 0 && (
-                      <div style={{ marginTop: 3 }}>
-                        Loosening the gates would accept{" "}
-                        {sp.descent_near.length === 1 ? "it" : "one of them"} —
-                        see the search picture at the top for where they are.
-                      </div>
+                    {sp.descent_near_image_url && (
+                      <figure style={{ margin: "6px 0 0" }}>
+                        <a href={sp.descent_near_image_url} target="_blank"
+                           rel="noreferrer">
+                          <img src={sp.descent_near_image_url}
+                               alt="descent turned away"
+                               style={{ width: "100%", borderRadius: 6 }} />
+                        </a>
+                        <figcaption className="tiny muted">
+                          What fell in this candidate&apos;s window and was
+                          turned away. If that is a ball coming down, the
+                          gates are wrong — the numbers on it say by how
+                          much.
+                        </figcaption>
+                      </figure>
                     )}
                   </div>
                 ) : null}
