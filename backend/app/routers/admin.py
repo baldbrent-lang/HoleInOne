@@ -8115,6 +8115,71 @@ def _view_map_for(db, row):
     return course, hole, (course.view_maps or {}).get(str(hole))
 
 
+def _camera_pair_for(db, row):
+    """(tee_camera_id, green_camera_id) for this upload, or (None, None).
+
+    Only a Pi-sourced upload knows its cameras; a hand-uploaded file has
+    no camera event and so cannot say which two cameras shot it.
+    """
+    try:
+        if not getattr(row, "camera_event_id", None):
+            return None, None
+        ev = db.get(CameraEvent, row.camera_event_id)
+        if ev is None:
+            return None, None
+        return (int(ev.tee_camera_id) if ev.tee_camera_id else None,
+                int(ev.green_camera_id) if ev.green_camera_id else None)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("camera pair for upload %s failed: %s",
+                  getattr(row, "id", None), exc)
+        return None, None
+
+
+def _view_map_mismatch(db, row, vm):
+    """Why the stored mapping does not belong to THIS upload's cameras.
+
+    A view map is two viewpoints of one hole, and it is stored under
+    `course.view_maps[hole]`. That key is not as specific as it looks:
+    `_hole_for_upload` falls back to hole 1 whenever it cannot work the
+    hole out, and it CANNOT work it out for a hand-uploaded file, which
+    has no camera event to ask. So every hand-uploaded pair on the whole
+    system lands in hole 1's slot, sharing one mapping between cameras
+    that are nowhere near each other.
+
+    What that looks like from the operator's chair: calibrate a pair,
+    open a different pair later, and eight points fitted on someone
+    else's geometry load onto these frames -- into the sky and the tree
+    line, because that is where those ground features are in THIS view.
+    Save, and the good calibration is overwritten by the new one.
+
+    Returns a sentence, or None when there is nothing to warn about.
+    """
+    if not vm:
+        return None
+    t_id, g_id = _camera_pair_for(db, row)
+    saved = vm.get("cameras") or []
+    s_t = saved[0] if len(saved) > 0 else None
+    s_g = saved[1] if len(saved) > 1 else None
+    if t_id is not None and s_t is not None and (t_id, g_id) != (s_t, s_g):
+        return (
+            f"this mapping was fitted on cameras {s_t}→{s_g}, and this "
+            f"upload is from {t_id}→{g_id}. Those are different views, so "
+            f"its points do not belong on these frames. Clicking Save "
+            f"would replace the other pair's calibration."
+        )
+    src = vm.get("source_upload_id")
+    if s_t is None and src is not None and int(src) != int(row.id):
+        return (
+            f"this mapping was fitted on upload #{src}, and the hole it is "
+            f"filed under could not be determined from either upload — so "
+            f"it is shared by every hand-uploaded pair on the system, "
+            f"whatever cameras shot them. Check the points land on real "
+            f"ground features in BOTH pictures before trusting or saving "
+            f"over it."
+        )
+    return None
+
+
 def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
     """A landing marked on the green camera -> a pixel in the tee frame.
 
@@ -8160,6 +8225,13 @@ def get_upload_view_map(upload_id: int, db: Session = Depends(get_db)):
         "course_name": getattr(course, "name", None),
         "hole": hole,
         "view_map": vm,
+        # Set when the stored mapping was fitted on a different pair of
+        # cameras than this upload's. The calibrator shows it and refuses
+        # to preload the points, because loading them silently is what
+        # turns a wrong mapping into a lost one: the operator clicks
+        # Save and overwrites the pair the points actually belonged to.
+        "mismatch": _view_map_mismatch(db, row, vm),
+        "cameras": list(_camera_pair_for(db, row)),
         "reason": None if course else (
             "this upload is not attached to a course, so there is nowhere "
             "to store a mapping"
@@ -8220,6 +8292,13 @@ def save_upload_view_map(
         )
     vm["source_upload_id"] = upload_id
     vm["calibrated_at"] = _utcnow_naive().isoformat()
+    # WHICH TWO CAMERAS THIS DESCRIBES. Without it the mapping is only
+    # as specific as its hole key, and that key is not specific at all
+    # for a hand-uploaded file -- `_hole_for_upload` has nothing to go on
+    # and answers 1, so every such pair shares one slot. Stamping the
+    # cameras lets the next open say "these are not the same two views"
+    # instead of loading points fitted on a different course corner.
+    vm["cameras"] = list(_camera_pair_for(db, row))
     # Replace the dict wholesale: SQLAlchemy does not see a mutation of a
     # JSON column in place, and the write would be silently dropped.
     _all = dict(course.view_maps or {})

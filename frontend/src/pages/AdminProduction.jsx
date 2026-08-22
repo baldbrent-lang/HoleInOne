@@ -3425,6 +3425,7 @@ function WizardBody({
         tee: { ...t, frame: draft.impactFrame ?? 0 },
         green: { ...g, frame: draft.landingFrame ?? defaultEnd ?? 0 },
         existing: vm?.view_map || null,
+        mismatch: vm?.mismatch || null,
         // What this calibration will apply to. Worth saying out loud:
         // it is saved against the hole, not this upload, so it is about
         // to change every swing recorded there.
@@ -3793,6 +3794,7 @@ function WizardBody({
               teeFrame={calibrating.tee}
               greenFrame={calibrating.green}
               existing={calibrating.existing}
+              mismatch={calibrating.mismatch}
               scope={calibrating.scope}
               onClose={() => setCalibrating(null)}
               onSaved={(out) => {
@@ -4456,13 +4458,19 @@ function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
  */
 function ViewMapModal({
   uploadId, adminPassword, teeFrame, greenFrame, existing, scope,
-  onClose, onSaved,
+  onClose, onSaved, mismatch = null,
 }) {
-  const [pairs, setPairs] = useState(() => existing?.points || []);
+  // A MISMATCHED MAP DOES NOT GET LOADED. Its points were clicked on
+  // two different cameras' frames, so on these they land in the sky and
+  // the tree line -- and the moment they are on screen the operator is
+  // one Save away from overwriting the pair they really belong to.
+  // Start empty and say why, instead.
+  const [pairs, setPairs] = useState(
+    () => (mismatch ? [] : existing?.points || []));
   // A saved calibration comes back with its pairs already on the
   // pictures. Say so: an operator who cannot tell a loaded calibration
   // from a blank one re-does work that was already correct.
-  const preloaded = (existing?.points || []).length;
+  const preloaded = mismatch ? 0 : (existing?.points || []).length;
   const [pending, setPending] = useState(null);   // {side, x, y}
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState(null);
@@ -4528,6 +4536,12 @@ function ViewMapModal({
             <span className="tiny" style={{ color: "#3ee37a" }}>
               already mapped — {preloaded} saved pairs loaded. Adjust or
               add to them, or just Close; this does not need redoing.
+            </span>
+          )}
+          {mismatch && (
+            <span className="tiny" style={{ color: "#f87171", maxWidth: 460 }}>
+              ⚠ A mapping is stored here, but not for these two cameras —
+              so it has NOT been loaded. {mismatch}
             </span>
           )}
           <span className="tiny muted">
@@ -12964,6 +12978,7 @@ export default function AdminProduction() {
         tee: { ...t, frame: teeF },
         green: { ...g, frame: greenF },
         existing: vm?.view_map || null,
+        mismatch: vm?.mismatch || null,
         // Worth saying out loud: this is saved against the HOLE, not
         // this upload, so it is about to change every swing recorded
         // there -- not only the one the operator opened it from.
@@ -13813,6 +13828,7 @@ export default function AdminProduction() {
           teeFrame={greenCal.tee}
           greenFrame={greenCal.green}
           existing={greenCal.existing}
+          mismatch={greenCal.mismatch}
           scope={greenCal.scope}
           onClose={() => setGreenCal(null)}
           onSaved={() => { setGreenCal(null); refreshAll(); }}
