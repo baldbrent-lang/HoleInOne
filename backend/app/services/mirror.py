@@ -142,6 +142,16 @@ def _import_one(ev: dict) -> bool:
             ),
             swing_count="multiple",
             processing_status="pending",
+            # THE HOLE, WRITTEN DOWN. A mirrored upload gets no
+            # CameraEvent, so nothing on the row said which hole it was
+            # of and `_hole_for_upload` had to fall back to 1 until a
+            # produce stamped a clip. Anything filing data under the
+            # answer -- the tee/green view map did -- pooled every
+            # mirrored pair on the system into hole 1's slot, whatever
+            # cameras shot them. The source told us the hole right here;
+            # keeping it costs nothing.
+            edit_metrics={"source_hole_number": hole,
+                          "source_event_id": eid},
         )
         db.add(lvu)
         # Mark imported in the SAME transaction — so if produce later fails,

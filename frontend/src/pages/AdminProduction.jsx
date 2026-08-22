@@ -3427,10 +3427,12 @@ function WizardBody({
         existing: vm?.view_map || null,
         mismatch: vm?.mismatch || null,
         // What this calibration will apply to. Worth saying out loud:
-        // it is saved against the hole, not this upload, so it is about
-        // to change every swing recorded there.
+        // it is not saved against this upload, so it is about to change
+        // every swing those two cameras record.
         scope: vm?.course_name
-          ? `${vm.course_name} · hole ${vm.hole}` : null,
+          ? `${vm.course_name} · hole ${vm.hole}`
+            + (vm.key_reason ? ` · filed by ${vm.key_reason}` : "")
+          : null,
         reason: vm?.reason || null,
       });
     } catch (e) {
@@ -12979,10 +12981,13 @@ export default function AdminProduction() {
         green: { ...g, frame: greenF },
         existing: vm?.view_map || null,
         mismatch: vm?.mismatch || null,
-        // Worth saying out loud: this is saved against the HOLE, not
-        // this upload, so it is about to change every swing recorded
-        // there -- not only the one the operator opened it from.
-        scope: vm?.course_name ? `${vm.course_name} · hole ${vm.hole}` : null,
+        // Worth saying out loud: this is not saved against this upload,
+        // so it is about to change every swing those two cameras
+        // record -- not only the one the operator opened it from.
+        scope: vm?.course_name
+          ? `${vm.course_name} · hole ${vm.hole}`
+            + (vm.key_reason ? ` · filed by ${vm.key_reason}` : "")
+          : null,
       });
     } catch (e) {
       setGreenCal({ uploadId: row.id, error: e?.message || String(e) });

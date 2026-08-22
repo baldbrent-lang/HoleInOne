@@ -8015,30 +8015,49 @@ def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx):
         return None
 
 
-def _hole_for_upload(db, row) -> int:
-    """Which hole this upload is of.
+def _hole_for_upload_ex(db, row) -> tuple[int, str]:
+    """(hole, where it came from). The source matters as much as the hole.
 
     LongVideoUpload has no hole column, so it is reconstructed the same
-    way produce does: the camera event when there is one, then whatever
-    the operator finalised, then the clips already cut from it, then 1.
+    way produce does: the camera event when there is one, then the hole
+    the import recorded, then whatever the operator finalised, then the
+    clips already cut from it, then 1.
+
+    THAT LAST STEP IS A GUESS, AND CALLERS HAVE TO BE ABLE TO SEE IT.
+    Returning a bare 1 makes "hole 1" and "no idea" the same value, and
+    anything filing data under the answer -- the tee/green view map did
+    -- silently pools every unidentifiable upload into one bucket. The
+    source is "default" in that case and nothing shared may be keyed on
+    it.
     """
     try:
         if getattr(row, "camera_event_id", None):
             ev = db.get(CameraEvent, row.camera_event_id)
             if ev and ev.hole_number:
-                return int(ev.hole_number)
+                return int(ev.hole_number), "camera_event"
         _em = row.edit_metrics or {}
+        # What the importer was told by the system it pulled from. A
+        # mirrored upload has no camera event, so without this its hole
+        # was unknowable until a produce had stamped a clip.
+        if _em.get("source_hole_number"):
+            return int(_em["source_hole_number"]), "import"
         if _em.get("finalized_hole_number"):
-            return int(_em["finalized_hole_number"])
+            return int(_em["finalized_hole_number"]), "finalized"
         _c = db.query(VideoClip).filter(
             VideoClip.long_upload_id == row.id,
             VideoClip.hole_number.isnot(None),
         ).first()
         if _c and _c.hole_number:
-            return int(_c.hole_number)
+            return int(_c.hole_number), "clip"
     except Exception as exc:  # noqa: BLE001
         log.debug("hole for upload %s failed: %s", getattr(row, "id", None), exc)
-    return 1
+    return 1, "default"
+
+
+def _hole_for_upload(db, row) -> int:
+    """Which hole this upload is of. 1 when it cannot be worked out --
+    see `_hole_for_upload_ex` when the difference matters."""
+    return _hole_for_upload_ex(db, row)[0]
 
 
 def hole_facts(db, course, hole):
@@ -8109,10 +8128,52 @@ def _view_map_for(db, row):
     calibrate button unusable on exactly those uploads.
     """
     course = db.get(Course, row.course_id) if row.course_id else None
-    hole = _hole_for_upload(db, row)
+    hole, _src = _hole_for_upload_ex(db, row)
     if course is None:
         return None, hole, None
-    return course, hole, (course.view_maps or {}).get(str(hole))
+    key, legacy, _why = _view_map_key(db, row)
+    maps = course.view_maps or {}
+    vm = maps.get(key)
+    if vm is None and legacy is not None:
+        vm = maps.get(legacy)
+    return course, hole, vm
+
+
+# WHAT A VIEW MAP IS ABOUT, in the order the answer can be trusted.
+#
+# It describes TWO VIEWPOINTS -- a homography from one camera's pixels
+# to another's -- so its identity is the pair of cameras. It was keyed on
+# the hole number instead, which is a property of the ground rather than
+# of the cameras looking at it, and worse, a hole number that
+# `_hole_for_upload` cannot determine comes back as 1. A mirrored upload
+# has no camera event, so before this its hole was unknowable until a
+# produce had stamped a clip -- which meant every mirrored pair on the
+# system, whatever cameras shot it and whatever hole it was of, filed its
+# calibration in hole 1's slot and read the last one written there.
+#
+# Three keys, most specific first:
+#   cam:T-G     the two cameras. Exact, and what this actually describes.
+#   hole:N      the hole, when it is genuinely known. Two cameras bolted
+#               on one hole are the pair, so this is right whenever the
+#               hole is.
+#   upload:N    nothing identifiable. PRIVATE to this upload -- it cannot
+#               clobber anyone and no one inherits it, which is the only
+#               safe thing to do with an identity you do not have.
+def _view_map_key(db, row) -> tuple[str, str | None, str]:
+    """(key, legacy key to fall back to on read, what decided it)."""
+    t_id, g_id = _camera_pair_for(db, row)
+    hole, src = _hole_for_upload_ex(db, row)
+    # The pre-key records are stored under the bare hole number, and are
+    # readable ONLY when the hole is genuinely known. A defaulted 1 must
+    # never inherit them -- that pooling is the bug being fixed.
+    legacy = str(hole) if src != "default" else None
+    if t_id is not None:
+        return f"cam:{t_id}-{g_id}", legacy, "camera pair"
+    if src != "default":
+        return f"hole:{hole}", legacy, f"hole {hole} (from the {src})"
+    return (f"upload:{row.id}", None,
+            "neither the cameras nor the hole could be determined, so this "
+            "mapping is private to this upload")
 
 
 def _camera_pair_for(db, row):
@@ -8164,19 +8225,32 @@ def _view_map_mismatch(db, row, vm):
         return (
             f"this mapping was fitted on cameras {s_t}→{s_g}, and this "
             f"upload is from {t_id}→{g_id}. Those are different views, so "
-            f"its points do not belong on these frames. Clicking Save "
-            f"would replace the other pair's calibration."
+            f"its points do not belong on these frames."
         )
-    src = vm.get("source_upload_id")
-    if s_t is None and src is not None and int(src) != int(row.id):
+    # A LEGACY RECORD IS ONLY AS GOOD AS THE KEY IT WAS FILED UNDER, and
+    # that key was a bare hole number that a mirrored upload could not
+    # determine. Reaching one through the fallback means it may have been
+    # fitted on any pair of cameras at this course; the points on screen
+    # are the only evidence either way, so say so and let the operator
+    # look. New saves are keyed on the cameras and never land here.
+    key, _legacy, _why = _view_map_key(db, row)
+    if vm.get("key") and vm["key"] != key:
         return (
-            f"this mapping was fitted on upload #{src}, and the hole it is "
-            f"filed under could not be determined from either upload — so "
-            f"it is shared by every hand-uploaded pair on the system, "
-            f"whatever cameras shot them. Check the points land on real "
-            f"ground features in BOTH pictures before trusting or saving "
-            f"over it."
+            f"this mapping is filed under {vm['key']}, and this upload "
+            f"resolves to {key}."
         )
+    if not vm.get("key"):
+        src = vm.get("source_upload_id")
+        if src is not None and int(src) != int(row.id):
+            return (
+                f"this mapping predates per-camera keying and was fitted "
+                f"on upload #{src}. It was stored under a bare hole "
+                f"number, which a mirrored upload could not determine — so "
+                f"it may have been fitted on a different pair of cameras "
+                f"entirely. Check the points land on real ground features "
+                f"in BOTH pictures before trusting it; saving re-files it "
+                f"against these cameras."
+            )
     return None
 
 
@@ -8232,6 +8306,12 @@ def get_upload_view_map(upload_id: int, db: Session = Depends(get_db)):
         # Save and overwrites the pair the points actually belonged to.
         "mismatch": _view_map_mismatch(db, row, vm),
         "cameras": list(_camera_pair_for(db, row)),
+        # What this upload's calibration is filed under, and why. Worth
+        # returning: "hole 1" used to mean both "hole 1" and "no idea",
+        # and the operator had no way to tell which one they were
+        # about to write into.
+        "key": _view_map_key(db, row)[0],
+        "key_reason": _view_map_key(db, row)[2],
         "reason": None if course else (
             "this upload is not attached to a course, so there is nowhere "
             "to store a mapping"
@@ -8301,12 +8381,24 @@ def save_upload_view_map(
     vm["cameras"] = list(_camera_pair_for(db, row))
     # Replace the dict wholesale: SQLAlchemy does not see a mutation of a
     # JSON column in place, and the write would be silently dropped.
+    _key, _legacy, _why = _view_map_key(db, row)
+    vm["key"] = _key
+    vm["key_reason"] = _why
+    vm["hole"] = hole
     _all = dict(course.view_maps or {})
-    _all[str(hole)] = vm
+    _all[_key] = vm
+    # THE LEGACY RECORD IS LEFT WHERE IT IS. It is keyed on a bare hole
+    # number that other uploads may still be reading through their own
+    # fallback, and rewriting or deleting it here would take a working
+    # calibration away from a pair that never asked for one. Reads prefer
+    # the new key, so this record simply stops being consulted once the
+    # pair it belongs to has been calibrated again.
     course.view_maps = _all
+    log.info("save_view_map: course=%s key=%s (%s) upload=%s",
+             course.id, _key, _why, upload_id)
     db.add(AuditLog(
         actor="admin", action="save_view_map",
-        target=f"course:{course.id}:hole:{hole}",
+        target=f"course:{course.id}:{_key}",
         detail=f"points={vm['n_points']} rms_px={vm['rms_px']} "
                f"upload={upload_id}",
     ))
@@ -8363,7 +8455,14 @@ def save_hole_pin(
             f"views first, or the pin has nowhere to be carried to",
         )
     _g = payload.get("green")
+    # THE SAME SLOT THE MAPPING WAS READ FROM. `_view_map_for` may have
+    # fallen back to a legacy hole-keyed record; writing the pin under
+    # the new key would file it against a mapping that is not there yet,
+    # and the pin would vanish on the next read.
+    _key, _legacy, _ = _view_map_key(db, row)
     _all = dict(course.view_maps or {})
+    if _key not in _all and _legacy is not None and _legacy in _all:
+        _key = _legacy
     _vm = dict(vm)
     if _g is None:
         _vm.pop("pin_green", None)
