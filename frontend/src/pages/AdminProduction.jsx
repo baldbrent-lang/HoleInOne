@@ -7513,6 +7513,38 @@ function BallScanModal({ state, onClose }) {
               </div>
             )}
 
+            {/* WHAT THE DESCENT SEARCH SAW, all of it. The per-candidate
+                pictures below show the chain that won; this shows the
+                whole field, so a descent you can see that the scan did
+                not take is either visibly here and marked REJECTED with
+                its reason, or visibly absent — and those call for
+                opposite responses. */}
+            {rep.descents?.overview_url && (
+              <figure style={{ margin: "10px 0 0" }}>
+                <a href={rep.descents.overview_url} target="_blank"
+                   rel="noreferrer">
+                  <img src={rep.descents.overview_url} alt="descents found"
+                       style={{ width: "100%", borderRadius: 6 }} />
+                </a>
+                <figcaption className="tiny muted">
+                  Every descent found on the green camera —{" "}
+                  {rep.descents.n_accepted} of {rep.descents.n_seen} strong
+                  enough to confirm a swing. Searched from{" "}
+                  {rep.descents.gates?.searched_from_points} points and{" "}
+                  {rep.descents.gates?.searched_to_bend_px}px of bend;
+                  accepted at {rep.descents.gates?.min_points} points and{" "}
+                  {rep.descents.gates?.max_bend_px}px. A candidate claims the
+                  one landing in its own flight window, and each descent can
+                  only be claimed once.
+                </figcaption>
+              </figure>
+            )}
+            {rep.descents && !rep.descents.overview_url && (
+              <div className="tiny muted" style={{ marginTop: 8 }}>
+                Descent search: {rep.descents.reason}
+              </div>
+            )}
+
             {/* SUMMARY FIRST. The cards below are the evidence; this is
                 the answer, and it is what you read to decide whether a
                 clip is worth opening the pictures for. */}
@@ -7591,6 +7623,11 @@ function BallScanModal({ state, onClose }) {
                                   title={`The green camera saw a ball come down ${sp.descent.flight_sec}s after this spot emptied — ${sp.descent.n_points} points falling, bending only ${sp.descent.bend_px}px. That is this swing, seen from the other end.`}>
                               ✓ {sp.descent.n_points} pts ·{" "}
                               {sp.descent.flight_sec}s
+                            </span>
+                          ) : (sp.descent_near || []).length ? (
+                            <span className="pill warn"
+                                  title={sp.descent_reason}>
+                              {sp.descent_near.length} near-miss
                             </span>
                           ) : (
                             <span className="muted"
@@ -7679,8 +7716,17 @@ function BallScanModal({ state, onClose }) {
                     )}
                   </div>
                 ) : sp.descent_reason ? (
-                  <div className="tiny muted" style={{ marginTop: 8 }}>
+                  <div className="tiny" style={{ marginTop: 8,
+                        color: (sp.descent_near || []).length
+                          ? "#f59e0b" : "var(--muted)" }}>
                     No descent: {sp.descent_reason}
+                    {(sp.descent_near || []).length > 0 && (
+                      <div style={{ marginTop: 3 }}>
+                        Loosening the gates would accept{" "}
+                        {sp.descent_near.length === 1 ? "it" : "one of them"} —
+                        see the search picture at the top for where they are.
+                      </div>
+                    )}
                   </div>
                 ) : null}
                 <div className="row" style={{ gap: 10, marginTop: 8,

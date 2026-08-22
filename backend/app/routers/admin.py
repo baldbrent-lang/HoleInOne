@@ -15567,6 +15567,12 @@ BALLSCAN_DESCENT_MIN_POINTS = 4
 # across three shots on two clips, and its false positives 17.6 and
 # 21.7. Six is inside the real ones and well clear of both.
 BALLSCAN_DESCENT_MAX_BEND_PX = 6.0
+# What the SEARCH is run at, which is deliberately looser than what it
+# is judged at. Anything between the two is a near-miss, and a near-miss
+# is the most useful thing there is to say to an operator who can see a
+# descent the scan did not accept.
+BALLSCAN_DESCENT_LOOSE_POINTS = 3
+BALLSCAN_DESCENT_LOOSE_BEND_PX = 16.0
 
 
 def _ball_scan_descents(row, db, spots, progress=None) -> dict:
@@ -15616,22 +15622,60 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         out["delta_source"] = delta_src
         if progress:
             progress("Looking for ball descents on the green camera", 0, 1)
+        # SEARCH LOOSE, JUDGE STRICT, AND KEEP BOTH.
+        #
+        # Running the search at the strict gate throws away exactly the
+        # information needed to explain a candidate that did not match:
+        # "no descent in your window" is the same answer whether nothing
+        # fell at all or whether something fell and was three points
+        # instead of four. So the scan is run once at a permissive gate,
+        # the strict gate is applied afterwards, and the near-misses are
+        # kept to be reported against the candidate they belong to.
         rep = _d3.find_descents(
             gp, gfps,
-            min_points=BALLSCAN_DESCENT_MIN_POINTS,
-            max_bend_px=BALLSCAN_DESCENT_MAX_BEND_PX,
+            min_points=BALLSCAN_DESCENT_LOOSE_POINTS,
+            max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
         ) or {}
-        evs = list(rep.get("events") or [])
+        _all_evs = list(rep.get("events") or [])
+
+        def _strict(e):
+            return (int(e.get("n_points") or 0) >= BALLSCAN_DESCENT_MIN_POINTS
+                    and float(e.get("bend_px") or 999.0)
+                    <= BALLSCAN_DESCENT_MAX_BEND_PX)
+
+        def _why_not(e):
+            _n = int(e.get("n_points") or 0)
+            _b = float(e.get("bend_px") or 999.0)
+            bits = []
+            if _n < BALLSCAN_DESCENT_MIN_POINTS:
+                bits.append(f"only {_n} points "
+                            f"(need {BALLSCAN_DESCENT_MIN_POINTS})")
+            if _b > BALLSCAN_DESCENT_MAX_BEND_PX:
+                bits.append(f"bends {_b}px "
+                            f"(need {BALLSCAN_DESCENT_MAX_BEND_PX} or less)")
+            return " and ".join(bits) or "accepted"
+
+        evs = [e for e in _all_evs if _strict(e)]
+        _keys = ("last_descent_frame", "last_descent_sec", "landing_xy",
+                 "n_points", "drop_px", "fall_rate", "bend_px")
         out["events"] = [
-            {k: e.get(k) for k in
-             ("last_descent_frame", "last_descent_sec", "landing_xy",
-              "n_points", "drop_px", "fall_rate", "bend_px")}
-            for e in evs
+            {**{k: e.get(k) for k in _keys},
+             "accepted": _strict(e), "verdict": _why_not(e)}
+            for e in _all_evs
         ]
+        out["n_seen"] = len(_all_evs)
+        out["n_accepted"] = len(evs)
         out["scan_reason"] = rep.get("reason")
-        if not evs:
+        out["gates"] = {
+            "min_points": BALLSCAN_DESCENT_MIN_POINTS,
+            "max_bend_px": BALLSCAN_DESCENT_MAX_BEND_PX,
+            "searched_from_points": BALLSCAN_DESCENT_LOOSE_POINTS,
+            "searched_to_bend_px": BALLSCAN_DESCENT_LOOSE_BEND_PX,
+        }
+        _ball_scan_descent_overview(row, gp, _all_evs, out)
+        if not evs and not _all_evs:
             out["reason"] = (
-                "no descent found anywhere on the green camera — "
+                "nothing fell anywhere on the green camera — "
                 + str(rep.get("reason") or ""))
             return out
 
@@ -15657,10 +15701,42 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                     _best, _best_d = k, _d
             if _best is None:
                 sp["descent"] = None
-                sp["descent_reason"] = (
-                    f"nothing came down on the green between "
-                    f"{_lo:.1f}s and {_hi:.1f}s, where a ball struck here "
-                    f"would have landed")
+                # NEAR-MISSES, NAMED. "No descent in your window" is the
+                # same sentence whether nothing fell at all or whether
+                # something fell and was one point short -- and those
+                # call for opposite responses from the operator.
+                _near = [e for e in _all_evs
+                         if _lo <= float(e.get("last_descent_sec") or 0.0)
+                         <= _hi]
+                sp["descent_window"] = [round(_lo, 2), round(_hi, 2)]
+                sp["descent_near"] = [
+                    {"sec": e.get("last_descent_sec"),
+                     "frame": e.get("last_descent_frame"),
+                     "landing_xy": e.get("landing_xy"),
+                     "n_points": e.get("n_points"),
+                     "bend_px": e.get("bend_px"),
+                     "drop_px": e.get("drop_px"),
+                     "verdict": _why_not(e)}
+                    for e in _near
+                ]
+                if _near:
+                    sp["descent_reason"] = (
+                        f"{len(_near)} thing(s) fell between {_lo:.1f}s and "
+                        f"{_hi:.1f}s but none was convincing enough: "
+                        + "; ".join(
+                            f"f{e.get('last_descent_frame')} — {_why_not(e)}"
+                            for e in _near))
+                elif _taken and any(
+                        _lo <= float(evs[k].get("last_descent_sec") or 0.0)
+                        <= _hi for k in _taken):
+                    sp["descent_reason"] = (
+                        f"the only descent between {_lo:.1f}s and {_hi:.1f}s "
+                        f"was already claimed by an earlier candidate")
+                else:
+                    sp["descent_reason"] = (
+                        f"nothing came down on the green between "
+                        f"{_lo:.1f}s and {_hi:.1f}s, where a ball struck "
+                        f"here would have landed")
                 continue
             _taken.add(_best)
             e = evs[_best]
@@ -15692,6 +15768,74 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         log.warning("ball scan: descent match failed on %s: %s", row.id, exc)
         out["reason"] = f"failed: {exc}"
         return out
+
+
+def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
+    """One picture of every descent the scan saw on the green clip.
+
+    THIS IS WHAT IT IS LOOKING FOR, drawn. The per-candidate image shows
+    the chain that WON; this shows the whole field -- accepted in the
+    candidate's colours, rejected in grey with the reason on them -- so
+    an operator who can see a descent the scan did not accept can tell
+    at a glance whether it was never detected or detected and judged
+    too short or too bent.
+
+    Drawn on the frame of the last event, which is a green frame like
+    any other; the chains are from all over the clip, so no single frame
+    is the "right" background and the most recent is the least
+    confusing.
+    """
+    if not all_evs:
+        return
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(gp))
+        if not cap.isOpened():
+            return
+        try:
+            _f = int(all_evs[-1].get("last_descent_frame") or 0)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, _f)
+            ok, im = cap.read()
+            if not ok or im is None:
+                return
+        finally:
+            cap.release()
+        # Dim it, so the chains read as the subject rather than the turf.
+        im = (im.astype("float32") * 0.72).astype("uint8")
+        for k, e in enumerate(all_evs):
+            _pts = e.get("points") or []
+            _acc = (int(e.get("n_points") or 0) >= BALLSCAN_DESCENT_MIN_POINTS
+                    and float(e.get("bend_px") or 999.0)
+                    <= BALLSCAN_DESCENT_MAX_BEND_PX)
+            _col = (90, 230, 120) if _acc else (150, 150, 150)
+            for a_, b_ in zip(_pts, _pts[1:]):
+                cv2.line(im, (a_["x"], a_["y"]), (b_["x"], b_["y"]),
+                         _col, 2 if _acc else 1, cv2.LINE_AA)
+            for q in _pts:
+                cv2.circle(im, (q["x"], q["y"]), 5, _col,
+                           2 if _acc else 1, cv2.LINE_AA)
+            _lx, _ly = e.get("landing_xy") or [0, 0]
+            cv2.circle(im, (int(_lx), int(_ly)), 13, _col, 2, cv2.LINE_AA)
+            cv2.putText(
+                im,
+                f"{e.get('last_descent_sec')}s  {e.get('n_points')}pts  "
+                f"bend {e.get('bend_px')}px" + ("" if _acc else "  REJECTED"),
+                (int(_lx) + 17, int(_ly) + 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.46, _col, 1, cv2.LINE_AA)
+        cv2.putText(
+            im,
+            f"{len(all_evs)} descent(s) seen — green = accepted "
+            f"(>={BALLSCAN_DESCENT_MIN_POINTS} pts, bend "
+            f"<={BALLSCAN_DESCENT_MAX_BEND_PX}px), grey = rejected",
+            (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2,
+            cv2.LINE_AA)
+        name = f"ballscan-{row.id}-descents.jpg"
+        if cv2.imwrite(str(CLIPS_DIR / name), im,
+                       [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
+            out["overview_url"] = _clip_url_for(name)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: descent overview failed on %s: %s", row.id, exc)
 
 
 def _ball_scan_descent_images(row, spots, tok, rep) -> None:
