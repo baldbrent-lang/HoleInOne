@@ -676,7 +676,7 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
               title={has
                 ? `Edit clip ${idx + 1}${
                     cur?.hole_number != null ? ` (hole ${cur.hole_number})` : ""
-                  } — ball, impact frame, landing and tracer for THIS clip only.`
+                  } — opens the plot map: ball, impact frame, landing, flag and both tracers for THIS clip.`
                 : "Nothing produced yet to edit"}
             >
               ✎ Edit
@@ -14493,8 +14493,24 @@ export default function AdminProduction() {
                       swingPos: pos >= 0 ? pos : swingIdx,
                     });
                   }}
-                  onEditClip={(clip) =>
-                    handleEdit(row, { focusClipId: clip?.id ?? null })}
+                  // EDIT OPENS THE PLOT MAP NOW. The wizard's field
+                  // list lives there, and it is the screen with the
+                  // pictures; keeping a second dialog that showed the
+                  // same five numbers against one still frame was the
+                  // thing being merged away.
+                  onEditClip={(clip, swingRec, idx) => {
+                    const arr = row.edit_metrics?.swings || [];
+                    const byClip = arr.findIndex(
+                      (sw) => sw?.clip_id != null && sw.clip_id === clip?.id);
+                    setPlotModal({
+                      row,
+                      swingPos: byClip >= 0
+                        ? byClip
+                        : (swingRec
+                          ? arr.findIndex((sw) => sw === swingRec)
+                          : idx) || 0,
+                    });
+                  }}
                   onAddClip={() => handleEdit(row, { startNewSwing: true })}
                   onDeleteClip={(clip, clipIdx) => {
                     const label = clip.hole_number != null
