@@ -9044,6 +9044,27 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
             covered = False
             dim_run = 0
             dim_max = 150
+            # TWO DIFFERENT QUESTIONS, TWO DIFFERENT NUMBERS. They were
+            # one number, and that is what broke when the watch was
+            # lengthened.
+            #
+            # `max_frames` is PATIENCE: how long to keep watching a spot
+            # something is standing over. It wants to be long, because a
+            # player who waits out the group ahead stands over the ball
+            # for a while, and the operator asked for ten seconds.
+            #
+            # `settle` is PROOF: how much continuous clear-and-empty
+            # establishes that the ball has gone. It wants to be SHORT,
+            # because once it is met the question is closed. Tying proof
+            # to patience meant a 384-frame departure could be undone by
+            # one bright blip eight seconds later -- somebody walking
+            # through the tee box lit the pixel for ten frames at f830,
+            # the empty run reset, and a ball struck at f448 was reported
+            # gone at f844. Four seconds of an empty, uncovered spot is
+            # not something a struck ball comes back from; anything
+            # appearing there afterwards is the next ball, which is
+            # exactly what the gap rule exists to separate.
+            settle = min(int(max_frames), 200)
             pm = None
             pm_age = 0
             f = start
@@ -9188,8 +9209,8 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
                 # again through the backswing could never move
                 # `last_frame` past the frame it first vanished on.
                 f += 1
-                # 300 EMPTY FRAMES IS THE ANSWER, and the walk has to end
-                # there. Extending the deadline on ANY later sighting let
+                # A SETTLED EMPTY RUN IS THE ANSWER, and the walk has to
+                # end there. Extending the deadline on ANY later sighting let
                 # the watch absorb the NEXT ball teed on the same spot and
                 # run to the end of the clip: measured 1,582 iterations to
                 # resolve a departure seventeen frames away, which is
@@ -9197,7 +9218,7 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
                 # that later sighting is a different ball, which is
                 # exactly what the gap rule in the main scan exists to
                 # separate.
-                if empty_run >= int(max_frames):
+                if empty_run >= settle:
                     sp["gone_frame"] = int(empty_from)
                     sp["gone_sec"] = round(int(empty_from) / max(1e-6, fps), 2)
                     break
