@@ -767,6 +767,36 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
   );
 }
 
+/**
+ * The five things a swing IS, down the right of the plot map.
+ *
+ * This is the edit wizard's field list, moved onto the screen where the
+ * pictures are. The two used to be separate: the wizard listed the
+ * numbers and showed one still, click-to-plot showed the motion and
+ * hid the numbers in a toolbar. Every real edit needed both, so every
+ * real edit meant opening one, closing it and opening the other.
+ *
+ * Each row says what it is, what it is set to, and how to set it. A row
+ * with nothing in it says "Not set" rather than a zero, because a zero
+ * is a value and the difference decides whether produce believes it.
+ */
+function PlotField({ label, value, hint, children, accent }) {
+  return (
+    <div style={{
+      border: "1px solid var(--line)", borderRadius: 8, padding: "7px 9px",
+      background: "var(--card, rgba(255,255,255,0.02))",
+    }}>
+      <div className="tiny upper muted">{label}</div>
+      <div style={{ fontWeight: 700, marginTop: 1,
+                    color: value ? (accent || "var(--ink)") : "var(--muted)" }}>
+        {value || "Not set"}
+      </div>
+      {hint && <div className="tiny muted" style={{ marginTop: 2 }}>{hint}</div>}
+      {children && <div style={{ marginTop: 5 }}>{children}</div>}
+    </div>
+  );
+}
+
 // Frames of clickable detections either side of impact. A few frames of
 // lead-in covers an impact frame estimated slightly late (the assumed-
 // impact path pins it to the pose peak, which can sit a frame or two off
@@ -1041,6 +1071,18 @@ function ClickToPlotModal({
   // and the landing is what gives the tracer its aim AND its flight
   // time. Same gesture as the tee side's ball placement.
   const [placingLanding, setPlacingLanding] = useState(false);
+  // THE FLAG STICK, WHICH BELONGS TO THE HOLE, NOT THE SWING.
+  //
+  // It is stored once against the hole's tee<->green mapping, so it
+  // carries from swing to swing and from clip to clip until somebody
+  // moves it. Kept in GREEN pixels because that is the camera that can
+  // see the base of the stick; where it sits in the TEE frame is read
+  // through the calibration rather than stored, so re-calibrating the
+  // hole corrects the flag too instead of leaving a stale coordinate.
+  const [pinGreen, setPinGreen] = useState(null);   // {x, y}
+  const [pinTee, setPinTee] = useState(null);       // {x, y}, derived
+  const [pinNote, setPinNote] = useState(null);
+  const [placingPin, setPlacingPin] = useState(null); // 'green' | 'tee'
   // THE LANDING, IN THE TEE PICTURE. Stored in green pixels because
   // that is the camera that sees it land, but the tee view is where the
   // tracer is drawn and so where "the ball finished THERE" is easiest
@@ -1051,6 +1093,91 @@ function ClickToPlotModal({
   // Which green frame the map is showing, so a placed landing carries
   // the instant it was seen at and not just the pixel.
   const [greenViewFrame, setGreenViewFrame] = useState(null);
+  // Load the hole's flag once, and put it in the tee frame as well.
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const vm = await api.getViewMap(adminPassword, row.id);
+        const g = vm?.view_map?.pin_green;
+        if (!live || !g) return;
+        setPinGreen({ x: Math.round(g[0]), y: Math.round(g[1]) });
+      } catch { /* no mapping yet: the flag simply has nowhere to be */ }
+    })();
+    return () => { live = false; };
+  }, [adminPassword, row.id]);
+
+  useEffect(() => {
+    if (!pinGreen) { setPinTee(null); return undefined; }
+    let live = true;
+    (async () => {
+      try {
+        const out = await api.mapLandingToTee(adminPassword, row.id, {
+          green: [pinGreen.x, pinGreen.y],
+        });
+        if (!live) return;
+        setPinTee(out?.tee
+          ? { x: Math.round(out.tee[0]), y: Math.round(out.tee[1]) } : null);
+      } catch (e) {
+        if (live) { setPinTee(null); setPinNote(e?.message || String(e)); }
+      }
+    })();
+    return () => { live = false; };
+  }, [pinGreen?.x, pinGreen?.y, adminPassword, row.id]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // MOVED ON THE GREEN: that is the flag, and the tee follows it through
+  // the calibration. This is the authoritative direction -- the green
+  // camera can see the base of the stick.
+  async function setPinFromGreen(pt) {
+    setPinGreen(pt);
+    setPlacingPin(null);
+    try {
+      const out = await api.saveHolePin(adminPassword, row.id,
+                                        { green: [pt.x, pt.y] });
+      setPinNote(out?.tee_xy
+        ? `flag saved for this hole — ${Math.round(out.tee_xy[0])}, `
+          + `${Math.round(out.tee_xy[1])} in the tee frame`
+        : (out?.reason || "flag saved for this hole"));
+    } catch (e) {
+      setPinNote(e?.message || String(e));
+    }
+  }
+
+  // MOVED ON THE TEE: the flag has not moved, the MAPPING is off. The
+  // green camera saw where the stick is; if it lands somewhere else in
+  // the tee picture, that gap is the hole's calibration error at the
+  // flag, which is the one point on the green anybody can identify in
+  // both views. So this reports the correction and does NOT write it
+  // back as a new flag position -- a coarse view must not overwrite the
+  // precise one, and a calibration that silently re-fits from a drag is
+  // one nobody can reason about.
+  async function setPinFromTee(pt) {
+    setPinTee(pt);
+    setPlacingPin(null);
+    if (!pinGreen) {
+      setPinNote("mark the flag on the green camera first — that is the "
+        + "view that can see the base of the stick");
+      return;
+    }
+    try {
+      const out = await api.mapLandingToTee(adminPassword, row.id, {
+        green: [pinGreen.x, pinGreen.y],
+      });
+      const t = out?.tee;
+      if (!t) { setPinNote("this hole has no tee ↔ green mapping yet"); return; }
+      const off = Math.hypot(t[0] - pt.x, t[1] - pt.y);
+      setPinNote(
+        `the calibration puts the flag at ${Math.round(t[0])}, `
+        + `${Math.round(t[1])} — ${off.toFixed(0)}px from where you put it`
+        + (off > 8
+          ? ". Re-calibrate tee ↔ green to close that gap; the flag itself "
+            + "is unchanged."
+          : ". That is close — the mapping agrees with you."));
+    } catch (e) {
+      setPinNote(e?.message || String(e));
+    }
+  }
+
   const loadGreenFrame = useCallback(
     async (f) => {
       const r = await api.getLongUploadFrame(adminPassword, row.id, f, "green");
@@ -1928,6 +2055,10 @@ function ClickToPlotModal({
 
         <div style={{
           flex: 1, minHeight: 0, display: "flex",
+          alignItems: "stretch", gap: 10,
+        }}>
+        <div style={{
+          flex: 1, minWidth: 0, minHeight: 0, display: "flex",
           alignItems: "stretch", justifyContent: "center",
         }}>
           {cam === "tracer" ? (
@@ -2012,13 +2143,16 @@ function ClickToPlotModal({
                 // the comet, the saved landing_spot/landing_frame, the
                 // tracer's aim and its flight time — is fed by the one
                 // mechanism and cannot disagree with itself.
-                placingBall={placingLanding}
+                placingBall={placingLanding || placingPin === "green"}
                 onPlaceBall={(pt) => {
+                  if (placingPin === "green") { setPinFromGreen(pt); return; }
                   const f = greenViewFrame ?? green.frame ?? 0;
                   setGreenMarks((m) => ({ ...m, [f]: { x: pt.x, y: pt.y } }));
                   setPlacingLanding(false);
                   setCometReason(null);
                 }}
+                // The hole's flag, on the camera that can see its base.
+                flag={pinGreen}
                 track={[]}
                 comet={comet}
                 note={cometStatus}
@@ -2078,11 +2212,16 @@ function ClickToPlotModal({
               )}
               onToggleDot={toggleDot}
               ballXY={ballAtRest}
-              placingBall={placingBall}
+              placingBall={placingBall || placingPin === "tee"}
               onPlaceBall={(pt) => {
+                if (placingPin === "tee") { setPinFromTee(pt); return; }
                 setBallAtRest(pt);
                 setPlacingBall(false);
               }}
+              // The same flag, put here by the calibration rather than
+              // by a click — which is why dragging it here measures the
+              // calibration instead of moving the flag.
+              flag={pinTee}
               // THE LANDING, GRABBABLE IN THE TEE PICTURE. It is stored
               // in green pixels, but this is the picture the tracer is
               // drawn on, so it is the one where the operator can see
@@ -2140,6 +2279,129 @@ function ClickToPlotModal({
               wizard) to populate them.
             </div>
           )}
+        </div>
+
+        {/* WHAT THIS SWING IS, down the right. The edit wizard's field
+            list, on the screen that has the pictures — because every
+            real edit needed both and they used to be two dialogs. */}
+        <div style={{
+          width: 250, flexShrink: 0, display: "flex",
+          flexDirection: "column", gap: 7, overflowY: "auto", minHeight: 0,
+        }}>
+          <PlotField
+            label="Ball at rest"
+            value={ballAtRest ? `${ballAtRest.x}, ${ballAtRest.y}` : null}
+            hint="Where the tracer starts."
+            accent="#4ade80"
+          >
+            <button type="button"
+                    className={placingBall ? "small" : "ghost small"}
+                    style={{ width: "100%" }}
+                    onClick={() => { setCam("tee"); setPlacingBall((v) => !v); }}
+                    title="Click the ball on the tee picture.">
+              {placingBall ? "click the ball…" : "◎ Place on tee"}
+            </button>
+          </PlotField>
+
+          <PlotField
+            label="Impact frame"
+            value={impactF != null ? `f${impactF}` : null}
+            hint={impactF != null
+              ? `MOG2 points shown f${winLo}–f${winHi}`
+              : "Set this and the motion points appear."}
+          >
+            <div className="row" style={{ gap: 3 }}>
+              {[-10, -1, 1, 10].map((d) => (
+                <button key={d} type="button" className="ghost small"
+                        style={{ width: "auto", flex: 1, padding: "0 4px" }}
+                        disabled={impactF == null}
+                        onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) + d))}>
+                  {d > 0 ? `+${d}` : d}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="ghost small"
+                    style={{ width: "100%", marginTop: 4,
+                             color: "var(--danger)" }}
+                    disabled={Object.keys(marks).length === 0}
+                    onClick={clearAllMarks}
+                    title="Remove every plotted tee point for this swing.">
+              ✕ Clear tee tracer ({Object.keys(marks).length})
+            </button>
+          </PlotField>
+
+          <PlotField
+            label="Ball landing spot"
+            value={landing ? `${landing.x}, ${landing.y}` : null}
+            hint="On the green camera. Gives the tracer its aim and its
+                  flight time."
+            accent="#f472b6"
+          >
+            <button type="button"
+                    className={placingLanding ? "small" : "ghost small"}
+                    style={{ width: "100%" }}
+                    disabled={!row.green_filename}
+                    onClick={() => {
+                      setCam("green"); setPlacingLanding((v) => !v);
+                    }}>
+              {placingLanding ? "click the landing…" : "📍 Place on green"}
+            </button>
+          </PlotField>
+
+          <PlotField
+            label="Landing frame"
+            value={landing ? `f${landing.frame}` : null}
+            hint={cometPoints.length > 1
+              ? `${cometPoints.length} descent points plotted`
+              : "The frame the ball comes down on."}
+          >
+            <button type="button" className="ghost small"
+                    style={{ width: "100%", color: "var(--danger)" }}
+                    disabled={!cometPoints.length}
+                    onClick={() => { setGreenMarks({}); setCometReason(null); }}
+                    title="Remove every plotted descent point for this swing.">
+              ✕ Clear descent ({cometPoints.length})
+            </button>
+          </PlotField>
+
+          <PlotField
+            label="Flag stick"
+            value={pinGreen ? `${pinGreen.x}, ${pinGreen.y}` : null}
+            hint={pinTee
+              ? `tee frame: ${pinTee.x}, ${pinTee.y}`
+              : "Belongs to the hole — it stays put from swing to swing."}
+            accent="#fbbf24"
+          >
+            <div className="row" style={{ gap: 4 }}>
+              <button type="button"
+                      className={placingPin === "green" ? "small" : "ghost small"}
+                      style={{ width: "auto", flex: 1 }}
+                      disabled={!row.green_filename}
+                      onClick={() => {
+                        setCam("green");
+                        setPlacingPin((v) => (v === "green" ? null : "green"));
+                      }}
+                      title="Click the BASE of the flagstick on the green camera. The tee view follows through the calibration, and it stays set for every swing on this hole.">
+                ⛳ green
+              </button>
+              <button type="button"
+                      className={placingPin === "tee" ? "small" : "ghost small"}
+                      style={{ width: "auto", flex: 1 }}
+                      onClick={() => {
+                        setCam("tee");
+                        setPlacingPin((v) => (v === "tee" ? null : "tee"));
+                      }}
+                      title="Click where the flag looks to be in the TEE picture. This does NOT move the flag — the green camera decides that. It measures how far the hole's calibration is out at the one point both cameras can identify.">
+                ⛳ tee
+              </button>
+            </div>
+            {pinNote && (
+              <div className="tiny" style={{ marginTop: 4, color: "#fbbf24" }}>
+                {pinNote}
+              </div>
+            )}
+          </PlotField>
+        </div>
         </div>
 
         {/* The legend is a dozen lines of prose that was pushing the map
@@ -8973,6 +9235,11 @@ function PlotHeatCanvas({
   // actual frame n, so the operator can walk the strike frame by frame
   // and see the ball itself rather than the trail it left.
   loadFrame, frameLo, frameHi, startFrame, onViewFrame,
+  // The hole's flagstick, in this picture's pixels. Drawn, not
+  // clickable: it is moved from the field panel, so that a click on the
+  // map is never ambiguous between "the ball went here" and "the flag
+  // is here".
+  flag,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -9433,6 +9700,27 @@ function PlotHeatCanvas({
           />
         ))}
 
+        {/* THE FLAG. Small, gold, and not interactive — it is a
+            landmark rather than a control, and the one thing on this
+            map that is about the HOLE rather than about this swing. */}
+        {hasDims && flag && (
+          <div
+            style={{
+              position: "absolute",
+              left: `${(flag.x / frameW) * 100}%`,
+              top: `${(flag.y / frameH) * 100}%`,
+              transform: "translate(-10%, -100%)",
+              fontSize: Math.max(15, 15 / zoom),
+              lineHeight: 1,
+              pointerEvents: "none",
+              filter: "drop-shadow(0 0 3px #000) drop-shadow(0 0 3px #000)",
+              zIndex: 7,
+            }}
+            title={`Flagstick — ${flag.x}, ${flag.y}`}
+          >
+            ⛳
+          </div>
+        )}
         {/* BALL AT IMPACT — where the tracer line STARTS. Not a track
             point: the renderer anchors the fitted curve here, so it is
             the one marker that decides where the line begins rather than
