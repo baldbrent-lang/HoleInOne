@@ -1988,8 +1988,17 @@ function ClickToPlotModal({
               onHandleDrop={(id, pt) => {
                 if (id === "landing") dropTeeLanding(pt);
               }}
-              note={teeLandingNote}
-              noteColour="#f472b6"
+              // WHY THE LINE IS SHORT, said on the screen where it
+              // looks short. With nothing marked the tracer stops where
+              // the plotted points stop, which is correct and does not
+              // look it.
+              note={teeLandingNote
+                || (!landing
+                  ? "no landing marked — the tracer will stop where the "
+                    + "plotted points stop. Mark one on the green tab, or "
+                    + "drag the pink handle here, to have it fly on."
+                  : null)}
+              noteColour={teeLandingNote ? "#f472b6" : "#fbbf24"}
               scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
