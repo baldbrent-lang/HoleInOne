@@ -8960,11 +8960,90 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
             x1, y1 = min(w, sp["x"] + pad), min(h, sp["y"] + pad)
             patch_roi = {"x": x0 / w, "y": y0 / h,
                          "w": (x1 - x0) / w, "h": (y1 - y0) / h}
+
+            # ── IS IT STILL THERE, asked WITHOUT asking "is it a ball" ──
+            #
+            # `ball_candidates_in_frame` is an ACQUISITION gate. It has to
+            # be picky, because it is looking at a whole tee box and must
+            # not return shoes, hats and daisies. Every one of its tests
+            # is about establishing that an unknown blob is a ball.
+            #
+            # None of that applies here. The position is already known --
+            # this spot was clustered from dozens of sightings -- and the
+            # only question left is whether the thing is still on it. Run
+            # the acquisition gate anyway and it will, sooner or later,
+            # say no for a reason that has nothing to do with the ball
+            # having gone. Measured on the clip that prompted this: from
+            # f1984 the ball is plainly back on the tee and stays there
+            # until it is struck at f2027, and the gate rejected it on
+            # every one of those frames as "not surrounded by grass" --
+            # 74% grass in its ring against a bar of 80%, because the
+            # ball reads a shade smaller at that moment (r 2.55 rather
+            # than 3.37) so the ring drew in tight over the tee's own
+            # shadow. The departure came back as f1923, 104 frames early,
+            # from a ball that was visible in the picture the whole time.
+            #
+            # So ask the cheap, position-only question instead: is the
+            # pixel brighter than the turf immediately around it. Same
+            # measure `find_departures_at_spot` uses, and the same
+            # argument -- once you know where it is, stop re-litigating
+            # what it is. Measured at this spot: 52-59 while the ball
+            # sits, 5-11 with the clubhead over it, 7 falling to 2 the
+            # frame after the strike. The two states are not close.
+            _r_px = float(expect_radius_px or sp.get("r") or 0.0)
+            if _r_px < 1.0:
+                _r_px = max(2.0, 0.0035 * h)
+            _m = max(12, int(round(8.0 * _r_px)))
+            px0, px1 = max(0, sp["x"] - _m), min(w, sp["x"] + _m + 1)
+            py0, py1 = max(0, sp["y"] - _m), min(h, sp["y"] + _m + 1)
+            _ker = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (int(max(5, min(31, round(6.0 * _r_px)))) | 1,) * 2,
+            )
+            _yy, _xx = np.ogrid[0:py1 - py0, 0:px1 - px0]
+            _core = (((_xx - (sp["x"] - px0)) ** 2
+                      + (_yy - (sp["y"] - py0)) ** 2)
+                     <= max(3.0, 2.0 * _r_px) ** 2)
+
+            def _peak(fr, _p=(py0, py1, px0, px1), _k=_ker, _c=_core):
+                try:
+                    g = cv2.cvtColor(fr[_p[0]:_p[1], _p[2]:_p[3]],
+                                     cv2.COLOR_BGR2GRAY)
+                    return int(cv2.morphologyEx(
+                        g, cv2.MORPH_TOPHAT, _k)[_c].max())
+                except Exception:  # noqa: BLE001
+                    return 0
+
+            # THE THRESHOLD IS MEASURED AT THIS SPOT, NOT CHOSEN. How
+            # bright this ball reads on this turf in this light is
+            # answered by the frames it was last certainly in -- the ones
+            # that produced `last_frame`. A fixed number cannot separate
+            # 59 from 7 on one clip and 105 from 52 on the next.
+            _cal0 = max(0, int(sp.get("last_frame") or 0) - 14)
+            _on = 0
+            if px1 - px0 >= 3 and py1 - py0 >= 3:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, _cal0)
+                for _ in range(int(sp.get("last_frame") or 0) - _cal0 + 1):
+                    _ok, _fr = cap.read()
+                    if not _ok or _fr is None:
+                        break
+                    _on = max(_on, _peak(_fr))
+            # A little over half of "clearly there". High enough that a
+            # divot or the tee's own shadow left behind after the strike
+            # does not read as the ball -- that residue measured 49 where
+            # the ball measured 105 -- and low enough that the ball
+            # coming back out from behind the clubhead does.
+            thr_present = max(0.55 * float(_on), 20.0)
+            sp["present_peak"] = int(_on)
+            sp["present_threshold"] = round(float(thr_present), 1)
+
             cap.set(cv2.CAP_PROP_POS_FRAMES, start)
             blocked = 0
             empty_run = 0
             empty_from = start
             covered = False
+            dim_run = 0
+            dim_max = 150
             pm = None
             pm_age = 0
             f = start
@@ -9030,7 +9109,45 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
                         (f - int(sp["first_frame"])) / max(1e-6, fps), 2)
                     blocked = 0
                     empty_run = 0
+                    dim_run = 0
                     deadline = f + int(max_frames)
+                    f += 1
+                    continue
+                # STILL BRIGHT AT THE PIXEL. The acquisition gate said no,
+                # but the spot is still lit the way the ball lit it -- so
+                # the ball is there and the gate is the thing that is
+                # wrong. That is evidence of PRESENCE, so it moves the
+                # last sighting and clears the empty run, exactly as a
+                # confirmed sighting does.
+                #
+                # It does NOT extend the deadline. A confirmed sighting is
+                # allowed to buy another full watch; this weaker signal is
+                # not, or a divot bright enough to squeak over the
+                # threshold would walk the watch to the end of the clip
+                # and swallow the next ball teed on the same spot. The
+                # window stays bounded and the run-at-the-end fallback
+                # below still names the right departure frame.
+                #
+                # AND IT ONLY BRIDGES A GAP. Presence alone cannot carry
+                # a sighting indefinitely: a pixel that is simply bright
+                # -- a patch of sky through the tree line, a painted
+                # marker -- clears the threshold on every frame forever,
+                # and three such spots kept their watch alive for all 500
+                # frames and reported twenty-second "balls" that were
+                # never there. So it may bridge, at most, `dim_max`
+                # frames without the real detector confirming the ball
+                # again. The clubhead-at-address case this exists for
+                # measured 104 consecutive frames; a spot that needs
+                # three seconds of faith is not a ball.
+                if _peak(frame) >= thr_present and dim_run < dim_max:
+                    dim_run += 1
+                    sp["last_frame"] = f
+                    sp["last_sec"] = round(f / max(1e-6, fps), 2)
+                    sp["held_sec"] = round(
+                        (f - int(sp["first_frame"])) / max(1e-6, fps), 2)
+                    sp["dim_sightings"] = int(sp.get("dim_sightings") or 0) + 1
+                    blocked += 1
+                    empty_run = 0
                     f += 1
                     continue
                 # ONE MISSED FRAME IS NOT A DEPARTURE. The detector
@@ -9117,10 +9234,10 @@ def scan_resting_balls(
     # before accepting that it has gone. A clubhead at address hides it
     # for as long as the player stands there, and 150 frames -- three
     # seconds at 50fps -- turned out to be tight: a player who waits out
-    # a group ahead can stand over the ball longer than that. 300 gives
-    # six seconds, which also sets the gap below, so one number decides
+    # a group ahead can stand over the ball longer than that. 500 gives
+    # ten seconds, which also sets the gap below, so one number decides
     # both "still hidden" and "same ball".
-    confirm_frames: int = 300,
+    confirm_frames: int = 500,
     min_votes: int = 3,
     max_spots: int = 24,
     expect_radius_px: float | None = None,
