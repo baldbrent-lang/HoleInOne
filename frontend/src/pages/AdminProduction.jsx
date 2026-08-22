@@ -750,6 +750,16 @@ function ClickToPlotModal({
   // was, against the motion heat.
   const [ballAtRest, setBallAtRest] = useState(swing.ball ?? null);
   const [placingBall, setPlacingBall] = useState(false);
+  // One tee frame as a picture, for the map's frame stepper. Stable
+  // across renders so the canvas's fetch effect is not re-run every time
+  // a dot is clicked.
+  const loadTeeFrame = useCallback(
+    async (f) => {
+      const r = await api.getLongUploadFrame(adminPassword, row.id, f, "tee");
+      return r?.image_url;
+    },
+    [adminPassword, row.id],
+  );
   const winLo = impactF == null ? null : impactF - PLOT_WINDOW_PRE;
   const winHi = impactF == null ? null : impactF + PLOT_WINDOW_POST;
   const inWindow = (arr) =>
@@ -1868,6 +1878,16 @@ function ClickToPlotModal({
               frameW={frameW}
               frameH={frameH}
               marks={marks}
+              // THE SWING'S OWN BOUNDS, not the dot window. The dot
+              // window is impact−5…impact+40, and the commonest reason
+              // to want the video is that the impact frame is WRONG --
+              // bounding the search by a window derived from it would
+              // make finding the right one circular.
+              loadFrame={loadTeeFrame}
+              frameLo={swing.start_frame ?? 0}
+              frameHi={swing.end_frame
+                ?? (row.tee_nb_frames ? row.tee_nb_frames - 1 : (winHi ?? 0))}
+              startFrame={impactF ?? undefined}
               track={(swing.ball_track_frames || []).filter(
                 (r) => r.found && r.x != null && r.y != null,
               )}
@@ -8575,6 +8595,13 @@ function PlotHeatCanvas({
   bgUrl, dots, denseDots, frameW, frameH, marks, onToggleDot, onClose,
   scanRegion, track, ballXY, placingBall, onPlaceBall, comet,
   note, noteColour, shape, handles, onHandleDrag, onHandleDrop,
+  // STEP THE REAL VIDEO UNDER THE DOTS. The map's background is a
+  // motion-heat composite: every frame of the window smeared into one
+  // picture, which is what makes a flight legible as a streak and makes
+  // a single instant impossible to see. `loadFrame(n)` fetches the
+  // actual frame n, so the operator can walk the strike frame by frame
+  // and see the ball itself rather than the trail it left.
+  loadFrame, frameLo, frameHi, startFrame,
 }) {
   const [zoom, setZoom] = useState(1);
   const [focus, setFocus] = useState({ x: 50, y: 50 });
@@ -8591,6 +8618,59 @@ function PlotHeatCanvas({
   // the operator is the filter.
   const [scanLevel, setScanLevel] = useState(2);
   const hasDims = !!(frameW && frameH);
+
+  // ── the video frame under the dots ────────────────────────────────
+  // null means the heat composite, which stays the default: it is the
+  // view that shows a whole flight at once.
+  const canStep = typeof loadFrame === "function"
+    && frameLo != null && frameHi != null && frameHi >= frameLo;
+  const [viewFrame, setViewFrame] = useState(null);
+  const [frameUrl, setFrameUrl] = useState(null);
+  const [frameErr, setFrameErr] = useState(null);
+  // Frames already fetched, so stepping back over ground already walked
+  // is instant instead of a round trip per press. The server caches the
+  // JPG on disk too; this saves the request as well as the seek.
+  const frameCache = useRef(new Map());
+  useEffect(() => {
+    if (!canStep || viewFrame == null) { setFrameUrl(null); return undefined; }
+    let live = true;
+    const want = viewFrame;
+    const cached = frameCache.current.get(want);
+    if (cached) setFrameUrl(cached);
+    (async () => {
+      try {
+        const url = cached || await loadFrame(want);
+        if (!live) return;
+        frameCache.current.set(want, url);
+        setFrameUrl(url);
+        setFrameErr(null);
+        // Warm the next one so a run of ▶ presses does not stutter.
+        // Failures here are silent on purpose: it is a guess about what
+        // the operator will ask for next, and a wrong guess is not worth
+        // an error message.
+        const nxt = want + 1;
+        if (nxt <= frameHi && !frameCache.current.has(nxt)) {
+          loadFrame(nxt)
+            .then((u) => frameCache.current.set(nxt, u))
+            .catch(() => {});
+        }
+      } catch (e) {
+        if (live) setFrameErr(e?.message || String(e));
+      }
+    })();
+    return () => { live = false; };
+  }, [canStep, viewFrame, loadFrame, frameHi]);
+  const stepFrame = (d) => setViewFrame((f) => {
+    if (f == null) return null;
+    return Math.max(frameLo, Math.min(frameHi, f + d));
+  });
+
+  // MOG2 dots, hideable. They are the point of this screen and they are
+  // also what covers the picture: on a frame where the ball is a
+  // three-pixel smudge, the dot marking it is bigger than it is. Being
+  // able to take them away for a moment is the difference between
+  // guessing which dot is the ball and seeing it.
+  const [showDots, setShowDots] = useState(true);
   // HOW BIG THE PICTURE GETS, IN PIXELS, MEASURED.
   //
   // The dots are placed as a percentage of this box while the picture
@@ -8779,8 +8859,8 @@ function PlotHeatCanvas({
         }}
       >
         <img
-          src={bgUrl}
-          alt="Raw motion heat"
+          src={(viewFrame != null && frameUrl) ? frameUrl : bgUrl}
+          alt={viewFrame != null ? `Frame ${viewFrame}` : "Raw motion heat"}
           draggable={false}
           style={{
             width: "100%", height: "100%", objectFit: "cover",
@@ -9052,7 +9132,7 @@ function PlotHeatCanvas({
         })}
         {/* Dense candidate layer — smaller, dimmer targets that only
             appear once zoomed in, so the fit view stays readable. */}
-        {hasDims && showDense &&
+        {hasDims && showDots && showDense &&
           extraDots.map((p, i) => {
             const q = marks[p.frame];
             const isQueued =
@@ -9108,7 +9188,7 @@ function PlotHeatCanvas({
               </div>
             );
           })}
-        {hasDims &&
+        {hasDims && showDots &&
           (dots || []).map((p, i) => {
             const q = marks[p.frame];
             const isQueued =
@@ -9204,6 +9284,72 @@ function PlotHeatCanvas({
           boxShadow: "0 4px 14px rgba(0,0,0,0.45)",
         }}
       >
+        {/* FRAME STEPPER. Off by default: the heat composite is the
+            view that shows a whole flight at once, and this trades that
+            for being able to see one instant properly. */}
+        {canStep && (
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button
+              type="button"
+              style={{
+                ...zoomBtn, width: "auto", padding: "0 8px",
+                background: viewFrame != null
+                  ? "rgba(56,189,248,0.35)" : zoomBtn.background,
+              }}
+              onClick={() => setViewFrame((f) => (
+                f == null
+                  ? Math.max(frameLo, Math.min(frameHi, startFrame ?? frameLo))
+                  : null
+              ))}
+              title={viewFrame != null
+                ? "Back to the motion-heat composite — every frame of the window in one picture"
+                : "Show the real video frame under the dots, and step through it one frame at a time"}
+            >
+              {viewFrame != null ? "▦ Heat" : "🎞 Frames"}
+            </button>
+            {viewFrame != null && (
+              <>
+                <button
+                  type="button"
+                  style={{ ...zoomBtn, width: 24 }}
+                  disabled={viewFrame <= frameLo}
+                  onClick={() => stepFrame(-1)}
+                  title="Previous frame"
+                >‹</button>
+                <span style={{
+                  color: frameErr ? "#f87171" : "#fff", fontSize: 12,
+                  padding: "0 4px", alignSelf: "center",
+                  minWidth: 52, textAlign: "center",
+                }}>
+                  {frameErr ? "error" : `f${viewFrame}`}
+                </span>
+                <button
+                  type="button"
+                  style={{ ...zoomBtn, width: 24 }}
+                  disabled={viewFrame >= frameHi}
+                  onClick={() => stepFrame(1)}
+                  title="Next frame"
+                >›</button>
+              </>
+            )}
+          </div>
+        )}
+        {/* MOG2 dots on/off. On a frame where the ball is a three-pixel
+            smudge, the dot marking it is bigger than the ball. */}
+        <button
+          type="button"
+          style={{
+            ...zoomBtn, width: "auto", padding: "0 8px",
+            background: showDots
+              ? zoomBtn.background : "rgba(248,113,113,0.35)",
+          }}
+          onClick={() => setShowDots((v) => !v)}
+          title={showDots
+            ? "Hide the MOG2 dots — see the picture underneath"
+            : "Show the MOG2 dots again"}
+        >
+          {showDots ? "⦿ MOG2" : "⦾ MOG2"}
+        </button>
         <button
           type="button"
           style={zoomBtn}
@@ -9310,6 +9456,14 @@ function TracerStep({
   // Step 3 can see the queued edits (red note) and pass them to
   // /render-tracer-fast on commit. Each entry is {frame: {x, y}}.
   const [selectedFrame, setSelectedFrame] = useState(null);
+  // One tee frame as a picture, for the plot map's frame stepper.
+  const loadStepFrame = useCallback(
+    async (f) => {
+      const r = await api.getLongUploadFrame(adminPassword, row.id, f, "tee");
+      return r?.image_url;
+    },
+    [adminPassword, row.id],
+  );
   const [editorBg, setEditorBg] = useState(null); // {url, frame}
   const [editorBall, setEditorBall] = useState(null); // {x, y}
   const [zoom, setZoom] = useState(1);
@@ -9769,6 +9923,14 @@ function TracerStep({
               frameW={frameW}
               frameH={frameH}
               marks={manualPositions}
+              // Same stepper as the standalone plot: this is the same
+              // map, and an operator who learns it in one place should
+              // not find it missing in the other.
+              loadFrame={loadStepFrame}
+              frameLo={draft?.startFrame ?? 0}
+              frameHi={draft?.endFrame
+                ?? (totalFrames ? totalFrames - 1 : 0)}
+              startFrame={draft?.impactFrame ?? undefined}
               onToggleDot={toggleTimedDot}
               onClose={() => setPlotAll(false)}
               scanRegion={async (region, sensitivity) => {
