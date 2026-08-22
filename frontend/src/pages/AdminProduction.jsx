@@ -8254,7 +8254,7 @@ function Debug2Modal({ state, onClose }) {
               <li>Pose candidates — wrist speed + spine bend</li>
               <li>Impact frame, and the ball from the bottom of the club arc</li>
               <li>AI judge on the motion-heat composite</li>
-              <li>MOG2 heat over impact−5 … impact+100</li>
+              <li>MOG2 heat over impact−5 … impact+40</li>
               <li>Chain walked upward from the ball</li>
             </ol>
           </div>

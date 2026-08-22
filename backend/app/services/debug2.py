@@ -20,7 +20,7 @@ The stages, in order:
                     a standing figure in warm heat, a blue fan of club
                     streaks above it, a dotted trail leaving the frame.
                     Candidates it rejects are dropped.
-  4. WINDOWED HEAT  for survivors, MOG2 heat over impact-5 .. impact+100
+  4. WINDOWED HEAT  for survivors, MOG2 heat over impact-5 .. impact+40
                     ONLY, so the map holds the flight and nothing else.
   5. CHAIN          walk a chain of MOG2 spots upward from the ball: each
                     step rises, drifts only a little sideways, and the
@@ -49,11 +49,29 @@ except Exception:  # pragma: no cover
     HAS_CV = False
 
 # Flight window, in frames either side of impact. The 5 frames of lead-in
-# cover an impact frame estimated a touch late; 100 after is ~2s at 50fps,
-# by which point the ball is gone and everything left is the golfer
-# walking off or wind in the trees.
+# cover an impact frame estimated a touch late.
+#
+# FORTY AFTER, NOT A HUNDRED, and the number comes from what the detector
+# actually produces rather than from how long a ball is in the air.
+# Measured on three labelled swings, the flight that gets chosen never
+# reaches impact+40 -- it ends at +17, +16 and +26 -- and not one point
+# past +40 was used at either setting. The ball is a two-pixel blob
+# accelerating away from a fixed camera; it stops being findable long
+# before it stops flying, and the renderer extrapolates the tail from the
+# fit rather than tracking it.
+#
+# So the extra sixty frames added no signal. What they added was noise,
+# and a lot of it: candidate tracks fell 21->8, 36->9 and 54->6 on those
+# same three swings when the window came in. `find_flight` scores
+# competing paths against each other, so those were three to six times as
+# many wrong answers for the right one to beat -- the golfer walking off,
+# a cart, wind in the trees. The chosen flight came out identical on two
+# of the three and within half a pixel of aim on the third, with the fit
+# residual improving on the one that changed.
+#
+# It is also sixty fewer frames of MOG2 per swing.
 WIN_PRE = 5
-WIN_POST = 100
+WIN_POST = 40
 
 
 # ── stage 2: the ball, from the bottom of the club's heat arc ──────────
