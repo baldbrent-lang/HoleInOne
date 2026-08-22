@@ -18445,12 +18445,39 @@ def _d3_green_delta_sec(db, row) -> tuple[float, str]:
             t_green = ev.green_recording_started_at
             if t_tee is not None and t_green is not None:
                 return (t_green - t_tee).total_seconds(), "camera_event"
+    # THE UPLOAD'S OWN STAMPS, which are the same two wall clocks and
+    # were never being read.
+    #
+    # LongVideoUpload carries `tee_recording_started_at` and
+    # `green_recording_started_at` -- the instant each camera's FIRST
+    # FRAME was captured, as the Pi reported it -- and this function
+    # asked only the CameraEvent for them. An upload with no camera
+    # event (a hand upload, or anything the mirror importer pulled in)
+    # therefore fell all the way through to assumed_zero while both
+    # clocks sat unread on the row, and every frame-to-frame conversion
+    # downstream was out by however far apart the two recordings
+    # actually started.
+    #
+    # This is the answer to "are we timing it by the clock, or just by
+    # seconds into the file". With either source it is the clock. Before
+    # this, on an upload without a camera event, it was neither -- it
+    # was an assumption that the two files began together.
+    t_tee = getattr(row, "tee_recording_started_at", None)
+    t_green = getattr(row, "green_recording_started_at", None)
+    if t_tee is not None and t_green is not None:
+        return (t_green - t_tee).total_seconds(), "upload_stamps"
     try:
         _saved = (row.edit_metrics or {}).get("tee_green_delta_sec")
         if _saved is not None:
             return float(_saved), "edit_metrics"
     except (TypeError, ValueError):
         pass
+    log.info(
+        "d3: upload %s has no wall clock on either camera — the tee and "
+        "green timelines are being ASSUMED to start together. Every "
+        "landing frame converted between them inherits that assumption.",
+        getattr(row, "id", None),
+    )
     return 0.0, "assumed_zero"
 
 
