@@ -1076,7 +1076,10 @@ function ClickToPlotModal({
   // server because the homography lives there. Re-asked whenever the
   // landing moves on the green side, so the two pictures agree.
   useEffect(() => {
-    if (!landing) { setTeeLandingXY(null); return undefined; }
+    if (!landing) {
+      setTeeLandingXY(tracerEnd ? { x: tracerEnd.x, y: tracerEnd.y } : null);
+      return undefined;
+    }
     let live = true;
     (async () => {
       try {
@@ -1084,7 +1087,14 @@ function ClickToPlotModal({
           green: [landing.x, landing.y],
         });
         if (!live) return;
-        setTeeLandingXY(out?.tee ? { x: out.tee[0], y: out.tee[1] } : null);
+        // AN AIM ALREADY DRAGGED WINS over the mapped position. Without
+        // this, re-opening the modal snapped the handle back to where
+        // the homography puts the landing and silently discarded the
+        // operator's own answer -- the one produce is actually using.
+        setTeeLandingXY(
+          tracerEnd
+            ? { x: tracerEnd.x, y: tracerEnd.y }
+            : (out?.tee ? { x: out.tee[0], y: out.tee[1] } : null));
         setTeeLandingNote(out?.tee ? null : (out?.reason || null));
       } catch (e) {
         if (live) {
@@ -1094,39 +1104,58 @@ function ClickToPlotModal({
       }
     })();
     return () => { live = false; };
+    // tracerEnd is read but deliberately NOT a dependency: it is set BY
+    // the drag this effect would otherwise fight, and listing it would
+    // re-run the mapping on every drop.
   }, [landing?.x, landing?.y, adminPassword, row.id]);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Dragged in the tee view: read it back to a green pixel and move the
-  // landing there. The landing keeps its frame -- a drag says where the
-  // ball finished, not when.
+  // Dragged in the tee view: this is the TEE-SIDE AIM, and nothing else.
+  //
+  // It was moving the green landing, which is backwards. The landing is
+  // a fact the green camera measured -- it saw the ball come down -- and
+  // a drag on the tee picture is a much coarser statement about the same
+  // place: the tee camera sees the whole green as a sliver a couple of
+  // hundred pixels wide, so a few pixels here is many yards there.
+  // Letting the coarse view overwrite the precise one loses the
+  // measurement.
+  //
+  // What a drag here IS good for is the thing the tee picture actually
+  // decides: where the predictive tracer is aimed. That is `tracer_end`,
+  // which produce already prefers over the mapped landing and which is
+  // saved with the swing.
+  //
+  // And the pair is worth something on its own. The operator has just
+  // said "the green camera's landing, in MY picture, is HERE" -- a
+  // correspondence between the two views, which is exactly what the
+  // calibrator collects by clicking a bunker corner in both. The
+  // distance between where the map put it and where they dragged it is
+  // how wrong the map is at the one point that matters, so it is
+  // measured and shown rather than quietly absorbed.
   async function dropTeeLanding(pt) {
     if (!pt) return;
     setTeeLandingXY(pt);
-    try {
-      const out = await api.landingFromTee(adminPassword, row.id, {
-        tee: [pt.x, pt.y],
-        tee_size: [frameW, frameH],
-        green_size: green ? [green.width, green.height] : null,
-      });
-      const g = out?.green;
-      if (!g) return;
-      const f = landing?.frame ?? greenViewFrame ?? green?.frame ?? 0;
-      setGreenMarks((m) => ({
-        ...m, [f]: { x: Math.round(g[0]), y: Math.round(g[1]) },
-      }));
-      // HOW WELL THE MAPPING HOLDS, said out loud. The round trip is
-      // exact when the homography is sound; a long way off when it is
-      // not, and this is the screen where that matters.
-      const rt = out?.tee_roundtrip;
-      const err = rt
-        ? Math.hypot(rt[0] - pt.x, rt[1] - pt.y) : null;
+    setTracerEnd(pt);
+    setEndGuessed(false);
+    if (!landing) {
       setTeeLandingNote(
-        `landing → green (${Math.round(g[0])}, ${Math.round(g[1])})`
-        + (err != null && err > 2
-          ? ` · the mapping is ${err.toFixed(0)}px out here — worth`
-            + " re-calibrating this hole"
-          : "")
-      );
+        `tracer aimed at ${pt.x}, ${pt.y} — mark the landing on the green `
+        + "tab too and this also measures the hole's calibration");
+      return;
+    }
+    try {
+      const out = await api.mapLandingToTee(adminPassword, row.id, {
+        green: [landing.x, landing.y],
+      });
+      const t = out?.tee;
+      if (!t) { setTeeLandingNote(`tracer aimed at ${pt.x}, ${pt.y}`); return; }
+      const off = Math.hypot(t[0] - pt.x, t[1] - pt.y);
+      setTeeLandingNote(
+        `tracer aimed at ${pt.x}, ${pt.y} · the green landing maps to `
+        + `${Math.round(t[0])}, ${Math.round(t[1])} — ${off.toFixed(0)}px away`
+        + (off > 8
+          ? ". That gap is this hole's calibration error at the landing —"
+            + " worth re-calibrating tee ↔ green."
+          : ". The mapping agrees with you here."));
     } catch (e) {
       setTeeLandingNote(e?.message || String(e));
     }
@@ -2061,10 +2090,14 @@ function ClickToPlotModal({
               handles={teeLandingXY ? [{
                 id: "landing", x: teeLandingXY.x, y: teeLandingXY.y,
                 colour: "#f472b6",
-                title: "Where the ball finished, shown in the tee frame. "
-                  + "Drag it onto the spot you can actually see and the "
-                  + "landing on the green camera follows — the two are the "
-                  + "same point read through this hole's calibration.",
+                title: "Where the tracer is aimed, shown in the tee "
+                  + "frame. It starts at wherever this hole's calibration "
+                  + "puts the green camera's landing. Drag it onto the "
+                  + "spot you can actually see: that aims the predictive "
+                  + "tracer, and the distance it moved is this hole's "
+                  + "calibration error at the one point that matters. The "
+                  + "landing on the green camera is NOT changed — that is "
+                  + "the measured one.",
               }] : []}
               onHandleDrag={(id, pt) => {
                 if (id === "landing" && pt) setTeeLandingXY(pt);

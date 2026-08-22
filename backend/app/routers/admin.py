@@ -18896,6 +18896,39 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # distance from the cutover to that frame instead. Worked out
             # HERE, before anything uses it, because three things below
             # have to agree on one number.
+            # THE TWO HALVES MEET AT ONE INSTANT.
+            #
+            # `tee_video_dur` above was t1 - t0, and t1 holds the tee
+            # until AFTER the ball has landed. `_g_start` meanwhile
+            # rewinds the green to a lead-in BEFORE the landing. So the
+            # composite showed the last couple of seconds of the flight
+            # twice: the tee tracer ran all the way to its landing, the
+            # cut happened, and then the green sat there for a second
+            # and a half waiting for a ball that had already arrived
+            # once.
+            #
+            # The tee is now cut at exactly the instant the green picks
+            # up. Nothing is shown twice, and at the cut the ball is
+            # still a lead-in short of the ground -- which is why the
+            # tracer is only part-way up the sky when the view changes,
+            # instead of finished.
+            #
+            # t1 keeps its old value: it is how long the tee is RENDERED,
+            # which has to carry the audio bed under the green half.
+            # Only the visible portion moves.
+            if green_path is not None:
+                _cut_tee = _g_start + float(delta)
+                _want_dur = max(D3_MIN_GREEN_SEC, _cut_tee - t0)
+                if _want_dur < tee_video_dur - 0.01:
+                    log.info(
+                        "d3 produce: swing %s tee half %.2fs -> %.2fs so it "
+                        "ends where the green begins (%.2fs green-clock); "
+                        "the last %.2fs was being shown on both cameras",
+                        i, tee_video_dur, _want_dur, _g_start,
+                        tee_video_dur - _want_dur,
+                    )
+                    tee_video_dur = _want_dur
+
             _green_sec = D3_GREEN_SEC
             if end_green_sec is not None and green_path is not None:
                 _want = float(end_green_sec) - _g_start
