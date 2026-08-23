@@ -1533,6 +1533,12 @@ DESCENT_DIFF_PER_FRAME = 30
 # jump onto a different object, not to second-guess the flight.
 DESCENT_CORRIDOR_PX = 10.0
 
+# THE ABSOLUTE FLOOR ON A DESCENT, wherever one is judged. Two points is
+# a pair of dots with a line between them: any two points are collinear,
+# so a two-point chain passes a straightness test by construction and
+# carries no evidence at all.
+MIN_DESCENT_POINTS = 3
+
 DIFF_SENS = {
     1: (12, 6, 600),
     2: (8, 10, 900),
@@ -1812,13 +1818,44 @@ def find_descents(
                     last_i = i + 1
                     break
         land = pts[last_i]
+        # EVERY NUMBER DESCRIBES THE CHAIN THAT IS KEPT.
+        #
+        # The gates above ran on the WHOLE track and the points reported
+        # were the truncated one, so an event could say "6 points, bends
+        # 3.4px" while carrying two. Every consumer then judged one thing
+        # and drew another: the point count that passed the gate was not
+        # the count of the chain that got saved as the comet, which is
+        # how a two-point comet came out of a search whose minimum is
+        # three.
+        #
+        # So the walk back to the landing happens first, and the drop,
+        # rate, bend and count are all measured on what survives it.
+        kept = pts[:last_i + 1]
+        # TWO POINTS IS NOT A DESCENT. It is a pair of dots with a line
+        # between them; any two points are collinear, so it passes a
+        # straightness test by construction and means nothing. A floor
+        # here rather than only at the acceptance gate, because this is
+        # where the chain is decided.
+        if len(kept) < max(int(min_points), MIN_DESCENT_POINTS):
+            continue
+        drop = float(kept[-1]["y"]) - float(kept[0]["y"])
+        if drop < min_drop:
+            continue
+        span_f = max(1, int(kept[-1]["frame"]) - int(kept[0]["frame"]))
+        rate = (drop / span_f) * _fps / frame_h
+        if not (float(rate_lo) <= rate <= float(rate_hi)):
+            continue
+        bend = _path_bend_px(kept)
+        if bend > float(max_bend_px):
+            continue
         events.append({
-            "first_frame": int(pts[0]["frame"]),
+            "first_frame": int(kept[0]["frame"]),
             "last_frame": int(pts[-1]["frame"]),
             "last_descent_frame": int(land["frame"]),
             "last_descent_sec": round(int(land["frame"]) / _fps, 2),
             "landing_xy": [int(round(land["x"])), int(round(land["y"]))],
-            "n_points": len(pts),
+            "n_points": len(kept),
+            "n_points_tracked": len(pts),
             "drop_px": int(round(drop)),
             "fall_rate": round(rate, 3),
             "bend_px": round(bend, 2),
@@ -1831,7 +1868,7 @@ def find_descents(
             "points": [
                 {"frame": int(q["frame"]),
                  "x": int(round(q["x"])), "y": int(round(q["y"]))}
-                for q in pts[:last_i + 1]
+                for q in kept
             ],
         })
 

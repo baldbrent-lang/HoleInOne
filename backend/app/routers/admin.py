@@ -16218,11 +16218,16 @@ def _descent_accepted(e) -> bool:
     """
     _n = int(e.get("n_points") or 0)
     _b = float(e.get("bend_px") or 999.0)
+    # THE FLOOR FIRST, and it is not a tunable. Two points are collinear
+    # by construction, so a two-point chain passes the straightness test
+    # for free and is evidence of nothing. Stated here as well as in the
+    # search because this is the other place a chain is judged, and a
+    # rule that matters should not depend on the only other copy of it.
+    if _n < BALLSCAN_DESCENT_SHORT_POINTS or _n < 3:
+        return False
     if _n >= BALLSCAN_DESCENT_MIN_POINTS:
         return _b <= BALLSCAN_DESCENT_MAX_BEND_PX
-    if _n >= BALLSCAN_DESCENT_SHORT_POINTS:
-        return _b <= BALLSCAN_DESCENT_SHORT_BEND_PX
-    return False
+    return _b <= BALLSCAN_DESCENT_SHORT_BEND_PX
 
 
 def _ball_scan_descents(row, db, spots, progress=None) -> dict:
@@ -16372,9 +16377,11 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
             _b = float(e.get("bend_px") or 999.0)
             if _strict(e):
                 return "accepted"
-            if _n < BALLSCAN_DESCENT_SHORT_POINTS:
-                return (f"only {_n} points — fewer than "
-                        f"{BALLSCAN_DESCENT_SHORT_POINTS} is not a chain")
+            if _n < BALLSCAN_DESCENT_SHORT_POINTS or _n < 3:
+                return (f"only {_n} point(s) — fewer than "
+                        f"{max(3, BALLSCAN_DESCENT_SHORT_POINTS)} is not a "
+                        f"chain, and two points are collinear by "
+                        f"construction so they prove nothing")
             if _n >= BALLSCAN_DESCENT_MIN_POINTS:
                 return (f"{_n} points but bends {_b}px, and "
                         f"{BALLSCAN_DESCENT_MAX_BEND_PX}px is the limit at "
@@ -16810,6 +16817,11 @@ def _ball_scan_refine_descent(gp, seed, gfps):
         if not added:
             return None
         best = sorted(added + list(_sorted), key=lambda q: q["frame"])
+        # The same floor the search holds to. A deeper look that comes
+        # back with two points has not found a descent, whatever the
+        # seed looked like.
+        if len(best) < 3:
+            return None
         _by = [float(q["y"]) for q in best]
         _bx = [float(q["x"]) for q in best]
         _fit = _np.polyfit(_np.array(_by), _np.array(_bx), 1)
