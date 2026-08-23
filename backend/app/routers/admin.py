@@ -17247,6 +17247,108 @@ def _ball_scan_considered_image(row, src_path, sweep) -> None:
         log.debug("ball scan: considered image failed on %s: %s", row.id, exc)
 
 
+def _ascent_descent_image(row, desc) -> None:
+    """Every chain the green pass weighed, and the gate each one died on.
+
+    The ascent picture's twin, and it exists because the ascent picture
+    is what made those gates tunable: before it, a lost ascent could
+    only be diagnosed by re-running the gates by hand in a scratch
+    script. The descent gates have never had that and have been tuned
+    exactly that way.
+
+    Drawn on the frame of the first accepted landing when there is one,
+    so the green is shown at the moment that matters, and on the middle
+    of the clip when there is not.
+    """
+    _sw = (desc or {}).get("sweep") or {}
+    _con = _sw.get("considered") or []
+    if not _con:
+        return
+    try:
+        import cv2  # type: ignore
+
+        row_green = _local_green(row)
+        if not row_green or not row_green.exists():
+            return
+        cap = cv2.VideoCapture(str(row_green))
+        if not cap.isOpened():
+            return
+        try:
+            _ok_ev = [z for z in _con if not (z.get("why") or [])]
+            _at = ((_ok_ev[0] if _ok_ev else _con[0])
+                   .get("last_descent_frame")
+                   or _con[0].get("first_frame") or 0)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(_at)))
+            ok, im = cap.read()
+            if not ok or im is None:
+                return
+        finally:
+            cap.release()
+        im = (im.astype("float32") * 0.55).astype("uint8")
+        _cols = _sw.get("why_colors") or {}
+
+        def _bgr(hexstr, fallback=(200, 200, 200)):
+            try:
+                _h = hexstr.lstrip("#")
+                r, g, b = (int(_h[k:k + 2], 16) for k in (0, 2, 4))
+                return (b, g, r)
+            except (AttributeError, TypeError, ValueError):
+                return fallback
+
+        _n_ok = 0
+        for a in reversed(_con):
+            _why = a.get("why") or []
+            _p = a.get("points") or []
+            if not _p:
+                continue
+            if _why:
+                _col, _w, _r = _bgr(_cols.get(a.get("why_primary"))), 1, 2
+            else:
+                _col, _w, _r = (255, 255, 255), 2, 4
+                _n_ok += 1
+            for u, v in zip(_p, _p[1:]):
+                cv2.line(im, (u["x"], u["y"]), (v["x"], v["y"]), _col, _w,
+                         cv2.LINE_AA)
+            for q in _p:
+                cv2.circle(im, (q["x"], q["y"]), _r, _col, _w, cv2.LINE_AA)
+            if not _why:
+                # WHERE IT LANDED, ringed. This is the number the produce
+                # actually consumes -- the frame it cuts to and the point
+                # it finishes at -- so it is the one thing in the picture
+                # worth being able to check by eye.
+                _lx, _ly = a.get("landing_xy") or [_p[-1]["x"], _p[-1]["y"]]
+                cv2.circle(im, (int(_lx), int(_ly)), 11, _col, 2,
+                           cv2.LINE_AA)
+                cv2.putText(
+                    im, f"{_n_ok}  {a.get('last_descent_sec')}s  "
+                        f"{a.get('n_points_drawn')}pts",
+                    (min(int(_lx) + 15, im.shape[1] - 190),
+                     max(66, int(_ly))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _col, 1, cv2.LINE_AA)
+        _tally = _sw.get("why_counts") or {}
+        im[0:58] = (im[0:58].astype("float32") * 0.35).astype("uint8")
+        cv2.putText(
+            im,
+            f"all {_sw.get('n_considered')} chain(s) the green pass "
+            f"weighed - white is a ball coming down, rings are landings",
+            (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+            cv2.LINE_AA)
+        _kx = 12
+        for _k in (_sw.get("why_order") or []):
+            _n = _tally.get(_k) or 0
+            if _n:
+                _kx = _key_entry(im, _kx, f"{_k} {_n}", _bgr(_cols.get(_k)))
+        if _tally.get("accepted"):
+            _key_entry(im, _kx, f"accepted {_tally['accepted']}",
+                       (255, 255, 255))
+        nm = f"ballscan-{row.id}-descents.jpg"
+        if cv2.imwrite(str(CLIPS_DIR / nm), im,
+                       [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
+            desc["image_url"] = _clip_url_for(nm)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ascent: descent image failed on %s: %s", row.id, exc)
+
+
 def _ascent_trim_considered(sweep) -> None:
     """Drop the coordinates once the picture has been drawn from them.
 
@@ -17868,7 +17970,24 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
            + (f" {_n_est} of these are estimated." if _n_est else ""),
            _n_spot, "located", time.perf_counter() - _t)
 
-    # ── 3. the edit dialog's own produce ──────────────────────────────
+    # ── 3. where each one came down ───────────────────────────────────
+    _t = time.perf_counter()
+    _desc = _ascent_descents(row, db, rep, fps, progress=progress)
+    rep["descents"] = _desc
+    _ascent_descent_image(row, _desc)
+    _ascent_trim_considered(_desc.get("sweep") or {})
+    _stage(3, "Balls coming down",
+           "One pass over the green camera, which is the easy half: "
+           "nothing else on a green falls. Each swing then claims the "
+           "landing that arrives five to eight seconds after its own "
+           "strike, carried across on the two cameras' wall clocks. A "
+           "swing with no match still produces, tee-only — a ball can "
+           "miss the green and still be a real shot, and nothing here "
+           "invents a landing to draw from. "
+           + str(_desc.get("reason") or ""),
+           _desc.get("n_matched"), "matched", time.perf_counter() - _t)
+
+    # ── 4. the edit dialog's own produce ──────────────────────────────
     if not produce:
         _ball_scan_finish_timing(rep, _t_run)
         rep["produced"] = False
@@ -17909,6 +18028,14 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                 # there were three. Clearing on the first and appending
                 # after is what Produce itself does.
                 solo=(_idx > 0), swing_idx=_idx,
+                # WHERE IT ARRIVED, when the green camera saw it. Both
+                # or neither: the renderer needs the frame to cut to and
+                # the point to draw at, and half of that pair is worse
+                # than none. Absent, the clip is tee-only and no comet
+                # is drawn -- the search behind it only ever walks back
+                # from a real landing, so there is nothing to fabricate.
+                landing_frame=c.get("landing_frame"),
+                landing_spot=c.get("landing_spot"),
             ) or {}
             c["ok"] = bool(_out.get("ok"))
             c["clip_url"] = _out.get("url") or _out.get("clip_url")
@@ -17920,7 +18047,7 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
             c["reason"] = f"render failed: {exc}"
         _idx += 1
     _phase = _pt_snapshot()
-    _stage(3, "Tracer clip",
+    _stage(4, "Tracer clip",
            "run_wizard_produce_job -- the same call the edit dialog's "
            "Save & close makes, with the same renderer behind it. Nothing "
            "about the finished clip is new here; only how its two numbers "
@@ -17937,6 +18064,133 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
     log.info("ascent produce upload=%s: %s in %.1fs", row.id, rep["reason"],
              rep["timing"]["total_sec"])
     return rep
+
+
+def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
+    """Match each ball that left the tee to the one that came down.
+
+    THE OTHER CAMERA FINISHES THE SENTENCE. The tee half says a ball was
+    struck and where from; it cannot say where the shot arrived, because
+    the ball is out of its frame in half a second. The green camera can,
+    and easily -- nothing else on a green falls. Players walk, the flag
+    moves, the tree line shifts, and all of it is slow and sideways.
+
+    ONE PASS FOR THE WHOLE CLIP, then handed out by time. `find_descents`
+    segments every frame of the window it is given, so running it once
+    per ascent would scan the same green clip three times over for the
+    same answer.
+
+    AND THE ASCENT MAKES THE HANDING-OUT EASY. The old ball scan had to
+    guess a flight window from "the spot emptied around here"; an ascent
+    gives a MEASURED departure frame, so the window on the green is
+    tight -- departure plus five to eight seconds, carried across on the
+    two cameras' wall clocks.
+
+    Attaches `landing_frame` and `landing_spot` to the clips that get a
+    match. A clip without one still produces, tee-only: a ball can miss
+    the green entirely and still be a real shot, and nothing here ever
+    invents a landing to draw from.
+
+    Never raises. This decorates a clip; a failure must not cost it.
+    """
+    from ..services import debug3 as _d3
+
+    out: dict = {"ok": False, "n_matched": 0, "events": [], "reason": None,
+                 "delta_sec": None, "delta_source": None}
+    _clips = rep.get("clips") or []
+    if not _clips:
+        out["reason"] = "no swings to match"
+        return out
+    if not getattr(row, "green_filename", None):
+        out["reason"] = "no green camera on this upload — nothing to match"
+        return out
+    try:
+        _gp = _local_green(row)
+        if not _gp or not _gp.exists():
+            out["reason"] = "the green video is missing on disk"
+            return out
+        _gfps = float(probe_fps(_gp) or 0.0) or 30.0
+        if progress:
+            progress("Finding the balls coming down on the green", 0, 0)
+        _gd = _d3.find_descents(_gp, fps=_gfps)
+        out["sweep"] = _gd
+        out["green_fps"] = round(_gfps, 2)
+        _delta, _dsrc = _d3_green_delta_sec(db, row)
+        out["delta_sec"] = round(float(_delta), 3)
+        out["delta_source"] = _dsrc
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ascent descents: green pass failed on %s: %s",
+                    row.id, exc)
+        out["reason"] = f"the green pass failed: {exc}"
+        return out
+
+    _events = list(_gd.get("events") or [])
+    out["events"] = _events
+    if not _events:
+        out["reason"] = (f"no ball seen coming down: {_gd.get('reason')}")
+        return out
+
+    # NEAREST FIT WINS, AND A DESCENT IS CLAIMED ONCE. Two tee shots
+    # inside three seconds of each other have overlapping windows, and
+    # letting both claim the same landing would draw one arrival twice
+    # and leave the other shot with none.
+    # BEST FIT ANYWHERE FIRST, not best fit for whoever is asked first.
+    #
+    # Taking each swing in turn and giving it its nearest free descent
+    # is greedy in the wrong order: if the first swing's window holds
+    # two landings and the second's holds only the later of them, the
+    # first will take that one and the second gets nothing -- even
+    # though the first had another to take. Ranking every possible pair
+    # by fit and assigning down the list costs nothing at these sizes
+    # and cannot make that trade.
+    #
+    # It matters more than a missing comet: a swing given the wrong
+    # landing draws its tracer finishing at somebody else's ball.
+    _pairs: list = []
+    for ci, c in enumerate(_clips):
+        _imp = c.get("impact_frame")
+        if _imp is None:
+            continue
+        # green_time = tee_time - delta. The landing is five to eight
+        # seconds after the strike, on the green's own clock.
+        _base = float(_imp) / float(fps or 30.0) - float(out["delta_sec"])
+        _lo, _hi = _base + FLIGHT_LO_SEC, _base + FLIGHT_HI_SEC
+        _mid = (_lo + _hi) / 2.0
+        c["landing_window_sec"] = [round(_lo, 2), round(_hi, 2)]
+        c["landing_reason"] = (
+            f"no ball came down between {round(_lo, 1)}s and "
+            f"{round(_hi, 1)}s on the green clock")
+        for ei, e in enumerate(_events):
+            _s = float(e.get("last_descent_sec") or 0.0)
+            if _lo <= _s <= _hi:
+                _pairs.append((abs(_s - _mid), ci, ei))
+    _pairs.sort()
+    _used_c: set = set()
+    _used_e: set = set()
+    for _d, ci, ei in _pairs:
+        if ci in _used_c or ei in _used_e:
+            continue
+        _used_c.add(ci)
+        _used_e.add(ei)
+        c, _e = _clips[ci], _events[ei]
+        c["landing_frame"] = int(_e["last_descent_frame"])
+        c["landing_spot"] = [int(_e["landing_xy"][0]),
+                             int(_e["landing_xy"][1])]
+        c["landing_sec"] = _e.get("last_descent_sec")
+        c["landing_points"] = _e.get("n_points_drawn")
+        c["landing_reason"] = (
+            f"came down at {c['landing_spot'][0]},{c['landing_spot'][1]} "
+            f"on the green at f{c['landing_frame']} "
+            f"({_e.get('last_descent_sec')}s), "
+            f"{_e.get('n_points_drawn')} point(s)")
+        out["n_matched"] += 1
+
+    out["ok"] = out["n_matched"] > 0
+    out["reason"] = (
+        f"{out['n_matched']} of {len(_clips)} swing(s) matched to "
+        f"{len(_events)} ball(s) coming down; the two clocks are "
+        f"{out['delta_sec']}s apart ({out['delta_source']})")
+    return out
 
 
 def _ascent_spot_fallback(out: dict, ascent: dict, seen, why: str) -> dict:

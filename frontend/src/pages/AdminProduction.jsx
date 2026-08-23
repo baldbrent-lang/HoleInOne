@@ -7842,6 +7842,50 @@ function FlagstickModal({ row, adminPassword, onClose, onSaved }) {
 // WHAT EACH GATE MEANS, in words. The colours and the order come from
 // the backend so the legend cannot disagree with the picture; only the
 // prose lives here, because that is the one part OpenCV has no use for.
+// THE COLOUR KEY, FROM THE SAME DICT THE PICTURE WAS DRAWN FROM. The
+// backend reports `why_colors` and `why_order`; only the prose is here,
+// because that is the one part OpenCV has no use for. Shared by both
+// pictures so a second copy of this logic cannot drift from the first.
+function WhyLegend({ sweep, texts, acceptedText }) {
+  if (!sweep?.why_order?.length) return null;
+  const row = (sw, name, text, n) => (
+    <tr key={name}>
+      <td style={{ paddingRight: 8 }}>
+        <span style={{ display: "inline-block", width: 22, height: 4,
+                       borderRadius: 2, background: sw }} />
+      </td>
+      <td style={{ paddingRight: 8 }}><b>{name}</b></td>
+      <td className="muted">{text}</td>
+      <td style={{ paddingLeft: 8 }}>{n}</td>
+    </tr>
+  );
+  return (
+    <>
+      <table className="tiny" style={{ marginTop: 6 }}>
+        <tbody>
+          {row("#fff", "accepted", acceptedText,
+               sweep.why_counts?.accepted || 0)}
+          {sweep.why_order.map((k) => row(
+            sweep.why_colors?.[k] || "#888", k, texts[k],
+            sweep.why_counts?.[k] || 0))}
+        </tbody>
+      </table>
+      <div className="tiny muted" style={{ marginTop: 4 }}>
+        A chain that failed several gates is drawn in the colour of the
+        first one it failed, reading down this list.
+      </div>
+    </>
+  );
+}
+
+
+const DESCENT_WHY_TEXT = {
+  drop: "did not fall far enough to be a ball arriving",
+  rate: "fell too slowly (or absurdly fast) for a ball under gravity",
+  bend: "not a straight line — speckles the tracker linked, not a ball",
+  points: "fewer than three points survived the walk back to the landing",
+};
+
 const ASCENT_WHY_TEXT = {
   rise: "did not climb far enough",
   rate: "barely moving",
@@ -7939,47 +7983,9 @@ function AscentProduceModal({ state, onClose }) {
                    alt="every chain considered"
                    style={{ width: "100%", borderRadius: 6, marginTop: 6 }} />
             </a>
-            {/* THE KEY, FROM THE SAME DICT THE PICTURE WAS DRAWN FROM.
-                A legend that keeps its own copy of the colours is a
-                legend that will eventually be wrong about them. */}
-            <table className="tiny" style={{ marginTop: 6 }}>
-              <tbody>
-                <tr>
-                  <td style={{ paddingRight: 8 }}>
-                    <span style={{ display: "inline-block", width: 22,
-                                   height: 4, borderRadius: 2,
-                                   background: "#fff" }} />
-                  </td>
-                  <td style={{ paddingRight: 8 }}><b>accepted</b></td>
-                  <td className="muted">
-                    a ball leaving the tee — these are the ones produced
-                  </td>
-                  <td style={{ paddingLeft: 8 }}>
-                    {rep.sweep.why_counts?.accepted || 0}
-                  </td>
-                </tr>
-                {(rep.sweep.why_order || []).map((k) => (
-                  <tr key={k}>
-                    <td style={{ paddingRight: 8 }}>
-                      <span style={{
-                        display: "inline-block", width: 22, height: 4,
-                        borderRadius: 2,
-                        background: rep.sweep.why_colors?.[k] || "#888",
-                      }} />
-                    </td>
-                    <td style={{ paddingRight: 8 }}><b>{k}</b></td>
-                    <td className="muted">{ASCENT_WHY_TEXT[k]}</td>
-                    <td style={{ paddingLeft: 8 }}>
-                      {rep.sweep.why_counts?.[k] || 0}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="tiny muted" style={{ marginTop: 4 }}>
-              A chain that failed several gates is drawn in the colour of
-              the first one it failed, reading down this list.
-            </div>
+            <WhyLegend
+              sweep={rep.sweep} texts={ASCENT_WHY_TEXT}
+              acceptedText="a ball leaving the tee — these are the ones produced" />
             {(rep.sweep.considered || []).length > 0 && (
               <div style={{ overflowX: "auto", marginTop: 6 }}>
                 <table className="tiny" style={{ width: "100%" }}>
@@ -8031,6 +8037,75 @@ function AscentProduceModal({ state, onClose }) {
           </details>
         )}
 
+        {/* THE OTHER CAMERA'S HALF. Same treatment as the ascents, and
+            for the same reason: these gates have only ever been tuned by
+            re-running them by hand in a scratch script. */}
+        {rep?.descents && (
+          <details style={{ margin: "10px 0" }}>
+            <summary className="small">
+              Balls coming down on the green
+              <span className="muted">
+                {" "}— {rep.descents.reason || "…"}
+              </span>
+            </summary>
+            {rep.descents.image_url && (
+              <a href={rep.descents.image_url} target="_blank"
+                 rel="noreferrer">
+                <img src={rep.descents.image_url} alt="descents considered"
+                     style={{ width: "100%", borderRadius: 6,
+                              marginTop: 6 }} />
+              </a>
+            )}
+            <WhyLegend
+              sweep={rep.descents.sweep} texts={DESCENT_WHY_TEXT}
+              acceptedText="a ball coming down — the ring is where it landed" />
+            {(rep.descents.sweep?.considered || []).length > 0 && (
+              <div style={{ overflowX: "auto", marginTop: 6 }}>
+                <table className="tiny" style={{ width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th align="left">at</th>
+                      <th align="left">pts</th>
+                      <th align="left">drawn</th>
+                      <th align="left">drop</th>
+                      <th align="left">fall rate</th>
+                      <th align="left">bend</th>
+                      <th align="left">landed</th>
+                      <th align="left">verdict</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rep.descents.sweep.considered.map((z, i) => (
+                      <tr key={i}
+                          style={{ opacity: (z.why || []).length ? 0.6 : 1 }}>
+                        <td>{z.last_descent_sec != null
+                          ? `${z.last_descent_sec}s` : `f${z.first_frame}`}</td>
+                        <td>{z.n_points}</td>
+                        <td>{z.n_points_drawn ?? "—"}</td>
+                        <td>{z.drop_px}px</td>
+                        <td>{z.fall_rate}</td>
+                        <td>{z.bend_px}</td>
+                        <td>{z.landing_xy
+                          ? `${z.landing_xy[0]}, ${z.landing_xy[1]}`
+                          : "—"}</td>
+                        <td>{(z.why || []).length ? (
+                          <span className="pill warn">{z.why.join(", ")}</span>
+                        ) : <span className="pill ok">accepted</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="tiny muted" style={{ marginTop: 4 }}>
+              The two cameras' clocks are {rep.descents.delta_sec}s apart
+              ({rep.descents.delta_source}) — every swing's landing window
+              is carried across on that. A wrong offset shows up here as
+              real descents nobody claimed.
+            </div>
+          </details>
+        )}
+
         {asc.length > 0 && (
           <div className="card" style={{ margin: "10px 0", padding: 10 }}>
             <b>Each ball, and what became of it</b>
@@ -8046,6 +8121,7 @@ function AscentProduceModal({ state, onClose }) {
                     <th align="left">straight</th>
                     <th align="left">tee spot</th>
                     <th align="left">impact</th>
+                    <th align="left">landed</th>
                     <th align="left">{findOnly ? "" : "clip"}</th>
                   </tr>
                 </thead>
@@ -8084,6 +8160,15 @@ function AscentProduceModal({ state, onClose }) {
                             )}
                           </span>
                         ) : <span className="muted">—</span>}</td>
+                        <td title={c.landing_reason || ""}>{c.landing_spot ? (
+                          <>f{c.landing_frame}
+                            <span className="muted">
+                              {" "}({c.landing_spot[0]}, {c.landing_spot[1]})
+                            </span>
+                          </>
+                        ) : (
+                          <span className="muted">tee-only</span>
+                        )}</td>
                         <td>{findOnly ? null : (c.clip_url
                           ? <a href={c.clip_url} target="_blank"
                                rel="noreferrer">clip</a>

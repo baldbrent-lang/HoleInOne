@@ -1586,6 +1586,26 @@ DESCENT_CORRIDOR_PX = None
 # carries no evidence at all.
 MIN_DESCENT_POINTS = 3
 
+# WHAT COLOUR EACH DESCENT VERDICT IS DRAWN IN, and the order the gates
+# are listed in. The ascent side's `ASCENT_WHY_COLORS`, for the same
+# reason and read the same way: one definition, shared by the OpenCV
+# picture and the browser legend, because a key that keeps its own copy
+# of the colours is a key that will eventually be wrong about them.
+#
+# The order decides which colour a chain that failed several gates is
+# drawn in -- the first one it failed, reading down this list.
+DESCENT_WHY_COLORS = {
+    # Did not fall far enough to be a ball arriving.
+    "drop": "#6b7a8f",
+    # Fell too slowly (or absurdly fast) for a ball under gravity.
+    "rate": "#8e6bb5",
+    # Not a straight line -- speckles the tracker linked, not a ball.
+    "bend": "#c98a2e",
+    # Fewer than three points survived the walk back to the landing.
+    "points": "#b5487d",
+}
+DESCENT_WHY_ORDER = list(DESCENT_WHY_COLORS)
+
 # HOW UNEVENLY SPACED A DESCENT MAY BE, as a fraction of its own median
 # per-frame drop. Gravity over the half-second a descent is in view
 # changes the step by roughly a quarter, so this leaves room for the
@@ -2015,29 +2035,40 @@ def find_descents(
                 "why": why, **nums,
             })
 
+    # EVERY CHAIN KEEPS ITS VERDICT, the way the ascent sweep does.
+    #
+    # `rejected` above is capped at 40 and holds a sentence each, which
+    # is a log rather than a picture. Tuning the ascent gates was only
+    # tractable once every chain came back with the NAME of the gate
+    # that refused it and a colour to draw it in; the descent side has
+    # been tuned by re-running it by hand in scratch scripts instead.
+    # Both are kept: the sentences are what a human reads, and the names
+    # are what the picture and the tally are built from.
+    considered: list = []
     for tk in tracks:
         pts = tk.get("points") or []
         if len(pts) < int(min_points):
             continue
+        _why: list = []
         drop = float(pts[-1]["y"]) - float(pts[0]["y"])
         span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
         rate = (drop / span_f) * _fps / frame_h
         bend = _path_bend_px(pts)
         if drop < min_drop:
+            _why.append("drop")
             _rej(pts, f"fell {int(drop)}px, needs {int(min_drop)}px",
                  drop_px=int(drop), fall_rate=round(rate, 3))
-            continue
         if not (float(rate_lo) <= rate <= float(rate_hi)):
+            _why.append("rate")
             _rej(pts,
                  (f"falls at {round(rate, 3)} frame-heights/sec, outside "
                   f"{rate_lo}-{rate_hi}"),
                  drop_px=int(drop), fall_rate=round(rate, 3))
-            continue
         if bend > float(max_bend_px):
+            _why.append("bend")
             _rej(pts, f"bends {round(bend, 2)}px, limit {max_bend_px}px",
                  drop_px=int(drop), fall_rate=round(rate, 3),
                  bend_px=round(bend, 2))
-            continue
 
         # WHERE IT LANDED, not where the tracker gave up. The seed keeps
         # producing points through the bounce and the roll, so the last
@@ -2088,13 +2119,13 @@ def find_descents(
         # tail was junk from being saved as a two-dot comet, and it
         # changes no decision about a chain that is real.
         if len(kept) < MIN_DESCENT_POINTS:
-            continue
+            _why.append("points")
         # Reported, not gated. How evenly a descent falls is worth
         # seeing on the picture; using it to reject cost more than it
         # caught, so it says what it measured and leaves the deciding to
         # the gates that were tuned against real footage.
         step_med, step_dev = _descent_step_consistency(kept)
-        events.append({
+        _entry = {
             "first_frame": int(pts[0]["frame"]),
             "last_frame": int(pts[-1]["frame"]),
             "last_descent_frame": int(land["frame"]),
@@ -2119,7 +2150,27 @@ def find_descents(
                  "x": int(round(q["x"])), "y": int(round(q["y"]))}
                 for q in kept
             ],
-        })
+            "why": _why,
+            "why_primary": next(
+                (w for w in DESCENT_WHY_ORDER if w in _why), None),
+        }
+        considered.append(_entry)
+        if not _why:
+            events.append(_entry)
+
+    # FURTHEST FIRST -- fewest gates failed, then longest. The order the
+    # picture draws them in, so an accepted chain is never buried under
+    # one that failed three gates.
+    considered.sort(key=lambda z: (len(z["why"]), -z["n_points"]))
+    out["considered"] = considered
+    out["n_considered"] = len(considered)
+    out["why_colors"] = dict(DESCENT_WHY_COLORS)
+    out["why_order"] = list(DESCENT_WHY_ORDER)
+    _tally: dict = {}
+    for z in considered:
+        for w in (z["why"] or ["accepted"]):
+            _tally[w] = _tally.get(w, 0) + 1
+    out["why_counts"] = _tally
 
     # One descent can arrive as two tracks when the ball blinks out
     # against the tree line on the way down. Anything landing within a
