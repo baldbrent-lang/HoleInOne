@@ -7892,6 +7892,88 @@ function AscentProduceModal({ state, onClose }) {
           </div>
         )}
 
+        {/* EVERY CHAIN, NOT JUST THE ONES THAT WON. When a shot is
+            missing the accepted picture above shows nothing, which is
+            also what a sweep that found the ball and threw it away
+            looks like. This is the picture that tells those apart. */}
+        {rep?.sweep?.considered_image_url && (
+          <details style={{ margin: "10px 0" }}>
+            <summary className="small">
+              Every chain considered, and the gate each one failed
+              {rep.sweep.n_considered != null && (
+                <span className="muted">
+                  {" "}— {rep.sweep.n_considered} weighed
+                </span>
+              )}
+            </summary>
+            <a href={rep.sweep.considered_image_url} target="_blank"
+               rel="noreferrer">
+              <img src={rep.sweep.considered_image_url}
+                   alt="every chain considered"
+                   style={{ width: "100%", borderRadius: 6, marginTop: 6 }} />
+            </a>
+            <div className="tiny muted" style={{ marginTop: 4 }}>
+              Coloured chains were accepted; grey ones are labelled with
+              the gate that refused them.{" "}
+              <b>rise</b> did not climb far enough ·{" "}
+              <b>rate</b> barely moving ·{" "}
+              <b>bend</b> not a straight line ·{" "}
+              <b>wander</b> doubled back on itself ·{" "}
+              <b>tilt</b> leaning too far off vertical ·{" "}
+              <b>backrun</b> left the tee line too long ago ·{" "}
+              <b>outside</b> points back outside the hitting area.
+            </div>
+            {(rep.sweep.considered || []).length > 0 && (
+              <div style={{ overflowX: "auto", marginTop: 6 }}>
+                <table className="tiny" style={{ width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th align="left">at</th>
+                      <th align="left">pts</th>
+                      <th align="left">rise</th>
+                      <th align="left">rate</th>
+                      <th align="left">bend</th>
+                      <th align="left">straight</th>
+                      <th align="left">tilt</th>
+                      <th align="left">back</th>
+                      <th align="left">from x</th>
+                      <th align="left">verdict</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rep.sweep.considered.map((z, i) => (
+                      <tr key={i}
+                          style={{ opacity: (z.why || []).length ? 0.6 : 1 }}>
+                        <td>f{z.first_frame}</td>
+                        <td title={z.n_trimmed
+                          ? `${z.n_trimmed} leading point(s) trimmed off a ${z.n_raw_points}-point chain`
+                          : ""}>
+                          {z.n_points}
+                          {z.n_trimmed > 0 && (
+                            <span className="muted"> −{z.n_trimmed}</span>
+                          )}
+                        </td>
+                        <td>{z.rise_px}</td>
+                        <td>{z.rate}</td>
+                        <td>{z.bend_px}</td>
+                        <td>{z.straightness}</td>
+                        <td>{z.tilt_deg}°</td>
+                        <td>{z.backrun_frames ?? "—"}</td>
+                        <td>{z.from_x ?? "—"}</td>
+                        <td>{(z.why || []).length ? (
+                          <span className="pill warn">
+                            {z.why.join(", ")}
+                          </span>
+                        ) : <span className="pill ok">accepted</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </details>
+        )}
+
         {asc.length > 0 && (
           <div className="card" style={{ margin: "10px 0", padding: 10 }}>
             <b>Each ball, and what became of it</b>

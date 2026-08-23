@@ -17066,7 +17066,12 @@ def _ball_scan_sweep_image(row, src_path, sweep) -> None:
             if _p:
                 cv2.putText(im, f"{i + 1}  {a['first_sec']}s  "
                                 f"{a['n_points']}pts  {a['rise_px']}px",
-                            (_p[-1]["x"] + 8, _p[-1]["y"]),
+                            # CLAMPED INTO THE PICTURE. The chains that
+                            # rise furthest are the ones worth reading,
+                            # and they are the ones whose last point is
+                            # at y=4 with the label off the top edge.
+                            (min(_p[-1]["x"] + 8, im.shape[1] - 210),
+                             max(18, _p[-1]["y"])),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, _col, 1,
                             cv2.LINE_AA)
             # WHERE IT CAME FROM, on the tee line. On a real ascent this
@@ -17087,6 +17092,111 @@ def _ball_scan_sweep_image(row, src_path, sweep) -> None:
             sweep["image_url"] = _clip_url_for(nm)
     except Exception as exc:  # noqa: BLE001
         log.debug("ball scan: sweep image failed on %s: %s", row.id, exc)
+
+
+def _ball_scan_considered_image(row, src_path, sweep) -> None:
+    """Every chain the sweep weighed, and the gate each one died on.
+
+    THE ACCEPTED PICTURE CANNOT ANSWER THE INTERESTING QUESTION. It shows
+    what got through, so when a shot is missing it shows nothing at all
+    -- and "nothing at all" is exactly what a sweep that found the ball
+    and threw it away also looks like. Twice now a lost ascent has been
+    found by re-running the gates by hand in a scratch script to see
+    which one refused it. This is that script, drawn.
+
+    Accepted chains keep their own colours and full weight. Everything
+    else is dimmed and labelled with the gates it failed, so the picture
+    reads as a foreground of balls against a background of what the band
+    also contains -- and a real ascent sitting in that background, one
+    gate from being kept, is visible as such.
+    """
+    _con = (sweep or {}).get("considered") or []
+    if not _con:
+        return
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(src_path))
+        if not cap.isOpened():
+            return
+        try:
+            _mid = _con[len(_con) // 2].get("first_frame") or 0
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(_mid)))
+            ok, im = cap.read()
+            if not ok or im is None:
+                return
+        finally:
+            cap.release()
+        im = (im.astype("float32") * 0.55).astype("uint8")
+        _band = sweep.get("band")
+        if _band:
+            cv2.rectangle(im, (0, 0), (int(_band[2]) - 1, int(_band[3])),
+                          (80, 200, 255), 2)
+        _ty = int(sweep.get("tee_line_y") or 0)
+        if _ty:
+            cv2.line(im, (0, _ty), (im.shape[1], _ty), (80, 200, 255), 1,
+                     cv2.LINE_AA)
+        # THE HITTING AREA ITSELF, when there is one -- the gate that
+        # refuses a chain for pointing outside it is unarguable only if
+        # the picture shows where "outside" was.
+        _area = sweep.get("hitting_area_px")
+        if _area and _ty:
+            cv2.line(im, (int(_area[0]), _ty - 9), (int(_area[0]), _ty + 9),
+                     (120, 255, 120), 2, cv2.LINE_AA)
+            cv2.line(im, (int(_area[1]), _ty - 9), (int(_area[1]), _ty + 9),
+                     (120, 255, 120), 2, cv2.LINE_AA)
+        from ..services.debug3 import TRACK_COLORS as _TC
+
+        # REJECTS FIRST, so an accepted chain is never buried under one.
+        _n_ok = 0
+        for a in sorted(_con, key=lambda z: -len(z.get("why") or [])):
+            _why = a.get("why") or []
+            _p = a.get("points") or []
+            if not _p:
+                continue
+            if _why:
+                _col, _w, _r = (110, 110, 110), 1, 2
+            else:
+                _hex = _TC[_n_ok % len(_TC)]
+                _rgb = tuple(int(_hex[k:k + 2], 16) for k in (1, 3, 5))
+                _col, _w, _r = (_rgb[2], _rgb[1], _rgb[0]), 2, 4
+                _n_ok += 1
+            for u, v in zip(_p, _p[1:]):
+                cv2.line(im, (u["x"], u["y"]), (v["x"], v["y"]), _col, _w,
+                         cv2.LINE_AA)
+            for q in _p:
+                cv2.circle(im, (q["x"], q["y"]), _r, _col, _w, cv2.LINE_AA)
+            _lab = (f"{_n_ok}  {a['first_sec']}s  {a['n_points']}pts"
+                    if not _why else ",".join(_why))
+            # A LABEL ABOVE THE TOP OF THE FRAME IS NOT A LABEL. The
+            # chains that rise furthest are the ones worth reading, and
+            # they are exactly the ones whose last point is at y=4.
+            cv2.putText(im, _lab, (min(_p[-1]["x"] + 7, im.shape[1] - 170),
+                                   max(20, _p[-1]["y"] - 3)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, _col, 1, cv2.LINE_AA)
+            if a.get("from_x") is not None and _ty:
+                cv2.drawMarker(im, (int(a["from_x"]), _ty), _col,
+                               cv2.MARKER_TILTED_CROSS,
+                               16 if not _why else 9, _w, cv2.LINE_AA)
+        _tally = sweep.get("why_counts") or {}
+        cv2.putText(
+            im,
+            f"{len(_con)} of {sweep.get('n_considered')} chain(s) shown, "
+            f"furthest first - grey labels are the gate each one failed",
+            (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+            cv2.LINE_AA)
+        cv2.putText(
+            im,
+            "  ".join(f"{k} {v}" for k, v in
+                      sorted(_tally.items(), key=lambda kv: -kv[1])),
+            (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
+            cv2.LINE_AA)
+        nm = f"ballscan-{row.id}-considered.jpg"
+        if cv2.imwrite(str(CLIPS_DIR / nm), im,
+                       [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
+            sweep["considered_image_url"] = _clip_url_for(nm)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: considered image failed on %s: %s", row.id, exc)
 
 
 def _ball_scan_ascent_image(row, src_path, spots, tok, rep) -> None:
@@ -17624,6 +17734,7 @@ def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
     _t = time.perf_counter()
     sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi")) or {}
     _ball_scan_sweep_image(row, src_path, sweep)
+    _ball_scan_considered_image(row, src_path, sweep)
     rep["sweep"] = sweep
     _asc = list(sweep.get("ascents") or [])
     rep["ascents"] = _asc

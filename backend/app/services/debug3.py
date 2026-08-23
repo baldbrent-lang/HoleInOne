@@ -2472,6 +2472,11 @@ SWEEP_PER_FRAME = 10
 # outranking a real ball and absorbing it, which is what a whole-video
 # pass makes possible and a forty-frame window never could.
 SWEEP_MAX_SPAN = 60
+# HOW MANY REJECTED CHAINS THE SWEEP HANDS BACK to be drawn and listed.
+# A picture of all of them is unreadable -- hundreds, nearly all three
+# specks of band noise -- so only the ones that got furthest are kept.
+# The full tally by reason is reported separately and counts every one.
+SWEEP_MAX_CONSIDERED = 24
 
 
 def _path_straightness(pts) -> float:
@@ -2703,26 +2708,39 @@ def sweep_ascents(
         out["timing"] = {"detect": round(_t_det, 2),
                          "linking": round(time.perf_counter()
                                           - _t0 - _t_det, 2)}
+        # EVERY CHAIN KEEPS ITS VERDICT.
+        #
+        # The gates used to be a run of `continue`s, so a chain that
+        # failed one left no trace and the only question anybody could
+        # ask of a sweep was "what did it accept". The interesting
+        # question when an ascent goes missing is the opposite one, and
+        # answering it meant re-running the gates by hand in a scratch
+        # script. Now each chain is measured all the way through and
+        # collects the names of the gates it failed; nothing is dropped
+        # until the list has been built.
+        _considered: list = []
         for tk in tracks:
             pts = tk.get("points") or []
             # JUDGE THE RISING TAIL, not everything that got linked --
             # and then only the part of it that goes one way.
+            _n_raw_pts = len(pts)
             pts = _smooth_tail(_rising_tail(pts), int(min_points))
             if len(pts) < int(min_points):
                 continue
+            _why: list = []
             rise = float(pts[0]["y"]) - float(pts[-1]["y"])
             if rise < ASCENT_MIN_RISE_FRAC * frame_h:
-                continue
+                _why.append("rise")
             span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
             rate = (rise / span_f) * float(fps or 30.0) / frame_h
             if not (ASCENT_RATE_LO <= rate <= ASCENT_RATE_HI):
-                continue
+                _why.append("rate")
             bend = _path_bend_px(pts)
             if bend > ASCENT_MAX_BEND_PX:
-                continue
+                _why.append("bend")
             straight = _path_straightness(pts)
             if straight < ASCENT_MIN_STRAIGHT:
-                continue
+                _why.append("wander")
             # WHERE IT CAME FROM. Run the chain back along its own
             # heading to the height of the tee box: on a real ascent that
             # is the ball's resting spot, and it is the number that would
@@ -2748,7 +2766,7 @@ def sweep_ascents(
             _tilt = math.degrees(math.atan2(abs(_vx), abs(_vy))) \
                 if abs(_vy) > 1e-6 else 90.0
             if _tilt > ASCENT_MAX_TILT_DEG:
-                continue
+                _why.append("tilt")
             _from_x = _from_f = None
             if _vy < -0.5:
                 # SOLVE FOR THE TEE LINE, minding the sign. y(t) = y0 +
@@ -2765,18 +2783,18 @@ def sweep_ascents(
             if (_from_f is None
                     or (int(pts[0]["frame"]) - _from_f)
                     > ASCENT_MAX_BACKRUN_SEC * float(fps or 30.0)):
-                continue
+                _why.append("backrun")
             # AND IT MUST POINT BACK AT THE HITTING AREA. Nobody tees
             # off from the cart path. A chain whose own heading, run
             # back to the tee line, lands outside the box drawn for this
             # hole did not start with a ball being struck in it --
             # whatever else it is, it is not this hole's tee shot.
-            if _span is not None and not (
+            if _span is not None and _from_x is not None and not (
                     _span[0] - ASCENT_ROI_MARGIN_PX <= _from_x
                     <= _span[1] + ASCENT_ROI_MARGIN_PX):
+                _why.append("outside")
                 out["n_outside_area"] += 1
-                continue
-            out["ascents"].append({
+            _entry = {
                 "first_frame": int(pts[0]["frame"]),
                 "last_frame": int(pts[-1]["frame"]),
                 "first_sec": round(int(pts[0]["frame"]) / float(fps or 30.0), 2),
@@ -2797,7 +2815,32 @@ def sweep_ascents(
                 "from_is_approx": True,
                 "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
                             "y": int(q["y"])} for q in pts],
-            })
+                "tilt_deg": round(_tilt, 1),
+                "backrun_frames": (int(pts[0]["frame"]) - _from_f
+                                   if _from_f is not None else None),
+                "n_raw_points": _n_raw_pts,
+                "n_trimmed": _n_raw_pts - len(pts),
+                "why": _why,
+            }
+            _considered.append(_entry)
+            if not _why:
+                out["ascents"].append(_entry)
+        # WHAT ELSE WAS ON OFFER, worst-first-out. A picture of every
+        # chain is unreadable -- there are hundreds, nearly all of them
+        # three specks of band noise -- so the ones that got FURTHEST
+        # are kept: fewest gates failed, then longest. That is the order
+        # in which a missing ascent is worth looking for.
+        _considered.sort(key=lambda z: (len(z["why"]), -z["n_points"]))
+        out["considered"] = _considered[:SWEEP_MAX_CONSIDERED]
+        out["n_considered"] = len(_considered)
+        # AND A TALLY OF EVERY REASON, over all of them and not just the
+        # ones that fit in the picture -- "twelve failed on tilt" is the
+        # sentence that says a threshold is wrong.
+        _tally: dict = {}
+        for z in _considered:
+            for w in (z["why"] or ["accepted"]):
+                _tally[w] = _tally.get(w, 0) + 1
+        out["why_counts"] = _tally
         _n_raw = len(out["ascents"])
         out["ascents"] = _dedupe_ascents(out["ascents"])
         out["n_merged"] = _n_raw - len(out["ascents"])
