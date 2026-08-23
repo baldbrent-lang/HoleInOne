@@ -18135,6 +18135,25 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         _delta, _dsrc = _d3_green_delta_sec(db, row)
         out["delta_sec"] = round(float(_delta), 3)
         out["delta_source"] = _dsrc
+        # AN ASSUMED OFFSET INVALIDATES EVERYTHING BELOW, SILENTLY.
+        #
+        # The window each swing searches is three seconds wide and is
+        # placed entirely by this number. The two files are separate
+        # recordings that start when their own camera started, so a pair
+        # whose offset is unknown and treated as zero can be searched a
+        # dozen seconds away from where the ball actually is -- four
+        # times the width of the window, so nothing is found and no gate
+        # threshold on earth would have found it.
+        #
+        # Measured on a real pair: the only two ball-like chains in 116
+        # seconds of green sat at 8.47s, which is one flight time after
+        # the first swing ONLY IF the green camera started about twelve
+        # seconds after the tee camera. The offset in use was 0.0.
+        #
+        # `camera_event` means the wall clocks answered and the number
+        # is real. Anything else is a guess, and says so here rather
+        # than being read off a line nobody looks at twice.
+        out["delta_measured"] = (_dsrc == "camera_event")
     except Exception as exc:  # noqa: BLE001
         log.warning("ascent descents: green setup failed on %s: %s",
                     row.id, exc)
@@ -18300,7 +18319,12 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
 
     out["ok"] = out["n_matched"] > 0
     out["reason"] = (
-        f"{out['n_matched']} of {len(_clips)} swing(s) matched to "
+        ("" if out["delta_measured"] else
+         "⚠ THE TWO CLOCKS WERE NOT MEASURED — the offset below is a "
+         "guess, and it alone decides which three seconds of the green "
+         "each swing searches. If the balls are not being found, check "
+         "this before anything else. ")
+        + f"{out['n_matched']} of {len(_clips)} swing(s) matched to "
         f"{len(_events)} ball(s) coming down, from "
         f"{out['n_frames_searched']} of {out['n_frames_green']} green "
         f"frame(s) — only the flight windows were searched; the two "

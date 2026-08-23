@@ -8133,9 +8133,21 @@ function AscentProduceModal({ state, onClose }) {
               <i>vertically</i>, not the one nearest the expected instant.
               {" "}The two cameras' clocks are {rep.descents.delta_sec}s apart
               ({rep.descents.delta_source}) — every swing's landing window
-              is carried across on that. A wrong offset shows up here as
-              real descents nobody claimed.
+              is carried across on that.
             </div>
+            {rep.descents.delta_measured === false && (
+              <div className="err-text tiny" style={{ marginTop: 6 }}>
+                ⚠ <b>That offset was not measured.</b> The two files are
+                separate recordings that each start when their own camera
+                started, and nothing here knows by how much they differ —
+                so it is being treated as zero. The offset alone decides
+                which three seconds of the green each swing searches, and
+                the window is only three seconds wide: if it is out by
+                more than that, the ball is not in the frames being
+                looked at and no gate could find it. Check this before
+                reading anything below as a detector problem.
+              </div>
+            )}
           </details>
         )}
 
