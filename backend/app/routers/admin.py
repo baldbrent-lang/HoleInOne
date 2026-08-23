@@ -18153,7 +18153,14 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         # `camera_event` means the wall clocks answered and the number
         # is real. Anything else is a guess, and says so here rather
         # than being read off a line nobody looks at twice.
-        out["delta_measured"] = (_dsrc == "camera_event")
+        # A STORED ZERO IS NOT A MEASUREMENT. `edit_metrics` reads like
+        # a source and, when it holds exactly 0.0, is indistinguishable
+        # from the assumed default it was probably written from -- a
+        # previous run's assumption saved back and then trusted as if
+        # somebody had established it.
+        out["delta_measured"] = (
+            _dsrc in ("camera_event", "mirrored_stamps", "upload_stamps")
+            or (_dsrc == "edit_metrics" and abs(float(_delta)) > 1e-6))
     except Exception as exc:  # noqa: BLE001
         log.warning("ascent descents: green setup failed on %s: %s",
                     row.id, exc)
@@ -18175,6 +18182,44 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     # looked at. Overlapping stretches are merged so the shared seconds
     # are scanned once.
     _n_green = _d3_probe_frames(_gp)
+
+    # NO CLOCK? THEN SOLVE FOR IT, before placing a single window.
+    #
+    # Windowing is only an optimisation, and it is worthless when the
+    # number that places the windows is a guess: three seconds looked at
+    # twenty-five seconds from the ball finds nothing however good the
+    # gates are. So when the offset was never measured, the whole green
+    # clip is swept once with the cheap detector, and the offset that
+    # explains the most swings at once is recovered from the shots.
+    if not out["delta_measured"] and len(_clips) >= 2:
+        if progress:
+            progress("No clock on this pair — solving for the offset "
+                     "from the shots themselves", 0, 0)
+        try:
+            _t_d = time.perf_counter()
+            _full = _d3.find_descents(_gp, fps=_gfps, detectors=("diff",))
+            _ev_all = list(_full.get("events") or [])
+            _d, _n_agree, _pairs_all = _ascent_derive_delta(
+                _clips, _ev_all, fps, _gfps)
+            out["derive"] = {
+                "seconds": round(time.perf_counter() - _t_d, 2),
+                "n_events": len(_ev_all), "n_agree": _n_agree,
+                "delta": (round(_d, 2) if _d is not None else None),
+                "assumed": out["delta_sec"],
+            }
+            if _d is not None:
+                log.info("ascent descents: upload=%s derived tee-green "
+                         "offset %.2fs from %d swing(s) (was %.2fs from "
+                         "%s)", row.id, _d, _n_agree, out["delta_sec"],
+                         out["delta_source"])
+                out["delta_sec"] = round(float(_d), 3)
+                out["delta_source"] = f"derived from {_n_agree} swing(s)"
+                out["delta_measured"] = True
+                out["delta_derived"] = True
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ascent descents: could not derive the offset "
+                        "on %s: %s", row.id, exc)
+
     _wins: list = []
     for c in _clips:
         _imp = c.get("impact_frame")
@@ -18330,6 +18375,63 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         f"frame(s) — only the flight windows were searched; the two "
         f"clocks are {out['delta_sec']}s apart ({out['delta_source']})")
     return out
+
+
+def _ascent_derive_delta(clips, events, fps, g_fps):
+    """Solve for the tee-green offset from the shots themselves.
+
+    ONE OFFSET SERVES EVERY SWING, and that is what makes it solvable
+    without a clock. Each swing's strike is known on the tee's timeline
+    and each candidate landing is known on the green's, so every
+    (swing, landing) pairing implies an offset -- a RANGE of one, since
+    the flight is five to eight seconds rather than a single number. The
+    true offset is the one that lies inside the ranges of the most
+    swings at once, because the alternative is a coincidence repeated
+    per shot.
+
+    WHY THIS IS NEEDED AT ALL. `_d3_green_delta_sec` falls through to a
+    stored zero on any pair whose cameras did not hand over their wall
+    clocks, and a zero is indistinguishable from never having known.
+    Measured on a real pair: the true offset was about -25 seconds, the
+    code used 0.0, and every three-second window was therefore placed
+    twenty-five seconds from the ball. One swing's landing landed inside
+    a DIFFERENT swing's window and was produced onto the wrong shot,
+    which is exactly what it looks like from the edit screen.
+
+    Returns (delta, n_swings_agreeing, [candidates]) or (None, 0, []).
+    Two agreeing swings is the floor: one pairing is not evidence, it is
+    an arithmetic identity -- any single landing can be explained by
+    some offset.
+    """
+    _cand: list = []
+    for ci, c in enumerate(clips):
+        _imp = c.get("impact_frame")
+        if _imp is None:
+            continue
+        _t = float(_imp) / float(fps or 30.0)
+        for e in events:
+            _g = float(e.get("last_descent_sec") or 0.0)
+            # green_time = tee_time - delta, landing at tee_time+flight:
+            #   delta = (impact + flight) - green_time
+            _cand.append((ci, _t + FLIGHT_LO_SEC - _g,
+                          _t + FLIGHT_HI_SEC - _g))
+    if not _cand:
+        return None, 0, []
+    # Stab the intervals: the offset covered by the most DISTINCT
+    # swings wins. Endpoints are the only places the count can change.
+    _best = (0, None, 0.0)
+    for _, _lo, _hi in _cand:
+        for _pt in (_lo, _hi):
+            _hit = {ci for ci, a, b in _cand if a - 1e-9 <= _pt <= b + 1e-9}
+            # Tightness breaks ties: prefer the offset that sits nearest
+            # the middle of the flight window rather than at its edge.
+            _tight = -abs(_pt)
+            if (len(_hit), _tight) > (_best[0], _best[2]):
+                _best = (len(_hit), _pt, _tight)
+    _n, _delta, _ = _best
+    if _delta is None or _n < 2:
+        return None, _n, _cand
+    return _delta, _n, _cand
 
 
 def _ascent_spot_fallback(out: dict, ascent: dict, seen, why: str) -> dict:

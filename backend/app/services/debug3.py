@@ -1488,6 +1488,26 @@ DESCENT_MAX_STEP_DEV = 0.35
 # descents put a point in 60-67% of the frames they span, and the chains
 # that fooled every other gate managed 17-37%.
 DESCENT_MIN_DENSITY = 0.5
+# HOW LONG A DESCENT TRACK MAY LIVE, in frames.
+#
+# THE SAME BUG THE ASCENT SWEEP ALREADY FIXED, left in place here. See
+# `build_tracks`'s own `max_span` note: established tracks associate
+# first and longest-first, which is right within a shot and inverts over
+# a whole clip -- a track that has been accumulating speckle for twenty
+# seconds outranks everything, so when the ball falls past it, it is
+# simply absorbed.
+#
+# Measured on a real green clip, against a landing an operator had
+# plotted by hand at f3008-f3017: the ball's six points were swallowed
+# by a 485-point track, and the chain then reported "138px of fall at
+# 0.02 frame-heights/sec" and was refused on rate. The ball was
+# detected, tracked, and then buried -- which is why no gate threshold
+# could recover it and why three rounds of tuning did nothing.
+#
+# A ball crosses the picture in well under a second. 60 frames is two
+# seconds at 30fps: generous for the thing being looked for, fatal to a
+# track that has been running since the clip began.
+DESCENT_MAX_SPAN = 60
 # How much of its peak fall speed a track must still have to count as
 # still descending. Below this it has landed and is rolling.
 DESCENT_FLATTEN_FRAC = 0.4
@@ -2090,7 +2110,8 @@ def find_descents(
         _t0 = time.perf_counter()
         tracks = build_tracks(dets, r, min_len=int(min_points),
                               max_gap=DESCENT_MAX_GAP,
-                              corridor_px=DESCENT_CORRIDOR_PX)
+                              corridor_px=DESCENT_CORRIDOR_PX,
+                              max_span=DESCENT_MAX_SPAN)
         _t_det["linking"] = round(time.perf_counter() - _t0, 2)
         out["timing"] = _t_det
         # Both of those are None/4 by default -- see the constants. The
@@ -2135,6 +2156,22 @@ def find_descents(
     considered: list = []
     for tk in tracks:
         pts = tk.get("points") or []
+        if len(pts) < int(min_points):
+            continue
+        # JUDGE THE FALL, NOT THE BUNDLE IT ARRIVED ON.
+        #
+        # Everything below used to be measured on the whole track, on
+        # the reasoning that the walk back to the landing shortens a
+        # chain and a shortened chain fails a drop gate written for the
+        # whole fall. That reasoning was about the walk back and got
+        # applied to the front of the chain too, where it is wrong: the
+        # front is not part of the fall, it is whatever the tracker was
+        # following before the ball got there.
+        #
+        # See `_falling_tail`. Measured on a hand-plotted landing, this
+        # is the difference between "138px at 0.16 with a step deviation
+        # of 999" and the six points that are actually the ball.
+        pts = _falling_tail(pts)
         if len(pts) < int(min_points):
             continue
         _why: list = []
@@ -2741,6 +2778,29 @@ def _rising_tail(pts):
     """
     i = len(pts) - 1
     while i > 0 and float(pts[i]["y"]) < float(pts[i - 1]["y"]):
+        i -= 1
+    return pts[i:]
+
+
+def _falling_tail(pts):
+    """The longest run at the END of a chain where every step goes down.
+
+    `_rising_tail`'s mirror, and it exists for the mirror reason. A
+    green-camera track accumulates whatever was moving near the ball's
+    line before the ball got there -- the flag, a branch, speckle -- and
+    the tracker is happy to carry all of it on the front of the chain
+    that ends at the landing.
+
+    Measured against a landing an operator had plotted by hand at
+    f3008-f3017: the ball's six points arrived on the end of a 57-point
+    track whose first fifty were not falling at all, and the chain
+    reported "138px of fall at 0.16 frame-heights/sec" with a step
+    deviation of 999. Every gate refused it, correctly, because the
+    thing being measured was not the descent -- it was the descent with
+    fifty frames of noise stapled to its front.
+    """
+    i = len(pts) - 1
+    while i > 0 and float(pts[i]["y"]) > float(pts[i - 1]["y"]):
         i -= 1
     return pts[i:]
 
