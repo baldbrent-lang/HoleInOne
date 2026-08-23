@@ -16390,12 +16390,21 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                     f"to be within {BALLSCAN_DESCENT_SHORT_BEND_PX}px of a "
                     f"straight line to count on its own")
 
+        def _step_note(e):
+            _d = e.get("step_dev")
+            if _d is None:
+                return ""
+            return (f" · falls {e.get('step_px')}px per frame, spacing "
+                    f"varies by {round(float(_d) * 100)}%")
+
         evs = [e for e in _all_evs if _strict(e)]
         _keys = ("last_descent_frame", "last_descent_sec", "landing_xy",
-                 "n_points", "drop_px", "fall_rate", "bend_px")
+                 "n_points", "n_points_tracked", "drop_px", "fall_rate",
+                 "bend_px", "step_px", "step_dev")
         out["events"] = [
             {**{k: e.get(k) for k in _keys},
-             "accepted": _strict(e), "verdict": _why_not(e)}
+             "accepted": _strict(e),
+             "verdict": _why_not(e) + _step_note(e)}
             for e in _all_evs
         ]
         out["n_seen"] = len(_all_evs)
@@ -16647,7 +16656,10 @@ def _ball_scan_descent_overview(row, gp, all_evs, out, dets=None) -> None:
             cv2.putText(
                 im,
                 f"{e.get('last_descent_sec')}s  {e.get('n_points')}pts  "
-                f"bend {e.get('bend_px')}px" + ("" if _acc else "  REJECTED"),
+                f"bend {e.get('bend_px')}px"
+                + (f"  step {e.get('step_px')}px"
+                   if e.get('step_px') is not None else "")
+                + ("" if _acc else "  REJECTED"),
                 (int(_lx) + 17, int(_ly) + 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.46, _col, 1, cv2.LINE_AA)
         cv2.putText(

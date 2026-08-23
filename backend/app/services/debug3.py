@@ -1539,6 +1539,21 @@ DESCENT_CORRIDOR_PX = 10.0
 # carries no evidence at all.
 MIN_DESCENT_POINTS = 3
 
+# HOW UNEVENLY SPACED A DESCENT MAY BE, as a fraction of its own median
+# per-frame drop. Gravity over the half-second a descent is in view
+# changes the step by roughly a quarter, so this leaves room for the
+# physics and still refuses a chain whose spacing doubles and halves
+# between points -- which is what a chain of unrelated specks does.
+DESCENT_STEP_TOL = 0.60
+
+# HOW MANY FRAMES A DESCENT MAY VANISH FOR and still be the same ball.
+# Wider than the general tracker's, and it is the constant rate that
+# earns it: the prediction knows where the ball should be and the
+# corridor and the step test both check that it turned up there. A ball
+# lost behind a tree for a quarter of a second used to end the chain,
+# and the chain ending early is what cut the tracer short.
+DESCENT_MAX_GAP = 8
+
 DIFF_SENS = {
     1: (12, 6, 600),
     2: (8, 10, 900),
@@ -1637,6 +1652,41 @@ def detect_movers_by_diff(
     except Exception as exc:  # noqa: BLE001
         log.debug("diff detector failed on %s: %s", input_path, exc)
     return out
+
+
+def _descent_step_consistency(pts):
+    """(median per-frame drop, worst deviation as a fraction of it).
+
+    A BALL NEAR THE END OF ITS FLIGHT FALLS AT A NEARLY CONSTANT RATE.
+    Vertical speed at the top of the descent is already most of what it
+    will be at the ground, and the half-second we see adds only a little
+    -- so a real descent's points are evenly spaced down the frame, and
+    the spacing is as much a signature as the straightness is.
+
+    Nothing else in a green view does that. A chain the tracker built
+    out of unrelated speckle jumps: 4px between one pair, 30px between
+    the next, because the "object" is a different speck each time. That
+    is invisible to a straightness test -- badly spaced points can sit
+    on a perfect line -- so it is the one thing the existing gates could
+    not see.
+
+    Returns (0.0, 999.0) for anything too short to have a rhythm.
+    """
+    if len(pts) < 3:
+        return 0.0, 999.0
+    steps = []
+    for a, b in zip(pts, pts[1:]):
+        df = max(1, int(b["frame"]) - int(a["frame"]))
+        steps.append((float(b["y"]) - float(a["y"])) / df)
+    steps.sort()
+    med = steps[len(steps) // 2]
+    if med <= 0.5:
+        # Not falling at all, so there is no rhythm to be consistent
+        # with. The fall-rate gate elsewhere is what rejects this; here
+        # it just means the question does not apply.
+        return med, 999.0
+    worst = max(abs(v - med) / med for v in steps)
+    return med, worst
 
 
 def find_descents(
@@ -1776,6 +1826,7 @@ def find_descents(
             for d in dets[::_step]
         ]
         tracks = build_tracks(dets, r, min_len=int(min_points),
+                              max_gap=DESCENT_MAX_GAP,
                               corridor_px=DESCENT_CORRIDOR_PX)
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"detection failed: {exc}"
@@ -1848,6 +1899,14 @@ def find_descents(
         bend = _path_bend_px(kept)
         if bend > float(max_bend_px):
             continue
+        # EVENLY SPACED, OR IT IS NOT A FALLING BALL. Gravity does add
+        # something over the half-second in view, which is why the
+        # tolerance is generous rather than tight -- a ball speeding up
+        # under gravity changes its step by well under this, and a chain
+        # of unrelated specks changes it by far more.
+        step_med, step_dev = _descent_step_consistency(kept)
+        if step_dev > DESCENT_STEP_TOL:
+            continue
         events.append({
             "first_frame": int(kept[0]["frame"]),
             "last_frame": int(pts[-1]["frame"]),
@@ -1859,6 +1918,8 @@ def find_descents(
             "drop_px": int(round(drop)),
             "fall_rate": round(rate, 3),
             "bend_px": round(bend, 2),
+            "step_px": round(step_med, 2),
+            "step_dev": round(step_dev, 2),
             "peak_px_per_frame": round(peak, 1),
             # THE CHAIN ITSELF, up to the frame it stopped falling.
             # Callers that only want to know a ball came down are served
