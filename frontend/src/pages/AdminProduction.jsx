@@ -1148,19 +1148,30 @@ function RawSyncPlayer({
  * pipeline as the wizard's Produce, minus the wizard.
  */
 function ClickToPlotModal({
-  row, swingPos, adminPassword, onClose, onBackground, onDone,
+  row, swingPos, addNew, adminPassword, onClose, onBackground, onDone,
 }) {
   const swings = row.edit_metrics?.swings || [];
-  const swing = swings[swingPos] || {};
   // ADDING A SWING IS THE SAME SCREEN WITH EMPTY FIELDS. A swing the
   // detector missed needs exactly what this map already collects -- tee
-  // spot, impact frame, flight points, landing -- so `swingPos` past the
-  // end of the list means "there is no swing here yet" and every field
-  // falls back to blank through `swings[swingPos] || {}` above. The only
-  // things that differ are at save: the swing is APPENDED rather than
-  // patched, and it needs a frame window, which is derived from the
-  // impact frame the operator set.
-  const isNew = swingPos >= swings.length;
+  // spot, impact frame, flight points, landing -- so a new swing reads
+  // every field off an empty object. The only things that differ are at
+  // save: the swing is APPENDED rather than patched, and it needs a
+  // frame window, which is derived from the impact frame the operator
+  // set.
+  //
+  // ADD IS A STATED INTENT, NOT A POSITION PAST THE END. It used to be
+  // the latter -- open at `swings.length` and call anything at or past
+  // that new -- and the length was read when the button was clicked
+  // while the check ran when the modal rendered. Add a swing, save it,
+  // press Add again before the row has come back from the server: the
+  // position is still N, the array now HAS an Nth swing, and the second
+  // Add silently opened the first one. Everything on it came along --
+  // its tee points, its comet, its landing -- and the two sets of
+  // points plotted one tracer through both, which is what "the tracer
+  // goes wacky" looked like. A flag cannot go stale between the click
+  // and the render.
+  const isNew = !!addNew || swingPos == null || swingPos >= swings.length;
+  const swing = isNew ? {} : (swings[swingPos] || {});
   // FLIGHT WINDOW. Pre-swing motion (waggle, address, shadow) is noise on
   // this map, and so is everything long after the ball has gone — the
   // golfer walking off, a cart, wind in the trees. Both crowd the map with
@@ -1825,7 +1836,8 @@ function ClickToPlotModal({
   const clipForSwing =
     (row.produced_clips || []).find(
       (c) => swing.clip_id != null && c.id === swing.clip_id,
-    ) ?? row.produced_clips?.[swingPos];
+    ) ?? (isNew || swingPos == null
+      ? null : row.produced_clips?.[swingPos]);
   const holeNumber = Number(
     swing.finalized_hole_number
       ?? clipForSwing?.hole_number
@@ -2046,11 +2058,31 @@ function ClickToPlotModal({
       // own flight, and here the operator has just overruled it by
       // hand, so their line is handed over and find_flight is skipped.
       stage("Producing the clip…");
-      const plotted = (fast.ball_track_frames || [])
+      // ONE SWING'S POINTS, AND NOTHING ELSE'S. A ball is in the air
+      // for a few seconds, so a point thirty seconds either side of
+      // impact is not a late tail of this flight -- it is another
+      // swing's, and two clusters that far apart get fitted into one
+      // curve that passes through neither. Bounded generously, at twice
+      // the longest flight the renderer will cut: this exists to catch
+      // points from a different swing, not to second-guess the tracker.
+      const _fps2 = Number(row.tee_fps) || 30;
+      const _impF = impactFrame ?? swing.impact_frame ?? null;
+      const _lo2 = _impF == null ? null : _impF - 2 * _fps2;
+      const _hi2 = _impF == null ? null : _impF + 22 * _fps2;
+      const _all2 = (fast.ball_track_frames || [])
         .filter((p) => p && p.found !== false
           && p.x != null && p.y != null && p.frame != null)
         .map((p) => ({ frame: p.frame, x: p.x, y: p.y }))
         .sort((a, b) => a.frame - b.frame);
+      const plotted = _lo2 == null
+        ? _all2
+        : _all2.filter((p) => p.frame >= _lo2 && p.frame <= _hi2);
+      if (plotted.length !== _all2.length) {
+        console.warn(
+          `click-to-plot: dropped ${_all2.length - plotted.length} track `
+          + `point(s) outside f${_lo2}-f${_hi2} around impact f${_impF} `
+          + "- they belong to a different swing");
+      }
       await api.wizardProduce(adminPassword, row.id, {
         // NO BALL AT REST IS NORMAL HERE. Click-to-plot is often used on
         // exactly the swings where the rest ball was never found -- the
@@ -2178,8 +2210,9 @@ function ClickToPlotModal({
           >
             <b>🖱 Click-to-plot</b>
             <span className="muted">
-              {" "}· #{row.id} · swing {(swing.idx ?? swingPos) + 1} · hole{" "}
-              {holeNumber}
+              {" "}· #{row.id} ·{" "}
+              {isNew ? "new swing" : `swing ${(swing.idx ?? swingPos) + 1}`}
+              {" "}· hole {holeNumber}
               {cam === "tracer"
                 ? " · the tracer's line"
                   + (shape?.kind ? ` · ${shape.kind}` : "")
@@ -14795,10 +14828,7 @@ export default function AdminProduction() {
                   // read a tee spot or an impact frame from -- and the
                   // save appends instead of patching. Same screen, same
                   // gestures, nothing held over from the last clip.
-                  onAddClip={() => setPlotModal({
-                    row,
-                    swingPos: (row.edit_metrics?.swings || []).length,
-                  })}
+                  onAddClip={() => setPlotModal({ row, addNew: true })}
                   onDeleteClip={(clip, clipIdx) => {
                     const label = clip.hole_number != null
                       ? `clip ${clipIdx + 1} (hole ${clip.hole_number})`
@@ -15150,7 +15180,8 @@ export default function AdminProduction() {
                   onClose={() => setPlotModal(null)}>
           <ClickToPlotModal
             row={plotModal.row}
-            swingPos={plotModal.swingPos}
+            swingPos={plotModal.swingPos ?? null}
+            addNew={!!plotModal.addNew}
             adminPassword={adminPassword}
             onClose={() => setPlotModal(null)}
             // The save runs after this modal has closed, so its progress
