@@ -9171,7 +9171,23 @@ def _merge_close_sightings(spots, cluster_px: float, gap_frames: int,
 
 
 def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
-                        max_frames: int = 150, fps: float = 30.0) -> None:
+                        max_frames: int = 150, fps: float = 30.0,
+                        # AN ABSOLUTE CEILING, not a rolling one.
+                        #
+                        # `max_frames` is a ROLLING deadline: every
+                        # confirmed sighting pushes it out by another
+                        # full watch, which is right -- a ball that
+                        # blinks back into view has not gone. But it
+                        # means the watch is not bounded by max_frames at
+                        # all. Measured on a 433-frame window with
+                        # max_frames=100: 25,307 decodes over 24 spots,
+                        # ~1,050 each, because anything that keeps being
+                        # seen walks to the end of the file.
+                        #
+                        # A caller that scanned a WINDOW has already said
+                        # nothing past it matters. This lets it say so to
+                        # the watch as well.
+                        watch_until: int | None = None) -> None:
     """Walk forward from each last sighting until the spot is clear AND empty.
 
     Fills `gone_frame` / `gone_sec` (the first frame the ball can honestly
@@ -9316,7 +9332,9 @@ def _confirm_departures(input_path, spots, roi=None, expect_radius_px=None,
             # so a ball that blinks back into view buys another full
             # watch rather than inheriting the remainder of the old one.
             deadline = start + int(max_frames)
-            while f < min(n_frames, deadline):
+            _ceiling = (n_frames if watch_until is None
+                        else min(n_frames, int(watch_until) + 1))
+            while f < min(_ceiling, deadline):
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     break
@@ -9514,6 +9532,10 @@ def scan_resting_balls(
     # frame in the video is cost with no answer in it. `(lo, hi)` in
     # frames, inclusive; None scans the whole file as before.
     window: tuple[int, int] | None = None,
+    # WHERE THE CALLER ALREADY THINKS THE BALL IS, in pixels across.
+    # Changes which candidates survive `max_spots`, and nothing else --
+    # see the sort below. None keeps the longest-sit ranking.
+    near_x: float | None = None,
 ) -> dict:
     """Every ball that SAT somewhere: where, first seen, last seen.
 
@@ -9669,6 +9691,19 @@ def scan_resting_balls(
     # Longest sit first. A teed ball waits while its owner addresses it;
     # a speck that flickers for a second is something else.
     spots.sort(key=lambda z: (-z["held_sec"], -z["votes"]))
+    if near_x is not None:
+        # THE CALLER KNOWS WHERE TO LOOK, so rank by that instead.
+        #
+        # This ordering decides which candidates survive the trim, and
+        # the trim decides how many get the expensive departure watch.
+        # Ranking by how long each SAT is right when nothing is known
+        # about the shot -- but the ascent path traced a chain back to a
+        # point on the tee line, and the ball it wants is the one
+        # nearest that point, which need not be the one that sat
+        # longest. Ranking by held_sec and then trimming can therefore
+        # throw the answer away before it is ever watched.
+        spots.sort(key=lambda z: (abs(int(z["x"]) - int(near_x)),
+                                  -z["held_sec"]))
     out["spots"] = spots[:int(max_spots)]
 
     # IS IT GONE, OR IS SOMETHING STANDING IN FRONT OF IT?
@@ -9688,6 +9723,13 @@ def scan_resting_balls(
             input_path, out["spots"], roi=roi,
             expect_radius_px=expect_radius_px,
             max_frames=confirm_frames, fps=_fps,
+            # A WINDOWED SCAN GETS A WINDOWED WATCH. Without this the
+            # window bounds only the sampling pass, and the watch below
+            # then reads to the end of the file for every spot that
+            # keeps being seen -- which is most of them, and which is
+            # how a 433-frame window came to cost 25,307 decodes.
+            watch_until=(None if not window
+                         else int(window[1]) + int(confirm_frames)),
         )
         # MERGE AGAIN, NOW THAT THE FRAMES ARE RIGHT.
         #

@@ -17730,6 +17730,7 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
     _hi = int((_seen if _seen is not None else _centre)
               + ASCENT_SPOT_LOOKAHEAD_SEC * fps)
     out["window"] = [_lo, _hi]
+    _x = ascent.get("from_x")
     try:
         course = db.get(Course, row.course_id) if row.course_id else None
         # The expected radius is a fraction of the FRAME HEIGHT, so it
@@ -17754,6 +17755,13 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
             # twelve thousand decodes, which is more than the whole
             # windowed scan it was supposed to be making cheap.
             confirm_frames=int(max(60, round(2.0 * float(fps or 30.0)))),
+            # AND WATCH ONLY THE FEW THAT COULD BE IT. The watch is the
+            # cost -- every spot that survives the trim gets one -- and
+            # the chain has already said which part of the tee line the
+            # ball left from. Ranking by that instead of by how long
+            # each sat is also more correct here: the ball this chain
+            # belongs to need not be the one that sat longest.
+            near_x=_x, max_spots=(4 if _x is not None else 24),
         ) or {}
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"resting-ball scan failed: {exc}"
@@ -17766,7 +17774,6 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
     # THE ONE NEAREST WHERE THE CHAIN CAME FROM, along the tee line. The
     # window can hold several balls -- a group tees off one after
     # another from the same strip of turf -- and the chain says which.
-    _x = ascent.get("from_x")
     if _x is not None:
         spots.sort(key=lambda sp: abs(int(sp["x"]) - int(_x)))
     else:
