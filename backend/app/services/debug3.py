@@ -1403,12 +1403,44 @@ def ransac_parabola(
 # speckle -- managed 0.16. There is nearly a factor of four of daylight
 # between them.
 #
-# The upper bound is physics. A par-3 tee shot comes down at 20-35 m/s;
-# the one track that beat 3.0 was doing the equivalent of 96 m/s, and
-# was three 9-pixel specks in black tree shadow that the tracker had
-# chained into a straight line.
+# THE UPPER BOUND WAS NOT PHYSICS, AND IT COST THE REAL BALL.
+#
+# It was set at 3.0 on the reasoning that a par-3 tee shot comes down at
+# 20-35 m/s and anything faster is a tracker artefact. The arithmetic
+# behind that converted frame-heights per second into metres per second
+# using ONE assumed distance from the camera -- and that is the step
+# that does not hold. Frame-heights per second is an ANGULAR speed: the
+# same ball crossing the same real metres sweeps far more of the frame
+# close to the lens than far from it. A number in these units cannot
+# name a physical speed without knowing the range, and the range is
+# exactly what a single camera does not know.
+#
+# Measured, on a green clip with a ball visibly landing in front of the
+# bunker -- three frames, in the trees, over the green's edge, down on
+# the turf: 4.472. It was refused as impossible while three chains in
+# the wind-shaken tree line were accepted.
+#
+# So the ceiling is now only a guard against the absurd, in the spirit
+# of ASCENT_RATE_HI, and the discriminating is done by the tilt gate
+# below and by ranking on how far a chain actually fell.
 DESCENT_RATE_LO = 0.30
-DESCENT_RATE_HI = 3.0
+DESCENT_RATE_HI = 12.0
+# HOW FAR OFF VERTICAL A FALLING BALL MAY LEAN, in degrees.
+#
+# The mirror of ASCENT_MAX_TILT_DEG, and the gate the descent side never
+# had. What actually populates a green camera's picture is the tree line
+# moving in wind, and it moves SIDEWAYS: measured on one clip, the three
+# chains the old gates accepted leaned 47.7, 78.0 and 5.1 degrees off
+# vertical, and the ball they missed leaned 16.6. A branch swaying
+# across the frame accumulates enough net drop to pass a drop gate while
+# never once behaving like something falling.
+#
+# Set at the ascent side's number rather than tighter. It is a floor
+# under the ranking rather than the thing deciding: a chain that leans
+# is already demoted by being scored on its VERTICAL fall, and a tilt
+# bar drawn tight enough to matter is a bar that eventually refuses a
+# real shot with sideways travel across the frame.
+DESCENT_MAX_TILT_DEG = 55.0
 # How much of its peak fall speed a track must still have to count as
 # still descending. Below this it has landed and is rolling.
 DESCENT_FLATTEN_FRAC = 0.4
@@ -1603,6 +1635,8 @@ DESCENT_WHY_COLORS = {
     "bend": "#c98a2e",
     # Fewer than three points survived the walk back to the landing.
     "points": "#b5487d",
+    # Leaning too far off vertical to be falling.
+    "tilt": "#2fa8b5",
 }
 DESCENT_WHY_ORDER = list(DESCENT_WHY_COLORS)
 
@@ -2069,6 +2103,23 @@ def find_descents(
             _rej(pts, f"bends {round(bend, 2)}px, limit {max_bend_px}px",
                  drop_px=int(drop), fall_rate=round(rate, 3),
                  bend_px=round(bend, 2))
+        # HOW FAR OFF VERTICAL, and HOW FAR IT ACTUALLY FELL.
+        #
+        # A branch swaying across the frame collects net drop the same
+        # way a falling ball does, and the drop gate cannot tell them
+        # apart because it measures the wrong leg of the triangle. The
+        # vertical component is the one that means "descended", and it
+        # is also what the caller ranks on when a window holds more than
+        # one candidate -- which, on a windy green, it always does.
+        _adx = abs(float(pts[-1]["x"]) - float(pts[0]["x"]))
+        tilt = math.degrees(math.atan2(_adx, drop)) if drop > 0 else 90.0
+        fall_px = drop * math.cos(math.radians(min(tilt, 89.9)))
+        if tilt > DESCENT_MAX_TILT_DEG:
+            _why.append("tilt")
+            _rej(pts, f"leans {round(tilt, 1)} degrees off vertical, "
+                      f"limit {DESCENT_MAX_TILT_DEG}",
+                 drop_px=int(drop), fall_rate=round(rate, 3),
+                 tilt_deg=round(tilt, 1))
 
         # WHERE IT LANDED, not where the tracker gave up. The seed keeps
         # producing points through the bounce and the roll, so the last
@@ -2150,6 +2201,11 @@ def find_descents(
                  "x": int(round(q["x"])), "y": int(round(q["y"]))}
                 for q in kept
             ],
+            "tilt_deg": round(tilt, 1),
+            # THE VERTICAL LEG, which is what "it fell this far" means.
+            # `drop_px` is the whole hypotenuse and flatters anything
+            # travelling sideways.
+            "fall_px": int(round(fall_px)),
             "why": _why,
             "why_primary": next(
                 (w for w in DESCENT_WHY_ORDER if w in _why), None),

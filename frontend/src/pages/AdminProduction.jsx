@@ -7884,6 +7884,7 @@ const DESCENT_WHY_TEXT = {
   rate: "fell too slowly (or absurdly fast) for a ball under gravity",
   bend: "not a straight line — speckles the tracker linked, not a ball",
   points: "fewer than three points survived the walk back to the landing",
+  tilt: "leaning too far off vertical — a branch in wind, not a ball",
 };
 
 const ASCENT_WHY_TEXT = {
@@ -8068,8 +8069,10 @@ function AscentProduceModal({ state, onClose }) {
                       <th align="left">pts</th>
                       <th align="left">drawn</th>
                       <th align="left">drop</th>
+                      <th align="left">fell</th>
                       <th align="left">fall rate</th>
                       <th align="left">bend</th>
+                      <th align="left">tilt</th>
                       <th align="left">landed</th>
                       <th align="left">verdict</th>
                     </tr>
@@ -8083,8 +8086,12 @@ function AscentProduceModal({ state, onClose }) {
                         <td>{z.n_points}</td>
                         <td>{z.n_points_drawn ?? "—"}</td>
                         <td>{z.drop_px}px</td>
+                        <td title="The vertical leg — how far it actually descended. This is what decides which candidate a swing claims.">
+                          <b>{z.fall_px}px</b>
+                        </td>
                         <td>{z.fall_rate}</td>
                         <td>{z.bend_px}</td>
+                        <td>{z.tilt_deg}°</td>
                         <td>{z.landing_xy
                           ? `${z.landing_xy[0]}, ${z.landing_xy[1]}`
                           : "—"}</td>
@@ -8098,7 +8105,12 @@ function AscentProduceModal({ state, onClose }) {
               </div>
             )}
             <div className="tiny muted" style={{ marginTop: 4 }}>
-              The two cameras' clocks are {rep.descents.delta_sec}s apart
+              In three seconds of a green there is at most one ball coming
+              down — the flag flaps, leaves and grass go back and forth,
+              but none of it descends. So where a window holds several
+              survivors, the swing claims the one that fell furthest
+              <i>vertically</i>, not the one nearest the expected instant.
+              {" "}The two cameras' clocks are {rep.descents.delta_sec}s apart
               ({rep.descents.delta_source}) — every swing's landing window
               is carried across on that. A wrong offset shows up here as
               real descents nobody claimed.

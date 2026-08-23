@@ -18227,11 +18227,29 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         for ei, e in enumerate(_events):
             _s = float(e.get("last_descent_sec") or 0.0)
             if _lo <= _s <= _hi:
-                _pairs.append((abs(_s - _mid), ci, ei))
+                _pairs.append((-int(e.get("fall_px") or 0),
+                               abs(_s - _mid), ci, ei))
+    # THE ONE THING THAT FELL, NOT THE ONE NEAREST THE MIDDLE.
+    #
+    # In three seconds of a green there is at most ONE ball coming down.
+    # Everything else that moves -- the flag flapping, leaves, blades of
+    # grass, a branch in wind -- oscillates or drifts sideways; none of
+    # it descends. So when a window holds several survivors the question
+    # is not which arrived closest to the expected instant, it is which
+    # actually fell, and the answer is the one with the greatest
+    # VERTICAL travel.
+    #
+    # Measured on a green clip: the real ball fell 309px vertically, and
+    # the three tree-line chains the old gates preferred managed 144, 28
+    # and 13. Ranking on time instead had nothing to say about any of
+    # that -- a branch shaking at the right moment beat the ball.
+    #
+    # Time survives as the tie-break, which is what decides which of two
+    # swings with overlapping windows claims a given landing.
     _pairs.sort()
     _used_c: set = set()
     _used_e: set = set()
-    for _d, ci, ei in _pairs:
+    for _negfall, _dt, ci, ei in _pairs:
         if ci in _used_c or ei in _used_e:
             continue
         _used_c.add(ci)
@@ -18246,7 +18264,9 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
             f"came down at {c['landing_spot'][0]},{c['landing_spot'][1]} "
             f"on the green at f{c['landing_frame']} "
             f"({_e.get('last_descent_sec')}s), "
-            f"{_e.get('n_points_drawn')} point(s)")
+            f"{_e.get('n_points_drawn')} point(s), fell "
+            f"{_e.get('fall_px')}px vertically at "
+            f"{_e.get('tilt_deg')} degrees off vertical")
         out["n_matched"] += 1
 
     out["ok"] = out["n_matched"] > 0
