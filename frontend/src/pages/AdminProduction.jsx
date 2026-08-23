@@ -7839,8 +7839,20 @@ function FlagstickModal({ row, adminPassword, onClose, onSaved }) {
   );
 }
 
-function BallScanModal({ state, onClose }) {
+function BallScanModal({ state, adminPassword, onClose }) {
   const rep = state?.report;
+  const [why, setWhy] = useState(null);
+  async function askWhy(fx, fy) {
+    if (!state?.uploadId) return;
+    setWhy({ loading: true });
+    try {
+      const r = await api.diagnoseBall(adminPassword, state.uploadId,
+                                       { x: fx, y: fy });
+      setWhy(r || { verdict: "no answer" });
+    } catch (e) {
+      setWhy({ error: e?.message || String(e) });
+    }
+  }
   // Scan-and-produce nests the scan under `scan`; a plain scan is flat.
   const spots = rep?.spots || rep?.scan?.spots || [];
   return (
@@ -8142,16 +8154,75 @@ function BallScanModal({ state, onClose }) {
             )}
             {(rep.overview_url || rep.scan?.overview_url) && (
               <figure style={{ margin: "10px 0" }}>
-                <a href={rep.overview_url || rep.scan.overview_url}
-                   target="_blank" rel="noreferrer">
+                {/* CLICK THE BALL YOU CAN SEE. The server has always been
+                    able to answer "why was the ball at this pixel not a
+                    candidate" -- it walks the blob nearest the click
+                    through the very same gates every other blob goes
+                    through and names the one that turned it away. The
+                    probe was only reachable from the dev-only swing
+                    test, so the question kept getting answered by
+                    squinting at screenshots instead, which is guessing
+                    with extra steps. */}
+                <div
+                  onClick={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    askWhy((e.clientX - r.left) / r.width,
+                           (e.clientY - r.top) / r.height);
+                  }}
+                  style={{ cursor: "crosshair", borderRadius: 6,
+                           overflow: "hidden" }}
+                >
                   <img src={rep.overview_url || rep.scan.overview_url}
                        alt="all candidates"
-                       style={{ width: "100%", borderRadius: 6 }} />
-                </a>
+                       style={{ width: "100%", display: "block" }} />
+                </div>
                 <figcaption className="tiny muted">
                   Green = the tee box searched. Each candidate is ringed in
                   its own colour, matching its row in the table.
+                  {" "}<b>Click a ball the scan did not ring</b> and it will
+                  say which gate rejected it.
                 </figcaption>
+                {why && (
+                  <div className="card tight"
+                       style={{ margin: "8px 0 0", padding: 10 }}>
+                    <div className="row"
+                         style={{ justifyContent: "space-between" }}>
+                      <b className="small">Why not a ball there?</b>
+                      <button className="btn ghost small"
+                              style={{ width: "auto" }}
+                              onClick={() => setWhy(null)}>Close ✕</button>
+                    </div>
+                    {why.loading ? (
+                      <div className="small">Asking the detector…</div>
+                    ) : (
+                      <>
+                        <div className="small" style={{ marginTop: 4 }}>
+                          {why.verdict || why.error || "no answer"}
+                        </div>
+                        {(why.expect_radius_px != null
+                          || why.roi_source) && (
+                          <div className="tiny muted" style={{ marginTop: 4 }}>
+                            {why.expect_radius_px != null && (
+                              <>expects a ball of r{why.expect_radius_px}px
+                                {why.accept_radius_px
+                                  ? ` (accepts ${why.accept_radius_px})`
+                                  : ""}{" · "}</>
+                            )}
+                            {why.roi_source && <>box from {why.roi_source}</>}
+                            {why.hole != null && <> · hole {why.hole}</>}
+                          </div>
+                        )}
+                        {why.probe && (
+                          <pre className="tiny muted" style={{
+                            margin: "6px 0 0", whiteSpace: "pre-wrap",
+                          }}>
+                            {JSON.stringify(why.probe, null, 1)}
+                          </pre>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
               </figure>
             )}
             {!spots.length && (
@@ -15118,7 +15189,8 @@ export default function AdminProduction() {
       {d2 && <Debug2Modal state={d2} onClose={() => setD2(null)} />}
       {d3 && <Debug3Modal state={d3} onClose={() => setD3(null)} />}
       {ballScan && (
-        <BallScanModal state={ballScan} onClose={() => setBallScan(null)} />
+        <BallScanModal state={ballScan} adminPassword={adminPassword}
+                       onClose={() => setBallScan(null)} />
       )}
       {hitArea && (
         <HittingAreaModal state={hitArea} adminPassword={adminPassword}
