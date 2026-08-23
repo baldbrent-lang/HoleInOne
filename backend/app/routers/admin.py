@@ -16200,6 +16200,31 @@ def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
     }
 
 
+def _descent_accepted(e) -> bool:
+    """FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR NEED TO BE.
+
+    The detector loses a falling ball against the tree line for a few
+    frames at a time, so how many points it links is partly a fact about
+    the background. A three-point chain that falls almost perfectly
+    straight is stronger evidence than four wandering 6px off a line, so
+    a shorter chain is allowed and pays for the missing point by being
+    straighter.
+
+    ONE COPY, because the picture and the gate were two. The overview
+    drew accepted-vs-rejected from a rule that knew only the four-point
+    half of this, so a chain the search had accepted could be labelled
+    REJECTED in the very image an operator was using to work out why
+    something was rejected.
+    """
+    _n = int(e.get("n_points") or 0)
+    _b = float(e.get("bend_px") or 999.0)
+    if _n >= BALLSCAN_DESCENT_MIN_POINTS:
+        return _b <= BALLSCAN_DESCENT_MAX_BEND_PX
+    if _n >= BALLSCAN_DESCENT_SHORT_POINTS:
+        return _b <= BALLSCAN_DESCENT_SHORT_BEND_PX
+    return False
+
+
 def _ball_scan_descents(row, db, spots, progress=None) -> dict:
     """Match each resting-ball candidate to a descent on the green camera.
 
@@ -16337,27 +16362,10 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         out["n_dets"] = len(_raw)
 
         def _strict(e):
-            # FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR NEED TO BE.
-            #
-            # A flat count was the wrong shape of test. The detector
-            # loses a falling ball against the tree line for a few
-            # frames at a time, so the number of points it links is
-            # partly about the background -- and a three-point chain
-            # that falls a long way almost perfectly straight is
-            # stronger evidence than four points wandering 6px off a
-            # line. Measured on upload 653: a real descent at f447 was
-            # thrown out for having three points while passing the bend
-            # gate outright.
-            #
-            # So a shorter chain is allowed, and pays for the missing
-            # point by being straighter AND having fallen further.
-            _n = int(e.get("n_points") or 0)
-            _b = float(e.get("bend_px") or 999.0)
-            if _n >= BALLSCAN_DESCENT_MIN_POINTS:
-                return _b <= BALLSCAN_DESCENT_MAX_BEND_PX
-            if _n >= BALLSCAN_DESCENT_SHORT_POINTS:
-                return _b <= BALLSCAN_DESCENT_SHORT_BEND_PX
-            return False
+            # See `_descent_accepted` -- one copy, shared with the
+            # picture, so the two cannot disagree about what was
+            # accepted.
+            return _descent_accepted(e)
 
         def _why_not(e):
             _n = int(e.get("n_points") or 0)
@@ -16619,9 +16627,7 @@ def _ball_scan_descent_overview(row, gp, all_evs, out, dets=None) -> None:
                        (90, 140, 240), -1, cv2.LINE_AA)
         for k, e in enumerate(all_evs):
             _pts = e.get("points") or []
-            _acc = (int(e.get("n_points") or 0) >= BALLSCAN_DESCENT_MIN_POINTS
-                    and float(e.get("bend_px") or 999.0)
-                    <= BALLSCAN_DESCENT_MAX_BEND_PX)
+            _acc = _descent_accepted(e)
             _col = (90, 230, 120) if _acc else (150, 150, 150)
             for a_, b_ in zip(_pts, _pts[1:]):
                 cv2.line(im, (a_["x"], a_["y"]), (b_["x"], b_["y"]),

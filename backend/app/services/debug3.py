@@ -1488,6 +1488,11 @@ def detect_movers_by_plate(
 # The sensitivity ladder the operator's map exposes as 🔍 Scan, and now
 # the descent search's third detector. (threshold, per-frame keep,
 # max blob area)
+# How many diff blobs per frame the DESCENT search keeps. Deeper than
+# the map's own scan uses, because that one runs on a region an operator
+# has already pointed at and this one runs on a whole green view.
+DESCENT_DIFF_PER_FRAME = 30
+
 DIFF_SENS = {
     1: (12, 6, 600),
     2: (8, 10, 900),
@@ -1502,6 +1507,17 @@ def detect_movers_by_diff(
     sens: int = 2,
     roi=None,
     cap: int = 20000,
+    # HOW MANY BLOBS SURVIVE EACH FRAME. Largest-first beats speckle,
+    # which is why it is the order -- but it is extremal either way, and
+    # a green view has big things that are not the ball: a tree edge
+    # lit by a pixel of camera shake is a far larger blob than a ball
+    # forty yards off. Keeping ten of those per frame can crowd the ball
+    # out exactly as keeping the smallest forty did, in the other
+    # direction. So the descent search asks for a deeper keep and lets
+    # the fall-rate, drop and straightness gates do the discriminating,
+    # which is what they are for and what a size ranking is only ever a
+    # proxy for.
+    per_frame: int | None = None,
 ) -> list:
     """Frame-to-frame difference. The detector that actually sees the ball.
 
@@ -1523,7 +1539,8 @@ def detect_movers_by_diff(
 
     Returns [{frame, x, y, area}], the shape the others return.
     """
-    thr, per_frame, area_max = DIFF_SENS[int(sens)]
+    thr, _pf_default, area_max = DIFF_SENS[int(sens)]
+    per_frame = int(per_frame) if per_frame else _pf_default
     out: list = []
     if not HAS_CV:
         return out
@@ -1682,7 +1699,8 @@ def find_descents(
         # which on smooth turf under moving cloud means the tree line;
         # this one asks only "was that there a frame ago", which is what
         # a falling ball is.
-        dets.extend(detect_movers_by_diff(input_path, f_lo, f_hi, sens=2))
+        dets.extend(detect_movers_by_diff(input_path, f_lo, f_hi, sens=2,
+                                          per_frame=DESCENT_DIFF_PER_FRAME))
         n_diff = len(dets) - n_mog - n_plate
         dets.sort(key=lambda d: d["frame"])
         out["n_dets"] = len(dets)
