@@ -7885,6 +7885,8 @@ const DESCENT_WHY_TEXT = {
   bend: "not a straight line — speckles the tracker linked, not a ball",
   points: "fewer than three points survived the walk back to the landing",
   tilt: "leaning too far off vertical — a branch in wind, not a ball",
+  uneven: "its per-frame step jumps about — a ball falls at a steady pace",
+  sparse: "mostly gaps — specks joined across frames the ball was not in",
 };
 
 const ASCENT_WHY_TEXT = {
@@ -8084,6 +8086,8 @@ function AscentProduceModal({ state, onClose }) {
                       <th align="left">fall rate</th>
                       <th align="left">bend</th>
                       <th align="left">tilt</th>
+                      <th align="left">step dev</th>
+                      <th align="left">density</th>
                       <th align="left">landed</th>
                       <th align="left">verdict</th>
                     </tr>
@@ -8103,6 +8107,12 @@ function AscentProduceModal({ state, onClose }) {
                         <td>{z.fall_rate}</td>
                         <td>{z.bend_px}</td>
                         <td>{z.tilt_deg}°</td>
+                        <td title="How much its per-frame step varies, as a fraction of its own median. A falling ball is steady.">
+                          {z.step_dev_frac}
+                        </td>
+                        <td title={`${z.n_points} point(s) across ${z.span_frames} frame(s)`}>
+                          {z.density}
+                        </td>
                         <td>{z.landing_xy
                           ? `${z.landing_xy[0]}, ${z.landing_xy[1]}`
                           : "—"}</td>

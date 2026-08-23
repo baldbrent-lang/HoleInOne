@@ -1456,6 +1456,38 @@ DESCENT_MAX_TILT_DEG = 55.0
 # foreground grass a few feet from the lens, waving. None of them was
 # on the green, which is where a ball that lands on the green lands.
 DESCENT_EDGE_MARGIN_FRAC = 0.04
+# HOW UNEVEN A DESCENT'S PER-FRAME STEP MAY BE, as a fraction of its own
+# median step.
+#
+# THE PHYSICS THE GATES WERE MISSING. A ball near the end of its flight
+# falls at a nearly constant rate -- vertical speed at the top of the
+# descent is already most of what it will be at the ground, and gravity
+# adds only a little over the half-second in view. So its points are
+# EVENLY spaced, and the spacing is as much a signature as straightness.
+#
+# Nothing else in a green view does that. A chain the tracker assembled
+# out of unrelated speckle jumps -- 4px between one pair, 30px between
+# the next -- because the "object" is a different speck each time, and
+# that is invisible to a straightness test: badly spaced points sit on a
+# perfect line just as happily as well spaced ones.
+#
+# Measured per FRAME, not per point, so a chain that loses the ball for
+# two frames and picks it up where a constant velocity says it should is
+# judged as consistent -- which is the honest reading of a brief
+# occlusion. A chain that picks it up somewhere else is not.
+#
+# This has been computed and reported since the descent search was
+# written, and never once used to decide anything.
+DESCENT_MAX_STEP_DEV = 0.35
+# HOW MUCH OF ITS OWN TIME SPAN A CHAIN MUST ACTUALLY HAVE POINTS IN.
+#
+# If the detector can see the ball at all it sees it on consecutive
+# frames; a chain with points at f1340 and f1362 and two in between is
+# not a ball that went missing, it is four unrelated specks the tracker
+# was willing to join because they happened to line up. Measured: real
+# descents put a point in 60-67% of the frames they span, and the chains
+# that fooled every other gate managed 17-37%.
+DESCENT_MIN_DENSITY = 0.5
 # How much of its peak fall speed a track must still have to count as
 # still descending. Below this it has landed and is rolling.
 DESCENT_FLATTEN_FRAC = 0.4
@@ -1654,6 +1686,10 @@ DESCENT_WHY_COLORS = {
     "tilt": "#2fa8b5",
     # "Landed" at the very edge of the picture, which means it left.
     "edge": "#7d6b4f",
+    # Its per-frame step jumps about; not something falling.
+    "uneven": "#c0392b",
+    # Mostly gaps -- specks joined across frames the ball was not in.
+    "sparse": "#8fa03a",
 }
 DESCENT_WHY_ORDER = list(DESCENT_WHY_COLORS)
 
@@ -2201,11 +2237,26 @@ def find_descents(
         # changes no decision about a chain that is real.
         if len(kept) < MIN_DESCENT_POINTS:
             _why.append("points")
-        # Reported, not gated. How evenly a descent falls is worth
-        # seeing on the picture; using it to reject cost more than it
-        # caught, so it says what it measured and leaves the deciding to
-        # the gates that were tuned against real footage.
-        step_med, step_dev = _descent_step_consistency(kept)
+        # THE RHYTHM AND THE DENSITY, both now gates. See the constants.
+        #
+        # Measured on the WHOLE track for the same reason drop, rate and
+        # bend are: the walk back to the landing keeps only the part
+        # that is drawn, and a chain of three that survives it has too
+        # few steps left to have a rhythm at all.
+        step_med, step_dev = _descent_step_consistency(pts)
+        _span_f = int(pts[-1]["frame"]) - int(pts[0]["frame"]) + 1
+        _density = len(pts) / float(max(1, _span_f))
+        if step_dev > DESCENT_MAX_STEP_DEV:
+            _why.append("uneven")
+            _rej(pts, f"its per-frame step varies by {round(step_dev, 2)} "
+                      f"of its own median, limit {DESCENT_MAX_STEP_DEV}",
+                 drop_px=int(drop), fall_rate=round(rate, 3),
+                 step_dev=round(step_dev, 2))
+        if _density < DESCENT_MIN_DENSITY:
+            _why.append("sparse")
+            _rej(pts, f"{len(pts)} point(s) across {_span_f} frames, "
+                      f"{round(100 * _density)}% of them",
+                 drop_px=int(drop), fall_rate=round(rate, 3))
         _entry = {
             "first_frame": int(pts[0]["frame"]),
             "last_frame": int(pts[-1]["frame"]),
@@ -2232,6 +2283,9 @@ def find_descents(
                 for q in kept
             ],
             "tilt_deg": round(tilt, 1),
+            "step_dev_frac": round(step_dev, 2),
+            "density": round(_density, 2),
+            "span_frames": _span_f,
             # THE VERTICAL LEG, which is what "it fell this far" means.
             # `drop_px` is the whole hypotenuse and flatters anything
             # travelling sideways.
