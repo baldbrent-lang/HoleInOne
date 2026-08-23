@@ -2258,9 +2258,12 @@ function ClickToPlotModal({
               </>
             ) : swing?.green_track ? (
               <span className="tiny" style={{ color: "#3ee37a" }}>
+                {/* MIN AND MAX, not first and last. A saved track is not
+                    promised to be in frame order, and reading its ends
+                    positionally reported a span it does not have. */}
                 ☄ green comet · {swing.green_track.length} frames
-                {" "}(f{swing.green_track[0]?.frame}→
-                f{swing.green_track[swing.green_track.length - 1]?.frame})
+                {" "}(f{Math.min(...swing.green_track.map((q) => q.frame))}→
+                f{Math.max(...swing.green_track.map((q) => q.frame))})
               </span>
             ) : null}
             <button

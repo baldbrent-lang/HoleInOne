@@ -8104,12 +8104,26 @@ def _apply_distance_plate(db, row, clip, final, slot, rep=None,
         return f"failed: {exc}"
 
 
-def _saved_green_track(row, slot: int):
+# HOW LONG A DESCENT CAN POSSIBLY BE. A ball falling onto a green
+# crosses the frame in well under a second; three is generous even for a
+# high wedge caught early by the tracker. Anything filed under one
+# swing's green track that is further back than this is not part of the
+# fall being drawn -- it is another shot's descent, or a gull, or a
+# point that outlived a re-produce. Bounding it matters because the
+# clip's length is derived from the span: a stray point 39 seconds
+# before the landing made a 47-second clip out of a six-second shot.
+D3_MAX_COMET_SEC = 3.0
+
+
+def _saved_green_track(row, slot: int, fps: float | None = None):
     """The descent this swing's operator plotted by hand, or None.
 
     One reader, because three places need it -- whether to hold the clip
     open for it, what to draw, and what not to overwrite -- and three
     different spellings of "look it up" is how they came to disagree.
+    That is also why the length bound lives here: the span decides how
+    long the clip runs and the points decide what is drawn on it, and
+    those two must not be bounded differently.
     """
     try:
         for _s in ((row.edit_metrics or {}).get("swings") or []):
@@ -8118,6 +8132,24 @@ def _saved_green_track(row, slot: int):
                 _t = [p for p in (_t or [])
                       if isinstance(p, dict) and p.get("frame") is not None
                       and p.get("x") is not None and p.get("y") is not None]
+                if _t:
+                    # BACKWARDS FROM THE LANDING, which is the end of the
+                    # fall and the one point in the chain that is not in
+                    # doubt. Points before the window are dropped rather
+                    # than the whole track rejected: the tail is the
+                    # descent whatever got prepended to it.
+                    _last = max(int(p["frame"]) for p in _t)
+                    _budget = int(round(D3_MAX_COMET_SEC * (fps or 30.0)))
+                    _keep = [p for p in _t
+                             if int(p["frame"]) >= _last - _budget]
+                    if len(_keep) < len(_t):
+                        log.info(
+                            "green track for swing %s: dropped %d point(s) "
+                            "more than %.1fs before the landing at f%d — a "
+                            "descent does not last that long",
+                            slot, len(_t) - len(_keep), D3_MAX_COMET_SEC,
+                            _last)
+                    _t = _keep
                 return _t or None
         return None
     except Exception as exc:  # noqa: BLE001
@@ -19490,6 +19522,13 @@ D3_GREEN_SEC = 6.0
 # reads as a glitch rather than a shot landing, and an end frame that
 # lands before the cutover would otherwise ask for a negative duration.
 D3_MIN_GREEN_SEC = 1.0
+# AND A CEILING ON IT. Every rule above only ever makes the green half
+# LONGER -- an end frame pushes it out, a comet span pushes it out
+# further -- and nothing was pushing back, so one wrong number in one
+# saved track produced a 47-second clip of a six-second shot. A ball
+# lands, holds and is done; twelve seconds is past generous for that,
+# and a clip that wants more than that is reporting a bug, not a shot.
+D3_MAX_GREEN_SEC = 12.0
 # How long the clip runs past the landing when the operator marked one.
 # Long enough to see the ball settle, short enough that it does not sit
 # on an empty green. The wizard mirrors this so its copy matches the cut.
@@ -19866,18 +19905,19 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # had already ended before the ball arrived, which looks
             # exactly like not drawing it at all.
             landing = _landing_arg
-            if not landing and _saved_green_track(row, _slot) and green_path:
-                _gt = _saved_green_track(row, _slot)
-                _gfps_l = float(probe_fps(green_path) or 0.0)
-                if _gfps_l > 0:
-                    _last = max(_gt, key=lambda q: int(q["frame"]))
-                    landing = {"sec": int(_last["frame"]) / _gfps_l,
-                               "xy": [float(_last["x"]), float(_last["y"])]}
-                    log.info(
-                        "d3 produce: swing %s taking its landing from the "
-                        "operator's plotted comet — f%d, %.2fs green-clock",
-                        i, int(_last["frame"]), landing["sec"],
-                    )
+            _gfps_l = (float(probe_fps(green_path) or 0.0)
+                       if green_path else 0.0)
+            if not landing and green_path and _gfps_l > 0 \
+                    and _saved_green_track(row, _slot, _gfps_l):
+                _gt = _saved_green_track(row, _slot, _gfps_l)
+                _last = max(_gt, key=lambda q: int(q["frame"]))
+                landing = {"sec": int(_last["frame"]) / _gfps_l,
+                           "xy": [float(_last["x"]), float(_last["y"])]}
+                log.info(
+                    "d3 produce: swing %s taking its landing from the "
+                    "operator's plotted comet — f%d, %.2fs green-clock",
+                    i, int(_last["frame"]), landing["sec"],
+                )
             _land_tee = None
             if landing and landing.get("sec") is not None:
                 try:
@@ -19927,8 +19967,8 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # make sure the length below reaches past its last.
             _comet_span = None
             if green_path is not None:
-                _gt_b = _saved_green_track(row, _slot)
                 _gfps_b = float(probe_fps(green_path) or 0.0)
+                _gt_b = _saved_green_track(row, _slot, _gfps_b)
                 if _gt_b and _gfps_b > 0:
                     _c0 = min(int(q["frame"]) for q in _gt_b) / _gfps_b
                     _c1 = max(int(q["frame"]) for q in _gt_b) / _gfps_b
@@ -20005,6 +20045,16 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         i, _green_sec, _need, _comet_span[0], _comet_span[1],
                     )
                     _green_sec = _need
+
+            # The one rule that shortens. Everything above lengthens.
+            if _green_sec > D3_MAX_GREEN_SEC:
+                log.warning(
+                    "d3 produce: swing %s green side asked for %.2fs — "
+                    "capped at %.1fs. Something upstream is wrong: a clip "
+                    "of a ball landing does not need that long.",
+                    i, _green_sec, D3_MAX_GREEN_SEC,
+                )
+                _green_sec = D3_MAX_GREEN_SEC
 
             # The tee file must also carry the audio bed under the green
             # half, so render past the cutover even though that footage
@@ -20264,7 +20314,10 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         # when a real chain walks back from a marked
                         # landing, because a fabricated one over grass
                         # would be worse than nothing.
-                        _saved_gt = _saved_green_track(row, _slot)
+                        _saved_gt = _saved_green_track(
+                            row, _slot,
+                            float(probe_fps(green_path) or 0.0)
+                            if green_path else None)
                         _gcomet = _render_green_comet(
                             green_path, green_seg, g0,
                             (landing or {}).get("sec"),
