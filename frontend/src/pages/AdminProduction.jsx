@@ -8282,6 +8282,7 @@ function BallScanModal({ state, adminPassword, onClose }) {
                       <th style={{ padding: "3px 8px" }}>gone</th>
                       <th style={{ padding: "3px 8px" }}>blocked</th>
                       <th style={{ padding: "3px 8px" }}>frames</th>
+                      <th style={{ padding: "3px 8px" }}>ascent</th>
                       <th style={{ padding: "3px 8px" }}>descent</th>
                     </tr>
                   </thead>
@@ -8352,6 +8353,26 @@ function BallScanModal({ state, adminPassword, onClose }) {
                             : <span className="muted">—</span>}
                         </td>
                         <td style={{ padding: "3px 8px" }}>{sp.votes}</td>
+                        <td style={{ padding: "3px 8px" }}>
+                          {/* DID A BALL LEAVE THIS SPOT. The tee camera's
+                              own verdict, and the one a shoe cannot pass
+                              even in principle: the shoe IS the thing
+                              sitting there, so nothing rises away from
+                              it. */}
+                          {sp.ascent ? (
+                            <span className="pill ok" title={sp.ascent_reason}>
+                              ↑ {sp.ascent.n_points}pts · {sp.ascent.rise_px}px
+                            </span>
+                          ) : (
+                            <span className="tiny muted"
+                                  title={sp.ascent_reason || "not searched"}>
+                              none
+                            </span>
+                          )}
+                          {sp.gate && (
+                            <div className="tiny muted">via {sp.gate}</div>
+                          )}
+                        </td>
                         <td style={{ padding: "3px 8px" }}>
                           {sp.descent ? (
                             <span className="pill ok"

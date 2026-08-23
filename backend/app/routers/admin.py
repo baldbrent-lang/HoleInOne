@@ -17132,6 +17132,41 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
                _dsub.items(), key=lambda kv: -float(kv[1] or 0))) or "n/a"),
            (rep["descents"] or {}).get("n_matched"), "matched", _t_desc)
 
+    # EVERY CANDIDATE IS ASKED TO SHOW ITS ASCENT.
+    #
+    # The green camera can prove a ball came DOWN; until now nothing on
+    # the tee side could prove one went UP, so a shoe that sat still for
+    # ten seconds and then had a golfer walk over it looked exactly like
+    # a ball that was struck. A ball rises away from the spot it was
+    # sitting on and does not come back. A shoe never leaves. A clubhead
+    # swings through and returns.
+    #
+    # It costs a fraction of a second per candidate -- forty frames of
+    # the cheap frame-difference detector -- and unlike the descent it
+    # needs no green camera, no calibration and no flight window, so it
+    # is available on every upload including tee-only ones.
+    from ..services import debug3 as _d3
+
+    _t = time.perf_counter()
+    for _sp in spots:
+        _imp = _sp.get("gone_frame")
+        if _imp is None:
+            _sp["ascent"] = None
+            _sp["ascent_reason"] = "never seen to go — nothing to rise from"
+            continue
+        try:
+            _asc = _d3.find_ascents(src_path, fps, int(_imp),
+                                    (_sp["x"], _sp["y"])) or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ball scan: ascent search failed on %s: %s",
+                        row.id, exc)
+            _asc = {"ok": False, "reason": f"failed: {exc}"}
+        _sp["ascent"] = _asc if _asc.get("ok") else None
+        _sp["ascent_reason"] = _asc.get("reason")
+    _t_asc = time.perf_counter() - _t
+    _n_asc = sum(1 for _sp in spots if _sp.get("ascent"))
+    rep["n_ascents"] = _n_asc
+
     _t = time.perf_counter()
     _ball_scan_descent_images(row, spots, tok, rep)
     _t_dimg = time.perf_counter() - _t
@@ -17208,7 +17243,14 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
         cap.release()
     except Exception as exc:  # noqa: BLE001
         log.warning("ball scan: pictures failed: %s", exc)
-    _stage(4, "Evidence pictures",
+    _stage(4, "Ball leaving the tee (ascent)",
+           "Every candidate is asked to show a ball rising away from the "
+           "spot it was sitting on, in the forty frames after it went. A "
+           "ball leaves and does not come back; a shoe never leaves and a "
+           "clubhead swings through and returns. Needs no green camera "
+           "and no calibration, so it is available on every upload.",
+           _n_asc, "with an ascent", _t_asc)
+    _stage(5, "Evidence pictures",
            "A crop of each candidate's first and last frame, the descent "
            "strips, and one overview with every candidate ringed. Two "
            "seeks per candidate through a long file, so this grows with "
@@ -17351,14 +17393,38 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
     # is the shot. So a confirmed candidate is produced however briefly
     # it sat, and an unconfirmed one still has to earn its place the old
     # way.
-    spots = [sp for sp in _all
-             if sp.get("confirmed_swing")
-             or float(sp.get("held_sec") or 0.0) >= min_held]
+    # THE GATE. Three ways to be a swing, and one way not to be.
+    #
+    # A descent settles it: the green camera watched a ball come down in
+    # the window a shot from here would land in. An ASCENT settles it
+    # too, and from the tee camera alone -- a ball rose away from this
+    # exact spot and did not come back, which a shoe cannot do because
+    # the shoe IS the thing that was sitting there.
+    #
+    # And the held-time rule, which was only ever a proxy for both of
+    # them, no longer stands on its own: something that sat ten seconds
+    # with nothing leaving it is a shoe, a headcover or a divot tool, and
+    # that is precisely the false positive this is here to stop. It is
+    # kept as a rescue for the one case neither camera can speak to --
+    # a shot whose ball left the tee frame too fast to track AND landed
+    # off the green camera's view -- which is why a long sit still
+    # counts when nothing contradicts it.
+    spots = []
+    for sp in _all:
+        _has_desc = bool(sp.get("confirmed_swing"))
+        _has_asc = bool(sp.get("ascent"))
+        _sat = float(sp.get("held_sec") or 0.0) >= min_held
+        sp["gate"] = ("descent" if _has_desc else
+                      "ascent" if _has_asc else
+                      "sat long enough" if _sat else None)
+        if _has_desc or _has_asc or _sat:
+            spots.append(sp)
+    _n_asc_only = sum(1 for sp in spots if sp.get("gate") == "ascent")
     _n_conf = sum(1 for sp in spots if sp.get("confirmed_swing"))
     _rescued = [sp for sp in spots
                 if sp.get("confirmed_swing")
                 and float(sp.get("held_sec") or 0.0) < min_held]
-    _stage(2, f"Sat {min_held:.0f}s or longer, or confirmed by a descent",
+    _stage(2, f"Confirmed by an ascent or a descent, or sat {min_held:.0f}s",
            "A ball waits on a tee while its owner walks up, picks a club "
            "and addresses it. Anything that appeared and vanished inside a "
            "few seconds is a speck, or a marker being moved — UNLESS the "

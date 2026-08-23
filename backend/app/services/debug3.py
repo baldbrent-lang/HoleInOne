@@ -2077,6 +2077,131 @@ def find_descents(
     return out
 
 
+# WHAT A BALL LEAVING A TEE LOOKS LIKE, and how far off it may be.
+#
+# The mirror image of the descent search, and it exists for the same
+# reason: the green camera can prove a ball came DOWN, and nothing on the
+# tee side could prove one went UP. A shoe does not leave. A clubhead
+# swings through and comes back. A ball rises away from the spot it was
+# sitting on and does not return, and that is a fact the tee camera can
+# establish on its own -- no calibration, no green half, no flight
+# window.
+ASCENT_MIN_POINTS = 3
+ASCENT_MIN_RISE_FRAC = 0.04      # of frame height, over the whole chain
+ASCENT_RATE_LO = 0.25            # frame-heights per second, rising
+ASCENT_RATE_HI = 12.0
+ASCENT_MAX_BEND_PX = 14.0        # straighter than a full flight: this is
+                                 # the first half-second, before gravity
+                                 # has bent it much
+ASCENT_START_NEAR_PX = 90.0      # how close the chain's foot must start
+                                 # to where the ball was sitting
+ASCENT_WINDOW_FRAMES = 45        # after the strike -- the ball is out of
+                                 # a tee camera's frame long before this
+
+
+def find_ascents(
+    input_path: Path,
+    fps: float,
+    impact_frame: int,
+    ball_xy,
+    window_frames: int = ASCENT_WINDOW_FRAMES,
+    min_points: int = ASCENT_MIN_POINTS,
+) -> dict:
+    """Did a ball rise away from `ball_xy` just after `impact_frame`?
+
+    THE CHEAP DETECTOR ONLY. This runs on the same frame-difference pass
+    the operator's map uses and the descent search now leads with -- a
+    ball leaving a tee is the largest, fastest new thing in the picture
+    for a handful of frames, which is the easiest question in this whole
+    file. It reads about forty frames, so it costs a fraction of a second
+    per candidate.
+
+    Returns {ok, points, n_points, rise_px, rate, bend_px, reason}.
+    Never raises: this confirms candidates, and a failure here should
+    leave one unconfirmed rather than take the scan down.
+    """
+    out = {"ok": False, "points": [], "n_points": 0, "rise_px": 0,
+           "rate": 0.0, "bend_px": None, "reason": None}
+    if not HAS_CV:
+        out["reason"] = "opencv not installed"
+        return out
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open the tee video"
+            return out
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+        if frame_h <= 0:
+            out["reason"] = "the tee video reports no frames"
+            return out
+        f0 = max(0, int(impact_frame) - 2)
+        f1 = int(impact_frame) + int(window_frames)
+        if n_frames:
+            f1 = min(f1, n_frames - 1)
+        if f1 <= f0:
+            out["reason"] = "no footage after the strike"
+            return out
+        dets = detect_movers_by_diff(input_path, f0, f1, sens=2,
+                                     per_frame=DESCENT_DIFF_PER_FRAME)
+        if not dets:
+            out["reason"] = "nothing moved after the strike"
+            return out
+        tracks = build_tracks(dets, 14.0, min_len=int(min_points),
+                              max_gap=DESCENT_MAX_GAP)
+        bx, by = float(ball_xy[0]), float(ball_xy[1])
+        best = None
+        for tk in tracks:
+            pts = tk.get("points") or []
+            if len(pts) < int(min_points):
+                continue
+            # UP, not down. Screen y decreases as the ball climbs.
+            rise = float(pts[0]["y"]) - float(pts[-1]["y"])
+            if rise < ASCENT_MIN_RISE_FRAC * frame_h:
+                continue
+            # AND IT STARTED WHERE THE BALL WAS. Every other rising thing
+            # in a tee view -- a bird, a cart on the horizon, a branch --
+            # rises somewhere else. This is the test a shoe cannot pass
+            # even in principle, because the shoe IS the thing that was
+            # sitting there.
+            d0 = math.hypot(float(pts[0]["x"]) - bx, float(pts[0]["y"]) - by)
+            if d0 > ASCENT_START_NEAR_PX:
+                continue
+            span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
+            rate = (rise / span_f) * float(fps or 30.0) / frame_h
+            if not (ASCENT_RATE_LO <= rate <= ASCENT_RATE_HI):
+                continue
+            bend = _path_bend_px(pts)
+            if bend > ASCENT_MAX_BEND_PX:
+                continue
+            cand = {
+                "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
+                            "y": int(q["y"])} for q in pts],
+                "n_points": len(pts), "rise_px": int(round(rise)),
+                "rate": round(rate, 3), "bend_px": round(bend, 2),
+                "starts_px_from_ball": int(round(d0)),
+            }
+            # The longest chain that started nearest the ball.
+            if (best is None or cand["n_points"] > best["n_points"]
+                    or (cand["n_points"] == best["n_points"]
+                        and d0 < best["starts_px_from_ball"])):
+                best = cand
+        if best is None:
+            out["reason"] = (
+                f"{len(tracks)} track(s) after the strike, none of them a "
+                f"ball leaving this spot")
+            return out
+        out.update(best)
+        out["ok"] = True
+        out["reason"] = (
+            f"{best['n_points']} points rising {best['rise_px']}px from "
+            f"{best['starts_px_from_ball']}px of the ball")
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"ascent search failed: {exc}"
+    return out
+
+
 def find_flight(
     input_path: Path,
     fps: float,
