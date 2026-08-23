@@ -2126,6 +2126,24 @@ ASCENT_START_NEAR_PX = 120.0
 ASCENT_WINDOW_FRAMES = 45        # after the strike -- the ball is out of
                                  # a tee camera's frame long before this
 
+# LOOK ABOVE THE GOLFERS' HEADS, AND NOWHERE ELSE.
+#
+# Everything that makes a tee view hard to track is below that line:
+# players walking, a club swinging, shadows, the rest of the group. One
+# run built 31 chains after a strike and all but a handful were people.
+# A ball on its way out crosses the band above them against plain sky,
+# where it is the only thing moving -- so searching only there removes
+# the noise rather than filtering it, and costs less because there are
+# fewer pixels to difference.
+#
+# The band's floor is a golfer's height above the tee box. Measured off
+# the reference frame: the hitting area sits at 0.79 of frame height and
+# the players' heads reach 0.47, so a standing golfer is about a third of
+# the picture tall. With no tee box to measure from, the top 45% is the
+# same answer for a camera framed the usual way.
+ASCENT_HEAD_ROOM_FRAC = 0.33
+ASCENT_BAND_FALLBACK_FRAC = 0.45
+
 
 def find_ascents(
     input_path: Path,
@@ -2134,6 +2152,7 @@ def find_ascents(
     ball_xy,
     window_frames: int = ASCENT_WINDOW_FRAMES,
     min_points: int = ASCENT_MIN_POINTS,
+    roi: dict | None = None,
 ) -> dict:
     """Did a ball rise away from `ball_xy` just after `impact_frame`?
 
@@ -2159,6 +2178,7 @@ def find_ascents(
             out["reason"] = "could not open the tee video"
             return out
         frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or 1280
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         cap.release()
         if frame_h <= 0:
@@ -2171,10 +2191,21 @@ def find_ascents(
         if f1 <= f0:
             out["reason"] = "no footage after the strike"
             return out
+        # The band: full width, from the top of the frame down to a
+        # golfer's height above the tee box.
+        _tee_top = (float(roi.get("y", 0.0)) * frame_h if roi
+                    else (ASCENT_BAND_FALLBACK_FRAC
+                          + ASCENT_HEAD_ROOM_FRAC) * frame_h)
+        band_h = int(max(40, min(frame_h - 1,
+                                 _tee_top - ASCENT_HEAD_ROOM_FRAC * frame_h)))
+        out["band"] = [0, 0, int(frame_w), band_h]
         dets = detect_movers_by_diff(input_path, f0, f1, sens=2,
-                                     per_frame=DESCENT_DIFF_PER_FRAME)
+                                     per_frame=DESCENT_DIFF_PER_FRAME,
+                                     roi=(0, 0, int(frame_w), band_h))
         if not dets:
-            out["reason"] = "nothing moved after the strike"
+            out["reason"] = (
+                f"nothing moved in the band above the golfers "
+                f"(the top {band_h}px) after the strike")
             return out
         tracks = build_tracks(dets, 14.0, min_len=int(min_points),
                               max_gap=DESCENT_MAX_GAP)
@@ -2223,9 +2254,15 @@ def find_ascents(
             # lands. That is the question actually being asked -- did
             # this come from the ball -- and it does not care how fast
             # the ball was going or how late the tracker picked it up.
-            _dfb = max(1, int(pts[1]["frame"]) - int(pts[0]["frame"]))
-            _vx = (float(pts[1]["x"]) - float(pts[0]["x"])) / _dfb
-            _vy = (float(pts[1]["y"]) - float(pts[0]["y"])) / _dfb
+            # Velocity over the first few points rather than the first
+            # pair. The chain now starts high in the band, so it is
+            # extrapolated back further -- and a heading taken from one
+            # pair of two-pixel centroids drifts over that distance in a
+            # way one taken from four points does not.
+            _k = min(4, len(pts)) - 1
+            _dfb = max(1, int(pts[_k]["frame"]) - int(pts[0]["frame"]))
+            _vx = (float(pts[_k]["x"]) - float(pts[0]["x"])) / _dfb
+            _vy = (float(pts[_k]["y"]) - float(pts[0]["y"])) / _dfb
             _back = max(0, int(pts[0]["frame"]) - int(impact_frame))
             _ox = float(pts[0]["x"]) - _vx * _back
             _oy = float(pts[0]["y"]) - _vy * _back

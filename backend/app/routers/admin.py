@@ -17033,6 +17033,15 @@ def _ball_scan_ascent_image(row, src_path, spots, tok, rep) -> None:
                 cv2.circle(im, (int(sp["x"]), int(sp["y"])),
                            int(_d3_ascent_near_px()), (60, 200, 255), 1,
                            cv2.LINE_AA)
+                # THE BAND THAT WAS SEARCHED. Everything below it was
+                # never looked at, which is most of what used to end up
+                # in this picture as grey noise around the players.
+                _band = (sp.get("ascent") or {}).get("band") or sp.get(
+                    "ascent_band")
+                if _band:
+                    cv2.rectangle(im, (0, 0), (int(_band[2]) - 1,
+                                               int(_band[3])),
+                                  (80, 200, 255), 2)
                 cv2.putText(
                     im,
                     f"after f{_f}: {len(_all)} chain(s) - green = taken, "
@@ -17259,7 +17268,8 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
             continue
         try:
             _asc = _d3.find_ascents(src_path, fps, int(_imp),
-                                    (_sp["x"], _sp["y"])) or {}
+                                    (_sp["x"], _sp["y"]),
+                                    roi=_roi.get("roi")) or {}
         except Exception as exc:  # noqa: BLE001
             log.warning("ball scan: ascent search failed on %s: %s",
                         row.id, exc)
@@ -17267,6 +17277,7 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
         _sp["ascent"] = _asc if _asc.get("ok") else None
         _sp["ascent_reason"] = _asc.get("reason")
         _sp["ascent_considered"] = _asc.get("considered") or []
+        _sp["ascent_band"] = _asc.get("band")
     _t_asc = time.perf_counter() - _t
     _n_asc = sum(1 for _sp in spots if _sp.get("ascent"))
     rep["n_ascents"] = _n_asc
@@ -17350,11 +17361,14 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
     except Exception as exc:  # noqa: BLE001
         log.warning("ball scan: pictures failed: %s", exc)
     _stage(4, "Ball leaving the tee (ascent)",
-           "Every candidate is asked to show a ball rising away from the "
-           "spot it was sitting on, in the forty frames after it went. A "
-           "ball leaves and does not come back; a shoe never leaves and a "
-           "clubhead swings through and returns. Needs no green camera "
-           "and no calibration, so it is available on every upload.",
+           "Searched only in the band ABOVE the golfers' heads, where a "
+           "ball on its way out is the one thing moving. Everything that "
+           "makes a tee view hard -- players walking, a club swinging, "
+           "shadows -- is below that line, so this removes the noise "
+           "rather than filtering it. Each chain is then run back along "
+           "its own heading to the frame of the strike, and counts as an "
+           "ascent if that lands on the ball. Needs no green camera and "
+           "no calibration, so it works on every upload.",
            _n_asc, "with an ascent", _t_asc)
     _stage(5, "Evidence pictures",
            "A crop of each candidate's first and last frame, the descent "

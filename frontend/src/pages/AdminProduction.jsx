@@ -8472,12 +8472,15 @@ function BallScanModal({ state, adminPassword, onClose }) {
                                style={{ width: "100%", borderRadius: 6 }} />
                         </a>
                         <figcaption className="tiny muted">
-                          What rose after this spot emptied. Green = the
-                          chain taken as the ascent, grey = every other
-                          chain considered with the reason it lost. The
-                          small ring is where the ball was sitting; the
-                          wide one is how close a chain has to start to
-                          count as leaving it.
+                          What rose after this spot emptied. Only the
+                          boxed band above the golfers' heads is searched
+                          — everything below it is players, clubs and
+                          shadows. Green = the chain taken, grey = every
+                          other chain considered with the reason it lost.
+                          The small ring is where the ball was sitting;
+                          the wide one is how close a chain must run back
+                          to, along its own heading, to count as having
+                          left it.
                           {sp.ascent_reason && <> — {sp.ascent_reason}</>}
                         </figcaption>
                       </figure>
