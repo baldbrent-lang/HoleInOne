@@ -1441,6 +1441,21 @@ DESCENT_RATE_HI = 12.0
 # bar drawn tight enough to matter is a bar that eventually refuses a
 # real shot with sideways travel across the frame.
 DESCENT_MAX_TILT_DEG = 55.0
+# HOW CLOSE TO THE PICTURE'S EDGE A LANDING MAY BE, as a fraction of
+# frame height.
+#
+# A LANDING AT THE FRAME BORDER HAS NOT BEEN SEEN TO LAND. The landing
+# is defined as the frame where the fall flattened out -- where the
+# thing stopped descending at a decent share of its peak speed. A fall
+# that "flattens" exactly at the edge of the picture has not flattened;
+# it has been cut off, because the object left the frame and the tracker
+# ran out of pixels to follow it in.
+#
+# Measured on a windy clip: five of the seven chains the gates accepted
+# landed at y=706-710 in a 720-tall frame, in the bottom corners --
+# foreground grass a few feet from the lens, waving. None of them was
+# on the green, which is where a ball that lands on the green lands.
+DESCENT_EDGE_MARGIN_FRAC = 0.04
 # How much of its peak fall speed a track must still have to count as
 # still descending. Below this it has landed and is rolling.
 DESCENT_FLATTEN_FRAC = 0.4
@@ -1637,6 +1652,8 @@ DESCENT_WHY_COLORS = {
     "points": "#b5487d",
     # Leaning too far off vertical to be falling.
     "tilt": "#2fa8b5",
+    # "Landed" at the very edge of the picture, which means it left.
+    "edge": "#7d6b4f",
 }
 DESCENT_WHY_ORDER = list(DESCENT_WHY_COLORS)
 
@@ -1931,6 +1948,7 @@ def find_descents(
             return out
         n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         _fps = float(fps or cap.get(cv2.CAP_PROP_FPS) or 30.0)
         cap.release()
     except Exception as exc:  # noqa: BLE001
@@ -2140,6 +2158,18 @@ def find_descents(
                     last_i = i + 1
                     break
         land = pts[last_i]
+        # SEE DESCENT_EDGE_MARGIN_FRAC. Checked here rather than with
+        # the other gates because it is a fact about the LANDING, and
+        # the landing is not known until the walk back above has run.
+        _m = DESCENT_EDGE_MARGIN_FRAC * frame_h
+        _fw = frame_w or 0
+        if (float(land["y"]) > frame_h - _m or float(land["y"]) < _m
+                or (_fw and (float(land["x"]) > _fw - _m
+                             or float(land["x"]) < _m))):
+            _why.append("edge")
+            _rej(pts, f"landed at {int(land['x'])},{int(land['y'])}, "
+                      f"within {int(_m)}px of the picture's edge",
+                 drop_px=int(drop), fall_rate=round(rate, 3))
         # EVERY NUMBER DESCRIBES THE CHAIN THAT IS KEPT.
         #
         # The gates above ran on the WHOLE track and the points reported

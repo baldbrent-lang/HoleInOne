@@ -17295,42 +17295,63 @@ def _ascent_descent_image(row, desc) -> None:
             except (AttributeError, TypeError, ValueError):
                 return fallback
 
-        _n_ok = 0
+        # REJECTS ARE DOTS, NOT LINES.
+        #
+        # Drawing every chain as a joined-up path put 290 lines across
+        # one frame and the result was unreadable -- which defeats the
+        # entire purpose, since the picture exists to be read. The lines
+        # are what does the damage: a chain spanning the frame paints
+        # across everything, and hundreds of them paint over each other.
+        # Their POINTS carry the same information about where the noise
+        # lives, at a fraction of the ink. Only chains that survived the
+        # gates get a path drawn.
         for a in reversed(_con):
-            _why = a.get("why") or []
-            _p = a.get("points") or []
-            if not _p:
+            if not (a.get("why") or []):
                 continue
-            if _why:
-                _col, _w, _r = _bgr(_cols.get(a.get("why_primary"))), 1, 2
-            else:
-                _col, _w, _r = (255, 255, 255), 2, 4
-                _n_ok += 1
+            _col = _bgr(_cols.get(a.get("why_primary")))
+            for q in a.get("points") or []:
+                cv2.circle(im, (q["x"], q["y"]), 1, _col, -1, cv2.LINE_AA)
+
+        # THEN THE SURVIVORS, over the top, and the ones actually USED
+        # over those. Three states, not two: refused, passed the gates,
+        # and put on a clip. An operator looking at seven white paths
+        # had no way to tell which three the produce consumed.
+        _n_ok = 0
+        for a in _con:
+            _p = a.get("points") or []
+            if (a.get("why") or []) or not _p:
+                continue
+            _n_ok += 1
+            _used = a.get("chosen_for")
+            _col = (120, 255, 120) if _used else (255, 255, 255)
+            _w = 3 if _used else 1
             for u, v in zip(_p, _p[1:]):
                 cv2.line(im, (u["x"], u["y"]), (v["x"], v["y"]), _col, _w,
                          cv2.LINE_AA)
             for q in _p:
-                cv2.circle(im, (q["x"], q["y"]), _r, _col, _w, cv2.LINE_AA)
-            if not _why:
-                # WHERE IT LANDED, ringed. This is the number the produce
-                # actually consumes -- the frame it cuts to and the point
-                # it finishes at -- so it is the one thing in the picture
-                # worth being able to check by eye.
-                _lx, _ly = a.get("landing_xy") or [_p[-1]["x"], _p[-1]["y"]]
-                cv2.circle(im, (int(_lx), int(_ly)), 11, _col, 2,
-                           cv2.LINE_AA)
-                cv2.putText(
-                    im, f"{_n_ok}  {a.get('last_descent_sec')}s  "
-                        f"{a.get('n_points_drawn')}pts",
-                    (min(int(_lx) + 15, im.shape[1] - 190),
-                     max(66, int(_ly))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _col, 1, cv2.LINE_AA)
+                cv2.circle(im, (q["x"], q["y"]), 4 if _used else 3, _col,
+                           _w, cv2.LINE_AA)
+            # WHERE IT LANDED, ringed. This is the number the produce
+            # actually consumes -- the frame it cuts to and the point
+            # it finishes at -- so it is the one thing in the picture
+            # worth being able to check by eye.
+            _lx, _ly = a.get("landing_xy") or [_p[-1]["x"], _p[-1]["y"]]
+            cv2.circle(im, (int(_lx), int(_ly)), 13 if _used else 9, _col,
+                       2, cv2.LINE_AA)
+            cv2.putText(
+                im,
+                (f"USED by swing {_used}  " if _used else "passed  ")
+                + f"{a.get('last_descent_sec')}s  fell {a.get('fall_px')}px",
+                (min(int(_lx) + 17, im.shape[1] - 260), max(66, int(_ly))),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, _col,
+                2 if _used else 1, cv2.LINE_AA)
         _tally = _sw.get("why_counts") or {}
         im[0:58] = (im[0:58].astype("float32") * 0.35).astype("uint8")
         cv2.putText(
             im,
             f"all {_sw.get('n_considered')} chain(s) the green pass "
-            f"weighed - white is a ball coming down, rings are landings",
+            f"weighed - GREEN was put on a clip, white passed but lost, "
+            f"coloured dots were refused",
             (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
             cv2.LINE_AA)
         _kx = 12
@@ -18255,6 +18276,14 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         _used_c.add(ci)
         _used_e.add(ei)
         c, _e = _clips[ci], _events[ei]
+        # WHICH CHAIN THIS SWING ACTUALLY TOOK. `considered` and
+        # `events` hold the SAME dict objects, so marking it here marks
+        # it in the picture too -- and "accepted" versus "used" is the
+        # distinction the picture was missing. Seven chains can pass the
+        # gates while only three are ever put on a clip, and without
+        # this an operator looking at seven white paths has no way to
+        # tell which three the produce actually consumed.
+        _e["chosen_for"] = ci + 1
         c["landing_frame"] = int(_e["last_descent_frame"])
         c["landing_spot"] = [int(_e["landing_xy"][0]),
                              int(_e["landing_xy"][1])]

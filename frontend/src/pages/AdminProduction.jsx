@@ -8057,9 +8057,20 @@ function AscentProduceModal({ state, onClose }) {
                               marginTop: 6 }} />
               </a>
             )}
+            <div className="tiny muted" style={{ marginTop: 6 }}>
+              <b>How to read the picture.</b>{" "}
+              <span style={{ color: "#78ff78" }}>Green</span> is the chain
+              a swing actually used — that is the landing the clip was
+              cut and drawn to. <b>White</b> passed every gate but lost to
+              a better candidate in the same window, or fell outside every
+              swing&apos;s window. Coloured <b>dots</b> were refused, in the
+              colour of the gate that refused them; they are dots rather
+              than paths because 290 joined-up lines on one frame is not a
+              picture anyone can read. Rings mark landings.
+            </div>
             <WhyLegend
               sweep={rep.descents.sweep} texts={DESCENT_WHY_TEXT}
-              acceptedText="a ball coming down — the ring is where it landed" />
+              acceptedText="a ball coming down — green if a swing used it" />
             {(rep.descents.sweep?.considered || []).length > 0 && (
               <div style={{ overflowX: "auto", marginTop: 6 }}>
                 <table className="tiny" style={{ width: "100%" }}>
