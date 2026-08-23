@@ -1626,6 +1626,22 @@ def detect_movers_by_diff(
     # which is what they are for and what a size ranking is only ever a
     # proxy for.
     per_frame: int | None = None,
+    # THREE-FRAME DIFFERENCE INSTEAD OF TWO.
+    #
+    # A difference against the previous frame lights a moving thing
+    # TWICE: once where it is and once where it was. For a ball that is
+    # two detections a frame, and the tracker takes the NEARER one --
+    # the ghost, at distance zero. It therefore measures the ball's
+    # velocity as zero, and on the next frame the real ball is 52px
+    # outside a gate sized for something standing still, so the chain
+    # dies at two points. Measured on a clean synthetic ascent: eight
+    # frames of perfect detections yielded ZERO tracks.
+    #
+    # Differencing against the frame before AND the frame after, and
+    # keeping only what differs from both, leaves the thing where it IS
+    # and drops both ghosts. Costs one extra decoded frame in memory,
+    # and reports the middle of the three, so results lag by one frame.
+    three_frame: bool = False,
 ) -> list:
     """Frame-to-frame difference. The detector that actually sees the ball.
 
@@ -1660,6 +1676,7 @@ def detect_movers_by_diff(
             x0, y0 = (int(roi[0]), int(roi[1])) if roi else (0, 0)
             cap_v.set(cv2.CAP_PROP_POS_FRAMES, float(max(0, int(f0))))
             prev = None
+            _win: list = []
             for f in range(max(0, int(f0)), int(f1) + 1):
                 ok, frame = cap_v.read()
                 if not ok or frame is None:
@@ -1668,11 +1685,9 @@ def detect_movers_by_diff(
                     frame = frame[y0:y0 + int(roi[3]), x0:x0 + int(roi[2])]
                 gray = cv2.GaussianBlur(
                     cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (3, 3), 0)
-                if prev is not None:
-                    diff = cv2.absdiff(gray, prev)
-                    _, th = cv2.threshold(diff, thr, 255, cv2.THRESH_BINARY)
-                    th = cv2.dilate(th, None, iterations=1)
-                    n, _l, st, cen = cv2.connectedComponentsWithStats(th)
+
+                def _emit(th_, f_):
+                    n, _l, st, cen = cv2.connectedComponentsWithStats(th_)
                     hits = []
                     for i in range(1, n):
                         a = int(st[i, cv2.CC_STAT_AREA])
@@ -1687,10 +1702,27 @@ def detect_movers_by_diff(
                     # the ball away.
                     hits.sort(reverse=True)
                     for a, cx, cy in hits[:per_frame]:
-                        out.append({"frame": int(f),
+                        out.append({"frame": int(f_),
                                     "x": int(round(x0 + cx)),
                                     "y": int(round(y0 + cy)),
                                     "area": int(a)})
+
+                if three_frame:
+                    _win.append((f, gray))
+                    if len(_win) > 3:
+                        _win.pop(0)
+                    if len(_win) == 3:
+                        _fm, _gm = _win[1]
+                        _, t1 = cv2.threshold(cv2.absdiff(_gm, _win[0][1]),
+                                              thr, 255, cv2.THRESH_BINARY)
+                        _, t2 = cv2.threshold(cv2.absdiff(_gm, _win[2][1]),
+                                              thr, 255, cv2.THRESH_BINARY)
+                        _emit(cv2.dilate(cv2.bitwise_and(t1, t2), None,
+                                         iterations=1), _fm)
+                elif prev is not None:
+                    _, th = cv2.threshold(cv2.absdiff(gray, prev), thr, 255,
+                                          cv2.THRESH_BINARY)
+                    _emit(cv2.dilate(th, None, iterations=1), f)
                 prev = gray
                 if len(out) >= cap:
                     break
@@ -2201,7 +2233,8 @@ def find_ascents(
         out["band"] = [0, 0, int(frame_w), band_h]
         dets = detect_movers_by_diff(input_path, f0, f1, sens=2,
                                      per_frame=DESCENT_DIFF_PER_FRAME,
-                                     roi=(0, 0, int(frame_w), band_h))
+                                     roi=(0, 0, int(frame_w), band_h),
+                                     three_frame=True)
         if not dets:
             out["reason"] = (
                 f"nothing moved in the band above the golfers "
@@ -2312,6 +2345,138 @@ def find_ascents(
             f"{best['starts_px_from_ball']}px of the ball")
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"ascent search failed: {exc}"
+    return out
+
+
+# HOW MANY DIFF BLOBS PER FRAME THE FULL-VIDEO SWEEP KEEPS. Lower than
+# the per-candidate search uses, because the band is sky: there is very
+# little up there that is not the ball, and a whole video's worth of
+# detections has to be small enough for the tracker to link without
+# choking. Ten is what the operator's own map uses.
+SWEEP_PER_FRAME = 10
+
+
+def sweep_ascents(
+    input_path: Path,
+    fps: float,
+    roi: dict | None = None,
+    sens: int = 2,
+    min_points: int = ASCENT_MIN_POINTS,
+) -> dict:
+    """Every ball leaving the tee in the WHOLE video, found from above.
+
+    A DIAGNOSTIC, not a decision. The current pipeline finds a swing by
+    finding a ball SITTING somewhere and inferring that one probably
+    followed. This asks the opposite question directly: what crossed the
+    band above the golfers' heads on its way out, over the entire clip.
+    A ball leaving is the event; a ball sitting is a guess that one might
+    follow.
+
+    One frame-difference pass over the band, every frame -- no sampling,
+    because a ball crosses that band in a handful of frames. Chains that
+    rise are kept, and each is run back along its own heading to the
+    height of the tee box so it can report WHERE it came from, which is
+    what would make this a swing detector rather than a curiosity.
+
+    Returns {ok, ascents, n_tracks, n_dets, seconds, band, reason}.
+    Never raises.
+    """
+    out = {"ok": False, "ascents": [], "n_tracks": 0, "n_dets": 0,
+           "seconds": 0.0, "band": None, "reason": None}
+    if not HAS_CV:
+        out["reason"] = "opencv not installed"
+        return out
+    _t0 = time.perf_counter()
+    try:
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            out["reason"] = "could not open the tee video"
+            return out
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or 1280
+        n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+        if frame_h <= 0 or n_frames <= 1:
+            out["reason"] = "the tee video reports no frames"
+            return out
+        _tee_top = (float(roi.get("y", 0.0)) * frame_h if roi
+                    else (ASCENT_BAND_FALLBACK_FRAC
+                          + ASCENT_HEAD_ROOM_FRAC) * frame_h)
+        band_h = int(max(40, min(frame_h - 1,
+                                 _tee_top - ASCENT_HEAD_ROOM_FRAC * frame_h)))
+        out["band"] = [0, 0, int(frame_w), band_h]
+        out["tee_line_y"] = int(_tee_top)
+        dets = detect_movers_by_diff(input_path, 0, n_frames - 1,
+                                     sens=int(sens),
+                                     per_frame=SWEEP_PER_FRAME,
+                                     roi=(0, 0, int(frame_w), band_h),
+                                     cap=200000, three_frame=True)
+        out["n_dets"] = len(dets)
+        _t_det = time.perf_counter() - _t0
+        tracks = build_tracks(dets, 14.0, min_len=int(min_points),
+                              max_gap=DESCENT_MAX_GAP)
+        out["n_tracks"] = len(tracks)
+        out["timing"] = {"detect": round(_t_det, 2),
+                         "linking": round(time.perf_counter()
+                                          - _t0 - _t_det, 2)}
+        for tk in tracks:
+            pts = tk.get("points") or []
+            if len(pts) < int(min_points):
+                continue
+            rise = float(pts[0]["y"]) - float(pts[-1]["y"])
+            if rise < ASCENT_MIN_RISE_FRAC * frame_h:
+                continue
+            span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
+            rate = (rise / span_f) * float(fps or 30.0) / frame_h
+            if not (ASCENT_RATE_LO <= rate <= ASCENT_RATE_HI):
+                continue
+            bend = _path_bend_px(pts)
+            if bend > ASCENT_MAX_BEND_PX:
+                continue
+            # WHERE IT CAME FROM. Run the chain back along its own
+            # heading to the height of the tee box: on a real ascent that
+            # is the ball's resting spot, and it is the number that would
+            # turn this sweep into a swing detector.
+            _k = min(4, len(pts)) - 1
+            _dfb = max(1, int(pts[_k]["frame"]) - int(pts[0]["frame"]))
+            _vx = (float(pts[_k]["x"]) - float(pts[0]["x"])) / _dfb
+            _vy = (float(pts[_k]["y"]) - float(pts[0]["y"])) / _dfb
+            _from_x = _from_f = None
+            if _vy < -0.5:
+                # SOLVE FOR THE TEE LINE, minding the sign. y(t) = y0 +
+                # vy*t with vy negative, so reaching a LOWER point on the
+                # screen (larger y) needs t negative -- going back in
+                # time, which is the whole point. Written the other way
+                # round it steps forward by the same amount and reports
+                # the ball arriving at the tee line five frames AFTER it
+                # left, from 40px the wrong side of where it started.
+                _steps = (_tee_top - float(pts[0]["y"])) / _vy
+                _from_x = int(round(float(pts[0]["x"]) + _vx * _steps))
+                _from_f = int(round(float(pts[0]["frame"]) + _steps))
+            out["ascents"].append({
+                "first_frame": int(pts[0]["frame"]),
+                "last_frame": int(pts[-1]["frame"]),
+                "first_sec": round(int(pts[0]["frame"]) / float(fps or 30.0), 2),
+                "n_points": len(pts),
+                "rise_px": int(round(rise)),
+                "rate": round(rate, 3),
+                "bend_px": round(bend, 2),
+                "from_x": _from_x,
+                "from_frame": _from_f,
+                "from_sec": (round(_from_f / float(fps or 30.0), 2)
+                             if _from_f is not None else None),
+                "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
+                            "y": int(q["y"])} for q in pts],
+            })
+        out["ascents"].sort(key=lambda a: a["first_frame"])
+        out["ok"] = True
+        out["reason"] = (
+            f"{len(out['ascents'])} ball(s) seen leaving, from "
+            f"{len(tracks)} chain(s) in {len(dets)} detection(s) over "
+            f"{n_frames} frames of the band above the golfers")
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"sweep failed: {exc}"
+    out["seconds"] = round(time.perf_counter() - _t0, 2)
     return out
 
 

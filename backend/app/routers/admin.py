@@ -16982,6 +16982,79 @@ def _ball_scan_near_image(row, gp, sp, near) -> None:
         log.debug("ball scan: near-miss image failed on %s: %s", row.id, exc)
 
 
+def _ball_scan_sweep_image(row, src_path, sweep) -> None:
+    """One picture of every ball the full-video sweep saw leaving.
+
+    Drawn on a frame from the middle of the clip, which is arbitrary and
+    says so: the chains are from all over the video, so no single frame
+    is theirs. What matters is the shape -- a handful of near-vertical
+    streaks in the band and nothing else -- against the tee line each one
+    was traced back to.
+    """
+    _asc = (sweep or {}).get("ascents") or []
+    if not _asc:
+        return
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(src_path))
+        if not cap.isOpened():
+            return
+        try:
+            _mid = _asc[len(_asc) // 2]["first_frame"]
+            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(_mid)))
+            ok, im = cap.read()
+            if not ok or im is None:
+                return
+        finally:
+            cap.release()
+        im = (im.astype("float32") * 0.7).astype("uint8")
+        _band = sweep.get("band")
+        if _band:
+            cv2.rectangle(im, (0, 0), (int(_band[2]) - 1, int(_band[3])),
+                          (80, 200, 255), 2)
+        _ty = int(sweep.get("tee_line_y") or 0)
+        if _ty:
+            cv2.line(im, (0, _ty), (im.shape[1], _ty), (80, 200, 255), 1,
+                     cv2.LINE_AA)
+        from ..services.debug3 import TRACK_COLORS as _TC
+
+        for i, a in enumerate(_asc):
+            _hex = _TC[i % len(_TC)]
+            _rgb = tuple(int(_hex[k:k + 2], 16) for k in (1, 3, 5))
+            _col = (_rgb[2], _rgb[1], _rgb[0])
+            _p = a.get("points") or []
+            for u, v in zip(_p, _p[1:]):
+                cv2.line(im, (u["x"], u["y"]), (v["x"], v["y"]), _col, 2,
+                         cv2.LINE_AA)
+            for q in _p:
+                cv2.circle(im, (q["x"], q["y"]), 4, _col, 2, cv2.LINE_AA)
+            if _p:
+                cv2.putText(im, f"{i + 1}  {a['first_sec']}s  "
+                                f"{a['n_points']}pts  {a['rise_px']}px",
+                            (_p[-1]["x"] + 8, _p[-1]["y"]),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, _col, 1,
+                            cv2.LINE_AA)
+            # WHERE IT CAME FROM, on the tee line. On a real ascent this
+            # is the ball's resting spot, arrived at from the flight
+            # rather than from looking for something that sat still.
+            if a.get("from_x") is not None and _ty:
+                cv2.drawMarker(im, (int(a["from_x"]), _ty), _col,
+                               cv2.MARKER_TILTED_CROSS, 16, 2, cv2.LINE_AA)
+        cv2.putText(
+            im,
+            f"{len(_asc)} ball(s) seen leaving in {sweep.get('seconds')}s - "
+            f"crosses on the tee line are where each was traced back to",
+            (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
+            cv2.LINE_AA)
+        nm = f"ballscan-{row.id}-sweep.jpg"
+        if cv2.imwrite(str(CLIPS_DIR / nm), im,
+                       [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
+            sweep["image_url"] = _clip_url_for(nm)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: sweep image failed on %s: %s", row.id, exc)
+
+
 def _ball_scan_ascent_image(row, src_path, spots, tok, rep) -> None:
     """One picture per candidate of what rose after it emptied.
 
@@ -17284,6 +17357,23 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
 
     _ball_scan_ascent_image(row, src_path, spots, tok, rep)
 
+    # THE WHOLE VIDEO, FROM ABOVE. A measurement only -- nothing below
+    # reads it. The pipeline finds a swing by finding a ball SITTING
+    # somewhere and inferring one probably followed; this asks the
+    # opposite question directly, over the entire clip: what crossed the
+    # band above the golfers on its way out. If its answer matches the
+    # candidate list it could replace most of stage 2, which is a third
+    # of the run.
+    _t = time.perf_counter()
+    try:
+        _sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi")) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ball scan: ascent sweep failed on %s: %s", row.id, exc)
+        _sweep = {"ok": False, "reason": f"failed: {exc}"}
+    _ball_scan_sweep_image(row, src_path, _sweep)
+    rep["sweep"] = _sweep
+    _t_sweep = time.perf_counter() - _t
+
     _t = time.perf_counter()
     _ball_scan_descent_images(row, spots, tok, rep)
     _t_dimg = time.perf_counter() - _t
@@ -17370,7 +17460,16 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
            "ascent if that lands on the ball. Needs no green camera and "
            "no calibration, so it works on every upload.",
            _n_asc, "with an ascent", _t_asc)
-    _stage(5, "Evidence pictures",
+    _stage(5, "Ascent sweep over the whole video (measurement only)",
+           "One frame-difference pass over the band above the golfers, "
+           "every frame of the clip, looking for anything that rose and "
+           "left. Nothing reads the result: it is here to be compared "
+           "with the candidate list above, because a ball leaving IS the "
+           "swing while a ball sitting is only a guess that one might "
+           "follow. " + str((_sweep or {}).get("reason") or ""),
+           len((_sweep or {}).get("ascents") or []), "seen leaving",
+           _t_sweep)
+    _stage(6, "Evidence pictures",
            "A crop of each candidate's first and last frame, the descent "
            "strips, and one overview with every candidate ringed. Two "
            "seeks per candidate through a long file, so this grows with "

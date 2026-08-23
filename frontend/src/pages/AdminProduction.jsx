@@ -8152,6 +8152,37 @@ function BallScanModal({ state, adminPassword, onClose }) {
                 {rep.roi_note}
               </div>
             )}
+            {/* THE WHOLE VIDEO, FROM ABOVE. A measurement that decides
+                nothing -- it is here to be compared with the candidate
+                table below. If the two lists agree, this one pass could
+                replace the scan that costs a third of the run, and it
+                asks the direct question rather than the proxy one. */}
+            {(rep.sweep?.image_url || rep.scan?.sweep?.image_url) && (
+              <figure style={{ margin: "10px 0" }}>
+                <a href={rep.sweep?.image_url || rep.scan.sweep.image_url}
+                   target="_blank" rel="noreferrer">
+                  <img src={rep.sweep?.image_url || rep.scan.sweep.image_url}
+                       alt="every ball seen leaving"
+                       style={{ width: "100%", borderRadius: 6 }} />
+                </a>
+                <figcaption className="tiny muted">
+                  <b>Ascent sweep — measurement only, nothing uses this.</b>
+                  {" "}Every chain that rose through the band above the
+                  golfers, across the whole clip. The crosses on the tee
+                  line are where each was traced back to along its own
+                  heading — on a real ascent that is where the ball was
+                  sitting.
+                  {" "}{(rep.sweep || rep.scan?.sweep)?.reason}
+                  {" "}Took{" "}
+                  <b>{(rep.sweep || rep.scan?.sweep)?.seconds}s</b>
+                  {(rep.sweep || rep.scan?.sweep)?.timing && (
+                    <> ({Object.entries((rep.sweep
+                      || rep.scan.sweep).timing)
+                      .map(([k, v]) => `${k} ${v}s`).join(", ")})</>
+                  )}.
+                </figcaption>
+              </figure>
+            )}
             {(rep.overview_url || rep.scan?.overview_url) && (
               <figure style={{ margin: "10px 0" }}>
                 {/* CLICK THE BALL YOU CAN SEE. The server has always been
