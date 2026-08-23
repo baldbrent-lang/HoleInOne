@@ -16373,6 +16373,16 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
             for _s2 in (_e.get("sources") or []):
                 _by_src[_s2] = _by_src.get(_s2, 0) + 1
         out["accepted_by_detector"] = _by_src
+        # THE NEAR-MISSES THAT NEVER BECAME EVENTS. A track killed by the
+        # drop, rate or bend gate leaves no event, so the report could
+        # say "1 thing fell" while the tracker had built forty -- and the
+        # descent an operator can see plainly in the map was simply
+        # absent, with nothing saying where it went.
+        _rej = []
+        for _r2 in _per_window_reports:
+            _rej.extend(_r2.get("rejected_tracks") or [])
+        _rej.sort(key=lambda t: -int(t.get("n_points") or 0))
+        out["rejected_tracks"] = _rej[:12]
         _raw = []
         for _r2 in _per_window_reports:
             _raw.extend(_r2.get("dets_preview") or [])

@@ -1564,7 +1564,20 @@ DESCENT_STEP_TOL = None
 # corridor and the step test both check that it turned up there. A ball
 # lost behind a tree for a quarter of a second used to end the chain,
 # and the chain ending early is what cut the tracer short.
-DESCENT_MAX_GAP = 4
+# HOW MANY FRAMES A DESCENT MAY VANISH FOR and still be the same ball.
+#
+# Measured off a real one the operator could see plainly in the map and
+# the search reported nothing for: the chain runs f3005..f3014, then
+# nothing for thirteen frames, then f3027..f3033. No gap of four or eight
+# bridges that, so the tracker cut it in two and judged each half alone
+# -- and each half, being short, fell a shorter distance and failed the
+# drop gate that was written for a whole descent.
+#
+# Fifteen is half a second at 30fps. It is affordable here in a way it
+# would not be on a tee view because the prediction is good: a falling
+# ball holds a near-constant rate, so where it should be after half a
+# second of being hidden is arithmetic rather than a guess.
+DESCENT_MAX_GAP = 15
 
 DIFF_SENS = {
     1: (12, 6, 600),
@@ -1864,19 +1877,48 @@ def find_descents(
 
     min_drop = float(min_drop_frac) * frame_h
     events = []
+    # WHY A TRACK NEVER BECAME AN EVENT.
+    #
+    # These three gates run before an event exists, so a track they kill
+    # leaves no trace: the report says "1 thing fell" while the tracker
+    # built forty, and the one obvious descent an operator can see in the
+    # map is not among them with no explanation of where it went. Every
+    # rejection is recorded with the numbers that caused it, so the next
+    # one of these is read instead of inferred.
+    rejected = []
+
+    def _rej(tk_pts, why, **nums):
+        if len(rejected) < 40 and len(tk_pts) >= 3:
+            rejected.append({
+                "first_frame": int(tk_pts[0]["frame"]),
+                "last_frame": int(tk_pts[-1]["frame"]),
+                "n_points": len(tk_pts),
+                "at": [int(tk_pts[-1]["x"]), int(tk_pts[-1]["y"])],
+                "why": why, **nums,
+            })
+
     for tk in tracks:
         pts = tk.get("points") or []
         if len(pts) < int(min_points):
             continue
         drop = float(pts[-1]["y"]) - float(pts[0]["y"])
-        if drop < min_drop:
-            continue
         span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
         rate = (drop / span_f) * _fps / frame_h
-        if not (float(rate_lo) <= rate <= float(rate_hi)):
-            continue
         bend = _path_bend_px(pts)
+        if drop < min_drop:
+            _rej(pts, f"fell {int(drop)}px, needs {int(min_drop)}px",
+                 drop_px=int(drop), fall_rate=round(rate, 3))
+            continue
+        if not (float(rate_lo) <= rate <= float(rate_hi)):
+            _rej(pts,
+                 (f"falls at {round(rate, 3)} frame-heights/sec, outside "
+                  f"{rate_lo}-{rate_hi}"),
+                 drop_px=int(drop), fall_rate=round(rate, 3))
+            continue
         if bend > float(max_bend_px):
+            _rej(pts, f"bends {round(bend, 2)}px, limit {max_bend_px}px",
+                 drop_px=int(drop), fall_rate=round(rate, 3),
+                 bend_px=round(bend, 2))
             continue
 
         # WHERE IT LANDED, not where the tracker gave up. The seed keeps
@@ -1976,6 +2018,7 @@ def find_descents(
         merged.append(ev)
 
     out["events"] = merged[:int(max_events)]
+    out["rejected_tracks"] = rejected
     out["ok"] = bool(out["events"])
     out["fps"] = round(_fps, 3)
     out["reason"] = (
