@@ -560,7 +560,7 @@ function VideoTile({ label, thumb, durationSec, nbFrames, fps, sizeMb,
   );
 }
 
-function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
+function ProducedTile({ clips, swings, onOpenViewer,
                         onDeleteClip, onEditClip, onAddClip }) {
   // Right-most tile on the Production card: thumbnail + summary of every
   // produced clip cut from this upload. With multiple swings, toggle
@@ -712,52 +712,10 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
           )}
         </div>
       )}
-      {curSwing && (
-        <button
-          type="button"
-          className="small"
-          onClick={() => {
-            if (onClickToPlot) {
-              onClickToPlot(curSwing.idx ?? idx);
-            } else if (curSwing.mog2_overlay_url) {
-              window.open(curSwing.mog2_overlay_url, "_blank");
-            }
-          }}
-          style={{
-            display: "block", width: "100%", textAlign: "center",
-            marginTop: 4, padding: "3px 8px", borderRadius: 6,
-            border: "1px solid rgba(230,126,34,0.5)",
-            background: "transparent", cursor: "pointer",
-            // Base button CSS is white-on-green; on a transparent
-            // background the white label vanishes.
-            color: "var(--ink)",
-          }}
-          title={
-            "Open the click-to-plot editor — the motion heat zoomable " +
-            "with every timed dot clickable, one click marks the ball " +
-            "for that dot's frame." +
-            (curSwing.mog2_stats
-              ? ` AI picks: ${curSwing.mog2_stats.n_ai ?? "?"} · MOG2 dots: ` +
-                `${curSwing.mog2_stats.n_cv ?? "?"} · matched: ` +
-                `${curSwing.mog2_stats.n_matched ?? "?"} · added to arc: ` +
-                `${curSwing.mog2_stats.n_added ?? 0}` +
-                (curSwing.mog2_stats.n_added_descent === 0 &&
-                 curSwing.mog2_stats.descent_debug
-                  ? ` · descent 0 because: ` +
-                    `${curSwing.mog2_stats.descent_debug.stopped || "?"} ` +
-                    `(seen ${curSwing.mog2_stats.descent_debug.seen ?? 0}, ` +
-                    `step-rejected ${curSwing.mog2_stats.descent_debug.step_rej ?? 0}, ` +
-                    `corridor-rejected ${curSwing.mog2_stats.descent_debug.corr_rej ?? 0})`
-                  : "")
-              : "")
-          }
-        >
-          🖱 Click-to-plot
-          {curSwing.mog2_stats?.n_added > 0
-            ? ` (+${curSwing.mog2_stats.n_added} added)`
-            : ""}
-        </button>
-      )}
+      {/* THE CLICK-TO-PLOT BUTTON IS GONE, because Edit is it. The
+          two dialogs were merged onto the plot map, so a second button
+          opening the same screen for the same clip was one button too
+          many. */}
       <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 2 }}>
         <MetaRow k="Clips" v={has ? clips.length : ""} />
         <MetaRow k="Aces" v={has ? aces : ""} />
@@ -780,208 +738,29 @@ function ProducedTile({ clips, swings, onOpenViewer, onClickToPlot,
  * with nothing in it says "Not set" rather than a zero, because a zero
  * is a value and the difference decides whether produce believes it.
  */
-function PlotField({ label, value, hint, children, accent }) {
+function PlotField({ label, value, hint, children, accent, icon }) {
   return (
     <div style={{
-      border: "1px solid var(--line)", borderRadius: 8, padding: "7px 9px",
+      border: "1px solid var(--line)", borderRadius: 8, padding: "6px 9px",
       background: "var(--card, rgba(255,255,255,0.02))",
     }}>
-      <div className="tiny upper muted">{label}</div>
-      <div style={{ fontWeight: 700, marginTop: 1,
-                    color: value ? (accent || "var(--ink)") : "var(--muted)" }}>
-        {value || "Not set"}
-      </div>
-      {hint && <div className="tiny muted" style={{ marginTop: 2 }}>{hint}</div>}
-      {children && <div style={{ marginTop: 5 }}>{children}</div>}
-    </div>
-  );
-}
-
-/**
- * BOTH CAMERAS, ONE CLOCK, ONE PLAY BUTTON.
- *
- * The two files do not start together and do not run at the same frame
- * rate -- 50fps on the tee, 30 on the green, and whatever gap there was
- * between the two Pis pressing record. Playing them side by side from
- * 0:00 therefore shows two different moments, which is worse than
- * useless for judging a flight: the whole question is what the green
- * was doing at the instant the tee saw impact.
- *
- * So the transport is in WALL-CLOCK seconds, and each element is seeked
- * to that instant in its own timeline. `delta` is (green start - tee
- * start), the same number the produce cut is made on, so what is on
- * screen here is what the composite will splice.
- *
- * Frame numbers are shown for both, because a frame is what every other
- * screen in this tool talks in.
- */
-function RawSyncPlayer({ teeUrl, greenUrl, teeFps, greenFps, deltaSec,
-                         teeStartedAt, greenStartedAt, measured }) {
-  const teeRef = useRef(null);
-  const grnRef = useRef(null);
-  const [playing, setPlaying] = useState(false);
-  const [rate, setRate] = useState(1);
-  const [t, setT] = useState(0);              // tee-clock seconds
-  const [dur, setDur] = useState(0);
-  const _d = Number(deltaSec) || 0;
-  const _tf = Number(teeFps) || 30;
-  const _gf = Number(greenFps) || 30;
-
-  // ONE SEEK FUNCTION, so the two can never be set from different
-  // ideas of "now". Tee time is the master because it is where the
-  // swing is; the green is that same instant minus the offset.
-  const seek = useCallback((sec) => {
-    const s = Math.max(0, sec);
-    setT(s);
-    if (teeRef.current) teeRef.current.currentTime = s;
-    if (grnRef.current) grnRef.current.currentTime = Math.max(0, s - _d);
-  }, [_d]);
-
-  useEffect(() => {
-    const v = teeRef.current;
-    if (!v) return undefined;
-    const onTime = () => setT(v.currentTime);
-    const onMeta = () => setDur(v.duration || 0);
-    v.addEventListener("timeupdate", onTime);
-    v.addEventListener("loadedmetadata", onMeta);
-    return () => {
-      v.removeEventListener("timeupdate", onTime);
-      v.removeEventListener("loadedmetadata", onMeta);
-    };
-  }, []);
-
-  // DRIFT CORRECTION. Two <video> elements played independently walk
-  // apart -- different decoders, different buffering, and one of them
-  // is 30fps against the other's 50. Left alone they were half a second
-  // out inside ten seconds. The green is nudged back onto the tee's
-  // clock whenever it strays more than a frame.
-  useEffect(() => {
-    if (!playing) return undefined;
-    const id = setInterval(() => {
-      const a = teeRef.current, b = grnRef.current;
-      if (!a || !b) return;
-      const want = Math.max(0, a.currentTime - _d);
-      if (Math.abs(b.currentTime - want) > (1.0 / _gf)) {
-        b.currentTime = want;
-      }
-    }, 250);
-    return () => clearInterval(id);
-  }, [playing, _d, _gf]);
-
-  function play() {
-    setPlaying(true);
-    [teeRef, grnRef].forEach((r) => {
-      if (r.current) { r.current.playbackRate = rate; r.current.play(); }
-    });
-  }
-  function pause() {
-    setPlaying(false);
-    [teeRef, grnRef].forEach((r) => r.current && r.current.pause());
-  }
-  function setSpeed(x) {
-    setRate(x);
-    [teeRef, grnRef].forEach((r) => {
-      if (r.current) r.current.playbackRate = Math.abs(x);
-    });
-  }
-  // BACKWARDS IS NOT A PLAYBACK RATE. HTML video will not play in
-  // reverse, so rewind is a timer that steps the clock back -- which is
-  // what an operator means by it anyway.
-  const rewindRef = useRef(null);
-  function rewind() {
-    pause();
-    setPlaying(true);
-    clearInterval(rewindRef.current);
-    rewindRef.current = setInterval(() => {
-      const a = teeRef.current;
-      if (!a) return;
-      const nx = a.currentTime - (3 / 10);
-      if (nx <= 0) { stopRewind(); seek(0); return; }
-      seek(nx);
-    }, 100);
-  }
-  function stopRewind() {
-    clearInterval(rewindRef.current);
-    rewindRef.current = null;
-    setPlaying(false);
-  }
-  useEffect(() => () => clearInterval(rewindRef.current), []);
-
-  const btn = { width: "auto", padding: "0 10px" };
-  const teeFrame = Math.round(t * _tf);
-  const grnFrame = Math.round(Math.max(0, t - _d) * _gf);
-  const _clock = (base, sec) => {
-    if (!base) return null;
-    try {
-      const d = new Date(new Date(base).getTime() + sec * 1000);
-      return d.toTimeString().slice(0, 8)
-        + "." + String(d.getMilliseconds()).padStart(3, "0");
-    } catch { return null; }
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8,
-                  width: "100%", minHeight: 0 }}>
-      <div className="row" style={{ gap: 8, alignItems: "stretch" }}>
-        {[["Tee", teeUrl, teeRef, teeFrame, _tf, _clock(teeStartedAt, t)],
-          ["Green", greenUrl, grnRef, grnFrame, _gf,
-           _clock(greenStartedAt, Math.max(0, t - _d))]].map(
-          ([lab, url, ref, fr, fps, clk]) => (
-            <div key={lab} style={{ flex: 1, minWidth: 0 }}>
-              <div className="tiny upper muted">
-                {lab} · f{fr} · {fps}fps{clk ? ` · ${clk}` : ""}
-              </div>
-              {url ? (
-                <video ref={ref} src={url} muted playsInline preload="auto"
-                       style={{ width: "100%", borderRadius: 6,
-                                background: "#000" }} />
-              ) : (
-                <div className="muted small"
-                     style={{ padding: 24, textAlign: "center" }}>
-                  no {lab.toLowerCase()} video
-                </div>
-              )}
-            </div>
-          ))}
-      </div>
-
-      <div className="row" style={{ gap: 6, alignItems: "center",
-                                    flexWrap: "wrap" }}>
-        <button type="button" className="ghost small" style={btn}
-                onClick={() => { stopRewind(); seek(t - 1 / _tf); }}
-                title="Back one tee frame">⏮ 1f</button>
-        <button type="button" className="ghost small" style={btn}
-                onClick={rewind} title="Rewind at 3×">⏪ 3×</button>
-        {playing ? (
-          <button type="button" className="small" style={btn}
-                  onClick={() => { stopRewind(); pause(); }}>⏸ Pause</button>
-        ) : (
-          <button type="button" className="small" style={btn}
-                  onClick={() => { setSpeed(1); play(); }}>▶ Play</button>
-        )}
-        <button type="button" className="ghost small" style={btn}
-                onClick={() => { stopRewind(); setSpeed(3); play(); }}
-                title="Forward at 3×">⏩ 3×</button>
-        <button type="button" className="ghost small" style={btn}
-                onClick={() => { stopRewind(); seek(t + 1 / _tf); }}
-                title="Forward one tee frame">1f ⏭</button>
-        <input type="range" min={0} max={Math.max(0.1, dur)} step={1 / _tf}
-               value={Math.min(t, dur || t)}
-               onChange={(e) => { stopRewind(); seek(Number(e.target.value)); }}
-               style={{ flex: 1, minWidth: 140 }} />
-        <span className="tiny muted" style={{ minWidth: 96 }}>
-          {t.toFixed(2)}s{rate !== 1 ? ` · ${rate}×` : ""}
+      {/* LABEL AND VALUE ON ONE LINE. Stacked, five fields were taller
+          than the panel and the last of them needed a scroll to reach —
+          on a screen whose whole point is that everything about the
+          swing is in front of you. */}
+      <div className="row" style={{ justifyContent: "space-between",
+                                    alignItems: "baseline", gap: 8 }}>
+        <span className="tiny upper muted" style={{ whiteSpace: "nowrap" }}>
+          {icon ? `${icon} ` : ""}{label}
+        </span>
+        <span style={{ fontWeight: 700, fontSize: "0.92rem",
+                       color: value ? (accent || "var(--ink)")
+                                    : "var(--muted)" }}>
+          {value || "not set"}
         </span>
       </div>
-      <div className="tiny muted">
-        Locked to the wall clock: the green is held at the tee's instant
-        minus {_d >= 0 ? "" : "−"}{Math.abs(_d).toFixed(3)}s
-        {measured
-          ? " — measured from what each camera reported for its first frame."
-          : " — ASSUMED, because neither camera reported when its first "
-            + "frame was captured. The two halves may not be showing the "
-            + "same moment."}
-      </div>
+      {hint && <div className="tiny muted" style={{ marginTop: 1 }}>{hint}</div>}
+      {children && <div style={{ marginTop: 4 }}>{children}</div>}
     </div>
   );
 }
@@ -1015,6 +794,15 @@ function ClickToPlotModal({
 }) {
   const swings = row.edit_metrics?.swings || [];
   const swing = swings[swingPos] || {};
+  // ADDING A SWING IS THE SAME SCREEN WITH EMPTY FIELDS. A swing the
+  // detector missed needs exactly what this map already collects -- tee
+  // spot, impact frame, flight points, landing -- so `swingPos` past the
+  // end of the list means "there is no swing here yet" and every field
+  // falls back to blank through `swings[swingPos] || {}` above. The only
+  // things that differ are at save: the swing is APPENDED rather than
+  // patched, and it needs a frame window, which is derived from the
+  // impact frame the operator set.
+  const isNew = swingPos >= swings.length;
   // FLIGHT WINDOW. Pre-swing motion (waggle, address, shadow) is noise on
   // this map, and so is everything long after the ball has gone — the
   // golfer walking off, a cart, wind in the trees. Both crowd the map with
@@ -1035,7 +823,6 @@ function ClickToPlotModal({
   // because this is the screen where you can actually SEE where the ball
   // was, against the motion heat.
   const [ballAtRest, setBallAtRest] = useState(swing.ball ?? null);
-  const [placingBall, setPlacingBall] = useState(false);
   // One tee frame as a picture, for the map's frame stepper. Stable
   // across renders so the canvas's fetch effect is not re-run every time
   // a dot is clicked.
@@ -1259,7 +1046,6 @@ function ClickToPlotModal({
   // simply missed -- there was no way to say where it came down at all,
   // and the landing is what gives the tracer its aim AND its flight
   // time. Same gesture as the tee side's ball placement.
-  const [placingLanding, setPlacingLanding] = useState(false);
   // THE FLAG STICK, WHICH BELONGS TO THE HOLE, NOT THE SWING.
   //
   // It is stored once against the hole's tee<->green mapping, so it
@@ -1271,7 +1057,13 @@ function ClickToPlotModal({
   const [pinGreen, setPinGreen] = useState(null);   // {x, y}
   const [pinTee, setPinTee] = useState(null);       // {x, y}, derived
   const [pinNote, setPinNote] = useState(null);
-  const [placingPin, setPlacingPin] = useState(null); // 'green' | 'tee'
+  // ONE-CLICK PLACEMENT, only for what is not there yet. Once a thing
+  // exists in the picture it is dragged; arming a mode to move
+  // something you can already see is a button standing between the
+  // operator and the obvious gesture.
+  const [placeOnTee, setPlaceOnTee] = useState(null);    // 'tee' | 'pin'
+  const [placeOnGreen, setPlaceOnGreen] = useState(null); // 'landing' | 'pin'
+  const [teeViewFrame, setTeeViewFrame] = useState(null);
   // THE OFFSET BETWEEN THE TWO CAMERAS, in the same order the produce
   // cut uses it: each Pi's own first-frame stamp, then whatever a
   // previous run established, then an assumption of zero. Worked out
@@ -1340,7 +1132,7 @@ function ClickToPlotModal({
   // camera can see the base of the stick.
   async function setPinFromGreen(pt) {
     setPinGreen(pt);
-    setPlacingPin(null);
+    setPlaceOnGreen(null);
     try {
       const out = await api.saveHolePin(adminPassword, row.id,
                                         { green: [pt.x, pt.y] });
@@ -1363,7 +1155,7 @@ function ClickToPlotModal({
   // one nobody can reason about.
   async function setPinFromTee(pt) {
     setPinTee(pt);
-    setPlacingPin(null);
+    setPlaceOnTee(null);
     if (!pinGreen) {
       setPinNote("mark the flag on the green camera first — that is the "
         + "view that can see the base of the stick");
@@ -1691,7 +1483,8 @@ function ClickToPlotModal({
     setCometReason(null);
     setImpactFrame(swing.impact_frame ?? null);
     setBallAtRest(swing.ball ?? null);
-    setPlacingBall(false);
+    setPlaceOnTee(null);
+    setPlaceOnGreen(null);
   }
 
   // Diff vs the baked state: new/moved picks become manual points,
@@ -1718,7 +1511,8 @@ function ClickToPlotModal({
       (ballAtRest.x !== (swing.ball?.x ?? null) ||
         ballAtRest.y !== (swing.ball?.y ?? null));
     if (
-      overrides.length === 0 && cleared.length === 0
+      !isNew
+      && overrides.length === 0 && cleared.length === 0
       && !movedImpact && !movedBall && !greenChanged
       && !shapeChanged
     ) {
@@ -1752,8 +1546,29 @@ function ClickToPlotModal({
     onClose();
     try {
       // 1. Bake the picks into the swing's track (cv2 only, no AI).
+      // A NEW SWING HAS NO WINDOW YET, and the renderer needs one to know
+      // which frames to draw over. The impact frame is the only anchor
+      // the operator has given, so the window is hung off it: a few
+      // seconds of lead-in and enough after for a full flight, clipped to
+      // the footage that actually exists.
+      const fps_ = Number(row.tee_fps) || 30;
+      const lastF_ = row.tee_nb_frames ? row.tee_nb_frames - 1 : null;
+      const newWindow =
+        isNew && impactFrame != null
+          ? {
+            start_frame: Math.max(0, Math.round(impactFrame - 3 * fps_)),
+            end_frame: (() => {
+              const e = Math.round(impactFrame + 10 * fps_);
+              return lastF_ == null ? e : Math.min(e, lastF_);
+            })(),
+          }
+          : null;
       const hasWindow =
         swing.start_frame != null && swing.end_frame != null;
+      const renderWindow = newWindow
+        || (hasWindow
+          ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
+          : null);
       const fast = teeChanged
         ? await api.renderWizardTracerFast(adminPassword, row.id, {
           manual_positions: overrides,
@@ -1767,17 +1582,22 @@ function ClickToPlotModal({
           // only ever a proxy for.
           target: tracerEnd || swing.target || null,
           flight_sec: flightSec,
-          render_window: hasWindow
-            ? { start_frame: swing.start_frame, end_frame: swing.end_frame }
-            : null,
+          render_window: renderWindow,
         })
         : {
           tracer_url: swing.tracer_url,
           ball_track_frames: swing.ball_track_frames || [],
         };
-      let nextSwings = swings.map((s, i) =>
-        i === swingPos
-          ? {
+      // The swing this save writes: a fresh one appended to the list when
+      // the map was opened on a swing that does not exist yet, otherwise
+      // the existing one patched in place. `newIdx` follows the wizard's
+      // rule -- one past the highest idx on the row, not the array length,
+      // so a deleted swing cannot make two swings share a number.
+      const newIdx = isNew
+        ? (swings.length
+          ? Math.max(...swings.map((s) => s.idx ?? 0)) + 1 : 0)
+        : (swing.idx ?? swingPos);
+      const patch = (s) => ({
               ...s,
               impact_frame: impactFrame ?? s.impact_frame,
               // The landing, and the descent found from it. Kept on the
@@ -1805,9 +1625,15 @@ function ClickToPlotModal({
                 : {}),
               tracer_url: fast.tracer_url,
               ball_track_frames: fast.ball_track_frames || [],
-            }
-          : s
-      );
+      });
+      const nextSwings = isNew
+        ? [...swings, patch({
+          idx: newIdx,
+          fps: fps_,
+          address_frame: renderWindow?.start_frame ?? 0,
+          ...(renderWindow || {}),
+        })]
+        : swings.map((s, i) => (i === swingPos ? patch(s) : s));
       await api.saveEditMetrics(adminPassword, row.id, {
         swings: nextSwings,
         // Single-swing rows read the landing from the top level (that
@@ -1858,7 +1684,7 @@ function ClickToPlotModal({
         // THIS SWING ONLY. Click-to-plot is opened on one clip, so a
         // save from it must not clear the upload's other clips.
         solo: true,
-        swing_idx: swing.idx ?? swingPos,
+        swing_idx: newIdx,
         points: plotted.length >= 2 ? plotted : null,
         launch_frame: plotted.length ? plotted[0].frame : null,
       });
@@ -1880,6 +1706,14 @@ function ClickToPlotModal({
     pendAdd.length + pendClear.length + (impactMoved ? 1 : 0)
     + (ballMoved ? 1 : 0) + (greenChanged ? 1 : 0)
     + (shapeChanged ? 1 : 0);
+  // A NEW SWING NEEDS AN IMPACT FRAME AND NOTHING ELSE. Every other
+  // field on this panel is optional -- a clip can be a tee tracer with
+  // no landing, or a landing with no tee spot -- but without impact
+  // there is no window to render and no moment to cut on, so that is
+  // the one thing Save waits for. `nChanged` measures edits against a
+  // saved swing, which a brand new one has none of, so it cannot gate
+  // the button here.
+  const canSave = isNew ? impactFrame != null : nChanged > 0;
   // The earliest point actually in the saved track — with a wrong impact
   // frame this is the honest answer to "when does the ball leave", so it
   // is offered as a one-click fix.
@@ -1994,118 +1828,13 @@ function ClickToPlotModal({
                 picture; on the green camera they are noise, and worse,
                 they are noise that wraps the toolbar onto three lines
                 and takes that height off the map. */}
-            {cam === "tee" && (
-            <>
-            <span
-              className="small"
-              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-              title="The frame the ball is struck. Drives the flight window shown here and where the rendered tracer line starts."
-            >
-              <span className="muted">impact</span>
-              <button
-                type="button"
-                className="ghost small"
-                style={{ width: "auto", padding: "0 6px" }}
-                disabled={impactFrame == null}
-                onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) - 10))}
-              >
-                −10
-              </button>
-              <button
-                type="button"
-                className="ghost small"
-                style={{ width: "auto", padding: "0 6px" }}
-                disabled={impactFrame == null}
-                onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) - 1))}
-              >
-                −1
-              </button>
-              <input
-                type="number"
-                value={impactFrame ?? ""}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  setImpactFrame(Number.isFinite(n) ? Math.max(0, n) : null);
-                }}
-                style={{ width: 80, textAlign: "center", padding: "1px 4px" }}
-              />
-              <button
-                type="button"
-                className="ghost small"
-                style={{ width: "auto", padding: "0 6px" }}
-                disabled={impactFrame == null}
-                onClick={() => setImpactFrame((f) => (f ?? 0) + 1)}
-              >
-                +1
-              </button>
-              <button
-                type="button"
-                className="ghost small"
-                style={{ width: "auto", padding: "0 6px" }}
-                disabled={impactFrame == null}
-                onClick={() => setImpactFrame((f) => (f ?? 0) + 10)}
-              >
-                +10
-              </button>
-              {firstTrackF != null && firstTrackF !== impactFrame && (
-                <button
-                  type="button"
-                  className="ghost small"
-                  style={{ width: "auto", padding: "0 6px" }}
-                    onClick={() => setImpactFrame(firstTrackF)}
-                  title={`The earliest point in the saved track is f${firstTrackF}. If the ball is already moving there, that is closer to the real strike than f${impactFrame}.`}
-                >
-                  ← f{firstTrackF}
-                </button>
-              )}
-              {impactMoved && (
-                <span style={{ color: "var(--emerald-700)" }}>
-                  (was f{swing.impact_frame})
-                </span>
-              )}
-            </span>
-            <button
-              type="button"
-              className={placingBall ? "small" : "ghost small"}
-              style={{ width: "auto" }}
-              onClick={() => setPlacingBall((v) => !v)}
-              title="Click the map to set where the tracer line STARTS - the ball at impact. This anchors the whole line, so it matters more than any single flight point."
-            >
-              {placingBall
-                ? "click the map…"
-                : ballAtRest
-                  ? `⦿ start ${ballAtRest.x},${ballAtRest.y}`
-                  : "⦿ set tracer start"}
-            </button>
-            {ballMoved && (
-              <span className="small" style={{ color: "var(--emerald-700)" }}>
-                start moved
-              </span>
-            )}
-            </>
-            )}
-            <button
-              type="button"
-              className="ghost small"
-              onClick={resetMarks}
-              style={{ width: "auto" }}
-              disabled={nChanged === 0}
-              title="Put every point back to what was saved before this modal was opened"
-            >
-              Reset
-            </button>
-            {cam === "tee" && (
-              <button
-                type="button"
-                className="ghost small"
-                onClick={clearAllMarks}
-                style={{ width: "auto" }}
-                disabled={Object.keys(marks).length === 0}
-                title="Remove ALL plotted points for this swing. Saving then re-renders the tracer with none of them."
-              >
-                Clear all ({Object.keys(marks).length})
-              </button>
-            )}
+            {/* THE TEE'S NUMBERS MOVED RIGHT. Impact, the tracer's
+                start and the plotted-point count all used to live here,
+                which put five controls and three readouts on one line
+                above the picture — and every one of them is a fact
+                about the swing, which is what the panel down the right
+                is for. What is left on the toolbar is what acts on the
+                DIALOG rather than on the swing. */}
             {/* THE COMET. In green mode this is the live state of the
                 click just made — searching, found, or the sentence
                 saying why there is no path. In tee mode it is what the
@@ -2214,15 +1943,6 @@ function ClickToPlotModal({
                 </button>
                 <button
                   type="button"
-                  className={placingLanding ? "small" : "ghost small"}
-                  style={{ width: "auto" }}
-                  onClick={() => setPlacingLanding((v) => !v)}
-                  title="Click anywhere on the green picture to say the ball came down THERE — no detected dot needed. The landing gives the tracer both its aim and its flight time, so a shot with one drawn is paced over the real seconds it was in the air instead of stopping where the blob detector lost it."
-                >
-                  {placingLanding ? "📍 Click the landing…" : "📍 Landing spot"}
-                </button>
-                <button
-                  type="button"
                   className="ghost small"
                   style={{ width: "auto" }}
                   disabled={!cometPoints.length}
@@ -2252,14 +1972,16 @@ function ClickToPlotModal({
               className="small"
               onClick={saveAndClose}
               style={{ width: "auto" }}
-              disabled={nChanged === 0}
+              disabled={!canSave}
               title={
-                nChanged === 0
-                  ? "Click dots on the heat to add/remove ball points first — green dots are already in the saved track"
-                  : "Re-render the tracer with the changes, re-apply graphics, and update Produced Clips"
+                canSave
+                  ? "Re-render the tracer with the changes, re-apply graphics, and update Produced Clips"
+                  : (isNew
+                    ? "Set the impact frame first — a new clip is cut around it"
+                    : "Click dots on the heat to add/remove ball points first — green dots are already in the saved track")
               }
             >
-              {"Save & close"}
+              {isNew ? "Add clip" : "Save & close"}
             </button>
           </div>
         </div>
@@ -2367,16 +2089,44 @@ function ClickToPlotModal({
                 // the comet, the saved landing_spot/landing_frame, the
                 // tracer's aim and its flight time — is fed by the one
                 // mechanism and cannot disagree with itself.
-                placingBall={placingLanding || placingPin === "green"}
-                onPlaceBall={(pt) => {
-                  if (placingPin === "green") { setPinFromGreen(pt); return; }
-                  const f = greenViewFrame ?? green.frame ?? 0;
+                // DRAG THEM, DO NOT ARM A MODE. The ball and the flag
+                // are things in the picture; picking one up and putting
+                // it down is what an operator means, and it works
+                // whenever they look at it rather than only after
+                // pressing a button first.
+                handles={[
+                  ...(landing ? [{
+                    id: "landing", x: landing.x, y: landing.y, icon: "ball",
+                    title: "Where the ball finished. Drag it onto the ball.",
+                  }] : []),
+                  ...(pinGreen ? [{
+                    id: "pin", x: pinGreen.x, y: pinGreen.y, icon: "flag",
+                    title: "The flagstick. Drag it to the BASE of the stick — the tee view follows through the calibration, and it stays put for every swing on this hole.",
+                  }] : []),
+                ]}
+                onHandleDrag={(id, pt) => {
+                  if (!pt) return;
+                  if (id === "pin") { setPinGreen(pt); return; }
+                  const f = landing?.frame ?? greenViewFrame
+                    ?? green.frame ?? 0;
                   setGreenMarks((m) => ({ ...m, [f]: { x: pt.x, y: pt.y } }));
-                  setPlacingLanding(false);
-                  setCometReason(null);
                 }}
-                // The hole's flag, on the camera that can see its base.
-                flag={pinGreen}
+                onHandleDrop={(id, pt) => {
+                  if (id === "pin" && pt) setPinFromGreen(pt);
+                  if (id === "landing") setCometReason(null);
+                }}
+                // Nothing placed yet? One click puts it down; after that
+                // it is dragged like everything else.
+                placingBall={placeOnGreen != null}
+                onPlaceBall={(pt) => {
+                  if (placeOnGreen === "pin") { setPinFromGreen(pt); }
+                  else {
+                    const f = greenViewFrame ?? green.frame ?? 0;
+                    setGreenMarks((m) => ({ ...m, [f]: { x: pt.x, y: pt.y } }));
+                    setCometReason(null);
+                  }
+                  setPlaceOnGreen(null);
+                }}
                 track={[]}
                 comet={comet}
                 note={cometStatus}
@@ -2436,49 +2186,42 @@ function ClickToPlotModal({
               )}
               onToggleDot={toggleDot}
               ballXY={ballAtRest}
-              placingBall={placingBall || placingPin === "tee"}
+              placingBall={placeOnTee != null}
               onPlaceBall={(pt) => {
-                if (placingPin === "tee") { setPinFromTee(pt); return; }
-                setBallAtRest(pt);
-                setPlacingBall(false);
+                if (placeOnTee === "pin") setPinFromTee(pt);
+                else setBallAtRest(pt);
+                setPlaceOnTee(null);
               }}
-              // The same flag, put here by the calibration rather than
-              // by a click — which is why dragging it here measures the
-              // calibration instead of moving the flag.
-              flag={pinTee}
               // THE LANDING, GRABBABLE IN THE TEE PICTURE. It is stored
               // in green pixels, but this is the picture the tracer is
               // drawn on, so it is the one where the operator can see
               // whether the line finishes where the ball did.
-              handles={teeLandingXY ? [{
-                id: "landing", x: teeLandingXY.x, y: teeLandingXY.y,
-                colour: "#f472b6",
-                title: "Where the tracer is aimed, shown in the tee "
-                  + "frame. It starts at wherever this hole's calibration "
-                  + "puts the green camera's landing. Drag it onto the "
-                  + "spot you can actually see: that aims the predictive "
-                  + "tracer, and the distance it moved is this hole's "
-                  + "calibration error at the one point that matters. The "
-                  + "landing on the green camera is NOT changed — that is "
-                  + "the measured one.",
-              }] : []}
+              handles={[
+                ...(ballAtRest ? [{
+                  id: "tee", x: ballAtRest.x, y: ballAtRest.y, icon: "tee",
+                  title: "The tee — where the ball was hit from, and where the tracer starts. Drag it onto the ball.",
+                }] : []),
+                ...(pinTee ? [{
+                  id: "pin", x: pinTee.x, y: pinTee.y, icon: "flag",
+                  title: "The flagstick, put here by this hole's calibration rather than by a click. Dragging it does NOT move the flag — the green camera decides that — it measures how far the calibration is out at the one point both cameras can identify.",
+                }] : []),
+                ...(teeLandingXY ? [{
+                  id: "aim", x: teeLandingXY.x, y: teeLandingXY.y,
+                  colour: "#f472b6",
+                  title: "Where the tracer is aimed. Drag it onto the spot you can actually see; the landing on the green camera is not changed.",
+                }] : []),
+              ]}
               onHandleDrag={(id, pt) => {
-                if (id === "landing" && pt) setTeeLandingXY(pt);
+                if (!pt) return;
+                if (id === "tee") setBallAtRest(pt);
+                if (id === "pin") setPinTee(pt);
+                if (id === "aim") setTeeLandingXY(pt);
               }}
               onHandleDrop={(id, pt) => {
-                if (id === "landing") dropTeeLanding(pt);
+                if (id === "pin" && pt) setPinFromTee(pt);
+                if (id === "aim") dropTeeLanding(pt);
               }}
-              // WHY THE LINE IS SHORT, said on the screen where it
-              // looks short. With nothing marked the tracer stops where
-              // the plotted points stop, which is correct and does not
-              // look it.
-              note={teeLandingNote
-                || (!landing
-                  ? "no landing marked — the tracer will stop where the "
-                    + "plotted points stop. Mark one on the green tab, or "
-                    + "drag the pink handle here, to have it fly on."
-                  : null)}
-              noteColour={teeLandingNote ? "#f472b6" : "#fbbf24"}
+              onViewFrame={setTeeViewFrame}
               scanRegion={async (region, sensitivity) => {
                 const out = await api.scanPlotRegion(adminPassword, row.id, {
                   ...region,
@@ -2513,114 +2256,116 @@ function ClickToPlotModal({
           flexDirection: "column", gap: 7, overflowY: "auto", minHeight: 0,
         }}>
           <PlotField
-            label="Ball at rest"
+            label="Tee spot" icon="⛳"
             value={ballAtRest ? `${ballAtRest.x}, ${ballAtRest.y}` : null}
-            hint="Where the tracer starts."
-            accent="#4ade80"
+            accent="#fde68a"
+            hint={ballAtRest
+              ? "Drag the tee on the tee view onto the ball."
+              : "Click the tee view where the ball was hit from."}
           >
-            <button type="button"
-                    className={placingBall ? "small" : "ghost small"}
-                    style={{ width: "100%" }}
-                    onClick={() => { setCam("tee"); setPlacingBall((v) => !v); }}
-                    title="Click the ball on the tee picture.">
-              {placingBall ? "click the ball…" : "◎ Place on tee"}
-            </button>
+            {!ballAtRest && (
+              <button type="button"
+                      className={placeOnTee === "tee" ? "small" : "ghost small"}
+                      style={{ width: "100%" }}
+                      onClick={() => {
+                        setCam("tee");
+                        setPlaceOnTee((v) => (v === "tee" ? null : "tee"));
+                      }}>
+                {placeOnTee === "tee" ? "click the tee view…" : "place it"}
+              </button>
+            )}
           </PlotField>
 
           <PlotField
-            label="Impact frame"
+            label="Impact frame" icon="⧗"
             value={impactF != null ? `f${impactF}` : null}
             hint={impactF != null
-              ? `MOG2 points shown f${winLo}–f${winHi}`
+              ? `motion points f${winLo}–f${winHi}`
               : "Set this and the motion points appear."}
           >
-            <div className="row" style={{ gap: 3 }}>
-              {[-10, -1, 1, 10].map((d) => (
-                <button key={d} type="button" className="ghost small"
-                        style={{ width: "auto", flex: 1, padding: "0 4px" }}
-                        disabled={impactF == null}
-                        onClick={() => setImpactFrame((f) => Math.max(0, (f ?? 0) + d))}>
-                  {d > 0 ? `+${d}` : d}
-                </button>
-              ))}
-            </div>
             <button type="button" className="ghost small"
-                    style={{ width: "100%", marginTop: 4,
+                    style={{ width: "100%" }}
+                    disabled={teeViewFrame == null}
+                    onClick={() => setImpactFrame(teeViewFrame)}
+                    title="Use the frame the tee view is showing. Step to the strike with the frame buttons on the picture, then press this.">
+              set to current{teeViewFrame != null ? ` (f${teeViewFrame})` : ""}
+            </button>
+            <button type="button" className="ghost small"
+                    style={{ width: "100%", marginTop: 3,
                              color: "var(--danger)" }}
                     disabled={Object.keys(marks).length === 0}
                     onClick={clearAllMarks}
                     title="Remove every plotted tee point for this swing.">
-              ✕ Clear tee tracer ({Object.keys(marks).length})
+              ✕ clear tee tracer ({Object.keys(marks).length})
             </button>
           </PlotField>
 
           <PlotField
-            label="Ball landing spot"
+            label="Ball landing spot" icon="◍"
             value={landing ? `${landing.x}, ${landing.y}` : null}
-            hint="On the green camera. Gives the tracer its aim and its
-                  flight time."
-            accent="#f472b6"
+            accent="#e2e8f0"
+            hint={!row.green_filename
+              ? "no green camera on this upload"
+              : landing
+                ? "Drag the ball on the green view."
+                : "Click the green view where it came down."}
           >
-            <button type="button"
-                    className={placingLanding ? "small" : "ghost small"}
-                    style={{ width: "100%" }}
-                    disabled={!row.green_filename}
-                    onClick={() => {
-                      setCam("green"); setPlacingLanding((v) => !v);
-                    }}>
-              {placingLanding ? "click the landing…" : "📍 Place on green"}
-            </button>
+            {!landing && row.green_filename && (
+              <button type="button"
+                      className={placeOnGreen === "landing"
+                        ? "small" : "ghost small"}
+                      style={{ width: "100%" }}
+                      onClick={() => {
+                        setCam("green");
+                        setPlaceOnGreen((v) => (v === "landing"
+                          ? null : "landing"));
+                      }}>
+                {placeOnGreen === "landing"
+                  ? "click the green view…" : "place it"}
+              </button>
+            )}
           </PlotField>
 
           <PlotField
-            label="Landing frame"
+            label="Landing frame" icon="⧖"
             value={landing ? `f${landing.frame}` : null}
             hint={cometPoints.length > 1
-              ? `${cometPoints.length} descent points plotted`
-              : "The frame the ball comes down on."}
+              ? `${cometPoints.length} descent points`
+              : "The frame it comes down on."}
           >
             <button type="button" className="ghost small"
                     style={{ width: "100%", color: "var(--danger)" }}
                     disabled={!cometPoints.length}
                     onClick={() => { setGreenMarks({}); setCometReason(null); }}
                     title="Remove every plotted descent point for this swing.">
-              ✕ Clear descent ({cometPoints.length})
+              ✕ clear descent ({cometPoints.length})
             </button>
           </PlotField>
 
           <PlotField
-            label="Flag stick"
+            label="Flag stick" icon="⚑"
             value={pinGreen ? `${pinGreen.x}, ${pinGreen.y}` : null}
+            accent="#ef4444"
             hint={pinTee
-              ? `tee frame: ${pinTee.x}, ${pinTee.y}`
-              : "Belongs to the hole — it stays put from swing to swing."}
-            accent="#fbbf24"
+              ? `tee frame ${pinTee.x}, ${pinTee.y} — belongs to the hole`
+              : "Belongs to the hole; it stays put from swing to swing."}
           >
-            <div className="row" style={{ gap: 4 }}>
+            {!pinGreen && (
               <button type="button"
-                      className={placingPin === "green" ? "small" : "ghost small"}
-                      style={{ width: "auto", flex: 1 }}
+                      className={placeOnGreen === "pin" ? "small" : "ghost small"}
+                      style={{ width: "100%" }}
                       disabled={!row.green_filename}
                       onClick={() => {
                         setCam("green");
-                        setPlacingPin((v) => (v === "green" ? null : "green"));
+                        setPlaceOnGreen((v) => (v === "pin" ? null : "pin"));
                       }}
-                      title="Click the BASE of the flagstick on the green camera. The tee view follows through the calibration, and it stays set for every swing on this hole.">
-                ⛳ green
+                      title="Click the BASE of the flagstick on the green view.">
+                {placeOnGreen === "pin"
+                  ? "click the flag base…" : "place it on green"}
               </button>
-              <button type="button"
-                      className={placingPin === "tee" ? "small" : "ghost small"}
-                      style={{ width: "auto", flex: 1 }}
-                      onClick={() => {
-                        setCam("tee");
-                        setPlacingPin((v) => (v === "tee" ? null : "tee"));
-                      }}
-                      title="Click where the flag looks to be in the TEE picture. This does NOT move the flag — the green camera decides that. It measures how far the hole's calibration is out at the one point both cameras can identify.">
-                ⛳ tee
-              </button>
-            </div>
+            )}
             {pinNote && (
-              <div className="tiny" style={{ marginTop: 4, color: "#fbbf24" }}>
+              <div className="tiny" style={{ marginTop: 3, color: "#fbbf24" }}>
                 {pinNote}
               </div>
             )}
@@ -9486,6 +9231,11 @@ function PlotHeatCanvas({
   // view that shows a whole flight at once.
   const canStep = typeof loadFrame === "function"
     && frameLo != null && frameHi != null && frameHi >= frameLo;
+  // ALWAYS THE REAL FRAME. The motion-heat composite is every frame of
+  // the window smeared into one picture -- useful for seeing a whole
+  // flight at once, and useless for placing anything, because nothing
+  // in it is a moment. Placing is what this map is for now, so it opens
+  // on the video and the composite is not offered.
   const [viewFrame, setViewFrame] = useState(null);
   const [frameUrl, setFrameUrl] = useState(null);
   const [frameErr, setFrameErr] = useState(null);
@@ -9526,6 +9276,13 @@ function PlotHeatCanvas({
   // camera is a place AND an instant, and the instant is whichever
   // frame the operator was looking at when they clicked it.
   useEffect(() => { onViewFrame?.(viewFrame); }, [viewFrame, onViewFrame]);
+  // Open on a frame rather than on the composite.
+  useEffect(() => {
+    if (!canStep) return;
+    setViewFrame((f) => (f == null
+      ? Math.max(frameLo, Math.min(frameHi, startFrame ?? frameLo))
+      : f));
+  }, [canStep, frameLo, frameHi, startFrame]);
   const stepFrame = (d) => setViewFrame((f) => {
     if (f == null) return null;
     return Math.max(frameLo, Math.min(frameHi, f + d));
@@ -9902,26 +9659,86 @@ function PlotHeatCanvas({
               position: "absolute",
               left: `${(h.x / frameW) * 100}%`,
               top: `${(h.y / frameH) * 100}%`,
-              width: Math.max(26, 26 / zoom),
-              height: Math.max(26, 26 / zoom),
-              transform: "translate(-50%, -50%)",
-              borderRadius: "50%",
-              border: `2px solid ${h.colour || "#67e8f9"}`,
+              // AN ICON HANGS FROM ITS OWN ANCHOR. A flagstick is at
+              // the BOTTOM of the stick and a tee is at the bottom of
+              // the peg, so centring them would put both a dozen pixels
+              // above the thing they mark. A plain handle still
+              // centres.
+              transform: h.icon === "flag" || h.icon === "tee"
+                ? "translate(-50%, -100%)" : "translate(-50%, -50%)",
+              width: h.icon ? "auto" : Math.max(26, 26 / zoom),
+              height: h.icon ? "auto" : Math.max(26, 26 / zoom),
+              borderRadius: h.icon ? 0 : "50%",
+              border: h.icon
+                ? "none" : `2px solid ${h.colour || "#67e8f9"}`,
               // TINTED WITH ITS OWN COLOUR. Hard-coded cyan made every
               // handle look like the tracer's end handle, which is the
               // one thing a second draggable point must not be mistaken
               // for.
-              background: h.colour
+              background: h.icon ? "transparent" : (h.colour
                 ? `${h.colour}${dragId === h.id ? "99" : "33"}`
                 : (dragId === h.id
                   ? "rgba(103,232,249,0.55)"
-                  : "rgba(103,232,249,0.18)"),
-              boxShadow: "0 0 0 2px rgba(0,0,0,0.55)",
+                  : "rgba(103,232,249,0.18)")),
+              boxShadow: h.icon ? "none" : "0 0 0 2px rgba(0,0,0,0.55)",
               cursor: h.axis === "y" ? "ns-resize" : "move",
               touchAction: "none",
+              opacity: dragId === h.id ? 0.75 : 1,
               zIndex: 8,
             }}
-          />
+          >
+            {h.icon === "flag" ? (
+              /* The flagstick as it has always been drawn here: a white
+                 pole with a red pennant, anchored at its base. */
+              <div style={{ position: "relative" }}>
+                <div style={{
+                  width: 2, height: Math.max(22, 22 / zoom),
+                  background: "#fff",
+                  boxShadow: "0 0 2px rgba(0,0,0,0.9)",
+                }} />
+                <div style={{
+                  position: "absolute", left: 2, top: 0,
+                  width: 0, height: 0,
+                  borderTop: `${Math.max(7, 7 / zoom)}px solid transparent`,
+                  borderBottom: `${Math.max(7, 7 / zoom)}px solid transparent`,
+                  borderLeft: `${Math.max(13, 13 / zoom)}px solid #ef4444`,
+                  filter: "drop-shadow(0 0 1px rgba(0,0,0,0.9))",
+                }} />
+              </div>
+            ) : h.icon === "tee" ? (
+              /* A golf tee: the cup, the stem, the point. Anchored at
+                 the point, which is where the ball sat. */
+              <div style={{ position: "relative",
+                            width: Math.max(14, 14 / zoom),
+                            height: Math.max(20, 20 / zoom) }}>
+                <div style={{
+                  position: "absolute", top: 0, left: 0, right: 0,
+                  height: Math.max(4, 4 / zoom), background: "#fde68a",
+                  borderRadius: 2,
+                  boxShadow: "0 0 2px rgba(0,0,0,0.9)",
+                }} />
+                <div style={{
+                  position: "absolute", top: Math.max(3, 3 / zoom),
+                  left: "50%", transform: "translateX(-50%)",
+                  width: 0, height: 0,
+                  borderLeft: `${Math.max(3, 3 / zoom)}px solid transparent`,
+                  borderRight: `${Math.max(3, 3 / zoom)}px solid transparent`,
+                  borderTop: `${Math.max(17, 17 / zoom)}px solid #fde68a`,
+                  filter: "drop-shadow(0 0 1px rgba(0,0,0,0.9))",
+                }} />
+              </div>
+            ) : h.icon === "ball" ? (
+              /* A golf ball: white, ringed so it reads against turf. */
+              <div style={{
+                width: Math.max(15, 15 / zoom),
+                height: Math.max(15, 15 / zoom),
+                borderRadius: "50%",
+                background: "radial-gradient(circle at 35% 30%, #fff, #cbd5e1)",
+                border: "1px solid #0f172a",
+                boxShadow: "0 0 0 2px rgba(0,0,0,0.5), 0 0 5px rgba(0,0,0,0.7)",
+              }} />
+            ) : null}
+          </div>
         ))}
 
         {/* THE FLAG. Small, gold, and not interactive — it is a
@@ -10180,51 +9997,31 @@ function PlotHeatCanvas({
         {/* FRAME STEPPER. Off by default: the heat composite is the
             view that shows a whole flight at once, and this trades that
             for being able to see one instant properly. */}
-        {canStep && (
-          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-            <button
-              type="button"
-              style={{
-                ...zoomBtn, width: "auto", padding: "0 8px",
-                background: viewFrame != null
-                  ? "rgba(56,189,248,0.35)" : zoomBtn.background,
-              }}
-              onClick={() => setViewFrame((f) => (
-                f == null
-                  ? Math.max(frameLo, Math.min(frameHi, startFrame ?? frameLo))
-                  : null
-              ))}
-              title={viewFrame != null
-                ? "Back to the motion-heat composite — every frame of the window in one picture"
-                : "Show the real video frame under the dots, and step through it one frame at a time"}
-            >
-              {viewFrame != null ? "▦ Heat" : "🎞 Frames"}
-            </button>
-            {viewFrame != null && (
-              <>
-                <button
-                  type="button"
-                  style={{ ...zoomBtn, width: 24 }}
-                  disabled={viewFrame <= frameLo}
-                  onClick={() => stepFrame(-1)}
-                  title="Previous frame"
-                >‹</button>
-                <span style={{
-                  color: frameErr ? "#f87171" : "#fff", fontSize: 12,
-                  padding: "0 4px", alignSelf: "center",
-                  minWidth: 52, textAlign: "center",
-                }}>
-                  {frameErr ? "error" : `f${viewFrame}`}
-                </span>
-                <button
-                  type="button"
-                  style={{ ...zoomBtn, width: 24 }}
-                  disabled={viewFrame >= frameHi}
-                  onClick={() => stepFrame(1)}
-                  title="Next frame"
-                >›</button>
-              </>
-            )}
+        {canStep && viewFrame != null && (
+          <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+            <button type="button" style={{ ...zoomBtn, width: 28 }}
+                    disabled={viewFrame <= frameLo}
+                    onClick={() => stepFrame(-10)}
+                    title="Back ten frames">‹‹</button>
+            <button type="button" style={{ ...zoomBtn, width: 22 }}
+                    disabled={viewFrame <= frameLo}
+                    onClick={() => stepFrame(-1)}
+                    title="Back one frame">‹</button>
+            <span style={{
+              color: frameErr ? "#f87171" : "#fff", fontSize: 12,
+              padding: "0 3px", alignSelf: "center",
+              minWidth: 54, textAlign: "center", fontWeight: 700,
+            }}>
+              {frameErr ? "error" : `f${viewFrame}`}
+            </span>
+            <button type="button" style={{ ...zoomBtn, width: 22 }}
+                    disabled={viewFrame >= frameHi}
+                    onClick={() => stepFrame(1)}
+                    title="Forward one frame">›</button>
+            <button type="button" style={{ ...zoomBtn, width: 28 }}
+                    disabled={viewFrame >= frameHi}
+                    onClick={() => stepFrame(10)}
+                    title="Forward ten frames">››</button>
           </div>
         )}
         {/* MOG2 dots on/off. On a frame where the ball is a three-pixel
@@ -14483,16 +14280,6 @@ export default function AdminProduction() {
                   clips={producedClips}
                   swings={row.edit_metrics?.swings}
                   onOpenViewer={openViewer}
-                  onClickToPlot={(swingIdx) => {
-                    // Map the produce swing idx to its position in the
-                    // swings array (they diverge if a swing was deleted).
-                    const arr = row.edit_metrics?.swings || [];
-                    const pos = arr.findIndex((s) => s?.idx === swingIdx);
-                    setPlotModal({
-                      row,
-                      swingPos: pos >= 0 ? pos : swingIdx,
-                    });
-                  }}
                   // EDIT OPENS THE PLOT MAP NOW. The wizard's field
                   // list lives there, and it is the screen with the
                   // pictures; keeping a second dialog that showed the
@@ -14511,7 +14298,16 @@ export default function AdminProduction() {
                           : idx) || 0,
                     });
                   }}
-                  onAddClip={() => handleEdit(row, { startNewSwing: true })}
+                  // ADD OPENS THE SAME MAP, EMPTY. Pointing it one past
+                  // the end of the swings array is what makes every
+                  // field blank -- there is no swing at that position to
+                  // read a tee spot or an impact frame from -- and the
+                  // save appends instead of patching. Same screen, same
+                  // gestures, nothing held over from the last clip.
+                  onAddClip={() => setPlotModal({
+                    row,
+                    swingPos: (row.edit_metrics?.swings || []).length,
+                  })}
                   onDeleteClip={(clip, clipIdx) => {
                     const label = clip.hole_number != null
                       ? `clip ${clipIdx + 1} (hole ${clip.hole_number})`
