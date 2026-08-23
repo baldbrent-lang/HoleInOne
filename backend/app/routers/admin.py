@@ -16349,14 +16349,14 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         # added because it caught a descent the others missed, and that
         # is a reason to keep them as a fallback, not a reason to pay for
         # them every time.
-        def _scan(_dets):
+        def _scan(_dets, _sens=2):
             _evs, _reps, _first = [], [], {}
             for _w in _wins:
                 _r = _d3.find_descents(
                     gp, gfps, window=_w,
                     min_points=BALLSCAN_DESCENT_LOOSE_POINTS,
                     max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
-                    detectors=_dets,
+                    detectors=_dets, diff_sens=_sens,
                 ) or {}
                 _first = _r if not _first else _first
                 _reps.append(_r)
@@ -16367,8 +16367,23 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         _t = time.perf_counter()
         _all_evs, _per_window_reports, rep = _scan(("diff",))
         out["scan_passes"] = ["diff"]
-        # Nothing the strict gate would take: pay for the slow detectors
-        # rather than report a miss that a second look would have caught.
+        # ESCALATE THE CHEAP DETECTOR BEFORE THE EXPENSIVE ONES.
+        #
+        # Measured: the fast pass costs 2.3s, and falling straight
+        # through to mog2 and the plate costs 18.3s more. On the run this
+        # came from, the full pass then accepted chains built from all
+        # three detectors -- which says the ball was findable and the
+        # cheap pass was not looking hard enough, rather than that the
+        # expensive detectors can see something it cannot. Looking harder
+        # with the cheap one is another 2.3s; it is worth trying before
+        # spending eight times that.
+        if not any(_descent_accepted(_e) for _e in _all_evs):
+            _deep, _dreps, _drep = _scan(("diff",), 3)
+            out["scan_passes"].append("diff@3")
+            if any(_descent_accepted(_e) for _e in _deep):
+                _all_evs, _per_window_reports, rep = _deep, _dreps, _drep
+            elif not _all_evs:
+                _all_evs, _per_window_reports, rep = _deep, _dreps, _drep
         if not any(_descent_accepted(_e) for _e in _all_evs):
             _slow, _sreps, _srep = _scan(("mog2", "plate", "diff"))
             out["scan_passes"].append("mog2+plate+diff")

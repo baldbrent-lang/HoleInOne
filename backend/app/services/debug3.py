@@ -1778,6 +1778,14 @@ def find_descents(
     # footage. Run that first; the others are a fallback for when it
     # comes back with nothing.
     detectors: tuple = ("mog2", "plate", "diff"),
+    # HOW HARD THE CHEAP DETECTOR LOOKS. Escalating this is a second
+    # decode of the windows at 2.3s; escalating to mog2 and the plate is
+    # 18.3s. Measured on the run that prompted it: diff at the normal
+    # level found nothing acceptable and the full pass then found chains
+    # built from all three detectors -- which says the ball WAS there and
+    # the cheap pass was simply not looking hard enough, not that the
+    # expensive detectors saw something it cannot.
+    diff_sens: int = 2,
 ) -> dict:
     """Every ball descent in a green-camera clip, found without being told
     where to look.
@@ -1884,7 +1892,8 @@ def find_descents(
         # this one asks only "was that there a frame ago", which is what
         # a falling ball is.
         _t0 = time.perf_counter()
-        _df = (detect_movers_by_diff(input_path, f_lo, f_hi, sens=2,
+        _df = (detect_movers_by_diff(input_path, f_lo, f_hi,
+                                     sens=int(diff_sens),
                                      per_frame=DESCENT_DIFF_PER_FRAME)
                if "diff" in detectors else [])
         _t_det["diff"] = round(time.perf_counter() - _t0, 2)
@@ -2107,8 +2116,13 @@ ASCENT_RATE_HI = 12.0
 ASCENT_MAX_BEND_PX = 14.0        # straighter than a full flight: this is
                                  # the first half-second, before gravity
                                  # has bent it much
-ASCENT_START_NEAR_PX = 90.0      # how close the chain's foot must start
-                                 # to where the ball was sitting
+# HOW CLOSE THE CHAIN'S OWN ORIGIN MUST BE to where the ball was
+# sitting, once it has been run back along its heading to the frame of
+# the strike. Generous, because it is absorbing two frames of tracker
+# latency and a velocity estimated from a single pair of points -- and
+# because the thing it is refusing (a bird, a cart, a branch, a shoe)
+# misses by the width of the picture rather than by a few pixels.
+ASCENT_START_NEAR_PX = 120.0
 ASCENT_WINDOW_FRAMES = 45        # after the strike -- the ball is out of
                                  # a tee camera's frame long before this
 
@@ -2192,9 +2206,33 @@ def find_ascents(
             # rises somewhere else. This is the test a shoe cannot pass
             # even in principle, because the shoe IS the thing that was
             # sitting there.
-            d0 = math.hypot(float(pts[0]["x"]) - bx, float(pts[0]["y"]) - by)
+            # WHERE THIS CHAIN CAME FROM, not where it was first seen.
+            #
+            # Measuring the first tracked point against the ball assumes
+            # the detector catches the ball on its way past the tee. It
+            # does not: a struck ball crosses 70px of frame between one
+            # frame and the next, and the tracker needs two points before
+            # it has a chain at all -- so a real ascent's first point is
+            # routinely 200px up. Measured on one: "starts 209px from the
+            # ball, limit 90px", on a swing whose descent the green
+            # camera had already confirmed twelve points of.
+            #
+            # A ball leaving a tee holds a near-constant heading over the
+            # handful of frames in view, so run the chain BACK along its
+            # own velocity to the frame of the strike and ask where that
+            # lands. That is the question actually being asked -- did
+            # this come from the ball -- and it does not care how fast
+            # the ball was going or how late the tracker picked it up.
+            _dfb = max(1, int(pts[1]["frame"]) - int(pts[0]["frame"]))
+            _vx = (float(pts[1]["x"]) - float(pts[0]["x"])) / _dfb
+            _vy = (float(pts[1]["y"]) - float(pts[0]["y"])) / _dfb
+            _back = max(0, int(pts[0]["frame"]) - int(impact_frame))
+            _ox = float(pts[0]["x"]) - _vx * _back
+            _oy = float(pts[0]["y"]) - _vy * _back
+            d0 = math.hypot(_ox - bx, _oy - by)
+            _row["from_px"] = int(round(d0))
             if d0 > ASCENT_START_NEAR_PX:
-                _row["why"] = (f"starts {int(d0)}px from the ball, limit {int(ASCENT_START_NEAR_PX)}px")
+                _row["why"] = (f"runs back to {int(d0)}px from the ball, {int(ASCENT_START_NEAR_PX)}px")
                 continue
             span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
             rate = (rise / span_f) * float(fps or 30.0) / frame_h
