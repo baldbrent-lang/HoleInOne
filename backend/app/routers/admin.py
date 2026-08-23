@@ -16304,6 +16304,10 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         out["det_stats"] = _ds
         out["n_tracks"] = sum(int(_r2.get("n_tracks") or 0)
                               for _r2 in _per_window_reports)
+        _raw = []
+        for _r2 in _per_window_reports:
+            _raw.extend(_r2.get("dets_preview") or [])
+        out["n_dets"] = len(_raw)
 
         def _strict(e):
             # FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR NEED TO BE.
@@ -16373,7 +16377,7 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
             "searched_to_bend_px": BALLSCAN_DESCENT_LOOSE_BEND_PX,
         }
         _t = time.perf_counter()
-        _ball_scan_descent_overview(row, gp, _all_evs, out)
+        _ball_scan_descent_overview(row, gp, _all_evs, out, dets=_raw)
         _add("overview_image", time.perf_counter() - _t)
         if not evs and not _all_evs:
             _kept = int((out.get("det_stats") or {}).get("kept") or 0)
@@ -16538,7 +16542,7 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         return out
 
 
-def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
+def _ball_scan_descent_overview(row, gp, all_evs, out, dets=None) -> None:
     """One picture of every descent the scan saw on the green clip.
 
     THIS IS WHAT IT IS LOOKING FOR, drawn. The per-candidate image shows
@@ -16553,7 +16557,10 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
     is the "right" background and the most recent is the least
     confusing.
     """
-    if not all_evs:
+    # DRAWN EVEN WITH NO EVENTS. "Nothing was found" is the case most
+    # in need of a picture, and returning early meant the one run you
+    # most want to look at produced nothing to look at.
+    if not all_evs and not dets:
         return
     try:
         import cv2  # type: ignore
@@ -16562,7 +16569,9 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
         if not cap.isOpened():
             return
         try:
-            _f = int(all_evs[-1].get("last_descent_frame") or 0)
+            _f = int((all_evs[-1].get("last_descent_frame") if all_evs
+                      else (dets[len(dets) // 2].get("frame") if dets else 0))
+                     or 0)
             cap.set(cv2.CAP_PROP_POS_FRAMES, _f)
             ok, im = cap.read()
             if not ok or im is None:
@@ -16571,6 +16580,16 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
             cap.release()
         # Dim it, so the chains read as the subject rather than the turf.
         im = (im.astype("float32") * 0.72).astype("uint8")
+        # EVERY DETECTION FIRST, faint and underneath. This is the layer
+        # that answers the prior question: a green covered in dots with
+        # no chain through them is a LINKING failure, and a bare green is
+        # a DETECTION failure, and those need opposite fixes. Without it
+        # the picture shows only what was linked, so a detector that
+        # never saw the ball and a tracker that never joined it up look
+        # exactly the same.
+        for q in (dets or []):
+            cv2.circle(im, (int(q["x"]), int(q["y"])), 2,
+                       (90, 140, 240), -1, cv2.LINE_AA)
         for k, e in enumerate(all_evs):
             _pts = e.get("points") or []
             _acc = (int(e.get("n_points") or 0) >= BALLSCAN_DESCENT_MIN_POINTS
@@ -16591,6 +16610,13 @@ def _ball_scan_descent_overview(row, gp, all_evs, out) -> None:
                 f"bend {e.get('bend_px')}px" + ("" if _acc else "  REJECTED"),
                 (int(_lx) + 17, int(_ly) + 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.46, _col, 1, cv2.LINE_AA)
+        cv2.putText(
+            im,
+            f"{len(dets or [])} raw detection(s) in blue - "
+            f"a bare green here means the ball was never DETECTED; "
+            f"dots with no chain through them means it was never LINKED",
+            (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 210, 140), 1,
+            cv2.LINE_AA)
         cv2.putText(
             im,
             f"{len(all_evs)} descent(s) seen - green = accepted "

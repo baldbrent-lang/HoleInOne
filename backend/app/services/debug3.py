@@ -1586,6 +1586,19 @@ def find_descents(
         # tracking problem.
         out["det_stats"] = dict(det.get("stats") or {})
         out["det_stats"]["plate"] = len(dets) - n_mog
+        # EVERY DETECTION, to be drawn. A picture of the chains answers
+        # "which tracks were found and why were they rejected"; it cannot
+        # answer "was the ball detected at all", which is the prior
+        # question and the one that decides whether the problem is in the
+        # detector or in the linker. Capped so a busy clip cannot make
+        # the payload enormous, keeping an even spread rather than the
+        # first N, which would be one corner of the clip.
+        _cap = 4000
+        _step = max(1, len(dets) // _cap)
+        out["dets_preview"] = [
+            {"frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"])}
+            for d in dets[::_step]
+        ]
         tracks = build_tracks(dets, r, min_len=int(min_points))
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"detection failed: {exc}"
