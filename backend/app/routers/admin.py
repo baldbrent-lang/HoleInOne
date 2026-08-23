@@ -15281,6 +15281,27 @@ def _daily_tee_box(db, course, hole: int, day: str):
         return None
 
 
+def _frame_height(src_path) -> int:
+    """This video's height in pixels, 0 when it cannot be read.
+
+    Small, but it exists because the alternative kept being a literal
+    720 written into a call site -- and every calibrated number in this
+    file is a FRACTION of the height, so guessing it wrong scales the
+    ball, the tee band and the search radius all at once.
+    """
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(src_path))
+        try:
+            return int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        finally:
+            cap.release()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("frame height unreadable for %s: %s", src_path, exc)
+        return 0
+
+
 def _ball_radius_px(course, hole: int, frame_h: int | None):
     """How many pixels of radius a ball is on this hole, or None.
 
@@ -16052,6 +16073,13 @@ def debug3_status(upload_id: int):
 # a candidate is a real swing, and proof should cost more than a hint.
 # Four linked points that fall and barely bend is not something the tree
 # line produces.
+# HOW FAR EITHER SIDE OF THE SWEEP'S ESTIMATE to look for the ball that
+# was sitting there. The estimate is linear and lands early, by about a
+# second and a half on the one measured, so the window reaches back
+# further than forward.
+ASCENT_SPOT_LOOKBACK_SEC = 6.0
+ASCENT_SPOT_LOOKAHEAD_SEC = 1.0
+
 BALLSCAN_DESCENT_MIN_POINTS = 4
 # How straight. `find_descents` measures the chain's bend as the rms of
 # x against y in pixels; a real descent measured 0.1, 2.2 and 5.3px
@@ -17549,6 +17577,197 @@ def get_tee_box(upload_id: int, db: Session = Depends(get_db)):
     return out
 
 
+def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
+    """Find every ball leaving, then produce a clip for each.
+
+    THE OTHER WAY ROUND. The existing pipeline finds a ball SITTING in
+    the tee box and infers that a swing probably followed, which is why
+    it can be fooled by a shoe, a clubhead or a headcover -- those all
+    sit still, and sitting still is the entire claim. This starts from
+    the event instead: what crossed the band above the golfers on its
+    way out. A shoe never leaves.
+
+    Three steps, and the middle one is the only new work: sweep for
+    ascents, find the tee spot and impact frame for each, then hand both
+    to the SAME renderer the edit dialog's Save & close uses. Nothing
+    about the clip that comes out is new.
+    """
+    from ..services import debug3 as _d3
+
+    rep: dict = {"ok": False, "stages": [], "ascents": [], "clips": [],
+                 "n_produced": 0, "reason": None}
+
+    def _stage(n, title, detail, count=None, units=None, secs=None):
+        rep["stages"].append({
+            "n": n, "title": title, "detail": detail, "count": count,
+            "counts": units, "seconds": round(secs or 0.0, 2)})
+
+    _pt_reset()
+    _t_run = time.perf_counter()
+    fps = float(probe_fps(src_path) or 0.0) or 30.0
+    try:
+        _roi = _tee_box_roi_fractions(src_path, db, row)
+    except Exception as exc:  # noqa: BLE001
+        _roi = {"roi": None, "source": f"failed: {exc}"}
+    rep["roi"] = _roi.get("roi")
+    rep["roi_source"] = _roi.get("source")
+
+    # ── 1. every ball leaving ─────────────────────────────────────────
+    if progress:
+        progress("Sweeping the whole clip for balls leaving the tee", 0, 0)
+    _t = time.perf_counter()
+    sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi")) or {}
+    _ball_scan_sweep_image(row, src_path, sweep)
+    rep["sweep"] = sweep
+    _asc = list(sweep.get("ascents") or [])
+    rep["ascents"] = _asc
+    _stage(1, "Balls leaving the tee",
+           "One frame-difference pass over the band above the golfers, "
+           "every frame. A chain counts as a ball if it rises far enough, "
+           "fast enough and straight enough -- straightness alone is not "
+           "sufficient, because the worst false positive measured was a "
+           "dead-straight 25-point chain that was not a ball. "
+           + str(sweep.get("reason") or ""),
+           len(_asc), "seen leaving", time.perf_counter() - _t)
+    if not _asc:
+        rep["reason"] = "no ball was seen leaving the tee in this clip"
+        _ball_scan_finish_timing(rep, _t_run)
+        return rep
+
+    # ── 2. where it was sitting, and when it went ─────────────────────
+    _t = time.perf_counter()
+    for i, a in enumerate(_asc):
+        if progress:
+            progress(f"Finding the tee spot for ball {i + 1} of {len(_asc)}",
+                     i, len(_asc))
+        _entry = {"n": i + 1, "seen_frame": a.get("first_frame"),
+                  "seen_sec": a.get("first_sec"), "ok": False,
+                  "reason": None}
+        _spot = _ascent_tee_spot(row, src_path, db, a, fps, _roi.get("roi"))
+        _entry.update(_spot)
+        rep["clips"].append(_entry)
+    _n_spot = sum(1 for c in rep["clips"] if c.get("ball"))
+    _stage(2, "Tee spot and impact frame",
+           "The sweep says roughly WHERE and WHEN each ball left, but its "
+           "run back to the tee line is linear while a struck ball slows "
+           "as it climbs, so it lands early. The resting-ball scan is run "
+           "in a short window around that estimate -- seconds of footage "
+           "rather than the whole clip -- and the ball it finds sitting "
+           "there is the tee spot, with the frame it went as the impact "
+           "frame.",
+           _n_spot, "located", time.perf_counter() - _t)
+
+    # ── 3. the edit dialog's own produce ──────────────────────────────
+    _t = time.perf_counter()
+    _idx = 0
+    for c in rep["clips"]:
+        if not c.get("ball"):
+            continue
+        if progress:
+            progress(f"Producing clip {_idx + 1}", _idx, _n_spot)
+        try:
+            _out = run_wizard_produce_job(
+                upload_id=row.id,
+                ball_xy=[float(c["ball"][0]), float(c["ball"][1])],
+                impact_frame=int(c["impact_frame"]),
+                hole_number=_hole_for_upload(db, row),
+                # THE FIRST ONE REPLACES, THE REST APPEND. `solo` means
+                # "keep the upload's other clips", which is right for
+                # the edit dialog adding one swing and wrong for a run
+                # that produces the whole clip again -- leave it True
+                # throughout and a second run leaves six clips where
+                # there were three. Clearing on the first and appending
+                # after is what Produce itself does.
+                solo=(_idx > 0), swing_idx=_idx,
+            ) or {}
+            c["ok"] = bool(_out.get("ok"))
+            c["clip_url"] = _out.get("url") or _out.get("clip_url")
+            c["reason"] = _out.get("error") or c.get("reason")
+            if c["ok"]:
+                rep["n_produced"] += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ascent produce: render failed on %s: %s", row.id, exc)
+            c["reason"] = f"render failed: {exc}"
+        _idx += 1
+    _phase = _pt_snapshot()
+    _stage(3, "Tracer clip",
+           "run_wizard_produce_job -- the same call the edit dialog's "
+           "Save & close makes, with the same renderer behind it. Nothing "
+           "about the finished clip is new here; only how its two numbers "
+           "were arrived at. Inside: "
+           + (", ".join(f"{k} {v}s" for k, v in
+                        sorted(_phase.items(), key=lambda kv: -kv[1])
+                        if v > 0) or "nothing measured"),
+           rep["n_produced"], "clips", time.perf_counter() - _t)
+
+    _ball_scan_finish_timing(rep, _t_run)
+    rep["ok"] = rep["n_produced"] > 0
+    rep["reason"] = (f"{rep['n_produced']} of {len(_asc)} ball(s) seen "
+                     f"leaving were produced")
+    log.info("ascent produce upload=%s: %s in %.1fs", row.id, rep["reason"],
+             rep["timing"]["total_sec"])
+    return rep
+
+
+def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
+    """Where the ball was sitting, and the frame it went.
+
+    The sweep's own estimate of where the chain came from is linear and
+    therefore early -- measured, 72 frames back where the strike was
+    nearer 20. So it is used only to pick a WINDOW, and the resting-ball
+    scan is run inside it. That scan is the expensive one, and this is
+    the whole reason for running the sweep first: it turns a search over
+    six thousand frames into a search over a few hundred.
+    """
+    out: dict = {"ball": None, "impact_frame": None, "reason": None}
+    _f = ascent.get("from_frame")
+    _seen = ascent.get("first_frame")
+    if _f is None and _seen is None:
+        out["reason"] = "the chain gave no origin to search around"
+        return out
+    _centre = int(_f if _f is not None else _seen)
+    _lo = max(0, _centre - int(ASCENT_SPOT_LOOKBACK_SEC * fps))
+    _hi = int((_seen if _seen is not None else _centre)
+              + ASCENT_SPOT_LOOKAHEAD_SEC * fps)
+    out["window"] = [_lo, _hi]
+    try:
+        course = db.get(Course, row.course_id) if row.course_id else None
+        # The expected radius is a fraction of the FRAME HEIGHT, so it
+        # has to be the real one -- a 1080-tall clip measured against an
+        # assumed 720 looks for a ball two-thirds the size it is.
+        _r = _ball_radius_px(course, _hole_for_upload(db, row),
+                             _frame_height(src_path)) if course else None
+        res = ai_scan_resting_balls(
+            src_path, roi=roi, fps=fps, expect_radius_px=_r,
+            window=(_lo, _hi),
+        ) or {}
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"resting-ball scan failed: {exc}"
+        return out
+    spots = list(res.get("spots") or [])
+    if not spots:
+        out["reason"] = (f"no ball found sitting in f{_lo}-{_hi}: "
+                         + str(res.get("reason") or ""))
+        return out
+    # THE ONE NEAREST WHERE THE CHAIN CAME FROM, along the tee line. The
+    # window can hold several balls -- a group tees off one after
+    # another from the same strip of turf -- and the chain says which.
+    _x = ascent.get("from_x")
+    if _x is not None:
+        spots.sort(key=lambda sp: abs(int(sp["x"]) - int(_x)))
+    else:
+        spots.sort(key=lambda sp: -float(sp.get("held_sec") or 0.0))
+    sp = spots[0]
+    out["ball"] = [int(sp["x"]), int(sp["y"])]
+    out["impact_frame"] = int(sp.get("gone_frame") or sp.get("last_frame") or 0)
+    out["held_sec"] = sp.get("held_sec")
+    out["from_x"] = _x
+    out["reason"] = (f"ball at {sp['x']},{sp['y']} sat "
+                     f"{sp.get('held_sec')}s and went at "
+                     f"f{out['impact_frame']}")
+    return out
+
+
 def _ball_scan_produce_run(row, src_path, db, progress=None,
                            hole_number=None) -> dict:
     """Trace every candidate that sat long enough to be a teed ball.
@@ -18036,6 +18255,17 @@ def ball_scan_produce(upload_id: int):
 @router.get("/long-uploads/{upload_id}/ball-scan/produce/status")
 def ball_scan_produce_status(upload_id: int):
     return _json_safe(_debugx_get("ballscanproduce", upload_id))
+
+
+@router.post("/long-uploads/{upload_id}/ascent-produce")
+def ascent_produce(upload_id: int):
+    """Find every ball LEAVING the tee, then produce a clip for each."""
+    return _debugx_start("ascentproduce", upload_id, _ascent_produce_run)
+
+
+@router.get("/long-uploads/{upload_id}/ascent-produce/status")
+def ascent_produce_status(upload_id: int):
+    return _json_safe(_debugx_get("ascentproduce", upload_id))
 
 
 # ── Swing test ─────────────────────────────────────────────────────────

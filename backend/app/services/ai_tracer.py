@@ -9507,6 +9507,13 @@ def scan_resting_balls(
     max_spots: int = 24,
     expect_radius_px: float | None = None,
     exclude_people: bool = True,
+    # LOOK AT A FEW HUNDRED FRAMES INSTEAD OF SIX THOUSAND. When the
+    # caller already knows roughly when the ball left -- the ascent
+    # sweep hands over a departure frame -- the ball it wants was
+    # sitting there in the seconds immediately before, and every other
+    # frame in the video is cost with no answer in it. `(lo, hi)` in
+    # frames, inclusive; None scans the whole file as before.
+    window: tuple[int, int] | None = None,
 ) -> dict:
     """Every ball that SAT somewhere: where, first seen, last seen.
 
@@ -9568,7 +9575,23 @@ def scan_resting_balls(
         # as running sums so it costs nothing per sighting.
         clusters: list = []
         f = seen = 0
+        w_hi = None
+        if window:
+            _lo, _hi = int(window[0]), int(window[1])
+            if n_frames > 0:
+                _hi = min(_hi, n_frames - 1)
+            _lo = max(0, min(_lo, _hi))
+            # Land on a multiple of `step` so the `f % step` sampling
+            # below keeps its phase after the seek; otherwise a window
+            # starting at, say, f=1001 samples nothing until it happens
+            # to cross a multiple.
+            _lo -= _lo % step
+            if _lo > 0:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, float(_lo))
+            f, w_hi = _lo, _hi
         while True:
+            if w_hi is not None and f > w_hi:
+                break
             # DECODE ONLY WHAT WE LOOK AT. Nine frames in ten are skipped
             # at this sample rate, and grab() advances the stream without
             # doing the colour conversion read() pays for -- half the

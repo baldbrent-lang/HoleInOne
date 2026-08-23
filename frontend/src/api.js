@@ -741,6 +741,19 @@ export const api = {
       adminPassword: key,
     }),
 
+  // The other way round: find every ball LEAVING the tee, and work back
+  // to where it was sitting. A shoe never leaves.
+  ascentProduce: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ascent-produce`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+
+  ascentProduceStatus: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ascent-produce/status`, {
+      adminPassword: key,
+    }),
+
   // Swing test — the ball-departure detector on its own. Same
   // start-then-poll shape as Debug2/Debug3, for the same proxy-timeout
   // reason.

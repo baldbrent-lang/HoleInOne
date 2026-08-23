@@ -2160,8 +2160,29 @@ def find_descents(
 # establish on its own -- no calibration, no green half, no flight
 # window.
 ASCENT_MIN_POINTS = 3
-ASCENT_MIN_RISE_FRAC = 0.04      # of frame height, over the whole chain
-ASCENT_RATE_LO = 0.25            # frame-heights per second, rising
+# WHAT SEPARATES A BALL FROM THE REST OF WHAT MOVES UP THERE.
+#
+# Measured on a clip with three known ascents and eleven pieces of
+# trash. Straightness ALONE does not do it, which is worth saying
+# because it is the obvious answer: the worst piece of trash on that
+# clip scored 0.993 -- a 25-point chain, dead straight, and not a ball.
+# What separates is straightness together with HOW FAR and HOW FAST:
+#
+#            rise        rate     straightness
+#   balls    119-312   0.59-2.07   0.84-1.00
+#   trash      29-165  0.33-1.46   0.46-0.99
+#
+# Only one piece of trash rose far enough to matter (165px) and it was
+# crawling at 0.33. The floors sit between the two populations rather
+# than hard against either: 95px against a nearest ball of 119 and a
+# nearest fake of 70; 0.45 against 0.59 and 0.33; 0.75 against 0.84 and
+# 0.78. Tuned on one clip, so they are placed for margin rather than
+# for the tightest possible split.
+ASCENT_MIN_RISE_FRAC = 0.132     # of frame height -- 95px at 720
+ASCENT_RATE_LO = 0.45            # frame-heights per second, rising
+# Net displacement over path length. A ball goes one way; a chain the
+# tracker assembled out of unrelated specks doubles back on itself.
+ASCENT_MIN_STRAIGHT = 0.75
 ASCENT_RATE_HI = 12.0
 ASCENT_MAX_BEND_PX = 14.0        # straighter than a full flight: this is
                                  # the first half-second, before gravity
@@ -2381,6 +2402,27 @@ SWEEP_PER_FRAME = 10
 SWEEP_MAX_SPAN = 60
 
 
+def _path_straightness(pts) -> float:
+    """Net displacement over path length: 1.0 is a perfectly straight run.
+
+    Cheaper and blunter than a line fit, and it answers a different
+    question. A fit asks how far the points sit off a line; this asks
+    whether the thing kept GOING somewhere. A chain that zigzags back
+    and forth can sit close to a line through its middle and still score
+    badly here, which is the case worth catching.
+    """
+    if len(pts) < 2:
+        return 0.0
+    path = sum(math.hypot(float(b["x"]) - float(a["x"]),
+                          float(b["y"]) - float(a["y"]))
+               for a, b in zip(pts, pts[1:]))
+    if path <= 1e-6:
+        return 0.0
+    net = math.hypot(float(pts[-1]["x"]) - float(pts[0]["x"]),
+                     float(pts[-1]["y"]) - float(pts[0]["y"]))
+    return net / path
+
+
 def _rising_tail(pts):
     """The longest run at the END of a chain where every step goes up.
 
@@ -2481,6 +2523,9 @@ def sweep_ascents(
             bend = _path_bend_px(pts)
             if bend > ASCENT_MAX_BEND_PX:
                 continue
+            straight = _path_straightness(pts)
+            if straight < ASCENT_MIN_STRAIGHT:
+                continue
             # WHERE IT CAME FROM. Run the chain back along its own
             # heading to the height of the tee box: on a real ascent that
             # is the ball's resting spot, and it is the number that would
@@ -2519,6 +2564,7 @@ def sweep_ascents(
                 "rise_px": int(round(rise)),
                 "rate": round(rate, 3),
                 "bend_px": round(bend, 2),
+                "straightness": round(straight, 3),
                 "from_x": _from_x,
                 "from_frame": _from_f,
                 "from_sec": (round(_from_f / float(fps or 30.0), 2)

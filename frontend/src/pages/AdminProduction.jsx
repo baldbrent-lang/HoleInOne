@@ -7839,6 +7839,130 @@ function FlagstickModal({ row, adminPassword, onClose, onSaved }) {
   );
 }
 
+function AscentProduceModal({ state, onClose }) {
+  const rep = state?.report;
+  const asc = rep?.ascents || [];
+  const clips = rep?.clips || [];
+  return (
+    <div role="dialog" className="modal-back" onClick={onClose}
+         style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+                  zIndex: 60, overflow: "auto", padding: 24 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()}
+           style={{ maxWidth: 1100, margin: "0 auto", padding: 16 }}>
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <b>🛫 Produce from ascents — upload #{state.uploadId}</b>
+          <button className="btn ghost" onClick={onClose}>Close ✕</button>
+        </div>
+        <div className="tiny muted" style={{ marginTop: 2 }}>
+          Starts from the event rather than the guess: what crossed the band
+          above the golfers on its way out. A shoe never leaves.
+        </div>
+
+        {state.running && (
+          <div className="small" style={{ marginTop: 10 }}>
+            {state.stage || "Working…"}
+            {state.total > 0 && ` (${state.done}/${state.total})`}
+          </div>
+        )}
+        {state.error && (
+          <div className="err-text" style={{ marginTop: 10 }}>{state.error}</div>
+        )}
+
+        {rep?.stages?.length > 0 && (
+          <div className="card" style={{ margin: "10px 0", padding: 10 }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <b>{rep.reason || "Working"}</b>
+              <span className={rep.n_produced ? "pill ok" : "pill warn"}>
+                {rep.n_produced || 0} clip(s)
+              </span>
+            </div>
+            <ScanTiming stages={rep.stages} timing={rep.timing} />
+          </div>
+        )}
+
+        {/* THE PICTURE IS THE ARGUMENT. Near-vertical streaks in the
+            band, and the tee line each one was traced back to. */}
+        {rep?.sweep?.image_url && (
+          <div style={{ margin: "10px 0" }}>
+            <a href={rep.sweep.image_url} target="_blank" rel="noreferrer">
+              <img src={rep.sweep.image_url} alt="ascent sweep"
+                   style={{ width: "100%", borderRadius: 6 }} />
+            </a>
+            <div className="tiny muted">{rep.sweep.reason}</div>
+          </div>
+        )}
+
+        {asc.length > 0 && (
+          <div className="card" style={{ margin: "10px 0", padding: 10 }}>
+            <b>Each ball, and what became of it</b>
+            <div style={{ overflowX: "auto", marginTop: 6 }}>
+              <table className="tiny" style={{ width: "100%" }}>
+                <thead>
+                  <tr>
+                    <th align="left">#</th>
+                    <th align="left">seen leaving</th>
+                    <th align="left">pts</th>
+                    <th align="left">rise</th>
+                    <th align="left">rate</th>
+                    <th align="left">straight</th>
+                    <th align="left">tee spot</th>
+                    <th align="left">impact</th>
+                    <th align="left">clip</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {asc.map((a, i) => {
+                    const c = clips[i] || {};
+                    return (
+                      <tr key={i}>
+                        <td>{i + 1}</td>
+                        <td>f{a.first_frame} ({a.first_sec}s)</td>
+                        <td>{a.n_points}</td>
+                        <td>{a.rise_px}px</td>
+                        <td>{a.rate}</td>
+                        <td>{a.straightness}</td>
+                        <td>{c.ball
+                          ? `${c.ball[0]}, ${c.ball[1]}`
+                          : <span className="muted">—</span>}</td>
+                        <td>{c.impact_frame != null
+                          ? `f${c.impact_frame}`
+                          : <span className="muted">—</span>}</td>
+                        <td>{c.clip_url
+                          ? <a href={c.clip_url} target="_blank"
+                               rel="noreferrer">clip</a>
+                          : <span className="muted">
+                              {c.reason || "not produced"}</span>}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {/* WHY A SPOT MISSED, spelled out. The window each
+                resting-ball scan was given is the thing most likely to
+                be wrong, so it is printed rather than inferred. */}
+            {clips.some((c) => !c.ball && c.reason) && (
+              <details style={{ marginTop: 6 }}>
+                <summary className="muted">
+                  Why some balls had no tee spot
+                </summary>
+                {clips.map((c, i) => (!c.ball && c.reason ? (
+                  <div key={i} className="tiny muted">
+                    #{i + 1}
+                    {c.window && ` searched f${c.window[0]}–${c.window[1]}`}
+                    {" — "}{c.reason}
+                  </div>
+                ) : null))}
+              </details>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 function BallScanModal({ state, adminPassword, onClose }) {
   const rep = state?.report;
   const [why, setWhy] = useState(null);
@@ -13866,6 +13990,7 @@ export default function AdminProduction() {
   // Swing test — the ball-departure detector alone. Read-only as well.
   const [swingTest, setSwingTest] = useState(null);
   const [ballScan, setBallScan] = useState(null);
+  const [ascProd, setAscProd] = useState(null);
   const [hitArea, setHitArea] = useState(null);
   // Tee <-> green calibration, opened from under the green raw video.
   // { uploadId, tee, green, existing, scope } once the two frames and
@@ -13897,6 +14022,7 @@ export default function AdminProduction() {
         : kind === "swingtest" ? api.swingTestStatus
           : kind === "ballscan" ? api.ballScanStatus
             : kind === "ballscanproduce" ? api.ballScanProduceStatus
+              : kind === "ascentproduce" ? api.ascentProduceStatus
           : api.debug2Status;
     const tick = async () => {
       try {
@@ -13979,6 +14105,24 @@ export default function AdminProduction() {
       pollDebugX("ballscanproduce", row.id, setBallScan);
     } catch (e) {
       setBallScan({
+        running: false, uploadId: row.id, report: null, error: e.message,
+      });
+      setBusyId((cur) => (cur === row.id ? null : cur));
+    }
+  }
+
+  // THE OTHER WAY ROUND. Find every ball that LEFT the tee, work back to
+  // where it was sitting and the frame it went, then hand both to the
+  // same renderer the edit dialog's Save & close uses.
+  async function handleAscentProduce(row) {
+    setAscProd({ running: true, uploadId: row.id, report: null, error: null });
+    busySinceRef.current = Date.now();
+    setBusyId(row.id);
+    try {
+      await api.ascentProduce(adminPassword, row.id);
+      pollDebugX("ascentproduce", row.id, setAscProd);
+    } catch (e) {
+      setAscProd({
         running: false, uploadId: row.id, report: null, error: e.message,
       });
       setBusyId((cur) => (cur === row.id ? null : cur));
@@ -15088,6 +15232,20 @@ export default function AdminProduction() {
                 >
                   ⚪▶ Scan &amp; produce
                 </button>
+                {/* THE OPPOSITE QUESTION. Scan & produce finds a ball
+                    SITTING and infers a swing followed, which is what a
+                    shoe and a clubhead can both pass. This finds the
+                    ball LEAVING first and works back. Both are here on
+                    purpose while the two are being compared on real
+                    footage. */}
+                <button
+                  className="small ghost"
+                  onClick={() => handleAscentProduce(row)}
+                  disabled={greyed || busy}
+                  title="Find every ball leaving the tee across the whole clip, then work back to where each was sitting and the frame it went — and produce each with the same renderer Save & close uses."
+                >
+                  🛫 Produce ascents
+                </button>
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
@@ -15269,6 +15427,10 @@ export default function AdminProduction() {
       {ballScan && (
         <BallScanModal state={ballScan} adminPassword={adminPassword}
                        onClose={() => setBallScan(null)} />
+      )}
+      {ascProd && (
+        <AscentProduceModal state={ascProd}
+                            onClose={() => setAscProd(null)} />
       )}
       {hitArea && (
         <HittingAreaModal state={hitArea} adminPassword={adminPassword}
