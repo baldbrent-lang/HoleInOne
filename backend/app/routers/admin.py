@@ -16073,12 +16073,18 @@ def debug3_status(upload_id: int):
 # a candidate is a real swing, and proof should cost more than a hint.
 # Four linked points that fall and barely bend is not something the tree
 # line produces.
-# HOW FAR EITHER SIDE OF THE SWEEP'S ESTIMATE to look for the ball that
-# was sitting there. The estimate is linear and lands early, by about a
+# HOW FAR BACK FROM THE SWEEP'S ESTIMATE to look for the ball that was
+# sitting there. The estimate is linear and lands early, by about a
 # second and a half on the one measured, so the window reaches back
-# further than forward.
+# well past it. There is no lookahead: the far end of the window is the
+# frame the sweep saw the ball airborne, and it cannot have been on the
+# tee after that.
 ASCENT_SPOT_LOOKBACK_SEC = 6.0
-ASCENT_SPOT_LOOKAHEAD_SEC = 1.0
+# HOW CLOSE TO THE ESTIMATE still counts as "this chain's ball". Wide,
+# because the estimate it is measured against is a linear run-back that
+# the sweep itself flags as approximate -- this is a contention bar, not
+# an identification.
+ASCENT_SPOT_NEAR_PX = 80
 
 BALLSCAN_DESCENT_MIN_POINTS = 4
 # How straight. `find_descents` measures the chain's bend as the rms of
@@ -17727,8 +17733,16 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
         return out
     _centre = int(_f if _f is not None else _seen)
     _lo = max(0, _centre - int(ASCENT_SPOT_LOOKBACK_SEC * fps))
-    _hi = int((_seen if _seen is not None else _centre)
-              + ASCENT_SPOT_LOOKAHEAD_SEC * fps)
+    # THE BALL IS AIRBORNE AT `_seen`, SO IT IS NOT ON THE TEE AFTER IT.
+    #
+    # This ran a second past that, and the extra second was not free:
+    # measured on two of three chains, the spot kept reading as present
+    # after the strike -- the tee, the divot and the shadow are still
+    # bright -- so the watch never concluded, `last_frame` walked to the
+    # ceiling, and the impact frame came out 150 frames LATE on a ball
+    # that had plainly gone. The sweep saw it leave; nothing after that
+    # is evidence about where it was sitting.
+    _hi = int(_seen if _seen is not None else _centre)
     out["window"] = [_lo, _hi]
     _x = ascent.get("from_x")
     try:
@@ -17775,17 +17789,45 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
     # window can hold several balls -- a group tees off one after
     # another from the same strip of turf -- and the chain says which.
     if _x is not None:
-        spots.sort(key=lambda sp: abs(int(sp["x"]) - int(_x)))
+        # NEAR, THEN CONCLUDED, THEN NEAREST.
+        #
+        # Distance alone picked the wrong spot on a measured chain: a
+        # candidate 20px from the estimate whose watch never concluded
+        # beat one 23px away that was seen to go at f5945 -- three
+        # pixels of a back-extrapolation the code itself calls
+        # approximate, traded for the difference between an observation
+        # and a fallback. So distance decides only whether a spot is in
+        # contention at all; among those that are, a departure the watch
+        # actually saw wins.
+        spots.sort(key=lambda sp: (
+            0 if abs(int(sp["x"]) - int(_x)) <= ASCENT_SPOT_NEAR_PX else 1,
+            0 if sp.get("gone_frame") is not None else 1,
+            abs(int(sp["x"]) - int(_x)),
+        ))
     else:
         spots.sort(key=lambda sp: -float(sp.get("held_sec") or 0.0))
     sp = spots[0]
     out["ball"] = [int(sp["x"]), int(sp["y"])]
-    out["impact_frame"] = int(sp.get("gone_frame") or sp.get("last_frame") or 0)
+    _imp = int(sp.get("gone_frame") or sp.get("last_frame") or 0)
+    # CLAMPED TO THE FRAME THE SWEEP SAW IT LEAVE. The watch can fail to
+    # conclude -- the spot goes on reading bright after the strike, and
+    # then `last_frame` is wherever the watch ran out rather than where
+    # the ball went. Measured on two of three chains, that was 150
+    # frames after the ball was already in the air. The sweep's sighting
+    # is an observation, not an estimate, so it wins.
+    out["watch_concluded"] = sp.get("gone_frame") is not None
+    if _seen is not None and _imp > int(_seen):
+        _imp = int(_seen)
+        out["clamped"] = True
+    out["impact_frame"] = _imp
     out["held_sec"] = sp.get("held_sec")
     out["from_x"] = _x
-    out["reason"] = (f"ball at {sp['x']},{sp['y']} sat "
-                     f"{sp.get('held_sec')}s and went at "
-                     f"f{out['impact_frame']}")
+    out["reason"] = (
+        f"ball at {sp['x']},{sp['y']} sat {sp.get('held_sec')}s and went "
+        f"at f{_imp}"
+        + ("" if out["watch_concluded"]
+           else " (the watch never saw the spot go clear; this is the "
+                "frame the sweep first saw the ball airborne)"))
     return out
 
 
