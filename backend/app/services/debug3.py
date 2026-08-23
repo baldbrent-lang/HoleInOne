@@ -2243,6 +2243,15 @@ ASCENT_MAX_BACKRUN_SEC = 1.2
 # that one cannot -- something moving fast, so it clears the back-run,
 # but travelling across the picture rather than up out of it.
 ASCENT_MAX_TILT_DEG = 55.0
+# HOW FAR OUTSIDE THE HITTING AREA a chain's origin may still land.
+#
+# The run back to the tee line is linear, off a velocity taken from a
+# handful of points, so its landing spot carries real error -- the same
+# error `ASCENT_START_NEAR_PX` exists to absorb. A ball teed at the very
+# edge of the box must not be refused because the estimate put it a
+# few pixels into the rough, so the box is widened before the test.
+# What this is actually refusing misses by a third of the picture.
+ASCENT_ROI_MARGIN_PX = 80.0
 # Net displacement over path length. A ball goes one way; a chain the
 # tracker assembled out of unrelated specks doubles back on itself.
 ASCENT_MIN_STRAIGHT = 0.75
@@ -2551,6 +2560,34 @@ def _smooth_tail(pts, min_points: int = ASCENT_MIN_POINTS):
     return pts[i:]
 
 
+def _roi_x_span(roi: dict, frame_w: int, frame_h: int):
+    """The hitting area's left and right edges in pixels, or None.
+
+    Honours `angle`, which is why this is not two multiplications: a tee
+    box drawn on a deck that runs away at a slant is stored as an
+    unrotated rectangle plus a rotation about its centre, and its real
+    horizontal extent is wider than `w` by however much the rotation
+    swings its corners out. Taking `x` and `x+w` on an angled box would
+    refuse balls teed at its own far end.
+
+    Kept local rather than borrowed from ai_tracer's `roi_corners_px`:
+    this module does not import that one, and a span is four lines.
+    """
+    if not roi:
+        return None
+    try:
+        w = float(roi.get("w", 1.0)) * frame_w
+        h = float(roi.get("h", 1.0)) * frame_h
+        x = float(roi.get("x", 0.0)) * frame_w
+        a = math.radians(float(roi.get("angle") or 0.0))
+        # Half-width of the rotated rectangle's bounding box.
+        half = (abs(w * math.cos(a)) + abs(h * math.sin(a))) / 2.0
+        cx = x + w / 2.0
+        return cx - half, cx + half
+    except (TypeError, ValueError):
+        return None
+
+
 def _dedupe_ascents(asc: list, gap_px: float = 40.0) -> list:
     """One ball that got tracked twice is one ball.
 
@@ -2644,6 +2681,14 @@ def sweep_ascents(
                                  _tee_top - ASCENT_HEAD_ROOM_FRAC * frame_h)))
         out["band"] = [0, 0, int(frame_w), band_h]
         out["tee_line_y"] = int(_tee_top)
+        # THE HITTING AREA, if one has been drawn for this hole. Without
+        # it there is nothing to be outside of, and the gate below is
+        # skipped -- reported, so a run that checked nothing does not
+        # read like a run that checked and found everything inside.
+        _span = _roi_x_span(roi, frame_w, frame_h) if roi else None
+        out["hitting_area_px"] = ([int(_span[0]), int(_span[1])]
+                                  if _span else None)
+        out["n_outside_area"] = 0
         dets = detect_movers_by_diff(input_path, 0, n_frames - 1,
                                      sens=int(sens),
                                      per_frame=SWEEP_PER_FRAME,
@@ -2721,6 +2766,16 @@ def sweep_ascents(
                     or (int(pts[0]["frame"]) - _from_f)
                     > ASCENT_MAX_BACKRUN_SEC * float(fps or 30.0)):
                 continue
+            # AND IT MUST POINT BACK AT THE HITTING AREA. Nobody tees
+            # off from the cart path. A chain whose own heading, run
+            # back to the tee line, lands outside the box drawn for this
+            # hole did not start with a ball being struck in it --
+            # whatever else it is, it is not this hole's tee shot.
+            if _span is not None and not (
+                    _span[0] - ASCENT_ROI_MARGIN_PX <= _from_x
+                    <= _span[1] + ASCENT_ROI_MARGIN_PX):
+                out["n_outside_area"] += 1
+                continue
             out["ascents"].append({
                 "first_frame": int(pts[0]["frame"]),
                 "last_frame": int(pts[-1]["frame"]),
@@ -2750,6 +2805,11 @@ def sweep_ascents(
         out["reason"] = (
             (f"{out['n_merged']} duplicate chain(s) merged; "
              if out["n_merged"] else "")
+            + (f"{out['n_outside_area']} pointed back outside the "
+               f"hitting area; " if out["n_outside_area"] else "")
+            + ("" if _span is not None else
+               "no hitting area is drawn for this hole, so where each "
+               "chain came from was not checked against one; ")
             + f"{len(out['ascents'])} ball(s) seen leaving, from "
             f"{len(tracks)} chain(s) in {len(dets)} detection(s) over "
             f"{n_frames} frames of the band above the golfers")
