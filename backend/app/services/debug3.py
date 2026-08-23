@@ -2179,7 +2179,51 @@ ASCENT_MIN_POINTS = 3
 # 0.78. Tuned on one clip, so they are placed for margin rather than
 # for the tightest possible split.
 ASCENT_MIN_RISE_FRAC = 0.132     # of frame height -- 95px at 720
-ASCENT_RATE_LO = 0.45            # frame-heights per second, rising
+# RATE IS NOT THE DISCRIMINATOR, AND WAS COSTING REAL ASCENTS.
+#
+# The table above put the floor at 0.45, between a slowest ball of 0.59
+# and a fastest slow-fake of 0.33. A second clip settled it the other
+# way: a plainly real ascent -- 14 points, 152px, bend 3.9px,
+# straightness 0.996 -- came in at 0.44 and was refused by one
+# hundredth. On the FIRST clip the only piece of trash that rose far
+# enough to matter measured rate 0.44 as well, with bend 18.1px.
+#
+# So the two populations are indistinguishable on rate at the bar and
+# separate cleanly on BEND: 3.9 against 18.1, either side of a gate
+# already set at 14. Rate now only excludes drift that is barely moving
+# -- below every real ascent measured, and doing none of the work that
+# smoothness does.
+ASCENT_RATE_LO = 0.25            # frame-heights per second, rising
+# HOW STRAIGHT A STEP MUST STAY to still be the same ball.
+#
+# `_rising_tail` keeps the run at the end of a chain where every step
+# goes up, which is the right idea and too weak a test: going up is not
+# going STRAIGHT up, and the point where a chain hooks into the ball's
+# path from somewhere else is rising too. Measured on a real ascent, the
+# lowest point sat off the line badly enough to take the chain's bend
+# from 3.4px to 13.5px and its straightness from 0.98 to 0.82, on its
+# own. cos 26 degrees: wide enough for the curve of a real flight over
+# half a second, tight enough to refuse a corner.
+ASCENT_TURN_COS = 0.90
+# HOW LONG AGO THIS THING CAN HAVE LEFT THE TEE LINE.
+#
+# The gap between the tee line and the bottom of the band is a third of
+# the frame, and a struck ball crosses it in a fraction of a second.
+# Something crossing the band on a shallow heading did not come off a
+# tee at all, and running it back along that heading puts its origin
+# absurdly far into the past -- and usually off the side of the picture.
+#
+# Measured. Real ascents, four of them across two clips, were traced
+# back 8, 8, 12 and 23 frames. The one piece of trash that survived
+# every other gate was traced back 118 frames to x=63, at the very edge
+# of the frame: two and a half seconds of travel to reach a band a ball
+# reaches in a fifth of one.
+#
+# This is not the rate gate in other clothes. Rate is averaged over the
+# whole chain; this uses the heading at its FOOT, which is the part
+# nearest the tee and the only part that says anything about where the
+# chain came from.
+ASCENT_MAX_BACKRUN_SEC = 1.2
 # Net displacement over path length. A ball goes one way; a chain the
 # tracker assembled out of unrelated specks doubles back on itself.
 ASCENT_MIN_STRAIGHT = 0.75
@@ -2443,6 +2487,94 @@ def _rising_tail(pts):
     return pts[i:]
 
 
+def _smooth_tail(pts, min_points: int = ASCENT_MIN_POINTS):
+    """Drop leading points that turn a corner into the rest of the chain.
+
+    A BALL DOES NOT CHANGE DIRECTION. Over half a second of climb it
+    bends a little under gravity and nothing else, so every step points
+    much the same way. `_rising_tail` already cut the chain back to
+    where it started going UP; this cuts it back to where it started
+    going STRAIGHT, and those are not the same frame -- the point where
+    the tracker hooked the ball's path onto a clubhead, a shadow or a
+    hat is rising too, and it is the one that ruins the fit.
+
+    Measured on two real ascents: one lowest point taking bend from
+    3.4px to 13.5px and straightness from 0.98 to 0.82; another adding a
+    visible dog-leg at the bottom of an otherwise dead-straight climb.
+    Both are single points, both are the FIRST point, and both are the
+    difference between a chain that reads as a ball and one that does
+    not.
+
+    Compares each leading step against the heading of the chain's back
+    half, which is the part that is unambiguously the ball, and stops at
+    the first step that agrees -- everything above it is kept whatever
+    it does, because a chain is only ever joined at the bottom.
+    """
+    if len(pts) <= int(min_points):
+        return pts
+    k = max(2, len(pts) // 2)
+    rx = float(pts[-1]["x"]) - float(pts[-k]["x"])
+    ry = float(pts[-1]["y"]) - float(pts[-k]["y"])
+    rn = math.hypot(rx, ry)
+    if rn < 1e-6:
+        return pts
+    rx, ry = rx / rn, ry / rn
+    i = 0
+    while len(pts) - i > int(min_points):
+        sx = float(pts[i + 1]["x"]) - float(pts[i]["x"])
+        sy = float(pts[i + 1]["y"]) - float(pts[i]["y"])
+        sn = math.hypot(sx, sy)
+        # A step of no length has no direction to disagree with; it
+        # carries no evidence either way, so it is not a corner.
+        if sn < 1e-6 or (sx * rx + sy * ry) / sn >= ASCENT_TURN_COS:
+            break
+        i += 1
+    return pts[i:]
+
+
+def _dedupe_ascents(asc: list, gap_px: float = 40.0) -> list:
+    """One ball that got tracked twice is one ball.
+
+    The detector emits several blobs for one object on a frame -- the
+    ball, its leading edge, a smear -- and the tracker is happy to
+    build a chain out of each. They come out as two chains climbing side
+    by side, a few pixels and no time apart, and the sweep then reports
+    two balls leaving from two crosses on the tee line where a person
+    watching saw one shot.
+
+    Two chains are the same ball if they were in the air at the same
+    time AND were in the same place while they were. Both halves matter:
+    same time alone merges two players hitting together, and same place
+    alone merges every ball off the same tee all morning.
+
+    Keeps the longer chain of each pair -- more points is a better line,
+    a better heading and a better run back to the tee.
+    """
+    out: list = []
+    for a in sorted(asc, key=lambda z: -int(z.get("n_points") or 0)):
+        _ap = a.get("points") or []
+        _af = {int(p["frame"]): p for p in _ap}
+        for b in out:
+            _shared = [f for f in _af if f in
+                       {int(p["frame"]) for p in (b.get("points") or [])}]
+            if not _shared:
+                continue
+            _bp = {int(p["frame"]): p for p in (b.get("points") or [])}
+            _near = sum(
+                1 for f in _shared
+                if math.hypot(float(_af[f]["x"]) - float(_bp[f]["x"]),
+                              float(_af[f]["y"]) - float(_bp[f]["y"]))
+                <= gap_px)
+            if _near >= max(2, len(_shared) // 2):
+                b.setdefault("merged", 0)
+                b["merged"] += 1
+                break
+        else:
+            out.append(a)
+    out.sort(key=lambda z: int(z.get("first_frame") or 0))
+    return out
+
+
 def sweep_ascents(
     input_path: Path,
     fps: float,
@@ -2509,8 +2641,9 @@ def sweep_ascents(
                                           - _t0 - _t_det, 2)}
         for tk in tracks:
             pts = tk.get("points") or []
-            # JUDGE THE RISING TAIL, not everything that got linked.
-            pts = _rising_tail(pts)
+            # JUDGE THE RISING TAIL, not everything that got linked --
+            # and then only the part of it that goes one way.
+            pts = _smooth_tail(_rising_tail(pts), int(min_points))
             if len(pts) < int(min_points):
                 continue
             rise = float(pts[0]["y"]) - float(pts[-1]["y"])
@@ -2556,6 +2689,11 @@ def sweep_ascents(
                 _steps = (_tee_top - float(pts[0]["y"])) / _vy
                 _from_x = int(round(float(pts[0]["x"]) + _vx * _steps))
                 _from_f = int(round(float(pts[0]["frame"]) + _steps))
+            # TOO LONG AGO TO HAVE BEEN A TEE SHOT. See the constant.
+            if (_from_f is None
+                    or (int(pts[0]["frame"]) - _from_f)
+                    > ASCENT_MAX_BACKRUN_SEC * float(fps or 30.0)):
+                continue
             out["ascents"].append({
                 "first_frame": int(pts[0]["frame"]),
                 "last_frame": int(pts[-1]["frame"]),
@@ -2566,6 +2704,11 @@ def sweep_ascents(
                 "bend_px": round(bend, 2),
                 "straightness": round(straight, 3),
                 "from_x": _from_x,
+                # THE TEE LINE'S OWN HEIGHT, carried so that a caller
+                # who finds no ball sitting there still has somewhere to
+                # put one. `from_x` says where along the line; without
+                # this it has no y and cannot name a point.
+                "from_y": int(_tee_top),
                 "from_frame": _from_f,
                 "from_sec": (round(_from_f / float(fps or 30.0), 2)
                              if _from_f is not None else None),
@@ -2573,10 +2716,14 @@ def sweep_ascents(
                 "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
                             "y": int(q["y"])} for q in pts],
             })
-        out["ascents"].sort(key=lambda a: a["first_frame"])
+        _n_raw = len(out["ascents"])
+        out["ascents"] = _dedupe_ascents(out["ascents"])
+        out["n_merged"] = _n_raw - len(out["ascents"])
         out["ok"] = True
         out["reason"] = (
-            f"{len(out['ascents'])} ball(s) seen leaving, from "
+            (f"{out['n_merged']} duplicate chain(s) merged; "
+             if out["n_merged"] else "")
+            + f"{len(out['ascents'])} ball(s) seen leaving, from "
             f"{len(tracks)} chain(s) in {len(dets)} detection(s) over "
             f"{n_frames} frames of the band above the golfers")
     except Exception as exc:  # noqa: BLE001

@@ -17653,6 +17653,7 @@ def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
         _entry.update(_spot)
         rep["clips"].append(_entry)
     _n_spot = sum(1 for c in rep["clips"] if c.get("ball"))
+    _n_est = sum(1 for c in rep["clips"] if c.get("estimated"))
     _stage(2, "Tee spot and impact frame",
            "The sweep says roughly WHERE and WHEN each ball left, but its "
            "run back to the tee line is linear while a struck ball slows "
@@ -17660,7 +17661,12 @@ def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
            "in a short window around that estimate -- seconds of footage "
            "rather than the whole clip -- and the ball it finds sitting "
            "there is the tee spot, with the frame it went as the impact "
-           "frame.",
+           "frame. When the ball was never visible sitting there -- a "
+           "playing partner standing in the line is enough -- the chain's "
+           "own run back to the tee line is used instead, marked `est`: "
+           "early rather than exact, and better than not producing a shot "
+           "the sweep watched fly."
+           + (f" {_n_est} of these are estimated." if _n_est else ""),
            _n_spot, "located", time.perf_counter() - _t)
 
     # ── 3. the edit dialog's own produce ──────────────────────────────
@@ -17713,6 +17719,50 @@ def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
     log.info("ascent produce upload=%s: %s in %.1fs", row.id, rep["reason"],
              rep["timing"]["total_sec"])
     return rep
+
+
+def _ascent_spot_fallback(out: dict, ascent: dict, seen, why: str) -> dict:
+    """Produce anyway, from the chain alone, and say that is what happened.
+
+    A BALL BEHIND A PERSON IS STILL A BALL THAT LEFT. The resting-ball
+    scan needs to SEE the ball sitting there, and on a busy tee it often
+    cannot -- a playing partner stands in the line, and the whole window
+    passes with the spot covered. Refusing to produce then throws away a
+    shot the sweep watched fly, on the grounds that it could not also
+    watch it wait.
+
+    The chain already carries an answer to both questions. It was run
+    back along its own heading to the tee line, which is a point on the
+    turf; and it says when it got there. Neither is as good as seeing
+    the ball -- the run back is linear where a struck ball decelerates,
+    so it lands EARLY -- but early by tens of frames is a usable impact
+    frame, and the alternative on offer is nothing at all.
+
+    Marked `estimated` throughout, because a guess that cannot be told
+    from a measurement is worse than no guess: the report and the modal
+    both show which of the two produced each clip.
+    """
+    _x, _y, _f = (ascent.get("from_x"), ascent.get("from_y"),
+                  ascent.get("from_frame"))
+    if _x is None or _y is None or _f is None:
+        out["reason"] = why + " — and the chain gave no origin to fall back on"
+        return out
+    # NEVER AFTER THE BALL IS IN THE AIR. The sweep saw it airborne at
+    # `seen`; it was not on the tee at any frame after that, whatever
+    # the linear run back says.
+    _imp = int(_f)
+    if seen is not None:
+        _imp = min(_imp, int(seen))
+    out["ball"] = [int(_x), int(_y)]
+    out["impact_frame"] = max(0, _imp)
+    out["estimated"] = True
+    out["watch_concluded"] = False
+    out["reason"] = (
+        f"{why} — estimated from the chain instead: it was traced back to "
+        f"{int(_x)},{int(_y)} on the tee line at f{out['impact_frame']}. The "
+        f"run back is linear and a struck ball slows as it climbs, so this "
+        f"is early rather than exact.")
+    return out
 
 
 def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
@@ -17782,9 +17832,10 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
         return out
     spots = list(res.get("spots") or [])
     if not spots:
-        out["reason"] = (f"no ball found sitting in f{_lo}-{_hi}: "
-                         + str(res.get("reason") or ""))
-        return out
+        return _ascent_spot_fallback(
+            out, ascent, _seen,
+            f"no ball found sitting in f{_lo}-{_hi}"
+            + (f": {res.get('reason')}" if res.get("reason") else ""))
     # THE ONE NEAREST WHERE THE CHAIN CAME FROM, along the tee line. The
     # window can hold several balls -- a group tees off one after
     # another from the same strip of turf -- and the chain says which.
@@ -17807,6 +17858,18 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
     else:
         spots.sort(key=lambda sp: -float(sp.get("held_sec") or 0.0))
     sp = spots[0]
+    # A SPOT ACROSS THE TEE BOX IS NOT THIS CHAIN'S BALL. The scan
+    # returns whatever it found in the window, and on a busy tee that
+    # can be somebody else's ball forty yards away while this one stayed
+    # hidden behind a playing partner the whole time. Producing from it
+    # would put the tracer on the wrong ball, which is worse than
+    # producing from the chain's own estimate.
+    if _x is not None and abs(int(sp["x"]) - int(_x)) > ASCENT_SPOT_NEAR_PX:
+        return _ascent_spot_fallback(
+            out, ascent, _seen,
+            f"the nearest ball sitting in f{_lo}-{_hi} was at {sp['x']}, "
+            f"{abs(int(sp['x']) - int(_x))}px from where this chain was "
+            f"traced back to")
     out["ball"] = [int(sp["x"]), int(sp["y"])]
     _imp = int(sp.get("gone_frame") or sp.get("last_frame") or 0)
     # CLAMPED TO THE FRAME THE SWEEP SAW IT LEAVE. The watch can fail to

@@ -7921,12 +7921,30 @@ function AscentProduceModal({ state, onClose }) {
                         <td>{a.rise_px}px</td>
                         <td>{a.rate}</td>
                         <td>{a.straightness}</td>
-                        <td>{c.ball
-                          ? `${c.ball[0]}, ${c.ball[1]}`
-                          : <span className="muted">—</span>}</td>
-                        <td>{c.impact_frame != null
-                          ? `f${c.impact_frame}`
-                          : <span className="muted">—</span>}</td>
+                        <td>{c.ball ? (
+                          <span title={c.reason || ""}>
+                            {c.ball[0]}, {c.ball[1]}
+                            {c.estimated && (
+                              <span className="pill warn"
+                                    style={{ marginLeft: 4 }}
+                                    title="The ball was never seen sitting there — hidden behind a person, most likely. This is where the chain was traced back to on the tee line.">
+                                est
+                              </span>
+                            )}
+                          </span>
+                        ) : <span className="muted">—</span>}</td>
+                        <td>{c.impact_frame != null ? (
+                          <span title={c.estimated
+                            ? "Estimated: the linear run back to the tee line, which lands early because a struck ball slows as it climbs."
+                            : (c.watch_concluded
+                              ? "Measured: the watch saw the spot go clear and empty."
+                              : "The watch never concluded; this is the frame the sweep first saw the ball airborne.")}>
+                            f{c.impact_frame}
+                            {!c.estimated && !c.watch_concluded && (
+                              <span className="muted"> ~</span>
+                            )}
+                          </span>
+                        ) : <span className="muted">—</span>}</td>
                         <td>{c.clip_url
                           ? <a href={c.clip_url} target="_blank"
                                rel="noreferrer">clip</a>
