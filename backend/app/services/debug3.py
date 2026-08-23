@@ -701,7 +701,8 @@ def build_tracks(
         tracks.append({
             "points": [
                 {"frame": int(p["frame"]), "x": int(p["x"]),
-                 "y": int(p["y"]), "area": int(p["area"])}
+                 "y": int(p["y"]), "area": int(p["area"]),
+                 "src": p.get("src")}
                 for p in pts
             ],
             "span_px": round(span, 1),
@@ -1787,17 +1788,31 @@ def find_descents(
                                 suppress_bodies=False,
                                 cap_prefer="large")
         dets = list(det.get("dets") or [])
+        # WHICH DETECTOR FOUND IT, carried on every detection. Three
+        # detectors means three decodes of the same footage, and on a
+        # two-core box that is most of what the descent stage costs --
+        # so whether each one earns its pass is worth knowing rather
+        # than assuming. A detector that contributes nothing to any
+        # ACCEPTED chain is a decode being paid for and thrown away.
+        for _d in dets:
+            _d["src"] = "mog2"
         n_mog = len(dets)
-        dets.extend(detect_movers_by_plate(input_path, f_lo, f_hi))
-        n_plate = len(dets) - n_mog
+        _pl = detect_movers_by_plate(input_path, f_lo, f_hi)
+        for _d in _pl:
+            _d["src"] = "plate"
+        dets.extend(_pl)
+        n_plate = len(_pl)
         # THE THIRD DETECTOR, and on a green view the one that works.
         # The other two model the scene and report departures from it,
         # which on smooth turf under moving cloud means the tree line;
         # this one asks only "was that there a frame ago", which is what
         # a falling ball is.
-        dets.extend(detect_movers_by_diff(input_path, f_lo, f_hi, sens=2,
-                                          per_frame=DESCENT_DIFF_PER_FRAME))
-        n_diff = len(dets) - n_mog - n_plate
+        _df = detect_movers_by_diff(input_path, f_lo, f_hi, sens=2,
+                                    per_frame=DESCENT_DIFF_PER_FRAME)
+        for _d in _df:
+            _d["src"] = "diff"
+        dets.extend(_df)
+        n_diff = len(_df)
         dets.sort(key=lambda d: d["frame"])
         out["n_dets"] = len(dets)
         out["n_dets_mog2"] = n_mog
@@ -1920,6 +1935,7 @@ def find_descents(
             "bend_px": round(bend, 2),
             "step_px": round(step_med, 2),
             "step_dev": round(step_dev, 2),
+            "sources": sorted({q.get("src") for q in kept if q.get("src")}),
             "peak_px_per_frame": round(peak, 1),
             # THE CHAIN ITSELF, up to the frame it stopped falling.
             # Callers that only want to know a ball came down are served

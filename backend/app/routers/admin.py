@@ -16361,6 +16361,18 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         out["det_stats"] = _ds
         out["n_tracks"] = sum(int(_r2.get("n_tracks") or 0)
                               for _r2 in _per_window_reports)
+        # WHICH DETECTOR'S PASS WAS WORTH MAKING. Each one is a separate
+        # decode of the same windows, and on a two-core box the descent
+        # stage is most of what a produce spends. A detector that
+        # appears in no accepted chain is a decode being paid for and
+        # discarded, and this is the number that says so.
+        _by_src: dict = {}
+        for _e in _all_evs:
+            if not _descent_accepted(_e):
+                continue
+            for _s2 in (_e.get("sources") or []):
+                _by_src[_s2] = _by_src.get(_s2, 0) + 1
+        out["accepted_by_detector"] = _by_src
         _raw = []
         for _r2 in _per_window_reports:
             _raw.extend(_r2.get("dets_preview") or [])
@@ -16400,7 +16412,7 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         evs = [e for e in _all_evs if _strict(e)]
         _keys = ("last_descent_frame", "last_descent_sec", "landing_xy",
                  "n_points", "n_points_tracked", "drop_px", "fall_rate",
-                 "bend_px", "step_px", "step_dev")
+                 "bend_px", "step_px", "step_dev", "sources")
         out["events"] = [
             {**{k: e.get(k) for k in _keys},
              "accepted": _strict(e),
@@ -17071,7 +17083,12 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
            f"{_d3s.get('clip_frames') or '?'} green frames — each "
            f"segmented and tracked once, then each candidate claims the "
            f"fall inside its own flight window. Deeper re-scans run only "
-           f"on near-misses. Inside: "
+           f"on near-misses. Accepted chains came from: "
+           + (", ".join(f"{k} {v}" for k, v in sorted(
+               (_d3s.get("accepted_by_detector") or {}).items(),
+               key=lambda kv: -kv[1])) or "none")
+           + ". A detector in none of them is a whole decode of these "
+             "windows being paid for and thrown away. Inside: "
            + (", ".join(f"{k} {v}s" for k, v in sorted(
                _dsub.items(), key=lambda kv: -float(kv[1] or 0))) or "n/a"),
            (rep["descents"] or {}).get("n_matched"), "matched", _t_desc)
