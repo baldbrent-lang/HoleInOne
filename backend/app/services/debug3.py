@@ -1431,6 +1431,23 @@ def detect_movers_by_plate(
     min_area: int = 3,
     max_area: int = 900,
     max_side: int = 70,
+    # A CAP, WHICH THIS NEVER HAD. The other two detectors both bound
+    # what one frame may contribute; this returned everything that
+    # passed the area filter. On tree-line texture that is thousands per
+    # frame -- measured 705,228 detections over 200 frames, against 585
+    # from the frame-difference detector on the same clip.
+    #
+    # The cost is not the detector, it is what comes after: the tracker
+    # associates every open track against every candidate, so burying it
+    # in three thousand candidates a frame turns linking into the most
+    # expensive thing in the produce. The same 200 frames take half a
+    # second with the ball detector alone and had not finished after two
+    # minutes with this one in the mix.
+    #
+    # Largest first, for the reason the ball detector keeps the largest:
+    # inside a ball-sized window the ball is the big one and the speckle
+    # is small.
+    max_per_frame: int = 40,
 ) -> list:
     """Ball-sized things that differ from a still picture of the scene.
 
@@ -1498,6 +1515,7 @@ def detect_movers_by_plate(
             d = np.abs(g - plate).astype(np.uint8)
             _, mask = cv2.threshold(d, int(thr), 255, cv2.THRESH_BINARY)
             n, _lab, st, cen = cv2.connectedComponentsWithStats(mask, 8)
+            _this: list = []
             for i in range(1, n):
                 a = int(st[i, cv2.CC_STAT_AREA])
                 bw = int(st[i, cv2.CC_STAT_WIDTH])
@@ -1512,7 +1530,11 @@ def detect_movers_by_plate(
                 if (x < edge_px or y < edge_px
                         or x > w - edge_px or y > h - edge_px):
                     continue
-                out.append({"frame": f, "x": x, "y": y, "area": a})
+                _this.append({"frame": f, "x": x, "y": y, "area": a})
+            if len(_this) > max_per_frame:
+                _this.sort(key=lambda d: -d["area"])
+                _this = _this[:max_per_frame]
+            out.extend(_this)
             f += 1
         cap.release()
     except Exception:  # noqa: BLE001
@@ -1739,6 +1761,23 @@ def find_descents(
     max_bend_px: float = 10.0,
     merge_sec: float = 1.0,
     max_events: int = 20,
+    # WHICH DETECTORS TO RUN. Measured on 200 frames of 720p with a ball
+    # falling past a textured tree line:
+    #
+    #   diff    2.5 ms/frame       585 detections
+    #   mog2   17.5 ms/frame     1,069 detections
+    #   plate  27.7 ms/frame   705,228 detections
+    #
+    # The plate detector has no per-frame cap, so on tree-line texture it
+    # returns thousands per frame -- it is not merely the slow one, it is
+    # the one that buries the ball in noise and then makes the tracker
+    # link it into the chains that keep showing up over the trees.
+    #
+    # `diff` alone is what the operator's own map runs, which is why the
+    # map answers instantly and produce takes two minutes on the same
+    # footage. Run that first; the others are a fallback for when it
+    # comes back with nothing.
+    detectors: tuple = ("mog2", "plate", "diff"),
 ) -> dict:
     """Every ball descent in a green-camera clip, found without being told
     where to look.
@@ -1808,10 +1847,13 @@ def find_descents(
         # not a problem here -- the fall-rate, drop and straightness
         # gates below throw them out, because a person does not fall at
         # a third of a frame-height per second in a straight line.
-        det = detect_ball_blobs(input_path, f_lo, f_hi,
-                                suppress_bodies=False,
-                                cap_prefer="large")
-        dets = list(det.get("dets") or [])
+        det = {}
+        dets = []
+        if "mog2" in detectors:
+            det = detect_ball_blobs(input_path, f_lo, f_hi,
+                                    suppress_bodies=False,
+                                    cap_prefer="large")
+            dets = list(det.get("dets") or [])
         # WHICH DETECTOR FOUND IT, carried on every detection. Three
         # detectors means three decodes of the same footage, and on a
         # two-core box that is most of what the descent stage costs --
@@ -1821,7 +1863,8 @@ def find_descents(
         for _d in dets:
             _d["src"] = "mog2"
         n_mog = len(dets)
-        _pl = detect_movers_by_plate(input_path, f_lo, f_hi)
+        _pl = (detect_movers_by_plate(input_path, f_lo, f_hi)
+               if "plate" in detectors else [])
         for _d in _pl:
             _d["src"] = "plate"
         dets.extend(_pl)
@@ -1831,8 +1874,9 @@ def find_descents(
         # which on smooth turf under moving cloud means the tree line;
         # this one asks only "was that there a frame ago", which is what
         # a falling ball is.
-        _df = detect_movers_by_diff(input_path, f_lo, f_hi, sens=2,
-                                    per_frame=DESCENT_DIFF_PER_FRAME)
+        _df = (detect_movers_by_diff(input_path, f_lo, f_hi, sens=2,
+                                     per_frame=DESCENT_DIFF_PER_FRAME)
+               if "diff" in detectors else [])
         for _d in _df:
             _d["src"] = "diff"
         dets.extend(_df)
@@ -1848,6 +1892,7 @@ def find_descents(
         # for opposite fixes. Without these counts the two look identical
         # from the outside, which is how a masked-out green reads as a
         # tracking problem.
+        out["detectors"] = list(detectors)
         out["det_stats"] = dict(det.get("stats") or {})
         out["det_stats"]["plate"] = n_plate
         out["det_stats"]["diff"] = n_diff

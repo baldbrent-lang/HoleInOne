@@ -16334,20 +16334,46 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         out["windows"] = [list(w) if w else None for w in _wins]
         out["window_frames"] = _covered if _wins != [None] else _n_gf
         out["clip_frames"] = _n_gf
+        # WHAT THE MAP RUNS, FIRST.
+        #
+        # The operator sets an impact frame, flips to the green view, and
+        # the dots are there before they have let go of the mouse -- and
+        # then produce spends two minutes on the same footage. The
+        # difference is not the window and it is not the machine: the map
+        # runs ONE detector, and produce ran three, of which the two
+        # extra ones are 95% of the cost. Measured on 200 frames of 720p:
+        # diff 2.5ms a frame, mog2 17.5ms, plate 27.7ms.
+        #
+        # So the fast pass is the map's pass. The other two are still
+        # there for the case the fast one comes back empty -- each was
+        # added because it caught a descent the others missed, and that
+        # is a reason to keep them as a fallback, not a reason to pay for
+        # them every time.
+        def _scan(_dets):
+            _evs, _reps, _first = [], [], {}
+            for _w in _wins:
+                _r = _d3.find_descents(
+                    gp, gfps, window=_w,
+                    min_points=BALLSCAN_DESCENT_LOOSE_POINTS,
+                    max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
+                    detectors=_dets,
+                ) or {}
+                _first = _r if not _first else _first
+                _reps.append(_r)
+                _evs.extend(_r.get("events") or [])
+            _evs.sort(key=lambda e: int(e.get("last_descent_frame") or 0))
+            return _evs, _reps, _first
+
         _t = time.perf_counter()
-        _all_evs = []
-        rep = {}
-        _per_window_reports = []
-        for _w in _wins:
-            _r = _d3.find_descents(
-                gp, gfps, window=_w,
-                min_points=BALLSCAN_DESCENT_LOOSE_POINTS,
-                max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
-            ) or {}
-            rep = _r if not rep else rep
-            _per_window_reports.append(_r)
-            _all_evs.extend(_r.get("events") or [])
-        _all_evs.sort(key=lambda e: int(e.get("last_descent_frame") or 0))
+        _all_evs, _per_window_reports, rep = _scan(("diff",))
+        out["scan_passes"] = ["diff"]
+        # Nothing the strict gate would take: pay for the slow detectors
+        # rather than report a miss that a second look would have caught.
+        if not any(_descent_accepted(_e) for _e in _all_evs):
+            _slow, _sreps, _srep = _scan(("mog2", "plate", "diff"))
+            out["scan_passes"].append("mog2+plate+diff")
+            if any(_descent_accepted(_e) for _e in _slow) or not _all_evs:
+                _all_evs, _per_window_reports, rep = _slow, _sreps, _srep
         _add("find_descents", time.perf_counter() - _t)
         # WAS THE BALL EVER DETECTED. Summed across the windows, because
         # "no descent found" means one of two opposite things -- nothing
@@ -17094,7 +17120,9 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
            f"{_d3s.get('clip_frames') or '?'} green frames — each "
            f"segmented and tracked once, then each candidate claims the "
            f"fall inside its own flight window. Deeper re-scans run only "
-           f"on near-misses. Accepted chains came from: "
+           f"on near-misses. Passes: "
+           + " then ".join(_d3s.get("scan_passes") or ["diff"])
+           + ". Accepted chains came from: "
            + (", ".join(f"{k} {v}" for k, v in sorted(
                (_d3s.get("accepted_by_detector") or {}).items(),
                key=lambda kv: -kv[1])) or "none")
