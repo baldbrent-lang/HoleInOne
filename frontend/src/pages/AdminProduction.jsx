@@ -782,6 +782,239 @@ const PLOT_WINDOW_PRE = 5;
 const PLOT_WINDOW_POST = 40;
 
 /**
+ * BOTH RAW CAMERAS UNDER ONE TRANSPORT, on the wall clock.
+ *
+ * The two Pis start recording at different moments, so "frame 900" means
+ * nothing across them and scrubbing the two players independently is a
+ * guessing game. The only thing they share is the time of day, so that is
+ * what drives them: `deltaSec` is green_start − tee_start, which makes
+ * the green video's position `teeTime − deltaSec` at every instant. One
+ * play button moves both; a rAF loop hauls green back whenever it drifts
+ * more than a frame's worth away.
+ *
+ * Rewind is a timer rather than a negative playbackRate, which no browser
+ * implements — stepping currentTime backwards on an interval is the only
+ * way to actually see the footage run backwards.
+ */
+function RawSyncPlayer({
+  teeUrl, greenUrl, teeFps, greenFps, deltaSec, teeStartedAt,
+  greenStartedAt, measured,
+}) {
+  const teeRef = useRef(null);
+  const greenRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const [rate, setRate] = useState(1);      // 1 or 3, forward only
+  const [rewinding, setRewinding] = useState(false);
+  const [teeTime, setTeeTime] = useState(0);
+  const [dur, setDur] = useState(0);
+  const tfps = Number(teeFps) || 30;
+  const gfps = Number(greenFps) || tfps;
+  const delta = Number(deltaSec) || 0;
+
+  // GREEN FOLLOWS TEE, always. Two <video>s decode independently and
+  // wander apart within a few seconds even when started together, so the
+  // offset is re-asserted continuously rather than once at play. A third
+  // of a frame is the tolerance: tighter and the correction itself
+  // becomes visible as a stutter.
+  useEffect(() => {
+    let raf = 0;
+    const tick = () => {
+      const t = teeRef.current;
+      const g = greenRef.current;
+      if (t) {
+        setTeeTime(t.currentTime);
+        if (g && g.readyState >= 2) {
+          const want = t.currentTime - delta;
+          const clamped = Math.max(0, Math.min(g.duration || 0, want));
+          if (Math.abs(g.currentTime - clamped) > (1 / gfps) / 3) {
+            g.currentTime = clamped;
+          }
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [delta, gfps]);
+
+  // REWIND, hand-cranked. Held at 3x real time by stepping the tee clock
+  // back a fixed slice every interval; green is dragged along by the sync
+  // loop above, so there is nothing camera-specific here.
+  useEffect(() => {
+    if (!rewinding) return undefined;
+    const step = 0.1;
+    const id = setInterval(() => {
+      const t = teeRef.current;
+      if (!t) return;
+      const next = t.currentTime - step * 3;
+      if (next <= 0) {
+        t.currentTime = 0;
+        setRewinding(false);
+      } else {
+        t.currentTime = next;
+      }
+    }, step * 1000);
+    return () => clearInterval(id);
+  }, [rewinding]);
+
+  function stopRewind() {
+    setRewinding(false);
+  }
+
+  async function play(r = 1) {
+    stopRewind();
+    const t = teeRef.current;
+    const g = greenRef.current;
+    if (!t) return;
+    t.playbackRate = r;
+    setRate(r);
+    // GREEN IS MUTED AND PLAYED TOO, so its decoder keeps running and the
+    // sync loop only has to nudge. Seeking a paused video every frame
+    // instead is what made this judder.
+    if (g) {
+      g.playbackRate = r;
+      g.currentTime = Math.max(0, Math.min(g.duration || 0,
+                                           t.currentTime - delta));
+      g.play().catch(() => {});
+    }
+    try { await t.play(); setPlaying(true); } catch { /* autoplay block */ }
+  }
+
+  function pause() {
+    stopRewind();
+    teeRef.current?.pause();
+    greenRef.current?.pause();
+    setPlaying(false);
+  }
+
+  // ONE FRAME, on the TEE's frame rate — the tee camera is the clock
+  // everything else is expressed against, so a "frame" here is one of
+  // its frames even when the green camera runs at a different rate.
+  function stepFrames(n) {
+    pause();
+    const t = teeRef.current;
+    if (!t) return;
+    t.currentTime = Math.max(
+      0, Math.min(t.duration || 0, t.currentTime + n / tfps));
+  }
+
+  const teeFrame = Math.round(teeTime * tfps);
+  const greenTime = teeTime - delta;
+  const greenFrame = Math.round(greenTime * gfps);
+  const btn = { width: "auto", padding: "2px 9px" };
+
+  return (
+    <div style={{
+      flex: 1, minWidth: 0, minHeight: 0, display: "flex",
+      flexDirection: "column", gap: 8,
+    }}>
+      <div style={{
+        flex: 1, minHeight: 0, display: "flex", gap: 8,
+        alignItems: "stretch",
+      }}>
+        <div style={{ flex: 1, minWidth: 0, display: "flex",
+                      flexDirection: "column", gap: 3 }}>
+          <video
+            ref={teeRef}
+            src={teeUrl}
+            muted
+            playsInline
+            preload="auto"
+            onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+            onEnded={() => setPlaying(false)}
+            style={{ width: "100%", flex: 1, minHeight: 0,
+                     objectFit: "contain", background: "#000",
+                     borderRadius: 6 }}
+          />
+          <div className="small muted" style={{ textAlign: "center" }}>
+            tee · f{teeFrame} · {teeTime.toFixed(2)}s
+          </div>
+        </div>
+        {greenUrl && (
+          <div style={{ flex: 1, minWidth: 0, display: "flex",
+                        flexDirection: "column", gap: 3 }}>
+            <video
+              ref={greenRef}
+              src={greenUrl}
+              muted
+              playsInline
+              preload="auto"
+              style={{ width: "100%", flex: 1, minHeight: 0,
+                       objectFit: "contain", background: "#000",
+                       borderRadius: 6 }}
+            />
+            <div className="small muted" style={{ textAlign: "center" }}>
+              green · {greenTime < 0
+                ? "not recording yet"
+                : `f${greenFrame} · ${greenTime.toFixed(2)}s`}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, alignItems: "center",
+                    justifyContent: "center", flexWrap: "wrap" }}>
+        <button type="button" className="ghost small" style={btn}
+                onClick={() => stepFrames(-1)} title="Back one tee frame">
+          ◀|
+        </button>
+        <button type="button"
+                className={rewinding ? "small" : "ghost small"} style={btn}
+                onClick={() => {
+                  pause();
+                  setRewinding(true);
+                }}
+                title="Rewind at 3x">
+          ◀◀ 3x
+        </button>
+        <button type="button"
+                className={playing && rate === 1 ? "small" : "ghost small"}
+                style={btn} onClick={() => play(1)} title="Play both">
+          ▶
+        </button>
+        <button type="button" className="ghost small" style={btn}
+                onClick={pause} title="Pause both">
+          ❙❙
+        </button>
+        <button type="button"
+                className={playing && rate === 3 ? "small" : "ghost small"}
+                style={btn} onClick={() => play(3)}
+                title="Fast forward at 3x">
+          ▶▶ 3x
+        </button>
+        <button type="button" className="ghost small" style={btn}
+                onClick={() => stepFrames(1)} title="Forward one tee frame">
+          |▶
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0.01, dur)}
+          step={1 / tfps}
+          value={Math.min(teeTime, dur || 0)}
+          onChange={(e) => {
+            pause();
+            const t = teeRef.current;
+            if (t) t.currentTime = Number(e.target.value);
+          }}
+          style={{ flex: 1, minWidth: 140, maxWidth: 420 }}
+        />
+      </div>
+      <div className="small muted" style={{ textAlign: "center" }}>
+        {/* THE OFFSET, AND HOW MUCH IT IS WORTH. "Nobody knows" and
+            "they started together" are both zero, and an operator
+            looking at two videos that will not line up needs to be able
+            to tell which one they are looking at. */}
+        offset {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s
+        {measured
+          ? " (from the cameras' own start stamps)"
+          : " (assumed — no start stamps on this upload)"}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Standalone click-to-plot modal, opened from a production card's
  * 🖱 Click-to-plot button. Big zoomable heat view with every timed dot
  * clickable; Save & close bakes the queued picks into the swing's
@@ -881,6 +1114,11 @@ function ClickToPlotModal({
     swing.track_frame_height
     ?? row.edit_metrics?.frame_height ?? row.tee_height ?? null;
   const bgUrl = swing.tracer_raw_motion_url || swing.mog2_overlay_url;
+  // Whether the tee picture can be stepped at all. On a swing with no
+  // produce behind it this is the ONLY thing that can be shown, so it
+  // is what decides whether the map renders rather than the presence of
+  // dots -- which a new swing has none of, by definition.
+  const canStepTee = !!row.tee_nb_frames;
 
   // WHICH VIEW IS UP: the tee's motion heat, the green camera, or the
   // tracer's own line. Declared here because everything below keys off
@@ -2163,9 +2401,15 @@ function ClickToPlotModal({
                   : "Loading the green camera…"}
               </div>
             )
-          ) : (dots.length > 0 || denseDots.length > 0) && bgUrl ? (
+          ) : (dots.length > 0 || denseDots.length > 0 || canStepTee) ? (
             <PlotHeatCanvas
-              bgUrl={bgUrl}
+              // NO HEAT COMPOSITE ON A NEW SWING, and that is fine --
+              // there has been no produce, so there is nothing to
+              // composite. The map opens on the real video frame
+              // instead, which is what it opens on anyway; `bgUrl` is
+              // only the fallback for the instant before the first
+              // frame arrives.
+              bgUrl={bgUrl || null}
               dots={dots}
               denseDots={denseDots}
               frameW={frameW}
@@ -2177,10 +2421,15 @@ function ClickToPlotModal({
               // bounding the search by a window derived from it would
               // make finding the right one circular.
               loadFrame={loadTeeFrame}
-              frameLo={swing.start_frame ?? 0}
+              frameLo={swing.start_frame ?? (isNew ? 1 : 0)}
               frameHi={swing.end_frame
                 ?? (row.tee_nb_frames ? row.tee_nb_frames - 1 : (winHi ?? 0))}
-              startFrame={impactF ?? undefined}
+              // A NEW CLIP OPENS AT FRAME 1 and the operator walks
+              // forward from there, because on a swing nobody has
+              // produced yet there is no impact frame to open at and
+              // finding the strike IS the first job. An existing swing
+              // still opens on its impact frame.
+              startFrame={impactF ?? (isNew ? 1 : undefined)}
               track={(swing.ball_track_frames || []).filter(
                 (r) => r.found && r.x != null && r.y != null,
               )}
