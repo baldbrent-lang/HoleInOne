@@ -813,7 +813,7 @@ const PLOT_WINDOW_POST = 40;
  */
 function RawSyncPlayer({
   teeUrl, greenUrl, teeFps, greenFps, deltaSec, teeStartedAt,
-  greenStartedAt, measured,
+  greenStartedAt, deltaSource, baseCapturedAt,
   // WHERE BOTH CAMERAS ARE STOPPED, reported up so the impact and
   // landing frames can be set from here. Only ever called with a pair
   // while paused, and with null the rest of the time: a moving picture
@@ -841,16 +841,29 @@ function RawSyncPlayer({
   // WHEN EACH CAMERA STARTED ROLLING, as a time of day. This is the only
   // thing the two clips share -- frame 900 means nothing across them --
   // so it is what the sync is built on and what the readout shows.
-  const teeEpoch = parseApiDate(teeStartedAt)?.getTime() ?? null;
-  const greenEpoch = parseApiDate(greenStartedAt)?.getTime() ?? null;
-  const haveClock = teeEpoch != null && greenEpoch != null;
-  // The offset IS the difference between the two start times. Taken from
-  // the stamps directly when they are there, so the number driving the
-  // pictures and the number on screen are the same arithmetic rather
-  // than two things that ought to agree.
-  const delta = haveClock
-    ? (greenEpoch - teeEpoch) / 1000
+  const teeStamp = parseApiDate(teeStartedAt)?.getTime() ?? null;
+  const greenStamp = parseApiDate(greenStartedAt)?.getTime() ?? null;
+  const bothStamped = teeStamp != null && greenStamp != null;
+  // The offset IS the difference between the two start times, whenever
+  // both cameras stamped one. Computed here rather than only passed in,
+  // so the number driving the pictures and the number on screen are the
+  // same arithmetic rather than two things that ought to agree.
+  const delta = bothStamped
+    ? (greenStamp - teeStamp) / 1000
     : (Number(deltaSec) || 0);
+  // THERE IS ALWAYS A TIME OF DAY, because there is always something
+  // that says when this capture happened -- if not each camera's own
+  // start, then the upload's. What changes is how much the two clocks
+  // are worth: on real stamps they are measured independently and can
+  // disagree, which is what makes them evidence. Anchored on the
+  // upload's capture time they are locked together by the offset and
+  // agree by construction, so they tell you the time and nothing about
+  // the sync. The footer says which of those you are looking at.
+  const baseEpoch = parseApiDate(baseCapturedAt)?.getTime() ?? null;
+  const teeEpoch = teeStamp ?? baseEpoch;
+  const greenEpoch = greenStamp
+    ?? (teeEpoch != null ? teeEpoch + delta * 1000 : null);
+  const haveClock = teeEpoch != null && greenEpoch != null;
 
   // GREEN FOLLOWS TEE, always. Two <video>s decode independently and
   // wander apart within a few seconds even when started together, so the
@@ -1088,21 +1101,34 @@ function RawSyncPlayer({
             "they started together" are both zero, and an operator
             looking at two videos that will not line up needs to be able
             to tell which one they are looking at. */}
-        {measured ? (
+        {bothStamped ? (
           <>
             tee started {fmtWallClock(teeEpoch)} · green started{" "}
             {fmtWallClock(greenEpoch)} · offset{" "}
+            {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s, measured from the
+            cameras&rsquo; own start stamps
+          </>
+        ) : haveClock ? (
+          <>
+            clock from the upload&rsquo;s capture time{" "}
+            {fmtWallClock(teeEpoch)} — neither camera stamped its own
+            start, so the green clip is placed by an offset of{" "}
             {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s
+            {deltaSource === "saved"
+              ? " that was saved for this upload"
+              : " nobody has established"}
+            . The two clocks cannot disagree, so they say when, not
+            whether the pictures line up.
           </>
         ) : (
           <>
-            offset {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s assumed —
-            neither camera stamped when it started rolling on this upload,
-            so the two clips are lined up on a guess and the clocks above
-            are only seconds into each file
+            nothing on this upload says when either camera started, so
+            there is no time of day to show — the numbers above are
+            seconds into each file, and the clips are lined up on an
+            offset of {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s
           </>
         )}
-        {skewMs != null && skewMs > 120 && (
+        {bothStamped && skewMs != null && skewMs > 120 && (
           <div style={{ color: "#fbbf24" }}>
             the two clocks are {Math.round(skewMs)}ms apart — the pictures
             are drifting, not showing the same instant
@@ -1428,13 +1454,19 @@ function ClickToPlotModal({
     const b_ = row.green_recording_started_at;
     if (a_ && b_) {
       const d = (new Date(b_).getTime() - new Date(a_).getTime()) / 1000;
-      if (Number.isFinite(d)) return { sec: d, measured: true };
+      if (Number.isFinite(d)) return { sec: d, source: "stamps" };
     }
+    // A SAVED OFFSET IS NOT A CAMERA STAMP. This used to report itself
+    // as measured, so an upload with no per-camera stamps at all said
+    // "from the cameras' own start stamps" under two clocks it had no
+    // way to place in the day. It is a real number and better than
+    // nothing -- an operator typed it, or a previous run worked it out
+    // -- but it says how far apart the clips are, not when either began.
     const saved = row.edit_metrics?.tee_green_delta_sec;
     if (saved != null && Number.isFinite(Number(saved))) {
-      return { sec: Number(saved), measured: true };
+      return { sec: Number(saved), source: "saved" };
     }
-    return { sec: 0, measured: false };
+    return { sec: 0, source: "assumed" };
   }, [row.tee_recording_started_at, row.green_recording_started_at,
       row.edit_metrics?.tee_green_delta_sec]);
   // THE LANDING, IN THE TEE PICTURE. Stored in green pixels because
@@ -2391,7 +2423,8 @@ function ClickToPlotModal({
               // day. Missing is missing; the player says so.
               teeStartedAt={row.tee_recording_started_at}
               greenStartedAt={row.green_recording_started_at}
-              measured={!!rawDelta?.measured}
+              deltaSource={rawDelta?.source || "assumed"}
+              baseCapturedAt={row.base_captured_at}
               onFrames={setRawFrames}
             />
           ) : cam === "tracer" ? (

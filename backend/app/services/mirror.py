@@ -150,8 +150,21 @@ def _import_one(ev: dict) -> bool:
             # mirrored pair on the system into hole 1's slot, whatever
             # cameras shot them. The source told us the hole right here;
             # keeping it costs nothing.
+            # WHEN EACH CAMERA STARTED ROLLING, carried over for the
+            # same reason as the hole above. These are CameraEvent
+            # columns and a mirrored upload gets no CameraEvent, so
+            # without keeping them here a mirrored pair falls through to
+            # an assumed zero offset: every green boundary in the clip
+            # out by however far apart the two recordings really started,
+            # and no time of day anywhere in the UI -- on footage whose
+            # exact offset the source knew and handed over in the same
+            # listing it handed the clips over in.
             edit_metrics={"source_hole_number": hole,
-                          "source_event_id": eid},
+                          "source_event_id": eid,
+                          "source_tee_started_at":
+                              ev.get("tee_recording_started_at"),
+                          "source_green_started_at":
+                              ev.get("green_recording_started_at")},
         )
         db.add(lvu)
         # Mark imported in the SAME transaction — so if produce later fails,

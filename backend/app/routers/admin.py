@@ -5427,15 +5427,20 @@ def list_long_uploads(
                 # event (null for manual uploads). Used by the wizard to
                 # show the cut frame's real-world timestamp and by the
                 # production page's clock overlay.
+                # ...falling back to what a mirror carried over. These
+                # columns live on CameraEvent, and a mirrored upload has
+                # no CameraEvent, so the importer files the source's two
+                # stamps in edit_metrics -- the same place it already
+                # files the hole for the same reason.
                 "tee_recording_started_at": (
                     cam_event.tee_recording_started_at.isoformat()
                     if cam_event and cam_event.tee_recording_started_at
-                    else None
+                    else (r.edit_metrics or {}).get("source_tee_started_at")
                 ),
                 "green_recording_started_at": (
                     cam_event.green_recording_started_at.isoformat()
                     if cam_event and cam_event.green_recording_started_at
-                    else None
+                    else (r.edit_metrics or {}).get("source_green_started_at")
                 ),
                 "swing_count": r.swing_count or "multiple",
                 "tee_filename": r.tee_filename,
@@ -19569,8 +19574,26 @@ def _d3_green_delta_sec(db, row) -> tuple[float, str]:
             t_green = ev.green_recording_started_at
             if t_tee is not None and t_green is not None:
                 return (t_green - t_tee).total_seconds(), "camera_event"
-    # THE UPLOAD'S OWN STAMPS, which are the same two wall clocks and
-    # were never being read.
+    # THE STAMPS A MIRROR CARRIED OVER. `tee_recording_started_at` is a
+    # CameraEvent column and NOT a LongVideoUpload one, so the getattr
+    # below has always returned None -- it reads as a second source and
+    # is not one. The importer files the source event's two stamps in
+    # edit_metrics instead (a mirrored upload has no CameraEvent to hang
+    # them on), and this is where they come back: same two wall clocks,
+    # same subtraction, so a mirrored pair cuts on the clock the way the
+    # original did instead of falling through to an assumed zero.
+    _em = row.edit_metrics or {}
+    _mt, _mg = (_em.get("source_tee_started_at"),
+                _em.get("source_green_started_at"))
+    if _mt and _mg:
+        try:
+            _dt = (datetime.fromisoformat(str(_mg).replace("Z", ""))
+                   - datetime.fromisoformat(str(_mt).replace("Z", "")))
+            return _dt.total_seconds(), "mirrored_stamps"
+        except (TypeError, ValueError) as exc:
+            log.debug("d3: mirrored stamps on upload %s unparseable: %s",
+                      getattr(row, "id", None), exc)
+    # The upload's own stamps, if the model ever grows them.
     #
     # LongVideoUpload carries `tee_recording_started_at` and
     # `green_recording_started_at` -- the instant each camera's FIRST
