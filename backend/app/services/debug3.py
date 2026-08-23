@@ -576,6 +576,21 @@ def build_tracks(
     # a direction, so acquisition is untouched, and it scales with the
     # gap because a longer gap is honestly less certain.
     corridor_px: float | None = None,
+    # HOW LONG A TRACK MAY LIVE before it is retired, in frames.
+    #
+    # Established tracks associate FIRST, longest first, so that a
+    # two-frame piece of noise cannot steal a detection from a flight
+    # that has been running for thirty. Over a whole video that rule
+    # inverts: a track that has been accumulating speckle for twenty
+    # seconds outranks everything, and when a ball crosses the band it
+    # is simply absorbed. Measured on a real clip -- a 514-point track
+    # spanning f485 to f1597 ate a real ascent at f1575, and the chain
+    # came out as "240px of rise over 1112 frames", rejected on rate.
+    #
+    # Nothing being looked for here lives that long: a ball crosses the
+    # band in well under a second. So a track past its span is closed,
+    # which stops it competing without throwing away what it found.
+    max_span: int | None = None,
 ) -> list:
     """Link detections into constant-velocity tracks, one track per object.
 
@@ -673,10 +688,13 @@ def build_tracks(
                 tr["vx"] = 0.5 * tr["vx"] + 0.5 * nvx
                 tr["vy"] = 0.5 * tr["vy"] + 0.5 * nvy
             tr["pts"].append(c)
-        # Retire anything that has gone quiet.
+        # Retire anything that has gone quiet, or that has been running
+        # so long it cannot be the thing being looked for.
         still = []
         for tr in open_tracks:
-            if f - tr["pts"][-1]["frame"] > max_gap:
+            _old = (max_span is not None
+                    and (f - tr["pts"][0]["frame"]) > int(max_span))
+            if _old or f - tr["pts"][-1]["frame"] > max_gap:
                 closed.append(tr)
             else:
                 still.append(tr)
@@ -2355,6 +2373,33 @@ def find_ascents(
 # choking. Ten is what the operator's own map uses.
 SWEEP_PER_FRAME = 10
 
+# HOW LONG A CHAIN IN THE SWEEP MAY RUN, in frames. A ball crosses the
+# band above the golfers in well under a second; at 50fps sixty frames is
+# already generous. Its job is to stop a long-lived speckle track from
+# outranking a real ball and absorbing it, which is what a whole-video
+# pass makes possible and a forty-frame window never could.
+SWEEP_MAX_SPAN = 60
+
+
+def _rising_tail(pts):
+    """The longest run at the END of a chain where every step goes up.
+
+    A whole-video pass links whatever was moving before the strike onto
+    the front of the ball's chain -- the club, the player, a shadow --
+    and those points wander. Measured on a real ascent: 26 points bending
+    24.7px, refused; its rising tail is 15 points bending 12.8px, which
+    is the ball and passes. The pre-impact junk is not evidence about the
+    flight and should not be fitted with it.
+
+    Only the tail, and only strictly rising, because that is the part
+    that is unambiguously a ball leaving. Anything before the last time
+    it started climbing belongs to whatever else was in the band.
+    """
+    i = len(pts) - 1
+    while i > 0 and float(pts[i]["y"]) < float(pts[i - 1]["y"]):
+        i -= 1
+    return pts[i:]
+
 
 def sweep_ascents(
     input_path: Path,
@@ -2414,13 +2459,16 @@ def sweep_ascents(
         out["n_dets"] = len(dets)
         _t_det = time.perf_counter() - _t0
         tracks = build_tracks(dets, 14.0, min_len=int(min_points),
-                              max_gap=DESCENT_MAX_GAP)
+                              max_gap=DESCENT_MAX_GAP,
+                              max_span=SWEEP_MAX_SPAN)
         out["n_tracks"] = len(tracks)
         out["timing"] = {"detect": round(_t_det, 2),
                          "linking": round(time.perf_counter()
                                           - _t0 - _t_det, 2)}
         for tk in tracks:
             pts = tk.get("points") or []
+            # JUDGE THE RISING TAIL, not everything that got linked.
+            pts = _rising_tail(pts)
             if len(pts) < int(min_points):
                 continue
             rise = float(pts[0]["y"]) - float(pts[-1]["y"])
@@ -2441,6 +2489,16 @@ def sweep_ascents(
             _dfb = max(1, int(pts[_k]["frame"]) - int(pts[0]["frame"]))
             _vx = (float(pts[_k]["x"]) - float(pts[0]["x"])) / _dfb
             _vy = (float(pts[_k]["y"]) - float(pts[0]["y"])) / _dfb
+            # A CAVEAT ON THIS NUMBER, stated because it is easy to
+            # read as exact. The step back is LINEAR, and a struck ball
+            # is fastest at the tee and slows as it climbs -- so its
+            # true speed over the gap below the band is higher than the
+            # band average this uses, and the origin comes out EARLIER
+            # than it really was. Measured on one: a chain averaging
+            # 8.4px/frame across the band reports its origin 72 frames
+            # back where the strike was nearer 20. Good enough to say
+            # WHICH tee shot a chain belongs to, not good enough to be
+            # an impact frame.
             _from_x = _from_f = None
             if _vy < -0.5:
                 # SOLVE FOR THE TEE LINE, minding the sign. y(t) = y0 +
@@ -2465,6 +2523,7 @@ def sweep_ascents(
                 "from_frame": _from_f,
                 "from_sec": (round(_from_f / float(fps or 30.0), 2)
                              if _from_f is not None else None),
+                "from_is_approx": True,
                 "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
                             "y": int(q["y"])} for q in pts],
             })
