@@ -8444,6 +8444,32 @@ function BallScanModal({ state, adminPassword, onClose }) {
                     <> · still covered when the watch ran out</>
                   )}
                 </div>
+                {/* THE TEE CAMERA'S VERDICT, AS A PICTURE, and OUTSIDE
+                    the descent branch -- it was nested inside it, so the
+                    one candidate you most want to see an ascent for (no
+                    descent, and is it a swing at all?) was the one that
+                    never showed one. */}
+                {sp.ascent_image && (
+                  <figure style={{ margin: "6px 0 0" }}>
+                    <a href={sp.ascent_image} target="_blank"
+                       rel="noreferrer">
+                      <img src={sp.ascent_image} alt="ascent"
+                           style={{ width: "100%", borderRadius: 6 }} />
+                    </a>
+                    <figcaption className="tiny muted">
+                      What rose after this spot emptied. Only the
+                      boxed band above the golfers' heads is searched
+                      — everything below it is players, clubs and
+                      shadows. Green = the chain taken, grey = every
+                      other chain considered with the reason it lost.
+                      The small ring is where the ball was sitting;
+                      the wide one is how close a chain must run back
+                      to, along its own heading, to count as having
+                      left it.
+                      {sp.ascent_reason && <> — {sp.ascent_reason}</>}
+                    </figcaption>
+                  </figure>
+                )}
                 {/* THE GREEN CAMERA'S VERDICT, AS A PICTURE. "Four
                     points falling nearly straight down" is a sentence;
                     whether THIS chain is a ball or the tree line is only
@@ -8464,27 +8490,6 @@ function BallScanModal({ state, adminPassword, onClose }) {
                           re-scan of this window found the rest.</>
                       ) : null}
                     </div>
-                    {sp.ascent_image && (
-                      <figure style={{ margin: "6px 0 0" }}>
-                        <a href={sp.ascent_image} target="_blank"
-                           rel="noreferrer">
-                          <img src={sp.ascent_image} alt="ascent"
-                               style={{ width: "100%", borderRadius: 6 }} />
-                        </a>
-                        <figcaption className="tiny muted">
-                          What rose after this spot emptied. Only the
-                          boxed band above the golfers' heads is searched
-                          — everything below it is players, clubs and
-                          shadows. Green = the chain taken, grey = every
-                          other chain considered with the reason it lost.
-                          The small ring is where the ball was sitting;
-                          the wide one is how close a chain must run back
-                          to, along its own heading, to count as having
-                          left it.
-                          {sp.ascent_reason && <> — {sp.ascent_reason}</>}
-                        </figcaption>
-                      </figure>
-                    )}
                     {sp.descent_image_url && (
                       <figure style={{ margin: "6px 0 0" }}>
                         <a href={sp.descent_image_url} target="_blank"
