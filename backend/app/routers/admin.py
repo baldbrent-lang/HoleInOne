@@ -16131,6 +16131,18 @@ def _d3_probe_frames(path) -> int:
         return 0
 
 
+def _machine_desc() -> dict:
+    """Cores, quota and OpenCV's thread pool. Cheap, and it is the first
+    thing to check when the same clip takes six times as long in one
+    place as another."""
+    try:
+        from ..services.cpu import describe
+        return describe()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("machine description unavailable: %s", exc)
+        return {}
+
+
 def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
     """Total, per-stage share, and what nothing accounted for.
 
@@ -16153,6 +16165,11 @@ def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
         "by_stage": {int(st["n"]): st["seconds"]
                      for st in (rep.get("stages") or [])},
         "unattributed_sec": round(max(0.0, _total - _staged), 2),
+        # WHAT IT RAN ON. Two timing tables from two deployments only
+        # explain a difference between them if each says what machine it
+        # was measured on -- otherwise "production is slower" is a
+        # observation with nowhere to go.
+        "machine": _machine_desc(),
     }
 
 

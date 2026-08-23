@@ -397,6 +397,18 @@ def _heal_media_urls() -> None:
 
 @app.on_event("startup")
 def _startup() -> None:
+    # BEFORE ANYTHING DECODES A FRAME. `os.cpu_count()` reports the
+    # host's cores rather than this container's share, and OpenCV
+    # believes it -- so on a throttled deployment every cv2 call runs
+    # across a thread pool several times larger than the quota allows,
+    # and spends its time being descheduled instead of decoding. Which
+    # is one honest explanation for the same video taking minutes in one
+    # place and far longer in another.
+    try:
+        from .services.cpu import tune_opencv
+        tune_opencv()
+    except Exception as exc:  # noqa: BLE001
+        _glog.warning("startup: could not tune opencv threads: %s", exc)
     Base.metadata.create_all(bind=engine)
     _migrate()
     _heal_media_urls()

@@ -1349,6 +1349,12 @@ def _path_bend_px(pts: list) -> float:
         return 0.0
 
 
+# HOW MANY FRAMES THE BACKGROUND PLATE IS MEDIANED OVER. A ceiling, not
+# a target: the step widens to hit it on a long range and is left alone
+# on a short one. See the note inside for why the ceiling exists at all.
+MAX_PLATE_SAMPLES = 48
+
+
 def detect_movers_by_plate(
     input_path: Path,
     f0: int,
@@ -1388,8 +1394,24 @@ def detect_movers_by_plate(
         cap = cv2.VideoCapture(str(input_path))
         if not cap.isOpened():
             return out
+        # A BOUNDED NUMBER OF SAMPLES, however long the range is.
+        #
+        # Every eighth frame of a two-minute clip is 450 frames, and 450
+        # greyscale 720p frames is a 415MB stack -- which `np.median`
+        # then partitions on a copy of, so the peak is over 800MB in one
+        # allocation, on top of everything else the process is holding.
+        # On a small container that is not slow, it is an OOM kill: the
+        # worker dies, the upload sits at "processing" forever, and
+        # nothing anywhere says what happened.
+        #
+        # The cap costs nothing that matters. The plate is a median of a
+        # background that is not moving; forty-odd samples describe it as
+        # well as four hundred do, and the ball -- there for a tenth of a
+        # second -- is outvoted either way.
+        _n_rng = max(1, int(f1) - int(f0) + 1)
+        _step = max(int(plate_step), _n_rng // MAX_PLATE_SAMPLES + 1)
         plate_frames = []
-        for f in range(int(f0), int(f1) + 1, max(1, int(plate_step))):
+        for f in range(int(f0), int(f1) + 1, _step):
             cap.set(cv2.CAP_PROP_POS_FRAMES, f)
             ok, im = cap.read()
             if ok and im is not None:
@@ -1398,6 +1420,7 @@ def detect_movers_by_plate(
             cap.release()
             return out
         plate = np.median(np.stack(plate_frames), axis=0).astype(np.int16)
+        del plate_frames
         h, w = plate.shape
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(f0))
         f = int(f0)

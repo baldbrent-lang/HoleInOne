@@ -7640,6 +7640,19 @@ function ScanTiming({ stages, timing, nested, nestedLabel, note }) {
       </div>
       {note && <div className="tiny muted">{note}</div>}
       {rows(list, 0)}
+      {timing?.machine?.effective_cpus != null && (
+        <div className="tiny muted" style={{ marginTop: 4 }}>
+          ran on {timing.machine.effective_cpus} usable core(s)
+          {timing.machine.host_cpus != null
+            && timing.machine.host_cpus !== timing.machine.effective_cpus
+            ? ` of ${timing.machine.host_cpus} the host reports`
+            : ""}
+          {timing.machine.cv2_threads != null
+            ? ` · OpenCV on ${timing.machine.cv2_threads} thread(s)` : ""}
+          {" — compare this line first when the same clip is slower in "}
+          {"one place than another."}
+        </div>
+      )}
       {timing?.unattributed_sec > 0.05 && (
         <div className="tiny muted" style={{ marginTop: 6 }}>
           {timing.unattributed_sec}s unattributed — time no step above
