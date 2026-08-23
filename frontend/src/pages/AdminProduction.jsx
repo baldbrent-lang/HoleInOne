@@ -122,6 +122,21 @@ function frameSig(d) {
   return `${d.startFrame ?? "s"}|${d.impactFrame ?? "i"}|${d.endFrame ?? "e"}`;
 }
 
+// A TIME OF DAY, to the millisecond. The two raw clips share nothing
+// else -- different frame rates, different start moments, so a frame
+// number means nothing across them -- and the whole reason the pair can
+// be lined up at all is that both cameras stamped when they started
+// rolling. Milliseconds because a frame is 20-33ms and the question
+// being asked of this readout is whether two pictures are the same
+// instant.
+function fmtWallClock(ms) {
+  if (ms == null || !Number.isFinite(ms)) return "—";
+  const d = new Date(ms);
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+    + `.${p(d.getMilliseconds(), 3)}`;
+}
+
 function fmtDuration(sec) {
   if (sec == null) return "—";
   const s = Math.round(sec);
@@ -812,10 +827,30 @@ function RawSyncPlayer({
   const [rate, setRate] = useState(1);      // 1 or 3, forward only
   const [rewinding, setRewinding] = useState(false);
   const [teeTime, setTeeTime] = useState(0);
+  // THE GREEN PLAYER'S OWN POSITION, read back rather than derived. The
+  // whole claim this view makes is that the two cameras are showing the
+  // same instant, and a clock computed from the tee's position cannot
+  // test that claim -- it would read correct while the green picture
+  // was seconds adrift. Read where green ACTUALLY is, turn it into a
+  // time of day with green's OWN start stamp, and the two clocks agree
+  // only when the pictures do.
+  const [greenTimeRaw, setGreenTimeRaw] = useState(0);
   const [dur, setDur] = useState(0);
   const tfps = Number(teeFps) || 30;
   const gfps = Number(greenFps) || tfps;
-  const delta = Number(deltaSec) || 0;
+  // WHEN EACH CAMERA STARTED ROLLING, as a time of day. This is the only
+  // thing the two clips share -- frame 900 means nothing across them --
+  // so it is what the sync is built on and what the readout shows.
+  const teeEpoch = parseApiDate(teeStartedAt)?.getTime() ?? null;
+  const greenEpoch = parseApiDate(greenStartedAt)?.getTime() ?? null;
+  const haveClock = teeEpoch != null && greenEpoch != null;
+  // The offset IS the difference between the two start times. Taken from
+  // the stamps directly when they are there, so the number driving the
+  // pictures and the number on screen are the same arithmetic rather
+  // than two things that ought to agree.
+  const delta = haveClock
+    ? (greenEpoch - teeEpoch) / 1000
+    : (Number(deltaSec) || 0);
 
   // GREEN FOLLOWS TEE, always. Two <video>s decode independently and
   // wander apart within a few seconds even when started together, so the
@@ -829,6 +864,7 @@ function RawSyncPlayer({
       const g = greenRef.current;
       if (t) {
         setTeeTime(t.currentTime);
+        if (g) setGreenTimeRaw(g.currentTime);
         if (g && g.readyState >= 2) {
           const want = t.currentTime - delta;
           const clamped = Math.max(0, Math.min(g.duration || 0, want));
@@ -905,8 +941,18 @@ function RawSyncPlayer({
   }
 
   const teeFrame = Math.round(teeTime * tfps);
+  // Where green SHOULD be (for "has it started yet") and where it IS
+  // (for the frame number and the clock).
   const greenTime = teeTime - delta;
-  const greenFrame = Math.round(greenTime * gfps);
+  const greenFrame = Math.round(greenTimeRaw * gfps);
+  const teeWall = teeEpoch == null ? null : teeEpoch + teeTime * 1000;
+  const greenWall = greenEpoch == null
+    ? null : greenEpoch + greenTimeRaw * 1000;
+  // The clocks are computed independently; a gap between them is real
+  // drift, so say so rather than letting it pass as a rounding wobble.
+  const skewMs = (teeWall != null && greenWall != null && greenUrl
+                  && greenTime >= 0)
+    ? Math.abs(teeWall - greenWall) : null;
   const paused = !playing && !rewinding;
   const btn = { width: "auto", padding: "2px 9px" };
 
@@ -943,8 +989,11 @@ function RawSyncPlayer({
                      objectFit: "contain", background: "#000",
                      borderRadius: 6 }}
           />
-          <div className="small muted" style={{ textAlign: "center" }}>
-            tee · f{teeFrame} · {teeTime.toFixed(2)}s
+          <div className="small" style={{ textAlign: "center" }}>
+            <b style={{ fontVariantNumeric: "tabular-nums" }}>
+              {haveClock ? fmtWallClock(teeWall) : `${teeTime.toFixed(2)}s`}
+            </b>
+            <span className="muted"> · tee f{teeFrame}</span>
           </div>
         </div>
         {greenUrl && (
@@ -960,10 +1009,21 @@ function RawSyncPlayer({
                        objectFit: "contain", background: "#000",
                        borderRadius: 6 }}
             />
-            <div className="small muted" style={{ textAlign: "center" }}>
-              green · {greenTime < 0
-                ? "not recording yet"
-                : `f${greenFrame} · ${greenTime.toFixed(2)}s`}
+            <div className="small" style={{ textAlign: "center" }}>
+              {greenTime < 0 ? (
+                <span className="muted">
+                  green was not recording yet at this instant
+                </span>
+              ) : (
+                <>
+                  <b style={{ fontVariantNumeric: "tabular-nums" }}>
+                    {haveClock
+                      ? fmtWallClock(greenWall)
+                      : `${greenTimeRaw.toFixed(2)}s`}
+                  </b>
+                  <span className="muted"> · green f{greenFrame}</span>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -1028,10 +1088,26 @@ function RawSyncPlayer({
             "they started together" are both zero, and an operator
             looking at two videos that will not line up needs to be able
             to tell which one they are looking at. */}
-        offset {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s
-        {measured
-          ? " (from the cameras' own start stamps)"
-          : " (assumed — no start stamps on this upload)"}
+        {measured ? (
+          <>
+            tee started {fmtWallClock(teeEpoch)} · green started{" "}
+            {fmtWallClock(greenEpoch)} · offset{" "}
+            {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s
+          </>
+        ) : (
+          <>
+            offset {delta >= 0 ? "+" : ""}{delta.toFixed(3)}s assumed —
+            neither camera stamped when it started rolling on this upload,
+            so the two clips are lined up on a guess and the clocks above
+            are only seconds into each file
+          </>
+        )}
+        {skewMs != null && skewMs > 120 && (
+          <div style={{ color: "#fbbf24" }}>
+            the two clocks are {Math.round(skewMs)}ms apart — the pictures
+            are drifting, not showing the same instant
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2308,10 +2384,13 @@ function ClickToPlotModal({
               teeFps={row.tee_fps}
               greenFps={row.green_fps}
               deltaSec={rawDelta?.sec ?? 0}
-              teeStartedAt={row.tee_recording_started_at
-                || row.base_captured_at}
-              greenStartedAt={row.green_recording_started_at
-                || row.base_captured_at}
+              // NO FALLBACK TO base_captured_at. That is one timestamp
+              // for the upload, so handing it to both cameras makes them
+              // look like they started in the same millisecond and turns
+              // "nobody stamped this" into a confident, wrong time of
+              // day. Missing is missing; the player says so.
+              teeStartedAt={row.tee_recording_started_at}
+              greenStartedAt={row.green_recording_started_at}
               measured={!!rawDelta?.measured}
               onFrames={setRawFrames}
             />
