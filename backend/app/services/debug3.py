@@ -2224,6 +2224,25 @@ ASCENT_TURN_COS = 0.90
 # nearest the tee and the only part that says anything about where the
 # chain came from.
 ASCENT_MAX_BACKRUN_SEC = 1.2
+# HOW FAR OFF VERTICAL A BALL LEAVING THE TEE MAY LEAN, in degrees.
+#
+# Measured, on the chain's own foot heading -- the first few points,
+# nearest the tee -- across the two clips with known answers:
+#
+#   real ascents   5.2  10.2  14.5  20.1  28.6  41.2
+#   not a ball                                        71.6
+#
+# The bar sits in the 30-degree gap, a little nearer the trash: 41.2 is
+# a real shot on a windy hole and the tilt of a genuine ascent has no
+# reason to be bounded much tighter than that, while nothing at 55 or
+# beyond has yet been a ball.
+#
+# NOT THE BACK-RUN GATE AGAIN. That one bounds how long ago the chain
+# left the tee line, which is about vertical SPEED: a slow crawl fails
+# it whatever its angle. This bounds direction, and catches the case
+# that one cannot -- something moving fast, so it clears the back-run,
+# but travelling across the picture rather than up out of it.
+ASCENT_MAX_TILT_DEG = 55.0
 # Net displacement over path length. A ball goes one way; a chain the
 # tracker assembled out of unrelated specks doubles back on itself.
 ASCENT_MIN_STRAIGHT = 0.75
@@ -2677,6 +2696,14 @@ def sweep_ascents(
             # back where the strike was nearer 20. Good enough to say
             # WHICH tee shot a chain belongs to, not good enough to be
             # an impact frame.
+            # HOW FAR OFF VERTICAL IT IS LEANING. A struck ball climbs
+            # away from the tee steeply; something crossing the picture
+            # on a long diagonal is going somewhere else. See the
+            # constant for the measured split.
+            _tilt = math.degrees(math.atan2(abs(_vx), abs(_vy))) \
+                if abs(_vy) > 1e-6 else 90.0
+            if _tilt > ASCENT_MAX_TILT_DEG:
+                continue
             _from_x = _from_f = None
             if _vy < -0.5:
                 # SOLVE FOR THE TEE LINE, minding the sign. y(t) = y0 +
