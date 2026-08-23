@@ -14865,7 +14865,14 @@ export default function AdminProduction() {
                     ⛳ Swing test
                   </button>
                 )}
-                {produceDebug.enabled && (
+                {/* DEV ONLY, and `mirror.configured` is what says so:
+                    only the dev backend has a prod to pull from. These
+                    two run the same scan Produce now runs, with the
+                    report panel attached -- which is a thing to argue
+                    with a produce about, not a thing to hand an
+                    operator at a course. `produce_debug_enabled` was
+                    the wrong gate for that, being on in both places. */}
+                {produceDebug.enabled && mirror.configured && (
                   <button
                     className="small ghost"
                     onClick={() => handleBallScan(row)}
@@ -14874,11 +14881,11 @@ export default function AdminProduction() {
                     ⚪ Scan for ball
                   </button>
                 )}
-                {produceDebug.enabled && (
+                {produceDebug.enabled && mirror.configured && (
                   <button
                     className="small ghost"
                     onClick={() => handleBallScanProduce(row)}
-                    title="Dev: scan for resting balls, then trace every candidate that sat 7s or longer — straight from the measured rest position and the frame it went, with no pose, club arc or judge in between."
+                    title="Dev: what Produce runs, with the report attached — scan for resting balls, then trace every candidate that sat 7s or longer, straight from the measured rest position and the frame it went."
                   >
                     ⚪▶ Scan &amp; produce
                   </button>

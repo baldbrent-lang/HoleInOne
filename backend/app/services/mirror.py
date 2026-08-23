@@ -101,7 +101,7 @@ def _import_one(ev: dict) -> bool:
     row, so a later produce failure can't cause a re-import."""
     # Lazy imports: _run_long_upload_job lives in admin.py (circular at
     # module load); video helpers are heavy.
-    from ..routers.admin import _run_long_upload_job
+    from ..routers.admin import run_produce_job
     from ..services.video import extract_thumbnail, transcode_for_web
 
     course_id = int(settings.mirror_course_id)
@@ -171,13 +171,15 @@ def _import_one(ev: dict) -> bool:
         except Exception as exc:  # noqa: BLE001
             log.warning("mirror: preview gen failed for %s: %s", p.name, exc)
 
-    # Same detection/produce path a live camera event uses.
+    # Same produce path a live camera event uses -- `run_produce_job`,
+    # which is the ball scan followed by the wizard's renderer. It used
+    # to call `_run_long_upload_job` with the audio+motion detector,
+    # which is a THIRD pipeline: a mirrored clip then behaved unlike the
+    # same footage produced on prod, which defeats the point of mirroring
+    # it. The source told us the hole; pass it rather than let the
+    # produce infer one.
     try:
-        _run_long_upload_job(
-            upload_id=upload_id, seg_list=[], auto_detect_swings=True,
-            starting_hole=hole, ai_tracer_model=None,
-            single_hole=True, motion_only=True,
-        )
+        run_produce_job(upload_id=upload_id, hole_number=hole)
     except Exception as exc:  # noqa: BLE001
         log.warning("mirror: produce failed for event %s: %s", eid, exc)
     return True

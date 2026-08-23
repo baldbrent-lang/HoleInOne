@@ -5827,8 +5827,8 @@ def reprocess_long_upload(
 ):
     """Re-produce a previously-uploaded long video without re-uploading.
 
-    Runs THE pipeline — the same `_debug3_run` the Debug3 panel runs,
-    with the diagnostic artefacts turned off. Returns immediately with
+    Runs THE pipeline — `_produce_run`, the ball scan followed by the
+    wizard's renderer, with the diagnostic artefacts turned off. Returns immediately with
     pending status so the frontend can poll /long-uploads.
 
     The detection Form fields (`segments`, `starting_hole`,
@@ -5884,21 +5884,21 @@ def reprocess_long_upload(
         row.edit_metrics = _em
     db.commit()
 
-    # RE-PRODUCE IS DEBUG3, MINUS THE PANEL. They were two
-    # implementations of one process and drifted the moment they existed
-    # side by side: different swing detectors (pose vs audio+motion),
-    # different clip windows, 35s versus 208s, and 40 AI calls per swing
-    # on this side whose answers Debug3 overwrote anyway. Same function
-    # now; `debug_artifacts=False` skips the film-strips, the whole-video
-    # resting-ball scan and the preview clip — diagnostics nobody is
-    # looking at on a plain Re-Produce. Nothing that decides what ships
-    # differs between the two.
+    # RE-PRODUCE IS THE BALL SCAN. It was Debug3 -- pose candidate, club
+    # bottom, inferred ball, inferred impact frame, then a flight hunted
+    # through those inferences. The scan measures the two numbers a
+    # flight actually needs instead of deducing them: where the ball
+    # rested, and the frame its pixel first went clear and empty. Both
+    # paths hand the same pair to the same find_flight and the same
+    # `_d3_fast_produce`, so nothing downstream changed -- only whether
+    # what goes in was observed or guessed. Debug3 stays behind its
+    # panel, which is where a run you want to argue with belongs.
     #
     # _debugx_start owns the thread, the DB session and the progress
     # state, so the existing Debug3 status poll reports this run too.
     _debugx_start(
         "debug3", row.id,
-        functools.partial(_debug3_run, debug_artifacts=False),
+        functools.partial(_produce_run, debug_artifacts=False),
     )
 
     return {
@@ -16630,7 +16630,8 @@ def get_tee_box(upload_id: int, db: Session = Depends(get_db)):
     return out
 
 
-def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
+def _ball_scan_produce_run(row, src_path, db, progress=None,
+                           hole_number=None) -> dict:
     """Trace every candidate that sat long enough to be a teed ball.
 
     THE TWO NUMBERS ARE ALREADY IN HAND. The scan measured where the
@@ -16869,7 +16870,8 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
             _out = _d3_fast_produce(
                 row, src_path, db, {"swings": _swings}, fps,
                 progress=progress,
-                hole_number=_hole_for_upload(db, row),
+                hole_number=(hole_number if hole_number is not None
+                             else _hole_for_upload(db, row)),
                 # No `landing=` argument: it is a single value and there
                 # can be several candidates here, each with its own. The
                 # renderer takes each swing's landing from the comet
@@ -16923,6 +16925,104 @@ def _ball_scan_produce_run(row, src_path, db, progress=None) -> dict:
         f"{rep['n_traced']} of {len(spots)} candidate(s) traced "
         f"(sat {min_held:.0f}s or longer)"
     )
+    return rep
+
+
+def _produce_run(row, src_path, db, progress=None, debug_artifacts=False,
+                 hole_number=None) -> dict:
+    """THE production pipeline: find the ball, then produce from it.
+
+    Wraps `_ball_scan_produce_run` in the bookkeeping every produce
+    caller needs and `_debug3_run` used to own — the row's terminal
+    status, the clip counts the card reads, and the non-golf screen.
+
+    WHY THIS AND NOT DEBUG3. Debug3 works forwards from the golfer: find
+    a pose candidate, find the club, guess where the ball was, guess when
+    it left, then look for a flight through those guesses. The ball scan
+    works backwards from the ball itself — it MEASURES where the ball
+    rested and watches that pixel until the spot is clear and empty,
+    which is the strike. Those are the only two numbers a flight needs,
+    and one path measures them while the other infers them. Both then
+    hand the same pair to the same `find_flight` and the same
+    `_d3_fast_produce`, so nothing downstream changes; what changes is
+    that the numbers going in are observed rather than deduced.
+
+    `debug_artifacts` is accepted so this is a drop-in for `_debug3_run`
+    in every caller. The scan writes its own overview images either way
+    and has no film-strips to skip, so it changes nothing here.
+    """
+    upload_id = row.id
+
+    def _set_status(status: str, err: str | None = None,
+                    n_ok: int | None = None, n_total: int | None = None):
+        # A card greyed by "processing" stays greyed until something sets
+        # a terminal status, so every exit below goes through here.
+        try:
+            r2 = db.get(LongVideoUpload, upload_id)
+            if r2 is None:
+                return
+            r2.processing_status = status
+            if status == "processing":
+                r2.processing_started_at = _utcnow_naive()
+                r2.last_error = None
+            else:
+                r2.processing_completed_at = _utcnow_naive()
+                r2.last_error = err
+            if n_ok is not None:
+                r2.last_n_succeeded = n_ok
+                r2.last_n_segments = n_total if n_total is not None else n_ok
+            db.add(r2)
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log.warning("produce: could not set status=%s on %s: %s",
+                        status, upload_id, exc)
+
+    _set_status("processing")
+    try:
+        rep = _ball_scan_produce_run(row, src_path, db, progress=progress,
+                                     hole_number=hole_number) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("produce: the ball scan crashed on %s: %s",
+                      upload_id, exc)
+        _set_status("failed", f"{exc}"[:2000])
+        raise
+
+    n_ok = int(rep.get("n_traced") or 0)
+    n_cand = int(rep.get("n_candidates") or 0)
+    n_seen = len((rep.get("scan") or {}).get("spots") or [])
+
+    # NOTHING THAT LOOKS LIKE A BALL AT ALL. The scan doubles as the
+    # screen the way the swing detector used to: a capture with no
+    # resting ball anywhere in the tee box is a walk-by, a pet, or an
+    # empty trigger. Only when the scan saw NOTHING -- a candidate that
+    # was seen and then rejected means there was something there, and
+    # deletion is not recoverable from the UI.
+    if n_seen == 0 and settings.auto_delete_non_golf:
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        _auto_delete_upload(
+            upload_id, "no resting ball found anywhere in the tee box")
+        return rep
+
+    if n_ok:
+        _set_status("completed", None, n_ok=n_ok, n_total=n_cand or n_ok)
+    else:
+        # "no swings detected" IS LOAD-BEARING. The camera path matches
+        # on that prefix to tell a capture with nothing in it (not an
+        # error -- the Pi did its job, nobody hit a ball) from a real
+        # failure, and flags the event red only for the latter. Keep the
+        # prefix, and say underneath it what the scan actually saw.
+        _err = rep.get("produce_error")
+        if not _err:
+            _err = (
+                f"no swings detected: {n_seen} resting-ball candidate(s), "
+                f"{n_cand} of them long enough to be a teed ball, "
+                f"no ball flight found"
+            )
+        _set_status("failed", str(_err)[:2000], n_ok=0, n_total=n_cand)
     return rep
 
 
@@ -19242,7 +19342,7 @@ def run_produce_job(
 ) -> dict:
     """Produce an upload. THE entry point — every caller uses this.
 
-    Wraps `_debug3_run` with the row/source plumbing each caller was
+    Wraps `_produce_run` with the row/source plumbing each caller was
     otherwise repeating: rehydrate the source from object storage,
     resolve it on disk, own a DB session, and never let an exception
     escape into a request handler or a camera callback.
@@ -19251,7 +19351,7 @@ def run_produce_job(
     thread; the camera path deliberately blocks so it can stamp the
     CameraEvent's terminal status in one pass.
 
-    Returns the Debug3 report, or {"ok": False, "error": ...}.
+    Returns the scan-and-produce report, or {"ok": False, "error": ...}.
     """
     db = SessionLocal()
     try:
@@ -19284,7 +19384,7 @@ def run_produce_job(
         _debugx_set("produce", upload_id, stage="Starting", done=0, total=0,
                     running=True, error=None)
         try:
-            return _debug3_run(
+            return _produce_run(
                 row, src_path, db,
                 progress=_prog,
                 debug_artifacts=debug_artifacts,
