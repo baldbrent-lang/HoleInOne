@@ -8320,6 +8320,17 @@ def _view_map_for(db, row):
     vm = maps.get(key)
     if vm is None and legacy is not None:
         vm = maps.get(legacy)
+    # A PIN STRANDED IN THE LEGACY SLOT still counts. save_hole_pin wrote
+    # under the bare hole number while this read preferred the keyed
+    # record, so every flag marked before that was fixed is sitting in a
+    # record this function would otherwise walk straight past. The
+    # mapping keeps whichever record won -- that part was never wrong --
+    # and only the pin is carried across.
+    if vm is not None and legacy is not None and not vm.get("pin_green"):
+        _old = maps.get(legacy) or {}
+        if _old.get("pin_green"):
+            vm = {**vm, "pin_green": _old["pin_green"],
+                  "pin_set_at": _old.get("pin_set_at")}
     return course, hole, vm
 
 
@@ -8523,7 +8534,7 @@ def save_upload_view_map(
     row = db.get(LongVideoUpload, upload_id)
     if not row:
         raise HTTPException(404, "long upload not found")
-    course, hole, _ = _view_map_for(db, row)
+    course, hole, _prev_vm = _view_map_for(db, row)
     if course is None:
         raise HTTPException(
             409,
@@ -8569,6 +8580,15 @@ def save_upload_view_map(
     vm["key"] = _key
     vm["key_reason"] = _why
     vm["hole"] = hole
+    # THE FLAG SURVIVES A RE-CALIBRATION. It is stored in GREEN pixels
+    # for exactly this reason -- where it falls in the tee frame is read
+    # through the mapping rather than kept, so a better fit MOVES the
+    # flag to the right place instead of invalidating it. `vm` here is a
+    # fresh dict from the fit, so without this the pin is simply dropped
+    # and the operator has to mark it again after every calibration.
+    if _prev_vm and _prev_vm.get("pin_green") and not vm.get("pin_green"):
+        vm["pin_green"] = _prev_vm["pin_green"]
+        vm["pin_set_at"] = _prev_vm.get("pin_set_at")
     _all = dict(course.view_maps or {})
     _all[_key] = vm
     # THE LEGACY RECORD IS LEFT WHERE IT IS. It is keyed on a bare hole
@@ -8747,7 +8767,14 @@ def save_hole_pin(
         except (TypeError, ValueError, IndexError):
             raise HTTPException(400, "the pin must be an [x, y] pair")
         _vm["pin_set_at"] = _utcnow_naive().isoformat()
-    _all[str(hole)] = _vm
+    # UNDER `_key`, which is the whole point of the four lines above.
+    # Writing it under the bare hole number instead put the pin in the
+    # legacy slot while the read went to `cam:T-G` / `hole:N` first and
+    # found a mapping with no pin in it -- so the flag was saved, the
+    # save reported success, and the next video (and the next open of
+    # the same one) came back with nowhere for the flag to be. It also
+    # meant every save forged a legacy record as a side effect.
+    _all[_key] = _vm
     course.view_maps = _all
     db.commit()
     xy, reason = (None, None)
