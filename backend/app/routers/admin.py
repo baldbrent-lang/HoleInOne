@@ -16131,6 +16131,28 @@ def _d3_probe_frames(path) -> int:
         return 0
 
 
+def _build_desc() -> dict:
+    """A stamp for the code and the settings that change what a produce
+    does. Not a version string -- there isn't one -- but the module's
+    own mtime, which on a container built at deploy time IS the deploy,
+    plus the handful of settings that alter the outcome rather than the
+    speed."""
+    out: dict = {}
+    try:
+        out["module_mtime"] = datetime.utcfromtimestamp(
+            Path(__file__).stat().st_mtime).isoformat(timespec="seconds")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("build stamp unavailable: %s", exc)
+    for _k in ("swing_detector", "camera_produce_unconfirmed_shots",
+               "camera_drop_garbage_clips", "auto_delete_non_golf",
+               "produce_debug_enabled"):
+        try:
+            out[_k] = getattr(settings, _k)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
 def _machine_desc() -> dict:
     """Cores, quota and OpenCV's thread pool. Cheap, and it is the first
     thing to check when the same clip takes six times as long in one
@@ -16170,6 +16192,11 @@ def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
         # was measured on -- otherwise "production is slower" is a
         # observation with nowhere to go.
         "machine": _machine_desc(),
+        # WHICH BUILD THIS WAS. Two deployments producing different
+        # results from the same video is either a code difference or a
+        # data one, and there is no way to tell them apart from two
+        # reports that do not say what code they ran.
+        "build": _build_desc(),
     }
 
 
@@ -17486,6 +17513,14 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
                 else:
                     _entry["reason"] = _c.get("error") or "the renderer made no clip"
             rep["produce_error"] = _out.get("error")
+            # A FAILED CLEAR IS NOT A FOOTNOTE. It means this upload now
+            # carries the clips this run made AND the ones it could not
+            # remove, which looks exactly like "produce started
+            # appending" from the card.
+            if _out.get("clear_error"):
+                rep["clear_error"] = _out["clear_error"]
+                log.error("ball scan produce: %s", _out["clear_error"])
+            rep["cleared_clips"] = _out.get("cleared_clips")
             # CLOSEST TO THE PIN, if the green camera could measure it.
             rep["distances"] = _out.get("distances") or []
             rep["distance_notes"] = _out.get("distance_notes") or []
@@ -17623,7 +17658,14 @@ def _produce_run(row, src_path, db, progress=None, debug_artifacts=False,
             upload_id, "no resting ball found anywhere in the tee box")
         return rep
 
-    if n_ok:
+    if rep.get("clear_error"):
+        # Produced, but the upload is now carrying more clips than this
+        # run made. Completed with the reason attached rather than
+        # silently: the count on the card is the only other clue, and it
+        # reads as a success.
+        _set_status("completed", str(rep["clear_error"])[:2000],
+                    n_ok=n_ok, n_total=n_cand or n_ok)
+    elif n_ok:
         _set_status("completed", None, n_ok=n_ok, n_total=n_cand or n_ok)
     else:
         # "no swings detected" IS LOAD-BEARING. The camera path matches
@@ -20428,6 +20470,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
     # Produce means "and now there are eleven", not "and now there is
     # one". Only the clip belonging to the swing being produced is
     # dropped, because that one really is being replaced.
+    _all_old: list = []
     try:
         _q = db.query(VideoClip).filter(VideoClip.long_upload_id == row.id)
         _all_old = _q.all()
@@ -20456,10 +20499,26 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             db.delete(_c)
         if _old:
             db.commit()
+            log.info("d3 produce: cleared %d prior clip(s) on upload %s "
+                     "before rendering %d new one(s)",
+                     len(_old), row.id, len(swings))
+        out["cleared_clips"] = len(_old)
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         _hole = int(hole_number) if hole_number else 1
-        log.warning("d3 produce: could not clear prior clips: %s", exc)
+        # LOUDLY. A failure here does not stop the render -- it goes on
+        # to add its clips to the ones it could not remove, and the card
+        # ends up with ten clips from a run that produced four. That
+        # read as "produce appends now", which is a very different bug
+        # from the one that actually happened, and nothing on screen
+        # said otherwise.
+        out["clear_error"] = (
+            f"could not remove this upload's {len(_all_old)} prior "
+            f"clip(s) before re-producing, so the new ones are IN ADDITION "
+            f"to them: {exc}")
+        log.error("d3 produce: could not clear prior clips on upload %s -- "
+                  "the new clips will be added to them: %s", row.id, exc,
+                  exc_info=True)
 
     tok = secrets.token_hex(4)
     # `landing` is rebound per swing below (a plotted comet supplies one

@@ -7640,6 +7640,16 @@ function ScanTiming({ stages, timing, nested, nestedLabel, note }) {
       </div>
       {note && <div className="tiny muted">{note}</div>}
       {rows(list, 0)}
+      {timing?.build?.module_mtime && (
+        <div className="tiny muted" style={{ marginTop: 4 }}>
+          build {timing.build.module_mtime.replace("T", " ")}
+          {timing.build.swing_detector
+            ? ` · detector ${timing.build.swing_detector}` : ""}
+          {" — two deployments giving different answers on one video is "}
+          {"either a code difference or a data one; this line is the "}
+          {"first half of telling them apart."}
+        </div>
+      )}
       {timing?.machine?.effective_cpus != null && (
         <div className="tiny muted" style={{ marginTop: 4 }}>
           ran on {timing.machine.effective_cpus} usable core(s)
@@ -7869,6 +7879,11 @@ function BallScanModal({ state, onClose }) {
           </div>
         )}
 
+        {rep?.clear_error && (
+          <div className="err-text small" style={{ margin: "10px 0" }}>
+            ⚠ {rep.clear_error}
+          </div>
+        )}
         {rep?.clips && (
           <div className="card" style={{ margin: "10px 0", padding: 10 }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
