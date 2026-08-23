@@ -8592,11 +8592,23 @@ def get_upload_view_map(upload_id: int, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(404, "long upload not found")
     course, hole, vm = _view_map_for(db, row)
+    # THE FLAG AS IT STOOD WHEN THIS WAS SHOT, not the newest one on
+    # record. `view_map.pin_green` is the newest, which is right for
+    # today's swing and wrong for every swing taken before the last time
+    # somebody moved it -- so the answer for THIS upload is worked out
+    # here and handed over separately, with a note saying which day it
+    # came from. Callers that want "the current flag" still have
+    # view_map.pin_green.
+    _pin_e, _pin_why = _pin_for_row(db, row)
     return {
         "course_id": getattr(course, "id", None),
         "course_name": getattr(course, "name", None),
         "hole": hole,
         "view_map": vm,
+        "pin_green": (_pin_e or {}).get("green"),
+        "pin_effective_at": (_pin_e or {}).get("effective_at"),
+        "pin_note": _pin_why,
+        "n_pins": len(_pin_entries(vm)),
         # Set when the stored mapping was fitted on a different pair of
         # cameras than this upload's. The calibrator shows it and refuses
         # to preload the points, because loading them silently is what
@@ -8820,6 +8832,156 @@ def landing_from_tee(
     }
 
 
+# THE FLAG MOVES, AND THE SWINGS DO NOT MOVE WITH IT.
+#
+# A pin is cut in a new place each morning, so "where is the flag" has no
+# answer on its own -- only "where was the flag WHEN THIS WAS SHOT". A
+# single `pin_green` had to be one or the other: leave it and yesterday's
+# swings are right while today's are wrong, move it and it is the other
+# way round. Neither is a setting anyone can hold in their head.
+#
+# So a pin is a dated entry and the hole keeps the list. Every entry is
+# stamped with the CAPTURE TIME of the swing it was marked on, not with
+# the moment somebody clicked -- an operator marking Tuesday's flag on
+# Thursday is describing Tuesday, and the clock on the wall says nothing
+# about that. A swing then takes the most recent entry at or before its
+# own capture time, which is exactly "it stays where it was last saved
+# until it is saved on a more recent swing".
+#
+# Swings older than every entry take the earliest one. There is no
+# honest answer for them -- nobody has said where the flag was that far
+# back -- and the nearest thing anyone HAS said beats nothing at all.
+def _pin_entries(vm) -> list:
+    """The hole's dated pins, oldest first. Reads the legacy single pin
+    as a one-entry history so nothing has to be migrated."""
+    if not vm:
+        return []
+    out = []
+    for e in (vm.get("pins") or []):
+        if not isinstance(e, dict) or not e.get("green"):
+            continue
+        out.append(e)
+    if not out and vm.get("pin_green"):
+        out = [{"green": vm["pin_green"],
+                "effective_at": vm.get("pin_set_at"),
+                "saved_at": vm.get("pin_set_at"),
+                "legacy": True}]
+    def _k(e):
+        try:
+            return datetime.fromisoformat(
+                str(e.get("effective_at") or "").replace("Z", ""))
+        except (TypeError, ValueError):
+            return datetime.min
+    return sorted(out, key=_k)
+
+
+def _pin_as_of(vm, when) -> dict | None:
+    """The flag as it stood at `when` (a datetime), or None."""
+    entries = _pin_entries(vm)
+    if not entries:
+        return None
+    if when is None:
+        return entries[-1]
+    best = None
+    for e in entries:
+        try:
+            _t = datetime.fromisoformat(
+                str(e.get("effective_at") or "").replace("Z", ""))
+        except (TypeError, ValueError):
+            continue
+        if _t <= when:
+            best = e
+    # Older than anything on record: the earliest is the closest thing
+    # to an answer, and it is flagged as such by its own date.
+    return best or entries[0]
+
+
+def _pin_for_row(db, row):
+    """(entry, why) for THIS upload -- the flag as it stood when it was
+    shot. `why` is for the UI, which has to be able to say "this is
+    Tuesday's flag" rather than presenting a stale one as current."""
+    _c, _h, vm = _view_map_for(db, row)
+    if not vm:
+        return None, "this hole has no green->tee mapping yet"
+    when = getattr(row, "base_captured_at", None)
+    e = _pin_as_of(vm, when)
+    if not e:
+        return None, "nobody has marked the flag on this hole"
+    _eff = e.get("effective_at")
+    if when is not None and _eff:
+        try:
+            _t = datetime.fromisoformat(str(_eff).replace("Z", ""))
+            if _t > when:
+                return e, (f"marked on a LATER swing ({_eff[:16]}) — nobody "
+                           f"has said where the flag was this far back")
+        except (TypeError, ValueError):
+            pass
+    return e, (f"marked {str(_eff)[:16]}" if _eff else "marked (undated)")
+
+
+@router.get("/cameras/{camera_id}/calibration-source")
+def camera_calibration_source(camera_id: int, db: Session = Depends(get_db)):
+    """A dual-camera capture from this camera's pair, to calibrate on.
+
+    THE CALIBRATION BELONGS TO THE CAMERAS, NOT TO A CLIP. It is a
+    homography between two bolted-down viewpoints: it does not change
+    when a new group tees off, and doing it from the Production page made
+    it look like something you do per upload -- which is how a hole ends
+    up calibrated a dozen times from a dozen clips, each one overwriting
+    the last with a slightly different fit.
+
+    The two frames are only backdrops to click ground features on, so any
+    capture from this pair will do. The most recent one is used because
+    it is the most likely to still look like the course does today.
+    """
+    cam = db.get(Camera, camera_id)
+    if cam is None:
+        raise HTTPException(404, "camera not found")
+    # Either camera of the pair can be asked; the tee is what uploads are
+    # filed under, so resolve to it.
+    tee_id = (cam.id if (cam.assigned_role or "tee") == "tee"
+              else cam.paired_with_camera_id)
+    if not tee_id:
+        raise HTTPException(
+            409, "this camera has no paired tee camera, so there is no "
+                 "pair to calibrate")
+    _tee = db.get(Camera, tee_id)
+    green_id = _tee.paired_with_camera_id if _tee else None
+    if not green_id:
+        raise HTTPException(
+            409, f"{getattr(_tee, 'name', None) or f'camera {tee_id}'} has "
+                 f"no paired green camera — pair them first, then calibrate")
+    ev_ids = [e.id for e in db.query(CameraEvent)
+              .filter(CameraEvent.tee_camera_id == tee_id)
+              .filter(CameraEvent.green_camera_id == green_id)
+              .order_by(CameraEvent.id.desc()).limit(200).all()]
+    row = None
+    if ev_ids:
+        row = (db.query(LongVideoUpload)
+               .filter(LongVideoUpload.camera_event_id.in_(ev_ids))
+               .filter(LongVideoUpload.green_filename.isnot(None))
+               .order_by(LongVideoUpload.id.desc()).first())
+    if row is None:
+        raise HTTPException(
+            409,
+            "no dual-camera capture from this pair yet — record one, then "
+            "calibrate from it")
+    course, hole, vm = _view_map_for(db, row)
+    key, _legacy, why = _view_map_key(db, row)
+    return {
+        "upload_id": row.id,
+        "captured_at": (row.base_captured_at.isoformat()
+                        if row.base_captured_at else None),
+        "tee_camera_id": tee_id, "green_camera_id": green_id,
+        "course_id": getattr(course, "id", None),
+        "course_name": getattr(course, "name", None),
+        "hole": hole,
+        "view_map": vm,
+        "key": key, "key_reason": why,
+        "mismatch": _view_map_mismatch(db, row, vm),
+    }
+
+
 @router.post("/long-uploads/{upload_id}/hole-pin")
 def save_hole_pin(
     upload_id: int,
@@ -8861,15 +9023,45 @@ def save_hole_pin(
     if _key not in _all and _legacy is not None and _legacy in _all:
         _key = _legacy
     _vm = dict(vm)
+    # WHEN THIS SWING WAS SHOT, which is what the pin is a fact about.
+    # Not the wall clock: an operator marking Tuesday's flag on Thursday
+    # is describing Tuesday, and stamping the click would file it as
+    # Thursday's and move every swing in between.
+    _eff = getattr(row, "base_captured_at", None)
+    _eff_iso = _eff.isoformat() if _eff else _utcnow_naive().isoformat()
+    _entries = [e for e in _pin_entries(_vm) if not e.get("legacy")]
     if _g is None:
-        _vm.pop("pin_green", None)
-        _vm.pop("pin_set_at", None)
+        # Clearing removes the entry for THIS swing's moment, not the
+        # history. Nobody marking one swing means to erase what the flag
+        # was on every other day.
+        _entries = [e for e in _entries if e.get("effective_at") != _eff_iso]
+        _vm["pins"] = _entries
+        _last = _entries[-1] if _entries else None
+        if _last:
+            _vm["pin_green"] = _last["green"]
+            _vm["pin_set_at"] = _last.get("effective_at")
+        else:
+            _vm.pop("pin_green", None)
+            _vm.pop("pin_set_at", None)
     else:
         try:
-            _vm["pin_green"] = [float(_g[0]), float(_g[1])]
+            _xy = [float(_g[0]), float(_g[1])]
         except (TypeError, ValueError, IndexError):
             raise HTTPException(400, "the pin must be an [x, y] pair")
-        _vm["pin_set_at"] = _utcnow_naive().isoformat()
+        # One entry per moment: marking the same swing twice corrects it
+        # rather than stacking two answers for one instant.
+        _entries = [e for e in _entries if e.get("effective_at") != _eff_iso]
+        _entries.append({"green": _xy, "effective_at": _eff_iso,
+                         "saved_at": _utcnow_naive().isoformat(),
+                         "upload_id": row.id})
+        _vm["pins"] = _pin_entries({"pins": _entries})
+        # LEGACY MIRROR, kept pointing at the newest entry. Everything
+        # that has not learned about the history yet -- the distance
+        # plate, the old readers -- keeps working and gets the current
+        # flag, which is the right answer for a swing shot today.
+        _newest = _vm["pins"][-1]
+        _vm["pin_green"] = _newest["green"]
+        _vm["pin_set_at"] = _newest.get("effective_at")
     # UNDER `_key`, which is the whole point of the four lines above.
     # Writing it under the bare hole number instead put the pin in the
     # legacy slot while the read went to `cam:T-G` / `hole:N` first and
@@ -8883,12 +9075,19 @@ def save_hole_pin(
     xy, reason = (None, None)
     if _g is not None:
         xy, reason = _map_landing_to_tee(
-            db, row, _vm["pin_green"],
+            db, row, _vm.get("pin_green"),
             payload.get("green_size"), payload.get("tee_size"),
         )
+    _mine, _why = _pin_for_row(db, row)
     return {"ok": True, "hole": hole, "pin_green": _vm.get("pin_green"),
             "pin_set_at": _vm.get("pin_set_at"), "tee_xy": xy,
-            "reason": reason}
+            "reason": reason,
+            # What THIS swing will use, which is the newest entry at or
+            # before its capture time -- the same one it was just given
+            # unless the operator marked an older swing.
+            "pin_for_this_swing": (_mine or {}).get("green"),
+            "pin_note": _why,
+            "n_pins": len(_vm.get("pins") or [])}
 
 
 @router.post("/long-uploads/{upload_id}/tracer-shape")

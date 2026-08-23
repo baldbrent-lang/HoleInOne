@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
+import { ViewMapModal } from "../components/ViewMapModal.jsx";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -695,6 +696,7 @@ export default function AdminCameras() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState({}); // {camera_id: true}
   const [revealedToken, setRevealedToken] = useState({}); // {camera_id: true}
+  const [cal, setCal] = useState(null);  // green→tee calibrator
   const [calibratingCam, setCalibratingCam] = useState(null);
   const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
   const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "", name: "", ballSide: "" });
@@ -908,6 +910,40 @@ export default function AdminCameras() {
       setError(e.message);
     } finally {
       setBusy((b) => ({ ...b, [cam.id]: false }));
+    }
+  }
+
+  // THE CALIBRATOR, SOURCED FROM THE PAIR'S OWN FOOTAGE. The two frames
+  // are only backdrops to click ground features on, so the server picks
+  // the pair's most recent dual-camera capture -- most likely to still
+  // look like the course does today -- and the fit is filed against the
+  // cameras, which is what it describes.
+  async function openCalibrator(cam) {
+    setCal({ loading: true, camId: cam.id });
+    try {
+      const src = await api.cameraCalibrationSource(adminPassword, cam.id);
+      const teeF = 0;
+      const greenF = 0;
+      const [t, g] = await Promise.all([
+        api.getLongUploadFrame(adminPassword, src.upload_id, teeF, "tee"),
+        api.getLongUploadFrame(adminPassword, src.upload_id, greenF, "green"),
+      ]);
+      setCal({
+        uploadId: src.upload_id,
+        tee: { ...t, frame: teeF },
+        green: { ...g, frame: greenF },
+        existing: src.view_map || null,
+        mismatch: src.mismatch || null,
+        scope: (src.course_name
+          ? `${src.course_name} · hole ${src.hole}`
+          : `hole ${src.hole}`)
+          + (src.key_reason ? ` · filed by ${src.key_reason}` : "")
+          + (src.captured_at
+            ? ` · frames from ${src.captured_at.slice(0, 16).replace("T", " ")}`
+            : ""),
+      });
+    } catch (e) {
+      setCal({ error: e?.message || String(e), camId: cam.id });
     }
   }
 
@@ -1296,6 +1332,22 @@ export default function AdminCameras() {
                       >
                         Unpair
                       </button>
+                      {/* CALIBRATED ONCE, HERE. It is a homography
+                          between two bolted-down viewpoints, so it is a
+                          property of this pair and not of any one clip
+                          -- which is what it looked like from a
+                          Production card, and is how a hole ends up
+                          calibrated a dozen times from a dozen clips,
+                          each fit overwriting the last. */}
+                      <button
+                        type="button" className="ghost small"
+                        style={{ marginTop: 4, width: "100%" }}
+                        onClick={() => openCalibrator(cam)}
+                        disabled={isBusy}
+                        title="Map the green camera's view onto the tee camera's by clicking the same ground features in both. Done once for this pair — every swing they record afterwards is aimed by it."
+                      >
+                        ⊹ Calibrate green→tee
+                      </button>
                     </span>
                   ) : candidates.length > 0 ? (
                     <select
@@ -1557,6 +1609,43 @@ export default function AdminCameras() {
           );
         })}
       </div>
+
+      {cal && (cal.loading || cal.error ? (
+        <div role="dialog" onClick={() => setCal(null)}
+             style={{ position: "fixed", inset: 0, zIndex: 1200,
+                      background: "rgba(0,0,0,0.75)", display: "flex",
+                      alignItems: "center", justifyContent: "center",
+                      padding: 16 }}>
+          <div className="card" onClick={(e) => e.stopPropagation()}
+               style={{ margin: 0, padding: 18, maxWidth: 460 }}>
+            <div className="row" style={{ justifyContent: "space-between",
+                                          gap: 12 }}>
+              <b>⊹ Calibrate green→tee</b>
+              <button className="btn ghost" style={{ width: "auto" }}
+                      onClick={() => setCal(null)}>Close ✕</button>
+            </div>
+            <div style={{ marginTop: 10 }}>
+              {cal.error
+                ? <div className="err-text small">{cal.error}</div>
+                : <div className="small">
+                    Finding a capture from this pair to calibrate on…
+                  </div>}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <ViewMapModal
+          uploadId={cal.uploadId}
+          adminPassword={adminPassword}
+          teeFrame={cal.tee}
+          greenFrame={cal.green}
+          existing={cal.existing}
+          mismatch={cal.mismatch}
+          scope={cal.scope}
+          onClose={() => setCal(null)}
+          onSaved={() => { setCal(null); load(); }}
+        />
+      ))}
 
       {calibratingCam && (
         <GreenCalibrationModal

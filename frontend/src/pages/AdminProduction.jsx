@@ -90,6 +90,7 @@ class Boundary extends Component {
   }
 }
 import { parseApiDate } from "../time.js";
+import { ViewMapModal } from "../components/ViewMapModal.jsx";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -1503,9 +1504,14 @@ function ClickToPlotModal({
     (async () => {
       try {
         const vm = await api.getViewMap(adminPassword, row.id);
-        const g = vm?.view_map?.pin_green;
+        // THE PIN FOR THIS SWING, which the server works out from the
+        // upload's capture time. `view_map.pin_green` is the newest one
+        // on record -- right for a swing shot today, wrong for one shot
+        // before the last time the flag moved.
+        const g = vm?.pin_green ?? vm?.view_map?.pin_green;
         if (!live || !g) return;
         setPinGreen({ x: Math.round(g[0]), y: Math.round(g[1]) });
+        if (vm?.pin_note) setPinNote(vm.pin_note);
       } catch { /* no mapping yet: the flag simply has nowhere to be */ }
     })();
     return () => { live = false; };
@@ -4371,9 +4377,12 @@ function WizardBody({
         const vm = await api.getViewMap(adminPassword, row.id);
         if (dead) return;
         setViewMapInfo(vm || null);
-        setHolePin(vm?.view_map?.pin_green
-          ? { pin_green: vm.view_map.pin_green,
-              pin_set_at: vm.view_map.pin_set_at }
+        const _pg = vm?.pin_green ?? vm?.view_map?.pin_green;
+        setHolePin(_pg
+          ? { pin_green: _pg,
+              pin_set_at: vm?.pin_effective_at
+                ?? vm?.view_map?.pin_set_at,
+              pin_note: vm?.pin_note }
           : null);
       } catch { /* the Target row simply offers nothing */ }
     })();
@@ -5277,418 +5286,6 @@ function scaleRoi(roi, factor, frameW, frameH) {
   return { x, y, w, h };
 }
 
-/* One clickable still, with the marks made on it. Used twice by the
-   view-map modal — once per camera — so the two panes cannot drift
-   apart in how a click becomes a coordinate. */
-function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
-  const ref = useRef(null);
-  const hasDims = !!(frame?.width && frame?.height);
-  // ZOOM IS NOT A CONVENIENCE ON THE TEE PANE. From 180 m back the whole
-  // green is about 200px wide and a handful of pixels tall, so a
-  // bunker corner is a two-pixel target at fit-to-width -- and the fit
-  // is only as good as the clicks. Magnified, the same corner is
-  // something you can actually put a cursor on.
-  const [zoom, setZoom] = useState(1);
-  // Centre of the visible region, as a fraction of the frame.
-  const [focus, setFocus] = useState({ x: 0.5, y: 0.5 });
-
-  // The visible sub-rectangle, clamped so the view never leaves the
-  // picture. Everything below -- the image offset and the click maths --
-  // is derived from these two, so they cannot disagree.
-  const span = 1 / zoom;
-  const left = Math.max(0, Math.min(1 - span, focus.x - span / 2));
-  const top = Math.max(0, Math.min(1 - span, focus.y - span / 2));
-
-  function toFrame(e) {
-    if (!hasDims || !ref.current) return null;
-    const r = ref.current.getBoundingClientRect();
-    const u = left + ((e.clientX - r.left) / r.width) * span;
-    const v = top + ((e.clientY - r.top) / r.height) * span;
-    return {
-      x: Math.max(0, Math.min(frame.width - 1, Math.round(u * frame.width))),
-      y: Math.max(0, Math.min(frame.height - 1, Math.round(v * frame.height))),
-    };
-  }
-
-  // A drag pans, a click places. Told apart by distance, so a slightly
-  // shaky click is still a click rather than a 2px pan that eats it.
-  function onDown(e) {
-    if (!hasDims || !ref.current) return;
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const r = ref.current.getBoundingClientRect();
-    const from = { ...focus };
-    let moved = false;
-    const target = e.currentTarget;
-    target.setPointerCapture?.(e.pointerId);
-    const move = (ev) => {
-      const dx = ev.clientX - startX;
-      const dy = ev.clientY - startY;
-      if (!moved && Math.hypot(dx, dy) < 4) return;
-      moved = true;
-      if (zoom <= 1) return;
-      setFocus({
-        x: Math.min(1, Math.max(0, from.x - (dx / r.width) * span)),
-        y: Math.min(1, Math.max(0, from.y - (dy / r.height) * span)),
-      });
-    };
-    const up = (ev) => {
-      target.releasePointerCapture?.(e.pointerId);
-      target.removeEventListener("pointermove", move);
-      target.removeEventListener("pointerup", up);
-      if (!moved) {
-        const pt = toFrame(ev);
-        if (pt) onClick(pt);
-      }
-    };
-    target.addEventListener("pointermove", move);
-    target.addEventListener("pointerup", up);
-  }
-
-  // Wheel zooms about the cursor, so the feature you are aiming at
-  // stays put instead of sliding off as you magnify.
-  function onWheel(e) {
-    if (!hasDims || !ref.current) return;
-    e.preventDefault();
-    const r = ref.current.getBoundingClientRect();
-    const u = left + ((e.clientX - r.left) / r.width) * span;
-    const v = top + ((e.clientY - r.top) / r.height) * span;
-    const next = Math.max(1, Math.min(16, zoom * (e.deltaY < 0 ? 1.25 : 0.8)));
-    setZoom(next);
-    if (next > 1) setFocus({ x: u, y: v });
-    else setFocus({ x: 0.5, y: 0.5 });
-  }
-
-  const btn = {
-    width: "auto", padding: "0 8px", minWidth: 28, background: "rgba(0,0,0,0.6)",
-    color: "#fff", border: "1px solid rgba(255,255,255,0.25)",
-  };
-  return (
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div className="row" style={{ alignItems: "center", gap: 6,
-                                    marginBottom: 4 }}>
-        <span className="tiny upper muted">{title}</span>
-        <span className="row" style={{ gap: 4, marginLeft: "auto" }}>
-          <button type="button" className="small" style={btn}
-                  onClick={() => setZoom((z) => Math.max(1, z / 1.6))}>−</button>
-          <span className="tiny muted" style={{ minWidth: 34,
-                                                textAlign: "center" }}>
-            {zoom.toFixed(1)}×
-          </span>
-          <button type="button" className="small" style={btn}
-                  onClick={() => setZoom((z) => Math.min(16, z * 1.6))}>+</button>
-          <button type="button" className="small" style={btn}
-                  onClick={() => { setZoom(1); setFocus({ x: 0.5, y: 0.5 }); }}
-                  title="Back to the whole frame">Fit</button>
-        </span>
-      </div>
-      <div
-        ref={ref}
-        onPointerDown={onDown}
-        onWheel={onWheel}
-        style={{
-          position: "relative", width: "100%",
-          aspectRatio: hasDims ? `${frame.width} / ${frame.height}` : "16 / 9",
-          background: "var(--border, #222)", borderRadius: 6,
-          overflow: "hidden", userSelect: "none",
-          cursor: zoom > 1 ? "grab" : "crosshair",
-          touchAction: "none",
-        }}
-      >
-        {/* The image and its marks share one scaled, offset wrapper, so
-            a mark can never drift from the pixel it was placed on. */}
-        <div
-          style={{
-            position: "absolute",
-            width: `${zoom * 100}%`, height: `${zoom * 100}%`,
-            left: `${-left * zoom * 100}%`, top: `${-top * zoom * 100}%`,
-            pointerEvents: "none",
-          }}
-        >
-          {frame?.image_url && (
-            <img
-              src={frame.image_url}
-              alt={title}
-              draggable={false}
-              style={{ width: "100%", height: "100%", objectFit: "fill",
-                       imageRendering: zoom >= 4 ? "pixelated" : "auto" }}
-            />
-          )}
-          {hasDims && (
-            <svg
-              viewBox={`0 0 ${frame.width} ${frame.height}`}
-              preserveAspectRatio="none"
-              style={{ position: "absolute", inset: 0, width: "100%",
-                       height: "100%" }}
-            >
-              {marks.map((m, i) => (
-                <g key={i}>
-                  {/* Sized in SCREEN terms: divided by the zoom so a
-                      marker stays the same size on screen instead of
-                      swelling into a blob that hides its own target. */}
-                  <circle cx={m.x} cy={m.y} r={frame.width / 160 / zoom}
-                          fill="none" stroke={colour}
-                          strokeWidth={frame.width / 400 / zoom} />
-                  <circle cx={m.x} cy={m.y} r={frame.width / 700 / zoom}
-                          fill={colour} />
-                  <text x={m.x + frame.width / 110 / zoom}
-                        y={m.y - frame.width / 220 / zoom}
-                        fontSize={frame.width / 40 / zoom} fontWeight={700}
-                        fill={colour} stroke="#000"
-                        strokeWidth={frame.width / 500 / zoom}
-                        paintOrder="stroke">
-                    {i + 1}
-                  </text>
-                </g>
-              ))}
-              {pending && (
-                /* The half-finished pair, dashed amber: it is waiting
-                   for its partner in the other picture, unsaved. */
-                <circle cx={pending.x} cy={pending.y}
-                        r={frame.width / 120 / zoom}
-                        fill="none" stroke="#f59e0b"
-                        strokeWidth={frame.width / 300 / zoom}
-                        strokeDasharray={`${frame.width / 90 / zoom} `
-                          + `${frame.width / 140 / zoom}`} />
-              )}
-            </svg>
-          )}
-        </div>
-        {zoom > 1 && (
-          <div className="tiny" style={{
-            position: "absolute", left: 6, bottom: 6, color: "#fff",
-            background: "rgba(0,0,0,0.6)", padding: "1px 6px",
-            borderRadius: 4, pointerEvents: "none",
-          }}>
-            drag to pan · scroll to zoom
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* CALIBRATE THE TWO VIEWS AGAINST EACH OTHER.
- *
- * The tracer has to finish where the ball landed, and the landing is
- * marked on the green camera. Both cameras look at the same flat
- * ground, so one homography carries green pixels to tee pixels — and
- * fitting it needs nothing but the same four ground features clicked in
- * both pictures. No tape measure, no yardage book, no walking out.
- *
- * ON THE GROUND is the one rule. A homography is exact only for points
- * on the surface it was fitted to. Bunker corners, the flagstick's
- * BASE, a bend in the cart path: yes. The top of the flagstick, a
- * treetop, anything in the air: no — it will skew the whole fit.
- */
-function ViewMapModal({
-  uploadId, adminPassword, teeFrame, greenFrame, existing, scope,
-  onClose, onSaved, mismatch = null,
-}) {
-  // A MISMATCHED MAP DOES NOT GET LOADED. Its points were clicked on
-  // two different cameras' frames, so on these they land in the sky and
-  // the tree line -- and the moment they are on screen the operator is
-  // one Save away from overwriting the pair they really belong to.
-  // Start empty and say why, instead.
-  const [pairs, setPairs] = useState(
-    () => (mismatch ? [] : existing?.points || []));
-  // A saved calibration comes back with its pairs already on the
-  // pictures. Say so: an operator who cannot tell a loaded calibration
-  // from a blank one re-does work that was already correct.
-  const preloaded = mismatch ? 0 : (existing?.points || []).length;
-  const [pending, setPending] = useState(null);   // {side, x, y}
-  const [saving, setSaving] = useState(false);
-  const [note, setNote] = useState(null);
-
-  function place(side, pt) {
-    if (!pending) { setPending({ side, ...pt }); return; }
-    if (pending.side === side) { setPending({ side, ...pt }); return; }
-    const pair = pending.side === "tee"
-      ? { tee: [pending.x, pending.y], green: [pt.x, pt.y] }
-      : { green: [pending.x, pending.y], tee: [pt.x, pt.y] };
-    setPairs((p) => [...p, pair]);
-    setPending(null);
-    setNote(null);
-  }
-
-  async function save() {
-    setSaving(true);
-    setNote(null);
-    try {
-      const out = await api.saveViewMap(adminPassword, uploadId, {
-        points: pairs,
-        green_size: [greenFrame?.width, greenFrame?.height],
-        tee_size: [teeFrame?.width, teeFrame?.height],
-      });
-      onSaved?.(out);
-    } catch (e) {
-      setNote(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // SIX, not four. Four pairs determine a homography exactly, so they
-  // also reproduce every click error exactly with nothing left over to
-  // average away — and the tee camera sees the whole green as a sliver
-  // about 200px wide and 5px tall, which is the worst possible shape to
-  // fit a projective transform into. Measured with 1.5px of click error:
-  // four pairs land ~20px out (worst case: off the frame), six land
-  // ~1px out. Eight is better still and costs four more clicks.
-  const MIN_PAIRS = 6;
-  const ready = pairs.length >= MIN_PAIRS;
-  return (
-    <div
-      style={{
-        position: "fixed", inset: 0, zIndex: 1200,
-        background: "rgba(0,0,0,0.75)", display: "flex",
-        alignItems: "center", justifyContent: "center", padding: 16,
-      }}
-      onClick={onClose}
-    >
-      <div
-        className="card"
-        style={{
-          margin: 0, maxWidth: 1400, width: "100%", maxHeight: "94vh",
-          overflowY: "auto", padding: 14,
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="row" style={{ alignItems: "baseline", gap: 10 }}>
-          <b>Calibrate tee ↔ green</b>
-          {scope && <span className="small">{scope}</span>}
-          {preloaded > 0 && (
-            <span className="tiny" style={{ color: "#3ee37a" }}>
-              already mapped — {preloaded} saved pairs loaded. Adjust or
-              add to them, or just Close; this does not need redoing.
-            </span>
-          )}
-          {mismatch && (
-            <span className="tiny" style={{ color: "#f87171", maxWidth: 460 }}>
-              ⚠ A mapping is stored here, but not for these two cameras —
-              so it has NOT been loaded. {mismatch}
-            </span>
-          )}
-          <span className="tiny muted">
-            Click the same GROUND feature in both pictures — a bunker
-            corner, the flagstick&apos;s BASE, a bend in the cart path.
-            Six pairs minimum, eight is better, spread as widely as the
-            green allows. Anything off the ground (a flag top, a
-            treetop) skews the whole fit. Saved against the HOLE, so it
-            aims every swing recorded there — not just this one.
-          </span>
-          <button
-            type="button"
-            className="ghost small"
-            style={{ width: "auto", marginLeft: "auto" }}
-            onClick={onClose}
-          >
-            Close
-          </button>
-        </div>
-
-        <div className="row" style={{ gap: 10, marginTop: 8,
-                                      alignItems: "flex-start" }}>
-          <ClickableStill
-            title={`Tee camera · frame ${teeFrame?.frame ?? "—"}`}
-            frame={teeFrame}
-            colour="#38bdf8"
-            marks={pairs.map((p) => ({ x: p.tee[0], y: p.tee[1] }))}
-            pending={pending?.side === "tee" ? pending : null}
-            onClick={(pt) => place("tee", pt)}
-          />
-          <ClickableStill
-            title={`Green camera · frame ${greenFrame?.frame ?? "—"}`}
-            frame={greenFrame}
-            colour="#22c55e"
-            marks={pairs.map((p) => ({ x: p.green[0], y: p.green[1] }))}
-            pending={pending?.side === "green" ? pending : null}
-            onClick={(pt) => place("green", pt)}
-          />
-        </div>
-
-        <div className="row" style={{ gap: 10, marginTop: 10,
-                                      alignItems: "center", flexWrap: "wrap" }}>
-          <span className="small">
-            {pending
-              ? `Now click the SAME feature on the ${
-                pending.side === "tee" ? "green" : "tee"} picture`
-              : `${pairs.length} pair${pairs.length === 1 ? "" : "s"}`
-                + (ready
-                  ? (pairs.length >= 8 ? " — good" : " — enough; 8 is better")
-                  : ` — need ${MIN_PAIRS - pairs.length} more`)}
-          </span>
-          {pairs.length > 0 && (
-            <button
-              type="button"
-              className="ghost small"
-              style={{ width: "auto" }}
-              onClick={() => { setPairs((p) => p.slice(0, -1)); setPending(null); }}
-            >
-              Undo last pair
-            </button>
-          )}
-          {pending && (
-            <button
-              type="button"
-              className="ghost small"
-              style={{ width: "auto" }}
-              onClick={() => setPending(null)}
-            >
-              Cancel this point
-            </button>
-          )}
-          <button
-            type="button"
-            className="small"
-            style={{ width: "auto", marginLeft: "auto", minWidth: 160 }}
-            disabled={!ready || saving}
-            onClick={save}
-            title={ready
-              ? "Fit the mapping and store it against this hole"
-              : "Six pairs minimum — four fit exactly and bake in every "
-                + "click error, which on this geometry is ~20px of aim"}
-          >
-            {saving ? "Fitting…" : "Save mapping"}
-          </button>
-        </div>
-        {/* HELD-OUT ERROR IS THE READOUT — not the residual against the
-            fit's own points, which comes back near zero even on a bad
-            fit here: with the tee-side points strung along a line the
-            homography has freedom left to absorb the click noise
-            exactly. In tee pixels, where the whole green is ~200px
-            wide, so single digits is good. */}
-        {existing?.cv_px != null && (
-          <div className="tiny" style={{ marginTop: 6 }}>
-            <span style={{
-              color: existing.cv_px <= 8 ? "#3ee37a"
-                : existing.cv_px <= 20 ? "#f59e0b" : "#ef4444",
-            }}>
-              Saved fit misses a held-out pair by {existing.cv_px}px
-            </span>
-            {existing.tee_spread_px && (
-              <span className="muted">
-                {" "}· the green spans {existing.tee_spread_px[0]}×
-                {existing.tee_spread_px[1]}px in the tee view, which is
-                why this needs pairs rather than precision
-              </span>
-            )}
-          </div>
-        )}
-        {existing?.calibrated_at && (
-          <div className="tiny muted" style={{ marginTop: 6 }}>
-            Currently saved: {existing.n_points} pairs
-            {existing.rms_px != null ? `, off by ${existing.rms_px}px` : ", exact fit"}
-            {" · "}{existing.calibrated_at.slice(0, 16).replace("T", " ")}
-          </div>
-        )}
-        {note && (
-          <div className="err-text small" style={{ marginTop: 8 }}>{note}</div>
-        )}
-      </div>
-    </div>
-  );
-}
 
 function FramePreview({ imageUrl, frameW, frameH, editing, draft, setDraft,
   loading, frameNav, heat, mappedLanding, onPickGreenPin,
@@ -8050,6 +7647,171 @@ function ScanTiming({ stages, timing, nested, nestedLabel, note }) {
           nobody is measuring yet.
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * MARK THE FLAG, ON THE DAY IT WAS THERE.
+ *
+ * The calibration is a fact about two bolted-down cameras and is done
+ * once, on the Cameras page. The flag is not: it is cut in a new place
+ * each morning, so it belongs to a swing's DATE rather than to the hole
+ * forever. Marking it here stamps it with this upload's capture time,
+ * and every later swing takes it until somebody marks a later one.
+ *
+ * Which is why this shows the date it is about. "The flag is here" and
+ * "the flag was here on Tuesday" are different claims, and only the
+ * second one is true.
+ */
+function FlagstickModal({ row, adminPassword, onClose, onSaved }) {
+  const [img, setImg] = useState(null);
+  const [err, setErr] = useState(null);
+  const [pin, setPin] = useState(null);       // {x, y} in green pixels
+  const [note, setNote] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [dims, setDims] = useState(null);     // {w, h} of the green frame
+  const wrapRef = useRef(null);
+  const [drag, setDrag] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const [f, vm] = await Promise.all([
+          api.getLongUploadFrame(adminPassword, row.id, 0, "green"),
+          api.getViewMap(adminPassword, row.id).catch(() => null),
+        ]);
+        if (!live) return;
+        if (!f?.image_url) throw new Error("no green frame on this upload");
+        setImg(f.image_url);
+        setDims({ w: f.width || row.green_width || 1280,
+                  h: f.height || row.green_height || 720 });
+        const g = vm?.pin_green ?? vm?.view_map?.pin_green;
+        if (g) setPin({ x: Math.round(g[0]), y: Math.round(g[1]) });
+        setNote(vm?.pin_note || null);
+        if (!vm?.view_map) {
+          setErr("This hole has no green→tee mapping yet — calibrate the "
+            + "camera pair on the Cameras page first, or the flag has "
+            + "nowhere to be carried to.");
+        }
+      } catch (e) {
+        if (live) setErr(e?.message || String(e));
+      }
+    })();
+    return () => { live = false; };
+  }, [adminPassword, row.id]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  function at(ev) {
+    const el = wrapRef.current;
+    if (!el || !dims) return null;
+    const r = el.getBoundingClientRect();
+    const fx = (ev.clientX - r.left) / r.width;
+    const fy = (ev.clientY - r.top) / r.height;
+    return {
+      x: Math.max(0, Math.min(dims.w - 1, Math.round(fx * dims.w))),
+      y: Math.max(0, Math.min(dims.h - 1, Math.round(fy * dims.h))),
+    };
+  }
+
+  async function save() {
+    if (!pin) return;
+    setSaving(true);
+    try {
+      const out = await api.saveHolePin(adminPassword, row.id,
+                                        { green: [pin.x, pin.y] });
+      onSaved?.(out);
+      onClose();
+    } catch (e) {
+      setErr(e?.message || String(e));
+      setSaving(false);
+    }
+  }
+
+  const captured = row.base_captured_at
+    ? fmtDateTime(row.base_captured_at) : "an unknown time";
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Set the flagstick"
+         onClick={onClose}
+         style={{ position: "fixed", inset: 0, zIndex: 1200,
+                  background: "rgba(0,0,0,0.75)", display: "flex",
+                  alignItems: "center", justifyContent: "center",
+                  padding: 16 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()}
+           style={{ margin: 0, padding: 16, maxWidth: 980, width: "100%" }}>
+        <div className="row" style={{ justifyContent: "space-between",
+                                      gap: 12 }}>
+          <b>⚑ Set flagstick — #{row.id}</b>
+          <button className="btn ghost" style={{ width: "auto" }}
+                  onClick={onClose}>Close ✕</button>
+        </div>
+        <div className="tiny muted" style={{ marginTop: 4 }}>
+          Click or drag the flag to the BASE of the stick. This is where
+          the flag was on <b>{captured}</b> — it carries to every later
+          swing until it is marked again on a more recent one, and it does
+          not move the swings before it.
+          {note && <> Currently: {note}.</>}
+        </div>
+        {err && (
+          <div className="err-text small" style={{ marginTop: 8 }}>{err}</div>
+        )}
+        {!img && !err && (
+          <div className="small" style={{ marginTop: 10 }}>
+            Fetching a frame from the green camera…
+          </div>
+        )}
+        {img && (
+          <div
+            ref={wrapRef}
+            onPointerDown={(e) => { setDrag(true); setPin(at(e)); }}
+            onPointerMove={(e) => { if (drag) setPin(at(e)); }}
+            onPointerUp={() => setDrag(false)}
+            onPointerLeave={() => setDrag(false)}
+            style={{ position: "relative", marginTop: 10, cursor: "crosshair",
+                     borderRadius: 8, overflow: "hidden",
+                     touchAction: "none", userSelect: "none" }}
+          >
+            <img src={img} alt="Green camera" draggable={false}
+                 style={{ width: "100%", display: "block" }} />
+            {pin && dims && (
+              // Anchored at its BASE, because that is the point being
+              // marked -- a pennant centred on the click would put the
+              // stored coordinate somewhere up the pole.
+              <div style={{
+                position: "absolute",
+                left: `${(pin.x / dims.w) * 100}%`,
+                top: `${(pin.y / dims.h) * 100}%`,
+                transform: "translate(-1px, -100%)",
+                pointerEvents: "none",
+              }}>
+                <div style={{ width: 2, height: 34, background: "#fff",
+                              boxShadow: "0 0 3px rgba(0,0,0,0.8)" }} />
+                <div style={{
+                  position: "absolute", left: 2, top: 0,
+                  width: 0, height: 0,
+                  borderLeft: "16px solid #ef4444",
+                  borderTop: "6px solid transparent",
+                  borderBottom: "6px solid transparent",
+                }} />
+              </div>
+            )}
+          </div>
+        )}
+        <div className="row" style={{ marginTop: 10, gap: 8,
+                                      justifyContent: "flex-end" }}>
+          <span className="tiny muted" style={{ marginRight: "auto" }}>
+            {pin ? `${pin.x}, ${pin.y} in the green frame`
+              : "nothing marked yet"}
+          </span>
+          <button className="btn ghost" style={{ width: "auto" }}
+                  onClick={onClose}>Cancel</button>
+          <button className="btn" style={{ width: "auto" }}
+                  disabled={!pin || saving} onClick={save}>
+            {saving ? "Saving…" : "Save flagstick"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -13917,6 +13679,7 @@ export default function AdminProduction() {
   // { uploadId, tee, green, existing, scope } once the two frames and
   // any saved map are in hand; { uploadId, loading } while fetching.
   const [greenCal, setGreenCal] = useState(null);
+  const [pinModal, setPinModal] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -14878,12 +14641,12 @@ export default function AdminProduction() {
                       className="small ghost"
                       style={{ width: "100%" }}
                       disabled={!row.dual_camera}
-                      onClick={() => openGreenCal(row)}
+                      onClick={() => setPinModal({ row })}
                       title={row.dual_camera
-                        ? "Map the green camera's view onto the tee camera's, by clicking the same ground features in both. Done ONCE per hole — every swing these two cameras record afterwards is aimed by it."
+                        ? "Mark the base of the flagstick on the green camera. It is dated with THIS swing's capture time and carries forward to every later swing until it is marked again — the calibration itself is done once per camera pair, on the Cameras page."
                         : "No green camera on this upload"}
                     >
-                      ⊹ Calibrate green
+                      ⚑ Set flagstick
                     </button>
                   )}
                 />
@@ -15345,6 +15108,14 @@ export default function AdminProduction() {
           onSaved={() => { setGreenCal(null); refreshAll(); }}
         />
       ))}
+      {pinModal && (
+        <FlagstickModal
+          row={pinModal.row}
+          adminPassword={adminPassword}
+          onClose={() => setPinModal(null)}
+          onSaved={() => refreshAll()}
+        />
+      )}
       {swingTest && (
         <SwingTestModal
           state={swingTest}

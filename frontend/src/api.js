@@ -395,6 +395,14 @@ export const api = {
   // ---- Green-camera calibration (image px -> feet on the green) ----
   getGreenCalibration: (key, cameraId) =>
     request(`/api/admin/cameras/${cameraId}/calibration`, { adminPassword: key }),
+  cameraCalibrationSource: (key, cameraId) =>
+    // A dual-camera capture from this camera's pair, to fit the
+    // green->tee homography on. The frames are only backdrops to click
+    // ground features in, so any capture from the pair will do and the
+    // most recent one is used.
+    request(`/api/admin/cameras/${cameraId}/calibration-source`, {
+      adminPassword: key,
+    }),
   calibrateGreenCamera: (key, cameraId, { imagePoints, worldPoints, pin }) =>
     request(`/api/admin/cameras/${cameraId}/calibrate`, {
       method: "POST",
