@@ -559,6 +559,23 @@ def build_tracks(
     r: float,
     max_gap: int = 4,
     min_len: int = 3,
+    # HOW FAR SIDEWAYS A LINK MAY GO, or None for the old circular gate.
+    #
+    # The gate below is a RADIUS: 36 to 120px depending on speed and gap,
+    # and equally happy in every direction. That is right while a track
+    # is being acquired and wrong once it has a direction, because a
+    # falling ball does not turn. Measured on the clip this was written
+    # for: five points descending cleanly, then a sixth 40px off to the
+    # side -- inside the radius, nearer the prediction than the real next
+    # point, and taken. Everything downstream followed it: the landing
+    # moved to the wrong place, and the walk back to where the fall
+    # flattened cut the chain to the two junk points at the end.
+    #
+    # A corridor says what the radius cannot: continue in the direction
+    # you are already going. It is only ever applied to a track that HAS
+    # a direction, so acquisition is untouched, and it scales with the
+    # gap because a longer gap is honestly less certain.
+    corridor_px: float | None = None,
 ) -> list:
     """Link detections into constant-velocity tracks, one track per object.
 
@@ -619,11 +636,28 @@ def build_tracks(
             else:
                 speed = math.hypot(tr["vx"], tr["vy"])
                 gate = (1.5 + 0.9 * df) * r + GATE_SPEED_FRAC * speed * df
+            # The track's heading, for the corridor test below. Only
+            # meaningful once it has two points and is actually moving.
+            _ux = _uy = None
+            if corridor_px and len(tr["pts"]) >= 2:
+                _sp = math.hypot(tr["vx"], tr["vy"])
+                if _sp > 1e-6:
+                    _ux, _uy = tr["vx"] / _sp, tr["vy"] / _sp
             best_i = None
             best_d = None
             for i, c in enumerate(cands):
                 if i in taken:
                     continue
+                if _ux is not None:
+                    # Distance from the line the track is already on, not
+                    # from the point it is at -- a candidate far ALONG
+                    # the heading is a ball the detector missed a frame
+                    # of, and a candidate far ACROSS it is a different
+                    # object.
+                    _dx = c["x"] - last["x"]
+                    _dy = c["y"] - last["y"]
+                    if abs(_dx * -_uy + _dy * _ux) > corridor_px * max(1, df):
+                        continue
                 dist = math.hypot(c["x"] - px, c["y"] - py)
                 if dist <= gate and (best_d is None or dist < best_d):
                     best_i, best_d = i, dist
@@ -1493,6 +1527,12 @@ def detect_movers_by_plate(
 # has already pointed at and this one runs on a whole green view.
 DESCENT_DIFF_PER_FRAME = 30
 
+# HOW FAR OFF ITS OWN HEADING A DESCENT MAY BE LINKED, per frame of gap.
+# Real descents on this footage bend 0.1 to 5.3px end to end, so ten is
+# already generous for a single link -- it is here to refuse a sideways
+# jump onto a different object, not to second-guess the flight.
+DESCENT_CORRIDOR_PX = 10.0
+
 DIFF_SENS = {
     1: (12, 6, 600),
     2: (8, 10, 900),
@@ -1729,7 +1769,8 @@ def find_descents(
             {"frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"])}
             for d in dets[::_step]
         ]
-        tracks = build_tracks(dets, r, min_len=int(min_points))
+        tracks = build_tracks(dets, r, min_len=int(min_points),
+                              corridor_px=DESCENT_CORRIDOR_PX)
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"detection failed: {exc}"
         return out
