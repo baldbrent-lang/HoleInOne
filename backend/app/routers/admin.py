@@ -16223,7 +16223,7 @@ def _descent_accepted(e) -> bool:
     # for free and is evidence of nothing. Stated here as well as in the
     # search because this is the other place a chain is judged, and a
     # rule that matters should not depend on the only other copy of it.
-    if _n < BALLSCAN_DESCENT_SHORT_POINTS or _n < 3:
+    if _n < BALLSCAN_DESCENT_SHORT_POINTS:
         return False
     if _n >= BALLSCAN_DESCENT_MIN_POINTS:
         return _b <= BALLSCAN_DESCENT_MAX_BEND_PX
@@ -16411,8 +16411,9 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
 
         evs = [e for e in _all_evs if _strict(e)]
         _keys = ("last_descent_frame", "last_descent_sec", "landing_xy",
-                 "n_points", "n_points_tracked", "drop_px", "fall_rate",
-                 "bend_px", "step_px", "step_dev", "sources")
+                 "n_points", "drop_px", "fall_rate",
+                 "bend_px", "step_px", "step_dev", "sources",
+                 "n_points_drawn")
         out["events"] = [
             {**{k: e.get(k) for k in _keys},
              "accepted": _strict(e),

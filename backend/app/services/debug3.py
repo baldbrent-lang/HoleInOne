@@ -639,7 +639,7 @@ def build_tracks(
             # The track's heading, for the corridor test below. Only
             # meaningful once it has two points and is actually moving.
             _ux = _uy = None
-            if corridor_px and len(tr["pts"]) >= 2:
+            if corridor_px and corridor_px > 0 and len(tr["pts"]) >= 2:
                 _sp = math.hypot(tr["vx"], tr["vy"])
                 if _sp > 1e-6:
                     _ux, _uy = tr["vx"] / _sp, tr["vy"] / _sp
@@ -1532,7 +1532,13 @@ DESCENT_DIFF_PER_FRAME = 30
 # Real descents on this footage bend 0.1 to 5.3px end to end, so ten is
 # already generous for a single link -- it is here to refuse a sideways
 # jump onto a different object, not to second-guess the flight.
-DESCENT_CORRIDOR_PX = 10.0
+# OFF. A corridor on the linker is sound in principle -- a falling ball
+# does not turn -- but switched on it matched one descent on a video
+# where the version without it matched three. It refuses a link when the
+# detector loses the ball and the only candidate is slightly off the
+# line, and on this footage that happens more often than a wrong sideways
+# link does. Set a number here to try it again.
+DESCENT_CORRIDOR_PX = None
 
 # THE ABSOLUTE FLOOR ON A DESCENT, wherever one is judged. Two points is
 # a pair of dots with a line between them: any two points are collinear,
@@ -1545,7 +1551,12 @@ MIN_DESCENT_POINTS = 3
 # changes the step by roughly a quarter, so this leaves room for the
 # physics and still refuses a chain whose spacing doubles and halves
 # between points -- which is what a chain of unrelated specks does.
-DESCENT_STEP_TOL = 0.60
+# OFF, and measured rather than enforced. Same story as the corridor:
+# the reasoning is right -- a falling ball keeps time -- but as a gate it
+# rejected more real descents than junk on the footage available. The
+# number is still computed and reported on every event, so it can be
+# judged from real runs before it is trusted to decide anything.
+DESCENT_STEP_TOL = None
 
 # HOW MANY FRAMES A DESCENT MAY VANISH FOR and still be the same ball.
 # Wider than the general tracker's, and it is the constant rate that
@@ -1553,7 +1564,7 @@ DESCENT_STEP_TOL = 0.60
 # corridor and the step test both check that it turned up there. A ball
 # lost behind a tree for a quarter of a second used to end the chain,
 # and the chain ending early is what cut the tracer short.
-DESCENT_MAX_GAP = 8
+DESCENT_MAX_GAP = 4
 
 DIFF_SENS = {
     1: (12, 6, 600),
@@ -1843,6 +1854,9 @@ def find_descents(
         tracks = build_tracks(dets, r, min_len=int(min_points),
                               max_gap=DESCENT_MAX_GAP,
                               corridor_px=DESCENT_CORRIDOR_PX)
+        # Both of those are None/4 by default -- see the constants. The
+        # arguments stay wired so re-enabling is a one-line change once
+        # there is a fair test to judge them on.
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"detection failed: {exc}"
         return out
@@ -1897,39 +1911,37 @@ def find_descents(
         # So the walk back to the landing happens first, and the drop,
         # rate, bend and count are all measured on what survives it.
         kept = pts[:last_i + 1]
-        # TWO POINTS IS NOT A DESCENT. It is a pair of dots with a line
-        # between them; any two points are collinear, so it passes a
-        # straightness test by construction and means nothing. A floor
-        # here rather than only at the acceptance gate, because this is
-        # where the chain is decided.
-        if len(kept) < max(int(min_points), MIN_DESCENT_POINTS):
+        # THE DROP, RATE AND BEND ARE THE WHOLE TRACK'S.
+        #
+        # Re-measuring them on the truncated chain was tried and cost
+        # real descents: a chain of three points that survives the walk
+        # back has fallen less far than the track it came from, so it
+        # failed a drop gate written for the whole fall. Measured on one
+        # video, the stricter version matched one descent where this
+        # matches three. The tests belong on the evidence the tracker
+        # gathered, not on the part of it that is drawn.
+        #
+        # TWO POINTS IS STILL NOT A DESCENT. That floor stays, because it
+        # is not a threshold that can be too tight: any two points are
+        # collinear, so a two-point chain passes a straightness test for
+        # free and carries nothing. It is what stops a long track whose
+        # tail was junk from being saved as a two-dot comet, and it
+        # changes no decision about a chain that is real.
+        if len(kept) < MIN_DESCENT_POINTS:
             continue
-        drop = float(kept[-1]["y"]) - float(kept[0]["y"])
-        if drop < min_drop:
-            continue
-        span_f = max(1, int(kept[-1]["frame"]) - int(kept[0]["frame"]))
-        rate = (drop / span_f) * _fps / frame_h
-        if not (float(rate_lo) <= rate <= float(rate_hi)):
-            continue
-        bend = _path_bend_px(kept)
-        if bend > float(max_bend_px):
-            continue
-        # EVENLY SPACED, OR IT IS NOT A FALLING BALL. Gravity does add
-        # something over the half-second in view, which is why the
-        # tolerance is generous rather than tight -- a ball speeding up
-        # under gravity changes its step by well under this, and a chain
-        # of unrelated specks changes it by far more.
+        # Reported, not gated. How evenly a descent falls is worth
+        # seeing on the picture; using it to reject cost more than it
+        # caught, so it says what it measured and leaves the deciding to
+        # the gates that were tuned against real footage.
         step_med, step_dev = _descent_step_consistency(kept)
-        if step_dev > DESCENT_STEP_TOL:
-            continue
         events.append({
-            "first_frame": int(kept[0]["frame"]),
+            "first_frame": int(pts[0]["frame"]),
             "last_frame": int(pts[-1]["frame"]),
             "last_descent_frame": int(land["frame"]),
             "last_descent_sec": round(int(land["frame"]) / _fps, 2),
             "landing_xy": [int(round(land["x"])), int(round(land["y"]))],
-            "n_points": len(kept),
-            "n_points_tracked": len(pts),
+            "n_points": len(pts),
+            "n_points_drawn": len(kept),
             "drop_px": int(round(drop)),
             "fall_rate": round(rate, 3),
             "bend_px": round(bend, 2),
