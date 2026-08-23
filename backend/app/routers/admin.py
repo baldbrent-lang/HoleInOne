@@ -16673,48 +16673,15 @@ def _deep_region_dots(path, x, y, w, h, start, end, sens=3):
 
     Returns [{frame, x, y}] in the SOURCE's pixel and frame numbering.
     """
-    import cv2  # type: ignore
+    # ONE IMPLEMENTATION. This used to be its own copy of the frame-diff
+    # loop; the descent search now uses the same detector, and two copies
+    # of "what the operator sees when they press Scan" is how the thing
+    # the operator can see stops being the thing the search looks for.
+    from ..services.debug3 import detect_movers_by_diff
 
-    _THRESH, _PER_FRAME, _AREA_MAX, _CAP = {
-        1: (12, 6, 600, 1200),
-        2: (8, 10, 900, 2000),
-        3: (5, 16, 1400, 3000),
-    }[int(sens)]
-    out: list[dict] = []
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        return out
-    try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, float(max(0, start)))
-        prev = None
-        for f in range(max(0, start), int(end) + 1):
-            ok, frame = cap.read()
-            if not ok:
-                break
-            crop = frame[y:y + h, x:x + w]
-            gray = cv2.GaussianBlur(
-                cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0)
-            if prev is not None:
-                diff = cv2.absdiff(gray, prev)
-                _, th = cv2.threshold(diff, _THRESH, 255, cv2.THRESH_BINARY)
-                th = cv2.dilate(th, None, iterations=1)
-                n, _l, stats, cents = cv2.connectedComponentsWithStats(th)
-                hits = []
-                for i in range(1, n):
-                    _a = int(stats[i, cv2.CC_STAT_AREA])
-                    if 1 <= _a <= _AREA_MAX:
-                        hits.append((_a, float(cents[i][0]),
-                                     float(cents[i][1])))
-                hits.sort(reverse=True)
-                for _a, cx, cy in hits[:_PER_FRAME]:
-                    out.append({"frame": int(f), "x": int(round(x + cx)),
-                                "y": int(round(y + cy))})
-            prev = gray
-            if len(out) >= _CAP:
-                break
-    finally:
-        cap.release()
-    return out
+    _CAP = {1: 1200, 2: 2000, 3: 3000}[int(sens)]
+    return detect_movers_by_diff(path, start, end, sens=int(sens),
+                                 roi=(x, y, w, h), cap=_CAP)
 
 
 # How far off the seed's own line a deep-scan dot may sit and still be

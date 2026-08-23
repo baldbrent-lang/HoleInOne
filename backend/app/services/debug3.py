@@ -237,6 +237,14 @@ def detect_ball_blobs(
     # detections in the tree line and none on the green, which is not a
     # tuning problem, it is the wrong question being asked of the view.
     suppress_bodies: bool = True,
+    # WHICH BLOBS SURVIVE THE PER-FRAME CAP. "small" keeps the smallest,
+    # which is right on a tee view where the ball is the tiniest thing
+    # that matters and the big stuff is the golfer. On a green view it
+    # is exactly backwards: everything left after the area filter is
+    # already ball-sized, the frame is full of one- and two-pixel
+    # speckle off the tree line, and keeping the smallest forty of
+    # several hundred keeps the speckle and throws the ball away.
+    cap_prefer: str = "small",
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -416,7 +424,8 @@ def detect_ball_blobs(
                 })
 
             if len(kept_this) > max_per_frame:
-                kept_this.sort(key=lambda d: d["area"])
+                kept_this.sort(key=lambda d: d["area"],
+                               reverse=(cap_prefer == "large"))
                 out["stats"]["over_cap"] = (
                     out["stats"].get("over_cap", 0)
                     + len(kept_this) - max_per_frame
@@ -1476,6 +1485,97 @@ def detect_movers_by_plate(
     return out
 
 
+# The sensitivity ladder the operator's map exposes as 🔍 Scan, and now
+# the descent search's third detector. (threshold, per-frame keep,
+# max blob area)
+DIFF_SENS = {
+    1: (12, 6, 600),
+    2: (8, 10, 900),
+    3: (5, 16, 1400),
+}
+
+
+def detect_movers_by_diff(
+    input_path: Path,
+    f0: int,
+    f1: int,
+    sens: int = 2,
+    roi=None,
+    cap: int = 20000,
+) -> list:
+    """Frame-to-frame difference. The detector that actually sees the ball.
+
+    WHY THIS IS HERE. MOG2 learns a background and the plate medians one;
+    both describe what the scene usually looks like, and both then ask
+    whether a pixel departs from it. On a green that is mostly smooth
+    turf under moving cloud, what departs most is the tree line and the
+    rough -- high-frequency texture that a pixel of camera shake lights
+    up -- and a small ball crossing plain grass is not what either model
+    is most surprised by. Measured on the clip this was written for:
+    19,260 detections between the two of them, densely over the trees,
+    and the putting surface all but bare.
+
+    A plain difference against the PREVIOUS FRAME has no model to be
+    unsurprised by. Something that was not there a thirtieth of a second
+    ago and is there now is exactly a ball in flight, and this is the
+    detector the operator's own map has been finding these descents with
+    all along.
+
+    Returns [{frame, x, y, area}], the shape the others return.
+    """
+    thr, per_frame, area_max = DIFF_SENS[int(sens)]
+    out: list = []
+    if not HAS_CV:
+        return out
+    try:
+        cap_v = cv2.VideoCapture(str(input_path))
+        if not cap_v.isOpened():
+            return out
+        try:
+            x0, y0 = (int(roi[0]), int(roi[1])) if roi else (0, 0)
+            cap_v.set(cv2.CAP_PROP_POS_FRAMES, float(max(0, int(f0))))
+            prev = None
+            for f in range(max(0, int(f0)), int(f1) + 1):
+                ok, frame = cap_v.read()
+                if not ok or frame is None:
+                    break
+                if roi:
+                    frame = frame[y0:y0 + int(roi[3]), x0:x0 + int(roi[2])]
+                gray = cv2.GaussianBlur(
+                    cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+                if prev is not None:
+                    diff = cv2.absdiff(gray, prev)
+                    _, th = cv2.threshold(diff, thr, 255, cv2.THRESH_BINARY)
+                    th = cv2.dilate(th, None, iterations=1)
+                    n, _l, st, cen = cv2.connectedComponentsWithStats(th)
+                    hits = []
+                    for i in range(1, n):
+                        a = int(st[i, cv2.CC_STAT_AREA])
+                        if 1 <= a <= area_max:
+                            hits.append((a, float(cen[i][0]),
+                                         float(cen[i][1])))
+                    # LARGEST FIRST, which is the whole difference between
+                    # this and the blob detector's cap. Inside a
+                    # ball-sized window the ball is the BIG one and the
+                    # speckle is the small one, so keeping the smallest
+                    # few of several hundred keeps the speckle and throws
+                    # the ball away.
+                    hits.sort(reverse=True)
+                    for a, cx, cy in hits[:per_frame]:
+                        out.append({"frame": int(f),
+                                    "x": int(round(x0 + cx)),
+                                    "y": int(round(y0 + cy)),
+                                    "area": int(a)})
+                prev = gray
+                if len(out) >= cap:
+                    break
+        finally:
+            cap_v.release()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("diff detector failed on %s: %s", input_path, exc)
+    return out
+
+
 def find_descents(
     input_path: Path,
     fps: float | None = None,
@@ -1571,13 +1671,24 @@ def find_descents(
         # gates below throw them out, because a person does not fall at
         # a third of a frame-height per second in a straight line.
         det = detect_ball_blobs(input_path, f_lo, f_hi,
-                                suppress_bodies=False)
+                                suppress_bodies=False,
+                                cap_prefer="large")
         dets = list(det.get("dets") or [])
         n_mog = len(dets)
         dets.extend(detect_movers_by_plate(input_path, f_lo, f_hi))
+        n_plate = len(dets) - n_mog
+        # THE THIRD DETECTOR, and on a green view the one that works.
+        # The other two model the scene and report departures from it,
+        # which on smooth turf under moving cloud means the tree line;
+        # this one asks only "was that there a frame ago", which is what
+        # a falling ball is.
+        dets.extend(detect_movers_by_diff(input_path, f_lo, f_hi, sens=2))
+        n_diff = len(dets) - n_mog - n_plate
         dets.sort(key=lambda d: d["frame"])
         out["n_dets"] = len(dets)
         out["n_dets_mog2"] = n_mog
+        out["n_dets_plate"] = n_plate
+        out["n_dets_diff"] = n_diff
         # WHAT THE DETECTORS THREW AWAY, carried out. "No descent found"
         # has two completely different causes -- the ball was never
         # detected, or it was detected and never linked -- and they call
@@ -1585,7 +1696,8 @@ def find_descents(
         # from the outside, which is how a masked-out green reads as a
         # tracking problem.
         out["det_stats"] = dict(det.get("stats") or {})
-        out["det_stats"]["plate"] = len(dets) - n_mog
+        out["det_stats"]["plate"] = n_plate
+        out["det_stats"]["diff"] = n_diff
         # EVERY DETECTION, to be drawn. A picture of the chains answers
         # "which tracks were found and why were they rejected"; it cannot
         # answer "was the ball detected at all", which is the prior
