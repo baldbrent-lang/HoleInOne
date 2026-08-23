@@ -994,11 +994,16 @@ function RawSyncPlayer({
                 title={paused ? "Play both" : "Pause both"}>
           {paused ? "▶" : "❙❙"}
         </button>
+        {/* PRESS AGAIN TO GO FASTER. 2x, then 4x, then 6x, then back
+            to 2x -- one button that steps through the speeds rather
+            than one speed you can only take or leave. */}
         <button type="button"
-                className={playing && rate === 3 ? "small" : "ghost small"}
-                style={btn} onClick={() => play(3)}
-                title="Fast forward at 3x">
-          ▶▶ 3x
+                className={playing && rate > 1 ? "small" : "ghost small"}
+                style={btn}
+                onClick={() => play(
+                  !playing || rate < 2 ? 2 : (rate >= 6 ? 2 : rate + 2))}
+                title="Fast forward — press again for the next speed up">
+          ▶▶ {playing && rate > 1 ? rate : 2}x
         </button>
         <button type="button" className="ghost small" style={btn}
                 onClick={() => stepFrames(1)} title="Forward one tee frame">
@@ -2388,7 +2393,12 @@ function ClickToPlotModal({
                 loadFrame={loadGreenFrame}
                 frameLo={0}
                 frameHi={Math.max(0, (green.total_frames || 1) - 1)}
-                startFrame={landing?.frame ?? green.frame ?? 0}
+                // Where the operator left off, then the landing --
+                // which is what `set to current` on the raw tab moves
+                // this to, so setting the landing frame there lands on
+                // it here.
+                startFrame={greenViewFrame ?? landing?.frame
+                  ?? green.frame ?? 0}
                 onViewFrame={setGreenViewFrame}
                 // PLACE THE LANDING ANYWHERE. It lands in `greenMarks`
                 // like a clicked dot does, so everything downstream —
@@ -2612,7 +2622,15 @@ function ClickToPlotModal({
             <button type="button" className="ghost small"
                     style={{ width: "100%" }}
                     disabled={teeCurrent == null}
-                    onClick={() => setImpactFrame(teeCurrent)}
+                    onClick={() => {
+                      setImpactFrame(teeCurrent);
+                      // AND TAKE THE TEE MAP THERE. Set from the raw
+                      // tab, the tee map is still parked wherever it
+                      // was last looked at -- which is not the frame
+                      // just chosen, and is the one place the operator
+                      // is about to go to check the choice.
+                      if (cam === "raw") setTeeViewFrame(teeCurrent);
+                    }}
                     title={cam === "raw"
                       ? "Use the tee frame the raw player is stopped on. Pause it on the strike, then press this."
                       : "Use the frame the tee view is showing. Step to the strike with the frame buttons on the picture, then press this."}>
@@ -2666,7 +2684,10 @@ function ClickToPlotModal({
                     style={{ width: "100%" }}
                     disabled={greenCurrent == null || !landing
                       || greenCurrent === landing.frame}
-                    onClick={() => setLandingFrame(greenCurrent)}
+                    onClick={() => {
+                      setLandingFrame(greenCurrent);
+                      if (cam === "raw") setGreenViewFrame(greenCurrent);
+                    }}
                     title={!landing
                       ? "Mark the ball landing spot first — this moves that point to another frame, and there is nothing to move without it."
                       : (cam === "raw"
