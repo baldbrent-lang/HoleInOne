@@ -17247,129 +17247,6 @@ def _ball_scan_considered_image(row, src_path, sweep) -> None:
         log.debug("ball scan: considered image failed on %s: %s", row.id, exc)
 
 
-def _ascent_descent_image(row, desc) -> None:
-    """Every chain the green pass weighed, and the gate each one died on.
-
-    The ascent picture's twin, and it exists because the ascent picture
-    is what made those gates tunable: before it, a lost ascent could
-    only be diagnosed by re-running the gates by hand in a scratch
-    script. The descent gates have never had that and have been tuned
-    exactly that way.
-
-    Drawn on the frame of the first accepted landing when there is one,
-    so the green is shown at the moment that matters, and on the middle
-    of the clip when there is not.
-    """
-    _sw = (desc or {}).get("sweep") or {}
-    _con = _sw.get("considered") or []
-    if not _con:
-        return
-    try:
-        import cv2  # type: ignore
-
-        row_green = _local_green(row)
-        if not row_green or not row_green.exists():
-            return
-        cap = cv2.VideoCapture(str(row_green))
-        if not cap.isOpened():
-            return
-        try:
-            _ok_ev = [z for z in _con if not (z.get("why") or [])]
-            _at = ((_ok_ev[0] if _ok_ev else _con[0])
-                   .get("last_descent_frame")
-                   or _con[0].get("first_frame") or 0)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(_at)))
-            ok, im = cap.read()
-            if not ok or im is None:
-                return
-        finally:
-            cap.release()
-        im = (im.astype("float32") * 0.55).astype("uint8")
-        _cols = _sw.get("why_colors") or {}
-
-        def _bgr(hexstr, fallback=(200, 200, 200)):
-            try:
-                _h = hexstr.lstrip("#")
-                r, g, b = (int(_h[k:k + 2], 16) for k in (0, 2, 4))
-                return (b, g, r)
-            except (AttributeError, TypeError, ValueError):
-                return fallback
-
-        # REJECTS ARE DOTS, NOT LINES.
-        #
-        # Drawing every chain as a joined-up path put 290 lines across
-        # one frame and the result was unreadable -- which defeats the
-        # entire purpose, since the picture exists to be read. The lines
-        # are what does the damage: a chain spanning the frame paints
-        # across everything, and hundreds of them paint over each other.
-        # Their POINTS carry the same information about where the noise
-        # lives, at a fraction of the ink. Only chains that survived the
-        # gates get a path drawn.
-        for a in reversed(_con):
-            if not (a.get("why") or []):
-                continue
-            _col = _bgr(_cols.get(a.get("why_primary")))
-            for q in a.get("points") or []:
-                cv2.circle(im, (q["x"], q["y"]), 1, _col, -1, cv2.LINE_AA)
-
-        # THEN THE SURVIVORS, over the top, and the ones actually USED
-        # over those. Three states, not two: refused, passed the gates,
-        # and put on a clip. An operator looking at seven white paths
-        # had no way to tell which three the produce consumed.
-        _n_ok = 0
-        for a in _con:
-            _p = a.get("points") or []
-            if (a.get("why") or []) or not _p:
-                continue
-            _n_ok += 1
-            _used = a.get("chosen_for")
-            _col = (120, 255, 120) if _used else (255, 255, 255)
-            _w = 3 if _used else 1
-            for u, v in zip(_p, _p[1:]):
-                cv2.line(im, (u["x"], u["y"]), (v["x"], v["y"]), _col, _w,
-                         cv2.LINE_AA)
-            for q in _p:
-                cv2.circle(im, (q["x"], q["y"]), 4 if _used else 3, _col,
-                           _w, cv2.LINE_AA)
-            # WHERE IT LANDED, ringed. This is the number the produce
-            # actually consumes -- the frame it cuts to and the point
-            # it finishes at -- so it is the one thing in the picture
-            # worth being able to check by eye.
-            _lx, _ly = a.get("landing_xy") or [_p[-1]["x"], _p[-1]["y"]]
-            cv2.circle(im, (int(_lx), int(_ly)), 13 if _used else 9, _col,
-                       2, cv2.LINE_AA)
-            cv2.putText(
-                im,
-                (f"USED by swing {_used}  " if _used else "passed  ")
-                + f"{a.get('last_descent_sec')}s  fell {a.get('fall_px')}px",
-                (min(int(_lx) + 17, im.shape[1] - 260), max(66, int(_ly))),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, _col,
-                2 if _used else 1, cv2.LINE_AA)
-        _tally = _sw.get("why_counts") or {}
-        im[0:58] = (im[0:58].astype("float32") * 0.35).astype("uint8")
-        cv2.putText(
-            im,
-            f"all {_sw.get('n_considered')} chain(s) the green pass "
-            f"weighed - GREEN was put on a clip, white passed but lost, "
-            f"coloured dots were refused",
-            (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
-            cv2.LINE_AA)
-        _kx = 12
-        for _k in (_sw.get("why_order") or []):
-            _n = _tally.get(_k) or 0
-            if _n:
-                _kx = _key_entry(im, _kx, f"{_k} {_n}", _bgr(_cols.get(_k)))
-        if _tally.get("accepted"):
-            _key_entry(im, _kx, f"accepted {_tally['accepted']}",
-                       (255, 255, 255))
-        nm = f"ballscan-{row.id}-descents.jpg"
-        if cv2.imwrite(str(CLIPS_DIR / nm), im,
-                       [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
-            desc["image_url"] = _clip_url_for(nm)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("ascent: descent image failed on %s: %s", row.id, exc)
-
-
 def _ascent_trim_considered(sweep) -> None:
     """Drop the coordinates once the picture has been drawn from them.
 
@@ -17995,7 +17872,6 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
     _t = time.perf_counter()
     _desc = _ascent_descents(row, db, rep, fps, progress=progress)
     rep["descents"] = _desc
-    _ascent_descent_image(row, _desc)
     _ascent_trim_considered(_desc.get("sweep") or {})
     _stage(3, "Balls coming down",
            "One pass over the green camera, which is the easy half: "
@@ -18244,6 +18120,7 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
 
     _events: list = []
     _considered: list = []
+    _dets: list = []
     _tally: dict = {}
     _reasons: list = []
     _sweep: dict = {}
@@ -18259,6 +18136,13 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
             continue
         _events.extend(_gd.get("events") or [])
         _considered.extend(_gd.get("considered") or [])
+        # EVERY DETECTION IN THE WINDOW, which answers the prior
+        # question: was the ball SEEN at all? A picture of the chains
+        # says which tracks were built and how they were judged; it
+        # cannot say whether the detector ever put a dot on the ball,
+        # and that is what decides whether to look at the detector or
+        # at the linker.
+        _dets.extend(_gd.get("dets_preview") or [])
         for k, v in (_gd.get("why_counts") or {}).items():
             _tally[k] = _tally.get(k, 0) + v
         _reasons.append(f"f{_flo}-{_fhi}: {_gd.get('reason')}")
@@ -18266,6 +18150,7 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         # last one to answer carries them out.
         _sweep = {"why_colors": _gd.get("why_colors"),
                   "why_order": _gd.get("why_order")}
+    out["dets_all"] = _dets
     _sweep["considered"] = sorted(
         _considered, key=lambda z: (len(z.get("why") or []),
                                     -int(z.get("n_points") or 0)))
@@ -18362,6 +18247,8 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
             f"{_e.get('tilt_deg')} degrees off vertical")
         out["n_matched"] += 1
 
+    _ascent_window_views(row, _gp, out, _clips, _gfps)
+    out.pop("dets_all", None)
     out["ok"] = out["n_matched"] > 0
     out["reason"] = (
         ("" if out["delta_measured"] else
@@ -18375,6 +18262,113 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         f"frame(s) — only the flight windows were searched; the two "
         f"clocks are {out['delta_sec']}s apart ({out['delta_source']})")
     return out
+
+
+# HOW MANY HEAT-MAP DOTS ONE WINDOW MAY SHIP. Three seconds of a windy
+# green can be thousands; the browser draws every one as an element with
+# its own hover target, and past a couple of thousand that is a slow
+# page for no extra insight. Thinned evenly rather than truncated, so
+# what survives is still a picture of the whole window.
+ASCENT_VIEW_MAX_DOTS = 1200
+
+
+def _ascent_window_views(row, src_green, out, clips, g_fps) -> None:
+    """One picture per swing: its own three seconds, and nothing else.
+
+    WHY PER SWING AND NOT ONE PICTURE. A single frame carrying every
+    candidate in the clip cannot be read -- and worse, it cannot answer
+    the question actually being asked, which is always about ONE shot:
+    was this ball seen coming down, and did we pick the right chain for
+    it. Chains from a shot ninety seconds away are not context for that,
+    they are clutter that looks like evidence.
+
+    Each view carries the frame the window sits on, every detection in
+    it with the frame number attached, and the chains, with the one the
+    swing actually claimed marked. The frame numbers are what let an
+    operator check the arithmetic by hand against the raw video.
+
+    Never raises: this is the explanation, and a clip must still produce
+    when the explanation cannot be drawn.
+    """
+    _views: list = []
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(src_green))
+        if not cap.isOpened():
+            return
+        try:
+            _w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            _h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            # ONE VIEW PER SWING, ALWAYS. Five swings, five pictures.
+            # A view that cannot be drawn still appears, saying so --
+            # a missing picture that is silently absent reads as a
+            # swing that was never looked at.
+            for ci, c in enumerate(clips):
+                _wd = c.get("landing_window_sec")
+                if not _wd:
+                    _views.append({
+                        "swing": ci + 1, "image_url": None, "dots": [],
+                        "chains": [], "chosen": False,
+                        "reason": c.get("landing_reason")
+                        or "this swing had no impact frame, so there is "
+                           "no three seconds to look at",
+                    })
+                    continue
+                _flo = max(0, int(float(_wd[0]) * g_fps))
+                _fhi = int(float(_wd[1]) * g_fps)
+                # The frame the ball is ON, when we found it -- so the
+                # picture shows the moment being argued about. Failing
+                # that, the middle of the window.
+                _at = (int(c["landing_frame"]) if c.get("landing_frame")
+                       is not None else (_flo + _fhi) // 2)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, _at))
+                ok, im = cap.read()
+                _url = None
+                if ok and im is not None:
+                    im = (im.astype("float32") * 0.55).astype("uint8")
+                    _nm = f"ascent-{row.id}-win{ci + 1}.jpg"
+                    if cv2.imwrite(str(CLIPS_DIR / _nm), im,
+                                   [int(cv2.IMWRITE_JPEG_QUALITY), 84]):
+                        _url = _clip_url_for(_nm)
+                _d = [q for q in (out.get("dets_all") or [])
+                      if _flo <= int(q["frame"]) <= _fhi]
+                _step = max(1, len(_d) // ASCENT_VIEW_MAX_DOTS)
+                _ch = []
+                for z in (out.get("sweep") or {}).get("considered") or []:
+                    if not (_flo <= int(z["last_descent_frame"]) <= _fhi):
+                        continue
+                    _ch.append({
+                        "points": z.get("points") or [],
+                        "why": z.get("why") or [],
+                        "why_primary": z.get("why_primary"),
+                        "chosen": z.get("chosen_for") == ci + 1,
+                        "landing_xy": z.get("landing_xy"),
+                        "last_sec": z.get("last_descent_sec"),
+                        "fall_px": z.get("fall_px"),
+                        "tilt_deg": z.get("tilt_deg"),
+                        "n_points": z.get("n_points"),
+                    })
+                _ch.sort(key=lambda t: (not t["chosen"], len(t["why"])))
+                _views.append({
+                    "swing": ci + 1,
+                    "frames": [_flo, _fhi],
+                    "secs": [round(_flo / g_fps, 2), round(_fhi / g_fps, 2)],
+                    "shown_frame": int(_at),
+                    "image_url": _url,
+                    "w": _w, "h": _h,
+                    "n_dets": len(_d),
+                    "dots": [{"f": int(q["frame"]), "x": int(q["x"]),
+                              "y": int(q["y"])} for q in _d[::_step]],
+                    "chains": _ch,
+                    "chosen": bool(c.get("landing_spot")),
+                    "reason": c.get("landing_reason"),
+                })
+        finally:
+            cap.release()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ascent: window views failed on %s: %s", row.id, exc)
+    out["views"] = _views
 
 
 def _ascent_derive_delta(clips, events, fps, g_fps):

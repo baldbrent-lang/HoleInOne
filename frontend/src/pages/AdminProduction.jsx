@@ -7846,6 +7846,104 @@ function FlagstickModal({ row, adminPassword, onClose, onSaved }) {
 // backend reports `why_colors` and `why_order`; only the prose is here,
 // because that is the one part OpenCV has no use for. Shared by both
 // pictures so a second copy of this logic cannot drift from the first.
+// ONE WINDOW, ONE PICTURE. The frame the ball was found on, dimmed,
+// with every MOG2 detection in those three seconds drawn over it as an
+// SVG dot carrying its own frame number. Native <title> is the tooltip:
+// hovering a dot says which frame it came from, which is the number an
+// operator needs to check the arithmetic against the raw video.
+function DescentWindow({ view, colors }) {
+  const w = view.w || 1280;
+  const h = view.h || 720;
+  if (!view.image_url) {
+    return (
+      <div className="tiny muted" style={{ margin: "8px 0" }}>
+        <b>Swing {view.swing}</b> — no picture: {view.reason || "unknown"}
+      </div>
+    );
+  }
+  const chosen = (view.chains || []).find((c) => c.chosen);
+  return (
+    <div style={{ margin: "10px 0" }}>
+      <div className="tiny" style={{ marginBottom: 3 }}>
+        <b>Swing {view.swing}</b>
+        <span className="muted">
+          {" "}— green f{view.frames?.[0]}–{view.frames?.[1]}{" "}
+          ({view.secs?.[0]}–{view.secs?.[1]}s), {view.n_dets} detection(s)
+        </span>
+        {chosen ? (
+          <span className="pill ok" style={{ marginLeft: 6 }}>
+            landed {chosen.landing_xy?.[0]}, {chosen.landing_xy?.[1]} at{" "}
+            {chosen.last_sec}s
+          </span>
+        ) : (
+          <span className="pill warn" style={{ marginLeft: 6 }}>
+            no ball found — tee-only
+          </span>
+        )}
+      </div>
+      <svg viewBox={`0 0 ${w} ${h}`} style={{ width: "100%",
+                                              borderRadius: 6,
+                                              display: "block" }}>
+        <image href={view.image_url} x="0" y="0" width={w} height={h} />
+        {/* THE HEAT MAP: every detection in the window. This is the
+            prior question — was the ball SEEN at all — and it is
+            answerable only from the dots, not from the chains. */}
+        {(view.dots || []).map((d, i) => (
+          <circle key={`d${i}`} cx={d.x} cy={d.y} r={3}
+                  fill="rgba(255,255,255,0.55)">
+            <title>f{d.f}</title>
+          </circle>
+        ))}
+        {(view.chains || []).filter((c) => !c.chosen).map((c, i) => (
+          <g key={`c${i}`}>
+            <polyline
+              points={(c.points || []).map((q) => `${q.x},${q.y}`).join(" ")}
+              fill="none" strokeWidth={2}
+              stroke={c.why?.length
+                ? (colors?.[c.why_primary] || "#888") : "#fff"} />
+            {(c.points || []).map((q, j) => (
+              <circle key={j} cx={q.x} cy={q.y} r={5} fill="none"
+                      strokeWidth={2}
+                      stroke={c.why?.length
+                        ? (colors?.[c.why_primary] || "#888") : "#fff"}>
+                <title>
+                  f{q.frame} — {c.why?.length
+                    ? `refused: ${c.why.join(", ")}`
+                    : "passed the gates but lost"}
+                </title>
+              </circle>
+            ))}
+          </g>
+        ))}
+        {chosen && (
+          <g>
+            <polyline
+              points={(chosen.points || [])
+                .map((q) => `${q.x},${q.y}`).join(" ")}
+              fill="none" stroke="#78ff78" strokeWidth={4} />
+            {(chosen.points || []).map((q, j) => (
+              <circle key={j} cx={q.x} cy={q.y} r={7} fill="none"
+                      stroke="#78ff78" strokeWidth={3}>
+                <title>f{q.frame} — the descent this swing used</title>
+              </circle>
+            ))}
+            {chosen.landing_xy && (
+              <circle cx={chosen.landing_xy[0]} cy={chosen.landing_xy[1]}
+                      r={18} fill="none" stroke="#78ff78" strokeWidth={3}>
+                <title>landed here</title>
+              </circle>
+            )}
+          </g>
+        )}
+      </svg>
+      <div className="tiny muted" style={{ marginTop: 2 }}>
+        {view.reason}
+      </div>
+    </div>
+  );
+}
+
+
 function WhyLegend({ sweep, texts, acceptedText }) {
   if (!sweep?.why_order?.length) return null;
   const row = (sw, name, text, n) => (
@@ -8051,14 +8149,14 @@ function AscentProduceModal({ state, onClose }) {
                 {" "}— {rep.descents.reason || "…"}
               </span>
             </summary>
-            {rep.descents.image_url && (
-              <a href={rep.descents.image_url} target="_blank"
-                 rel="noreferrer">
-                <img src={rep.descents.image_url} alt="descents considered"
-                     style={{ width: "100%", borderRadius: 6,
-                              marginTop: 6 }} />
-              </a>
-            )}
+            {/* ONE PICTURE PER SWING, of its own three seconds. The
+                single all-candidates frame it replaces could not answer
+                the question anyone actually asks, which is always about
+                one shot. Hover any dot for its frame number. */}
+            {(rep.descents.views || []).map((v) => (
+              <DescentWindow key={v.swing} view={v}
+                             colors={rep.descents.sweep?.why_colors} />
+            ))}
             <div className="tiny muted" style={{ marginTop: 6 }}>
               <b>How to read the picture.</b>{" "}
               <span style={{ color: "#78ff78" }}>Green</span> is the chain
