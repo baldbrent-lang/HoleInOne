@@ -754,6 +754,18 @@ export const api = {
       adminPassword: key,
     }),
 
+  // The same two stages, stopped before the one that writes clips.
+  ascentFind: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ascent-find`, {
+      method: "POST",
+      adminPassword: key,
+    }),
+
+  ascentFindStatus: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/ascent-find/status`, {
+      adminPassword: key,
+    }),
+
   // Swing test — the ball-departure detector on its own. Same
   // start-then-poll shape as Debug2/Debug3, for the same proxy-timeout
   // reason.

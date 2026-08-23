@@ -7839,10 +7839,28 @@ function FlagstickModal({ row, adminPassword, onClose, onSaved }) {
   );
 }
 
+// WHAT EACH GATE MEANS, in words. The colours and the order come from
+// the backend so the legend cannot disagree with the picture; only the
+// prose lives here, because that is the one part OpenCV has no use for.
+const ASCENT_WHY_TEXT = {
+  rise: "did not climb far enough",
+  rate: "barely moving",
+  bend: "not a straight line",
+  wander: "doubled back on itself",
+  tilt: "leaning too far off vertical to have come off a tee",
+  backrun: "left the tee line too long ago to have been a tee shot",
+  outside: "points back outside the hitting area",
+};
+
+
 function AscentProduceModal({ state, onClose }) {
   const rep = state?.report;
   const asc = rep?.ascents || [];
   const clips = rep?.clips || [];
+  // `state.findOnly` is set by the opener and the report says so once it
+  // lands; either is enough, so the heading is right from the first
+  // frame rather than only after the run finishes.
+  const findOnly = state?.findOnly || rep?.produced === false;
   return (
     <div role="dialog" className="modal-back" onClick={onClose}
          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
@@ -7850,12 +7868,17 @@ function AscentProduceModal({ state, onClose }) {
       <div className="card" onClick={(e) => e.stopPropagation()}
            style={{ maxWidth: 1100, margin: "0 auto", padding: 16 }}>
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <b>🛫 Produce from ascents — upload #{state.uploadId}</b>
+          <b>
+            {findOnly ? "🔎 Find ascents" : "🛫 Produce from ascents"}
+            {" "}— upload #{state.uploadId}
+          </b>
           <button className="btn ghost" onClick={onClose}>Close ✕</button>
         </div>
         <div className="tiny muted" style={{ marginTop: 2 }}>
           Starts from the event rather than the guess: what crossed the band
           above the golfers on its way out. A shoe never leaves.
+          {findOnly && " Nothing is produced and the upload's existing "
+            + "clips are left alone."}
         </div>
 
         {state.running && (
@@ -7872,8 +7895,12 @@ function AscentProduceModal({ state, onClose }) {
           <div className="card" style={{ margin: "10px 0", padding: 10 }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
               <b>{rep.reason || "Working"}</b>
-              <span className={rep.n_produced ? "pill ok" : "pill warn"}>
-                {rep.n_produced || 0} clip(s)
+              <span className={findOnly
+                ? "pill"
+                : (rep.n_produced ? "pill ok" : "pill warn")}>
+                {findOnly
+                  ? `${asc.length} ascent(s), nothing produced`
+                  : `${rep.n_produced || 0} clip(s)`}
               </span>
             </div>
             <ScanTiming stages={rep.stages} timing={rep.timing} />
@@ -7912,16 +7939,46 @@ function AscentProduceModal({ state, onClose }) {
                    alt="every chain considered"
                    style={{ width: "100%", borderRadius: 6, marginTop: 6 }} />
             </a>
+            {/* THE KEY, FROM THE SAME DICT THE PICTURE WAS DRAWN FROM.
+                A legend that keeps its own copy of the colours is a
+                legend that will eventually be wrong about them. */}
+            <table className="tiny" style={{ marginTop: 6 }}>
+              <tbody>
+                <tr>
+                  <td style={{ paddingRight: 8 }}>
+                    <span style={{ display: "inline-block", width: 22,
+                                   height: 4, borderRadius: 2,
+                                   background: "#fff" }} />
+                  </td>
+                  <td style={{ paddingRight: 8 }}><b>accepted</b></td>
+                  <td className="muted">
+                    a ball leaving the tee — these are the ones produced
+                  </td>
+                  <td style={{ paddingLeft: 8 }}>
+                    {rep.sweep.why_counts?.accepted || 0}
+                  </td>
+                </tr>
+                {(rep.sweep.why_order || []).map((k) => (
+                  <tr key={k}>
+                    <td style={{ paddingRight: 8 }}>
+                      <span style={{
+                        display: "inline-block", width: 22, height: 4,
+                        borderRadius: 2,
+                        background: rep.sweep.why_colors?.[k] || "#888",
+                      }} />
+                    </td>
+                    <td style={{ paddingRight: 8 }}><b>{k}</b></td>
+                    <td className="muted">{ASCENT_WHY_TEXT[k]}</td>
+                    <td style={{ paddingLeft: 8 }}>
+                      {rep.sweep.why_counts?.[k] || 0}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
             <div className="tiny muted" style={{ marginTop: 4 }}>
-              Coloured chains were accepted; grey ones are labelled with
-              the gate that refused them.{" "}
-              <b>rise</b> did not climb far enough ·{" "}
-              <b>rate</b> barely moving ·{" "}
-              <b>bend</b> not a straight line ·{" "}
-              <b>wander</b> doubled back on itself ·{" "}
-              <b>tilt</b> leaning too far off vertical ·{" "}
-              <b>backrun</b> left the tee line too long ago ·{" "}
-              <b>outside</b> points back outside the hitting area.
+              A chain that failed several gates is drawn in the colour of
+              the first one it failed, reading down this list.
             </div>
             {(rep.sweep.considered || []).length > 0 && (
               <div style={{ overflowX: "auto", marginTop: 6 }}>
@@ -7989,7 +8046,7 @@ function AscentProduceModal({ state, onClose }) {
                     <th align="left">straight</th>
                     <th align="left">tee spot</th>
                     <th align="left">impact</th>
-                    <th align="left">clip</th>
+                    <th align="left">{findOnly ? "" : "clip"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -8027,11 +8084,11 @@ function AscentProduceModal({ state, onClose }) {
                             )}
                           </span>
                         ) : <span className="muted">—</span>}</td>
-                        <td>{c.clip_url
+                        <td>{findOnly ? null : (c.clip_url
                           ? <a href={c.clip_url} target="_blank"
                                rel="noreferrer">clip</a>
                           : <span className="muted">
-                              {c.reason || "not produced"}</span>}</td>
+                              {c.reason || "not produced"}</span>)}</td>
                       </tr>
                     );
                   })}
@@ -14123,6 +14180,7 @@ export default function AdminProduction() {
           : kind === "ballscan" ? api.ballScanStatus
             : kind === "ballscanproduce" ? api.ballScanProduceStatus
               : kind === "ascentproduce" ? api.ascentProduceStatus
+                : kind === "ascentfind" ? api.ascentFindStatus
           : api.debug2Status;
     const tick = async () => {
       try {
@@ -14221,6 +14279,26 @@ export default function AdminProduction() {
     try {
       await api.ascentProduce(adminPassword, row.id);
       pollDebugX("ascentproduce", row.id, setAscProd);
+    } catch (e) {
+      setAscProd({
+        running: false, uploadId: row.id, report: null, error: e.message,
+      });
+      setBusyId((cur) => (cur === row.id ? null : cur));
+    }
+  }
+
+  // The same run, stopped before it writes anything. This is the one to
+  // press while a threshold is still being argued with -- producing
+  // clears the upload's existing clips, so finding out what the
+  // detector thinks should not cost a set of them.
+  async function handleAscentFind(row) {
+    setAscProd({ running: true, uploadId: row.id, report: null, error: null,
+                 findOnly: true });
+    busySinceRef.current = Date.now();
+    setBusyId(row.id);
+    try {
+      await api.ascentFind(adminPassword, row.id);
+      pollDebugX("ascentfind", row.id, setAscProd);
     } catch (e) {
       setAscProd({
         running: false, uploadId: row.id, report: null, error: e.message,
@@ -15338,6 +15416,18 @@ export default function AdminProduction() {
                     ball LEAVING first and works back. Both are here on
                     purpose while the two are being compared on real
                     footage. */}
+                {/* SAFE TO PRESS. Same gates, same pictures, same
+                    numbers -- it just does not render, so an operator
+                    can see what the detector thinks without spending
+                    the upload's clips to find out. */}
+                <button
+                  className="small ghost"
+                  onClick={() => handleAscentFind(row)}
+                  disabled={busy}
+                  title="Find every ball leaving the tee and where each was teed, with the full picture of what was considered and why — and produce nothing. The upload's existing clips are left alone."
+                >
+                  🔎 Find ascents
+                </button>
                 <button
                   className="small ghost"
                   onClick={() => handleAscentProduce(row)}

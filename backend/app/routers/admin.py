@@ -17071,7 +17071,7 @@ def _ball_scan_sweep_image(row, src_path, sweep) -> None:
                             # and they are the ones whose last point is
                             # at y=4 with the label off the top edge.
                             (min(_p[-1]["x"] + 8, im.shape[1] - 210),
-                             max(18, _p[-1]["y"])),
+                             max(42, _p[-1]["y"])),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, _col, 1,
                             cv2.LINE_AA)
             # WHERE IT CAME FROM, on the tee line. On a real ascent this
@@ -17092,6 +17092,23 @@ def _ball_scan_sweep_image(row, src_path, sweep) -> None:
             sweep["image_url"] = _clip_url_for(nm)
     except Exception as exc:  # noqa: BLE001
         log.debug("ball scan: sweep image failed on %s: %s", row.id, exc)
+
+
+def _key_entry(im, x: int, text: str, col) -> int:
+    """One swatch-and-label in the picture's colour key; returns the next x.
+
+    MEASURES THE TEXT rather than guessing nine pixels a character. The
+    guess was close enough that the key looked fine until the longest
+    label -- and the longest label is `outside`, the entry that matters
+    most, which then had the next swatch drawn through it.
+    """
+    import cv2  # type: ignore
+
+    cv2.line(im, (x, 44), (x + 16, 44), col, 3, cv2.LINE_AA)
+    cv2.putText(im, text, (x + 21, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                col, 1, cv2.LINE_AA)
+    (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+    return x + 21 + tw + 16
 
 
 def _ball_scan_considered_image(row, src_path, sweep) -> None:
@@ -17145,58 +17162,106 @@ def _ball_scan_considered_image(row, src_path, sweep) -> None:
                      (120, 255, 120), 2, cv2.LINE_AA)
             cv2.line(im, (int(_area[1]), _ty - 9), (int(_area[1]), _ty + 9),
                      (120, 255, 120), 2, cv2.LINE_AA)
-        from ..services.debug3 import TRACK_COLORS as _TC
+        _cols = sweep.get("why_colors") or {}
 
-        # REJECTS FIRST, so an accepted chain is never buried under one.
+        def _bgr(hexstr, fallback=(200, 200, 200)):
+            try:
+                _h = hexstr.lstrip("#")
+                r, g, b = (int(_h[k:k + 2], 16) for k in (0, 2, 4))
+                return (b, g, r)
+            except (AttributeError, TypeError, ValueError):
+                return fallback
+
+        # WORST FIRST, so an accepted chain is never buried under one
+        # that failed six gates. `considered` arrives furthest-first, so
+        # this is simply that order reversed.
         _n_ok = 0
-        for a in sorted(_con, key=lambda z: -len(z.get("why") or [])):
+        for a in reversed(_con):
             _why = a.get("why") or []
             _p = a.get("points") or []
             if not _p:
                 continue
             if _why:
-                _col, _w, _r = (110, 110, 110), 1, 2
+                _col = _bgr(_cols.get(a.get("why_primary")))
+                _w, _r = 1, 2
             else:
-                _hex = _TC[_n_ok % len(_TC)]
-                _rgb = tuple(int(_hex[k:k + 2], 16) for k in (1, 3, 5))
-                _col, _w, _r = (_rgb[2], _rgb[1], _rgb[0]), 2, 4
+                # ACCEPTED CHAINS ARE WHITE, and the only white thing in
+                # the picture. Giving each ball its own colour, as the
+                # accepted-only picture does, would put it in the same
+                # visual language as the seven verdict colours and make
+                # "which colour means accepted" a question.
+                _col, _w, _r = (255, 255, 255), 2, 4
                 _n_ok += 1
             for u, v in zip(_p, _p[1:]):
                 cv2.line(im, (u["x"], u["y"]), (v["x"], v["y"]), _col, _w,
                          cv2.LINE_AA)
             for q in _p:
                 cv2.circle(im, (q["x"], q["y"]), _r, _col, _w, cv2.LINE_AA)
-            _lab = (f"{_n_ok}  {a['first_sec']}s  {a['n_points']}pts"
-                    if not _why else ",".join(_why))
-            # A LABEL ABOVE THE TOP OF THE FRAME IS NOT A LABEL. The
-            # chains that rise furthest are the ones worth reading, and
-            # they are exactly the ones whose last point is at y=4.
-            cv2.putText(im, _lab, (min(_p[-1]["x"] + 7, im.shape[1] - 170),
-                                   max(20, _p[-1]["y"] - 3)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, _col, 1, cv2.LINE_AA)
+            # ONLY THE ACCEPTED ONES ARE LABELLED. Four hundred chains
+            # cannot each carry a word; that is what the colours are
+            # for, and a picture with four hundred labels in it is the
+            # thing the colours were introduced to replace.
+            if not _why:
+                cv2.putText(
+                    im, f"{_n_ok}  {a['first_sec']}s  {a['n_points']}pts",
+                    # A LABEL ABOVE THE TOP OF THE FRAME IS NOT A LABEL.
+                    # The chains that rise furthest are the ones worth
+                    # reading, and they are exactly the ones whose last
+                    # point is at y=4.
+                    (min(_p[-1]["x"] + 7, im.shape[1] - 170),
+                     max(66, _p[-1]["y"] - 3)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, _col, 1, cv2.LINE_AA)
             if a.get("from_x") is not None and _ty:
                 cv2.drawMarker(im, (int(a["from_x"]), _ty), _col,
                                cv2.MARKER_TILTED_CROSS,
-                               16 if not _why else 9, _w, cv2.LINE_AA)
+                               16 if not _why else 7, _w, cv2.LINE_AA)
         _tally = sweep.get("why_counts") or {}
+        # A BACKDROP FOR THE HEADER. The chains are drawn first and the
+        # tallest of them run through the top of the frame, so the key
+        # was being crossed out by the very lines it explains.
+        im[0:58] = (im[0:58].astype("float32") * 0.35).astype("uint8")
         cv2.putText(
             im,
-            f"{len(_con)} of {sweep.get('n_considered')} chain(s) shown, "
-            f"furthest first - grey labels are the gate each one failed",
+            f"all {sweep.get('n_considered')} chain(s) the sweep weighed - "
+            f"white is accepted, every other colour is the gate it failed",
             (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
             cv2.LINE_AA)
-        cv2.putText(
-            im,
-            "  ".join(f"{k} {v}" for k, v in
-                      sorted(_tally.items(), key=lambda kv: -kv[1])),
-            (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
-            cv2.LINE_AA)
+        # THE KEY, DRAWN INTO THE PICTURE. The dialog has a legend beside
+        # it, but the picture gets opened on its own in a new tab and
+        # saved and sent around, and a colour key that only exists in the
+        # page it came from does not travel with it.
+        _kx = 12
+        for _k in (sweep.get("why_order") or []):
+            _n = _tally.get(_k) or 0
+            if not _n:
+                continue
+            _kx = _key_entry(im, _kx, f"{_k} {_n}", _bgr(_cols.get(_k)))
+        if _tally.get("accepted"):
+            _key_entry(im, _kx, f"accepted {_tally['accepted']}",
+                       (255, 255, 255))
         nm = f"ballscan-{row.id}-considered.jpg"
         if cv2.imwrite(str(CLIPS_DIR / nm), im,
                        [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
             sweep["considered_image_url"] = _clip_url_for(nm)
     except Exception as exc:  # noqa: BLE001
         log.debug("ball scan: considered image failed on %s: %s", row.id, exc)
+
+
+def _ascent_trim_considered(sweep) -> None:
+    """Drop the coordinates once the picture has been drawn from them.
+
+    Every chain is drawn, and there can be hundreds. Their points have
+    done their job the moment the JPEG is written -- the table beside it
+    shows metrics, not paths -- so shipping a megabyte of coordinates to
+    a browser that will never plot them is pure weight on the status
+    poll. The rows that got furthest keep theirs, in case something else
+    wants to draw them; the rest keep their numbers and lose their path.
+    """
+    from ..services.debug3 import SWEEP_MAX_CONSIDERED as _CAP
+
+    _con = (sweep or {}).get("considered") or []
+    for z in _con[_CAP:]:
+        z.pop("points", None)
 
 
 def _ball_scan_ascent_image(row, src_path, spots, tok, rep) -> None:
@@ -17694,7 +17759,26 @@ def get_tee_box(upload_id: int, db: Session = Depends(get_db)):
 
 
 def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
-    """Find every ball leaving, then produce a clip for each.
+    """Find every ball leaving, then produce a clip for each."""
+    return _ascent_run(row, src_path, db, progress=progress, produce=True)
+
+
+def _ascent_find_run(row, src_path, db, progress=None) -> dict:
+    """Find every ball leaving and where it was teed. Produce nothing.
+
+    THE SAME TWO STAGES, STOPPED BEFORE THE IRREVERSIBLE ONE. Producing
+    writes clips and clears the upload's existing ones, so running the
+    detector to see what it thinks costs a set of clips whether or not
+    the answer was any good. Every gate, every picture and every number
+    here is the produce's own -- it simply does not render, which is
+    what makes it the thing to press while a threshold is still being
+    argued with.
+    """
+    return _ascent_run(row, src_path, db, progress=progress, produce=False)
+
+
+def _ascent_run(row, src_path, db, progress=None, produce=True) -> dict:
+    """Find every ball leaving, and optionally produce a clip for each.
 
     THE OTHER WAY ROUND. The existing pipeline finds a ball SITTING in
     the tee box and infers that a swing probably followed, which is why
@@ -17735,6 +17819,7 @@ def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
     sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi")) or {}
     _ball_scan_sweep_image(row, src_path, sweep)
     _ball_scan_considered_image(row, src_path, sweep)
+    _ascent_trim_considered(sweep)
     rep["sweep"] = sweep
     _asc = list(sweep.get("ascents") or [])
     rep["ascents"] = _asc
@@ -17781,6 +17866,19 @@ def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
            _n_spot, "located", time.perf_counter() - _t)
 
     # ── 3. the edit dialog's own produce ──────────────────────────────
+    if not produce:
+        _ball_scan_finish_timing(rep, _t_run)
+        rep["produced"] = False
+        rep["ok"] = _n_spot > 0
+        rep["reason"] = (
+            f"{len(_asc)} ball(s) seen leaving, {_n_spot} with a tee spot"
+            + (f" ({_n_est} estimated)" if _n_est else "")
+            + " — nothing was produced, and the upload's existing clips "
+              "were left alone")
+        log.info("ascent find upload=%s: %s in %.1fs", row.id, rep["reason"],
+                 rep["timing"]["total_sec"])
+        return rep
+    rep["produced"] = True
     _t = time.perf_counter()
     _idx = 0
     for c in rep["clips"]:
@@ -18503,6 +18601,17 @@ def ascent_produce(upload_id: int):
 @router.get("/long-uploads/{upload_id}/ascent-produce/status")
 def ascent_produce_status(upload_id: int):
     return _json_safe(_debugx_get("ascentproduce", upload_id))
+
+
+@router.post("/long-uploads/{upload_id}/ascent-find")
+def ascent_find(upload_id: int):
+    """Everything the ascent produce does, except produce anything."""
+    return _debugx_start("ascentfind", upload_id, _ascent_find_run)
+
+
+@router.get("/long-uploads/{upload_id}/ascent-find/status")
+def ascent_find_status(upload_id: int):
+    return _json_safe(_debugx_get("ascentfind", upload_id))
 
 
 # ── Swing test ─────────────────────────────────────────────────────────

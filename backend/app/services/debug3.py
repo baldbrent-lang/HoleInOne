@@ -2472,11 +2472,45 @@ SWEEP_PER_FRAME = 10
 # outranking a real ball and absorbing it, which is what a whole-video
 # pass makes possible and a forty-frame window never could.
 SWEEP_MAX_SPAN = 60
-# HOW MANY REJECTED CHAINS THE SWEEP HANDS BACK to be drawn and listed.
-# A picture of all of them is unreadable -- hundreds, nearly all three
-# specks of band noise -- so only the ones that got furthest are kept.
-# The full tally by reason is reported separately and counts every one.
+# HOW MANY REJECTED CHAINS KEEP THEIR POINTS in the JSON handed back.
+#
+# EVERY chain is drawn -- the picture is the whole point and a sample of
+# it answers nothing. But the picture is drawn once, server-side, and
+# then the points have done their job: shipping all of them to the
+# browser is a megabyte of coordinates nobody reads, for a table that
+# shows numbers rather than paths. So the ones that got furthest keep
+# their points for the table and the rest are trimmed to their metrics.
 SWEEP_MAX_CONSIDERED = 24
+
+# WHAT COLOUR EACH VERDICT IS DRAWN IN, and the order gates are applied.
+#
+# ONE DEFINITION, because the picture is drawn by OpenCV in Python and
+# the legend is rendered by React in the browser, and a colour key that
+# disagrees with its own picture is worse than no key at all. The sweep
+# reports this dict; both ends read it rather than each keeping a copy.
+#
+# The order is also the order the gates are listed in, which decides
+# which colour a chain that failed several of them is drawn in: the
+# first one it failed, going down this list. Arbitrary but fixed, and
+# stated, so the picture is reproducible rather than dependent on set
+# iteration.
+ASCENT_WHY_COLORS = {
+    # Did not climb far enough -- the great majority of band noise.
+    "rise": "#6b7a8f",
+    # Barely moving.
+    "rate": "#8e6bb5",
+    # Not a straight line.
+    "bend": "#c98a2e",
+    # Doubled back on itself.
+    "wander": "#7d6b4f",
+    # Leaning too far off vertical.
+    "tilt": "#2fa8b5",
+    # Left the tee line too long ago to have been a tee shot.
+    "backrun": "#b5487d",
+    # Points back outside the hitting area.
+    "outside": "#c0392b",
+}
+ASCENT_WHY_ORDER = list(ASCENT_WHY_COLORS)
 
 
 def _path_straightness(pts) -> float:
@@ -2825,14 +2859,21 @@ def sweep_ascents(
             _considered.append(_entry)
             if not _why:
                 out["ascents"].append(_entry)
-        # WHAT ELSE WAS ON OFFER, worst-first-out. A picture of every
-        # chain is unreadable -- there are hundreds, nearly all of them
-        # three specks of band noise -- so the ones that got FURTHEST
-        # are kept: fewest gates failed, then longest. That is the order
-        # in which a missing ascent is worth looking for.
+        # FURTHEST FIRST -- fewest gates failed, then longest. That is
+        # the order in which a missing ascent is worth looking for, and
+        # it is also the order the picture draws them in, so an accepted
+        # chain is never buried under a rejected one.
         _considered.sort(key=lambda z: (len(z["why"]), -z["n_points"]))
-        out["considered"] = _considered[:SWEEP_MAX_CONSIDERED]
+        for z in _considered:
+            # THE COLOUR IT WILL BE DRAWN IN, decided here rather than
+            # by whoever draws it, so the picture and the legend cannot
+            # disagree. The first gate it failed, in the fixed order.
+            z["why_primary"] = next(
+                (w for w in ASCENT_WHY_ORDER if w in z["why"]), None)
+        out["considered"] = _considered
         out["n_considered"] = len(_considered)
+        out["why_colors"] = dict(ASCENT_WHY_COLORS)
+        out["why_order"] = list(ASCENT_WHY_ORDER)
         # AND A TALLY OF EVERY REASON, over all of them and not just the
         # ones that fit in the picture -- "twelve failed on tilt" is the
         # sentence that says a threshold is wrong.
