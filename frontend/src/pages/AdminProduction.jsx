@@ -247,13 +247,20 @@ function ProduceStatusOverlay({ row, greyed, override }) {
   // delete — and has to name it. The produce stages are stale in that
   // case: they describe the run that made the clip, not what is
   // happening now.
-  const label = override ? override : queued
-    ? `Waiting to produce${
-        row.queue_position ? ` · ${row.queue_position} of ${row.queue_depth}` : ""
-      }`
-    : stage && stage !== "done" && stage !== "failed"
-      ? stage
-      : "Producing…";
+  // A ROW CLAIMING TO PRODUCE WITH NOTHING BEHIND IT. The server can
+  // tell -- it knows what is actually running in it -- and says so, so
+  // the card can stop looking busy and say what to do instead. Half an
+  // hour of "Producing…" is the same picture whether the run is slow or
+  // dead, and only one of those is worth waiting out.
+  const label = override ? override : row.produce_stalled
+    ? "Stalled — nothing is producing this. Press Produce to start again."
+    : queued
+      ? `Waiting to produce${
+          row.queue_position ? ` · ${row.queue_position} of ${row.queue_depth}` : ""
+        }`
+      : stage && stage !== "done" && stage !== "failed"
+        ? stage
+        : "Producing…";
 
   return (
     <div

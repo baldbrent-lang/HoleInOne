@@ -5332,18 +5332,33 @@ def list_long_uploads(
             )
         return out
 
-    def _live_produce_stage(upload_id: int) -> dict:
-        """Which Debug3 stage this upload is on, if it is producing right
-        now. Reported only while running — a stale stage left on a
-        finished row reads as stuck, which is the thing this fixes."""
+    def _live_produce_stage(row_) -> dict:
+        """Which stage this upload is on, if it is producing right now.
+        Reported only while running — a stale stage left on a finished
+        row reads as stuck, which is the thing this fixes.
+
+        And whether a row that CLAIMS to be producing has anything behind
+        it. The status is written by whatever starts a run and cleared by
+        whatever finishes it, so a run that died in between leaves the
+        row busy forever with nothing running. Said out loud here,
+        because the alternative is a card greyed for half an hour and an
+        operator with no way to tell working from dead."""
+        upload_id = row_.id
         st = _debugx_get("produce", upload_id)
         if not st.get("running"):
+            _stalled = False
+            if row_.processing_status == "processing":
+                _since = row_.processing_started_at
+                _age = ((_utcnow_naive() - _since).total_seconds()
+                        if _since else None)
+                _stalled = _age is None or _age >= PRODUCE_STALE_SEC
             return {"produce_stage": None, "produce_done": None,
-                    "produce_total": None}
+                    "produce_total": None, "produce_stalled": _stalled}
         return {
             "produce_stage": st.get("stage"),
             "produce_done": st.get("done"),
             "produce_total": st.get("total"),
+            "produce_stalled": False,
         }
 
     # Produce is serialised, so a card can sit at "pending" simply because
@@ -5501,7 +5516,7 @@ def list_long_uploads(
                 "queue_depth": len(_q_waiting),
                 # Live stage of an in-flight produce, so the greyed card
                 # can name what it is doing.
-                **_live_produce_stage(r.id),
+                **_live_produce_stage(r),
             }
         )
     return out
@@ -5873,9 +5888,31 @@ def reprocess_long_upload(
             "no segments supplied — pass auto_detect_swings=true or "
             "provide segments manually",
         )
+    # ALREADY PROCESSING, OR ONLY SAYING SO. A row is marked processing
+    # by whatever started the run and cleared by whatever finished it, so
+    # a run that died between those two -- a worker killed mid-produce, a
+    # crash the `finally` never saw -- leaves the row claiming to be busy
+    # with nothing behind it. The card greys forever and this endpoint
+    # refuses to try again, which is a stall with no way out of it from
+    # the UI. So ask whether a produce is actually RUNNING before
+    # believing the row: `_debugx_get` is the live answer, and it lives
+    # in this process, so "no live run" means there is genuinely nothing
+    # to interrupt.
     if row.processing_status == "processing":
-        raise HTTPException(409, "this upload is already being processed")
+        _live = _debugx_get("produce", row.id).get("running")
+        _since = row.processing_started_at
+        _age = ((_utcnow_naive() - _since).total_seconds()
+                if _since else None)
+        if _live or (_age is not None and _age < PRODUCE_STALE_SEC):
+            raise HTTPException(409, "this upload is already being processed")
+        log.warning(
+            "re-produce: upload %s says processing since %s (%s) but no "
+            "produce is running — treating it as a dead run and starting "
+            "a new one",
+            row.id, _since, f"{_age:.0f}s ago" if _age else "no start time",
+        )
 
+    _prev_status = row.processing_status
     row.processing_status = "pending"
     row.processing_started_at = None
     row.processing_completed_at = None
@@ -5910,10 +5947,30 @@ def reprocess_long_upload(
     # under "produce", narrated itself. Same kind now, which also means a
     # manual and an automatic produce of the same upload see each other's
     # "already running" instead of both starting.
-    _debugx_start(
+    _kick = _debugx_start(
         "produce", row.id,
         functools.partial(_produce_run, debug_artifacts=False),
     )
+    if not _kick.get("started"):
+        # PUT THE ROW BACK. It was set to "pending" above on the
+        # assumption this would start something; it did not, because a
+        # produce of this upload is already going. Leaving it pending
+        # greys the card for a job nobody is running and makes the
+        # Produce button refuse to try again -- a stall with no way out
+        # of it from the UI.
+        row.processing_status = _prev_status
+        db.commit()
+        log.info("re-produce: upload %s is already producing — left it "
+                 "alone and restored status %s", row.id, _prev_status)
+        return {
+            "upload_id": row.id,
+            "processing_status": row.processing_status,
+            "dual_camera": row.green_filename is not None,
+            "engine": "ballscan",
+            "already_running": True,
+            "note": "this upload is already being produced — that run "
+                    "was left to finish rather than started again",
+        }
 
     return {
         "upload_id": row.id,
@@ -15666,8 +15723,13 @@ def _debugx_start(kind: str, upload_id: int, runner) -> dict:
     """Kick `runner(row, src_path, db, progress)` on a thread."""
     with _debugx_lock:
         if (_debugx_state.get((kind, upload_id)) or {}).get("running"):
-            return {"ok": True, "running": True, "upload_id": upload_id,
-                    "note": "already running"}
+            # `started: False` matters to the caller. The Produce endpoint
+            # flips the row to "pending" BEFORE calling this, so a decline
+            # it cannot see leaves a row queued for a job that will never
+            # be started -- greyed forever, and the Produce button refuses
+            # to re-run it because it is already "pending".
+            return {"ok": True, "running": True, "started": False,
+                    "upload_id": upload_id, "note": "already running"}
         _debugx_state[(kind, upload_id)] = {
             "running": True, "stage": "starting", "done": 0, "total": 0,
             "report": None, "error": None,
@@ -15719,7 +15781,8 @@ def _debugx_start(kind: str, upload_id: int, runner) -> dict:
 
     threading.Thread(target=_job, daemon=True,
                      name=f"{kind}-{upload_id}").start()
-    return {"ok": True, "running": True, "upload_id": upload_id}
+    return {"ok": True, "running": True, "started": True,
+            "upload_id": upload_id}
 
 
 # ── Debug3 ─────────────────────────────────────────────────────────────
@@ -19675,6 +19738,13 @@ D3_GREEN_SEC = 6.0
 # Floor for an operator-trimmed green side. Below about a second the cut
 # reads as a glitch rather than a shot landing, and an end frame that
 # lands before the cutover would otherwise ask for a negative duration.
+# HOW LONG A ROW MAY CLAIM TO BE PRODUCING before the claim stops being
+# believed without a live run behind it. Long enough that a genuinely
+# slow produce on a long clip is never mistaken for a dead one -- the
+# check also requires that nothing is running in this process, so this is
+# only the grace period for a run that has not reported in yet.
+PRODUCE_STALE_SEC = 900.0
+
 D3_MIN_GREEN_SEC = 1.0
 # AND A CEILING ON IT. Every rule above only ever makes the green half
 # LONGER -- an end frame pushes it out, a comet span pushes it out
