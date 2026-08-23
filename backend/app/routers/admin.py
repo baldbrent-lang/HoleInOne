@@ -17740,6 +17740,20 @@ def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
         res = ai_scan_resting_balls(
             src_path, roi=roi, fps=fps, expect_radius_px=_r,
             window=(_lo, _hi),
+            # A SHORT WATCH, BECAUSE THE SWEEP ALREADY SAID WHEN.
+            #
+            # The default is 500 frames -- ten seconds -- and it has to
+            # be, because a plain scan has no idea when the ball went
+            # and a player can stand over it that long. Here the sweep
+            # has already seen the ball airborne, so the departure is
+            # within a second or two of the last sighting and every
+            # frame watched past that is cost with no answer in it.
+            #
+            # This is the step that dominated: the watch runs at FULL
+            # rate with a seek per spot, so 24 spots x 500 frames is
+            # twelve thousand decodes, which is more than the whole
+            # windowed scan it was supposed to be making cheap.
+            confirm_frames=int(max(60, round(2.0 * float(fps or 30.0)))),
         ) or {}
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"resting-ball scan failed: {exc}"
