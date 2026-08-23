@@ -14874,12 +14874,10 @@ export default function AdminProduction() {
                   </button>
                 )}
                 {/* DEV ONLY, and `mirror.configured` is what says so:
-                    only the dev backend has a prod to pull from. These
-                    two run the same scan Produce now runs, with the
-                    report panel attached -- which is a thing to argue
-                    with a produce about, not a thing to hand an
-                    operator at a course. `produce_debug_enabled` was
-                    the wrong gate for that, being on in both places. */}
+                    only the dev backend has a prod to pull from. A bare
+                    scan produces nothing -- it is a thing to argue with
+                    a produce about, not a thing to hand an operator at
+                    a course. */}
                 {produceDebug.enabled && mirror.configured && (
                   <button
                     className="small ghost"
@@ -14889,11 +14887,18 @@ export default function AdminProduction() {
                     ⚪ Scan for ball
                   </button>
                 )}
-                {produceDebug.enabled && mirror.configured && (
+                {/* BOTH PLACES. This runs exactly what Produce runs --
+                    same scan, same renderer, same clips committed -- and
+                    the only difference is that it shows its working:
+                    which candidates it found, what it decided about
+                    each, and where the time went. On the deployment
+                    whose runs are the ones behaving oddly, that is not
+                    a debug toy, it is the only view of what happened. */}
+                {produceDebug.enabled && (
                   <button
                     className="small ghost"
                     onClick={() => handleBallScanProduce(row)}
-                    title="Dev: what Produce runs, with the report attached — scan for resting balls, then trace every candidate that sat 7s or longer, straight from the measured rest position and the frame it went."
+                    title="What Produce runs, with the report attached — scan for resting balls, then trace every candidate that sat 7s or longer, straight from the measured rest position and the frame it went. Same clips, plus a per-stage timing breakdown."
                   >
                     ⚪▶ Scan &amp; produce
                   </button>
