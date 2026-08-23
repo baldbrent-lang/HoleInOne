@@ -5901,8 +5901,17 @@ def reprocess_long_upload(
     #
     # _debugx_start owns the thread, the DB session and the progress
     # state, so the existing Debug3 status poll reports this run too.
+    # UNDER THE KIND THE CARD READS. `_debugx_start` files progress
+    # under the kind it is given, and this passed "debug3" while
+    # `_live_produce_stage` -- the thing the production card polls -- asks
+    # for "produce". So every stage this run reported went into a bucket
+    # nothing was looking at, and a manual Produce sat on "Producing…"
+    # for its whole duration while an automatic one, which already ran
+    # under "produce", narrated itself. Same kind now, which also means a
+    # manual and an automatic produce of the same upload see each other's
+    # "already running" instead of both starting.
     _debugx_start(
-        "debug3", row.id,
+        "produce", row.id,
         functools.partial(_produce_run, debug_artifacts=False),
     )
 
@@ -5910,7 +5919,7 @@ def reprocess_long_upload(
         "upload_id": row.id,
         "processing_status": "pending",
         "dual_camera": row.green_filename is not None,
-        "engine": "debug3",
+        "engine": "ballscan",
         "queued_segments": None,
         "auto_detect_swings": True,
     }
@@ -11729,7 +11738,7 @@ def _trace_segment(
                     _bgn = None
                 _info3 = {
                     "ok": True,
-                    "engine": "debug3",
+                    "engine": "ballscan",
                     "ball_track_frames": _pts3,
                     # timed_points is what the card's click-to-plot button
                     # is gated on (hasEvidence in ProducedTile: an overlay
@@ -15668,7 +15677,16 @@ def _debugx_start(kind: str, upload_id: int, runner) -> dict:
         # Same gate the produce queue holds: an operator hitting
         # Re-Produce while a batch of uploads is producing waits its
         # turn rather than adding a fifth job to the pile.
+        #
+        # AND SAY SO WHILE WAITING. Queued behind three other uploads and
+        # working hard on this one look identical from the card, and the
+        # first is what an operator sees when they press Produce on a
+        # course morning's backlog. Held until the gate is actually in
+        # hand, then handed over to the run's own stages.
+        _debugx_set(kind, upload_id,
+                    stage="Waiting for the produce queue", running=True)
         with _produce_gate:
+            _debugx_set(kind, upload_id, stage="Starting", running=True)
             _debugx_job(kind, upload_id, runner)
 
     def _debugx_job(kind: str, upload_id: int, runner) -> None:
