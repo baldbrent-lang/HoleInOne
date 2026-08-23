@@ -9902,11 +9902,19 @@ def wizard_produce(
         saved = dict(row.edit_metrics or {})
         saved["wizard_ball"] = [bx, by]
         saved["wizard_impact_frame"] = impact_frame
-        if landing_frame is not None:
-            saved["landing_frame"] = landing_frame
-        if landing_spot is not None:
-            saved["landing_spot"] = {"x": landing_spot[0],
-                                     "y": landing_spot[1]}
+        # THE TOP-LEVEL LANDING IS A SINGLE-SWING ROW'S SLOT, and only
+        # that. Every swing on a row shares it, so writing one swing's
+        # landing there on a multi-swing row leaves a value that reads
+        # as "the landing" for clips that came down somewhere else
+        # entirely. The per-swing record below is where a multi-swing
+        # row's landing belongs, and it is already written there.
+        _solo_row = len(saved.get("swings") or []) <= 1
+        if _solo_row:
+            if landing_frame is not None:
+                saved["landing_frame"] = landing_frame
+            if landing_spot is not None:
+                saved["landing_spot"] = {"x": landing_spot[0],
+                                         "y": landing_spot[1]}
         row.edit_metrics = saved
         db.commit()
     except Exception as exc:  # noqa: BLE001

@@ -1266,12 +1266,21 @@ function ClickToPlotModal({
   const [greenScanning, setGreenScanning] = useState(false);
   const [greenNote, setGreenNote] = useState(null);
   const [greenLevel, setGreenLevel] = useState(2);
-  // Whatever landing is already on record — from the wizard, or from a
-  // produce. Per-swing first, then the upload-level one single-swing
-  // rows use.
+  // Whatever landing is already on record FOR THIS SWING — from the
+  // wizard, or from a produce.
+  //
+  // THE UPLOAD-LEVEL ONE IS NOT A FALLBACK on a row with more than one
+  // swing. It exists because a single-swing row keeps its answer at the
+  // top level, and reading it as a fallback handed swing 2 whatever
+  // swing 1 came down on -- which then got saved back to the top level
+  // and passed on again. A landing is one ball coming down once: it is
+  // set by a produce, set by hand, or not set. It is never inherited.
+  const soloRow = !isNew && swings.length <= 1;
   const [savedLanding] = useState(() => {
-    const f = swing.landing_frame ?? row.edit_metrics?.landing_frame ?? null;
-    const s = swing.landing_spot || row.edit_metrics?.landing_spot || null;
+    const f = swing.landing_frame
+      ?? (soloRow ? row.edit_metrics?.landing_frame : null) ?? null;
+    const s = swing.landing_spot
+      || (soloRow ? row.edit_metrics?.landing_spot : null) || null;
     return f != null && s
       ? { frame: f, x: Math.round(s.x ?? s[0]), y: Math.round(s.y ?? s[1]) }
       : null;
@@ -1903,9 +1912,12 @@ function ClickToPlotModal({
         : swings.map((s, i) => (i === swingPos ? patch(s) : s));
       await api.saveEditMetrics(adminPassword, row.id, {
         swings: nextSwings,
-        // Single-swing rows read the landing from the top level (that
-        // is where the wizard puts it), so mirror it there too.
-        ...(landing
+        // Mirrored to the top level ONLY on a single-swing row, which is
+        // where the wizard puts it and where such a row reads it back
+        // from. On a multi-swing row the top level is a slot every swing
+        // shares, so writing this swing's landing into it is how one
+        // clip's landing became every later clip's.
+        ...(landing && soloRow
           ? {
               landing_frame: landing.frame,
               landing_spot: { x: landing.x, y: landing.y },
