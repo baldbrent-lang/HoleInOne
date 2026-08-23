@@ -8464,6 +8464,24 @@ function BallScanModal({ state, adminPassword, onClose }) {
                           re-scan of this window found the rest.</>
                       ) : null}
                     </div>
+                    {sp.ascent_image && (
+                      <figure style={{ margin: "6px 0 0" }}>
+                        <a href={sp.ascent_image} target="_blank"
+                           rel="noreferrer">
+                          <img src={sp.ascent_image} alt="ascent"
+                               style={{ width: "100%", borderRadius: 6 }} />
+                        </a>
+                        <figcaption className="tiny muted">
+                          What rose after this spot emptied. Green = the
+                          chain taken as the ascent, grey = every other
+                          chain considered with the reason it lost. The
+                          small ring is where the ball was sitting; the
+                          wide one is how close a chain has to start to
+                          count as leaving it.
+                          {sp.ascent_reason && <> — {sp.ascent_reason}</>}
+                        </figcaption>
+                      </figure>
+                    )}
                     {sp.descent_image_url && (
                       <figure style={{ margin: "6px 0 0" }}>
                         <a href={sp.descent_image_url} target="_blank"

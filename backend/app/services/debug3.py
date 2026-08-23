@@ -1847,6 +1847,12 @@ def find_descents(
         # not a problem here -- the fall-rate, drop and straightness
         # gates below throw them out, because a person does not fall at
         # a third of a frame-height per second in a straight line.
+        # WHERE THIS FUNCTION'S TIME GOES. "find_descents 22.65s" is not
+        # an answer: detection and tracking are different costs with
+        # different fixes, and one of them grows with how many
+        # detections the other hands over.
+        _t_det: dict = {}
+        _t_all = time.perf_counter()
         det = {}
         dets = []
         if "mog2" in detectors:
@@ -1860,11 +1866,14 @@ def find_descents(
         # so whether each one earns its pass is worth knowing rather
         # than assuming. A detector that contributes nothing to any
         # ACCEPTED chain is a decode being paid for and thrown away.
+        _t_det["mog2"] = round(time.perf_counter() - _t_all, 2)
         for _d in dets:
             _d["src"] = "mog2"
         n_mog = len(dets)
+        _t0 = time.perf_counter()
         _pl = (detect_movers_by_plate(input_path, f_lo, f_hi)
                if "plate" in detectors else [])
+        _t_det["plate"] = round(time.perf_counter() - _t0, 2)
         for _d in _pl:
             _d["src"] = "plate"
         dets.extend(_pl)
@@ -1874,9 +1883,11 @@ def find_descents(
         # which on smooth turf under moving cloud means the tree line;
         # this one asks only "was that there a frame ago", which is what
         # a falling ball is.
+        _t0 = time.perf_counter()
         _df = (detect_movers_by_diff(input_path, f_lo, f_hi, sens=2,
                                      per_frame=DESCENT_DIFF_PER_FRAME)
                if "diff" in detectors else [])
+        _t_det["diff"] = round(time.perf_counter() - _t0, 2)
         for _d in _df:
             _d["src"] = "diff"
         dets.extend(_df)
@@ -1909,9 +1920,12 @@ def find_descents(
             {"frame": int(d["frame"]), "x": int(d["x"]), "y": int(d["y"])}
             for d in dets[::_step]
         ]
+        _t0 = time.perf_counter()
         tracks = build_tracks(dets, r, min_len=int(min_points),
                               max_gap=DESCENT_MAX_GAP,
                               corridor_px=DESCENT_CORRIDOR_PX)
+        _t_det["linking"] = round(time.perf_counter() - _t0, 2)
+        out["timing"] = _t_det
         # Both of those are None/4 by default -- see the constants. The
         # arguments stay wired so re-enabling is a one-line change once
         # there is a fair test to judge them on.
@@ -2152,13 +2166,26 @@ def find_ascents(
                               max_gap=DESCENT_MAX_GAP)
         bx, by = float(ball_xy[0]), float(ball_xy[1])
         best = None
+        # EVERY TRACK AND WHY IT LOST. Same reason the descent search
+        # reports its rejections: "no ascent" is one sentence covering
+        # four completely different failures -- nothing rose, something
+        # rose but not from here, it rose too slowly, it bent too much --
+        # and they need opposite fixes.
+        considered = []
         for tk in tracks:
             pts = tk.get("points") or []
             if len(pts) < int(min_points):
                 continue
+            _row = {
+                "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
+                            "y": int(q["y"])} for q in pts],
+                "n_points": len(pts),
+            }
+            considered.append(_row)
             # UP, not down. Screen y decreases as the ball climbs.
             rise = float(pts[0]["y"]) - float(pts[-1]["y"])
             if rise < ASCENT_MIN_RISE_FRAC * frame_h:
+                _row["why"] = (f"rose {int(rise)}px, needs {int(ASCENT_MIN_RISE_FRAC * frame_h)}px")
                 continue
             # AND IT STARTED WHERE THE BALL WAS. Every other rising thing
             # in a tee view -- a bird, a cart on the horizon, a branch --
@@ -2167,14 +2194,18 @@ def find_ascents(
             # sitting there.
             d0 = math.hypot(float(pts[0]["x"]) - bx, float(pts[0]["y"]) - by)
             if d0 > ASCENT_START_NEAR_PX:
+                _row["why"] = (f"starts {int(d0)}px from the ball, limit {int(ASCENT_START_NEAR_PX)}px")
                 continue
             span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
             rate = (rise / span_f) * float(fps or 30.0) / frame_h
             if not (ASCENT_RATE_LO <= rate <= ASCENT_RATE_HI):
+                _row["why"] = (f"rises at {round(rate, 2)} frame-heights/sec, outside {ASCENT_RATE_LO}-{ASCENT_RATE_HI}")
                 continue
             bend = _path_bend_px(pts)
             if bend > ASCENT_MAX_BEND_PX:
+                _row["why"] = f"bends {round(bend, 1)}px, limit {ASCENT_MAX_BEND_PX}px"
                 continue
+            _row["why"] = "accepted"
             cand = {
                 "points": [{"frame": int(q["frame"]), "x": int(q["x"]),
                             "y": int(q["y"])} for q in pts],
@@ -2188,12 +2219,19 @@ def find_ascents(
                         and d0 < best["starts_px_from_ball"])):
                 best = cand
         if best is None:
+            out["considered"] = considered
             out["reason"] = (
                 f"{len(tracks)} track(s) after the strike, none of them a "
-                f"ball leaving this spot")
+                f"ball leaving this spot"
+                + ("; closest: " + "; ".join(
+                    f"{c['n_points']}pts {c.get('why', 'not judged')}"
+                    for c in sorted(considered,
+                                    key=lambda c: -c["n_points"])[:3])
+                   if considered else ""))
             return out
         out.update(best)
         out["ok"] = True
+        out["considered"] = considered
         out["reason"] = (
             f"{best['n_points']} points rising {best['rise_px']}px from "
             f"{best['starts_px_from_ball']}px of the ball")

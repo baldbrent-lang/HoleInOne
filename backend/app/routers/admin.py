@@ -16399,6 +16399,14 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
             for _s2 in (_e.get("sources") or []):
                 _by_src[_s2] = _by_src.get(_s2, 0) + 1
         out["accepted_by_detector"] = _by_src
+        # Summed over every window and every pass, so "23 seconds in
+        # find_descents" becomes "18 of it was linking", which is a
+        # different problem from "18 of it was decoding".
+        _ft: dict = {}
+        for _r2 in _per_window_reports:
+            for _k3, _v3 in (_r2.get("timing") or {}).items():
+                _ft[_k3] = round(_ft.get(_k3, 0.0) + float(_v3 or 0.0), 2)
+        out["find_timing"] = _ft
         # THE NEAR-MISSES THAT NEVER BECAME EVENTS. A track killed by the
         # drop, rate or bend gate leaves no event, so the report could
         # say "1 thing fell" while the tracker had built forty -- and the
@@ -16959,6 +16967,82 @@ def _ball_scan_near_image(row, gp, sp, near) -> None:
         log.debug("ball scan: near-miss image failed on %s: %s", row.id, exc)
 
 
+def _ball_scan_ascent_image(row, src_path, spots, tok, rep) -> None:
+    """One picture per candidate of what rose after it emptied.
+
+    The descent has had a picture from the start and the ascent had a
+    sentence, and a sentence cannot show you that the chain the search
+    wanted is right there and started forty pixels too far away. Green is
+    the chain it took; grey is every other chain it considered, with the
+    reason it lost written on it; the ring is where the ball was sitting,
+    which is the thing every rejection is measured against.
+    """
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(str(src_path))
+        if not cap.isOpened():
+            return
+        try:
+            for i, sp in enumerate(spots):
+                _asc = sp.get("ascent") or {}
+                _all = _asc.get("considered") or sp.get(
+                    "ascent_considered") or []
+                if not _all and not _asc.get("points"):
+                    continue
+                _f = int(sp.get("gone_frame") or 0)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, _f))
+                ok, im = cap.read()
+                if not ok or im is None:
+                    continue
+                im = (im.astype("float32") * 0.72).astype("uint8")
+                for c in _all:
+                    _acc = c.get("why") == "accepted"
+                    _col = (90, 230, 120) if _acc else (150, 150, 150)
+                    _p = c.get("points") or []
+                    for a_, b_ in zip(_p, _p[1:]):
+                        cv2.line(im, (a_["x"], a_["y"]), (b_["x"], b_["y"]),
+                                 _col, 2 if _acc else 1, cv2.LINE_AA)
+                    for q in _p:
+                        cv2.circle(im, (q["x"], q["y"]), 4, _col,
+                                   2 if _acc else 1, cv2.LINE_AA)
+                    if _p and not _acc:
+                        cv2.putText(im, str(c.get("why") or ""),
+                                    (_p[-1]["x"] + 8, _p[-1]["y"]),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                                    _col, 1, cv2.LINE_AA)
+                # WHERE THE BALL WAS. Every rejection above is measured
+                # from this point, so it has to be in the picture.
+                cv2.circle(im, (int(sp["x"]), int(sp["y"])), 14,
+                           (60, 200, 255), 2, cv2.LINE_AA)
+                cv2.circle(im, (int(sp["x"]), int(sp["y"])),
+                           int(_d3_ascent_near_px()), (60, 200, 255), 1,
+                           cv2.LINE_AA)
+                cv2.putText(
+                    im,
+                    f"after f{_f}: {len(_all)} chain(s) - green = taken, "
+                    f"grey = rejected; the ring is the ball and the wide "
+                    f"circle is how close a chain must start",
+                    (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+                nm = f"ballscan-{row.id}-{tok}-{i}-ascent.jpg"
+                if cv2.imwrite(str(CLIPS_DIR / nm), im,
+                               [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
+                    sp["ascent_image"] = _clip_url_for(nm)
+        finally:
+            cap.release()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: ascent image failed on %s: %s", row.id, exc)
+
+
+def _d3_ascent_near_px() -> float:
+    try:
+        from ..services.debug3 import ASCENT_START_NEAR_PX
+        return float(ASCENT_START_NEAR_PX)
+    except Exception:  # noqa: BLE001
+        return 90.0
+
+
 def _ball_scan_descent_images(row, spots, tok, rep) -> None:
     """Draw each matched descent on the green frame it landed in.
 
@@ -17120,7 +17204,11 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
            f"{_d3s.get('clip_frames') or '?'} green frames — each "
            f"segmented and tracked once, then each candidate claims the "
            f"fall inside its own flight window. Deeper re-scans run only "
-           f"on near-misses. Passes: "
+           f"on near-misses. Inside find_descents: "
+           + (", ".join(f"{k} {v}s" for k, v in sorted(
+               (_d3s.get("find_timing") or {}).items(),
+               key=lambda kv: -float(kv[1] or 0)) if v) or "n/a")
+           + ". Passes: "
            + " then ".join(_d3s.get("scan_passes") or ["diff"])
            + ". Accepted chains came from: "
            + (", ".join(f"{k} {v}" for k, v in sorted(
@@ -17163,9 +17251,12 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
             _asc = {"ok": False, "reason": f"failed: {exc}"}
         _sp["ascent"] = _asc if _asc.get("ok") else None
         _sp["ascent_reason"] = _asc.get("reason")
+        _sp["ascent_considered"] = _asc.get("considered") or []
     _t_asc = time.perf_counter() - _t
     _n_asc = sum(1 for _sp in spots if _sp.get("ascent"))
     rep["n_ascents"] = _n_asc
+
+    _ball_scan_ascent_image(row, src_path, spots, tok, rep)
 
     _t = time.perf_counter()
     _ball_scan_descent_images(row, spots, tok, rep)
