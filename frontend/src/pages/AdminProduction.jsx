@@ -2248,6 +2248,15 @@ function ClickToPlotModal({
           ) : cam === "tracer" ? (
             bgUrl ? (
               <PlotHeatCanvas
+                // ONE INSTANCE PER CAMERA. All three tabs render this
+                // same component in the same slot of one ternary, so
+                // without a key React reuses a single instance across a
+                // tab switch -- and it carries its loaded frame image and
+                // its frame cache with it. That cache is keyed by frame
+                // number alone, so tee f900 would be served the GREEN
+                // camera's f900. What it looked like was the green
+                // picture with the tee's dots drawn on it.
+                key={`plot-${cam}`}
                 // THE SAME PICTURE AS THE TEE MAP, because the tracer
                 // is drawn on the tee camera and the motion heat is
                 // where its points came from. What changes is that the
@@ -2303,6 +2312,15 @@ function ClickToPlotModal({
           ) : cam === "green" ? (
             green?.image_url ? (
               <PlotHeatCanvas
+                // ONE INSTANCE PER CAMERA. All three tabs render this
+                // same component in the same slot of one ternary, so
+                // without a key React reuses a single instance across a
+                // tab switch -- and it carries its loaded frame image and
+                // its frame cache with it. That cache is keyed by frame
+                // number alone, so tee f900 would be served the GREEN
+                // camera's f900. What it looked like was the green
+                // picture with the tee's dots drawn on it.
+                key={`plot-${cam}`}
                 bgUrl={green.image_url}
                 // THE SAME MAP, POINTED AT THE OTHER CAMERA. Dots are
                 // the green window's motion, and every click plots one
@@ -2403,6 +2421,7 @@ function ClickToPlotModal({
             )
           ) : (dots.length > 0 || denseDots.length > 0 || canStepTee) ? (
             <PlotHeatCanvas
+              key={`plot-${cam}`}
               // NO HEAT COMPOSITE ON A NEW SWING, and that is fine --
               // there has been no produce, so there is nothing to
               // composite. The map opens on the real video frame
@@ -2424,12 +2443,20 @@ function ClickToPlotModal({
               frameLo={swing.start_frame ?? (isNew ? 1 : 0)}
               frameHi={swing.end_frame
                 ?? (row.tee_nb_frames ? row.tee_nb_frames - 1 : (winHi ?? 0))}
-              // A NEW CLIP OPENS AT FRAME 1 and the operator walks
-              // forward from there, because on a swing nobody has
+              // WHERE THE OPERATOR LEFT OFF, first. Keying this per
+              // camera remounts it on a tab switch, which is what stops
+              // the two cameras sharing a picture -- but a remount also
+              // forgets the frame, and walking back to f3017 after a
+              // glance at the green is not a thing to ask twice. The
+              // parent already tracks the tee frame for `set to
+              // current`, so it is handed back on the way in.
+              //
+              // Failing that: a new clip opens at frame 1 and the
+              // operator walks forward, because on a swing nobody has
               // produced yet there is no impact frame to open at and
               // finding the strike IS the first job. An existing swing
-              // still opens on its impact frame.
-              startFrame={impactF ?? (isNew ? 1 : undefined)}
+              // opens on its impact frame.
+              startFrame={teeViewFrame ?? impactF ?? (isNew ? 1 : undefined)}
               track={(swing.ball_track_frames || []).filter(
                 (r) => r.found && r.x != null && r.y != null,
               )}
