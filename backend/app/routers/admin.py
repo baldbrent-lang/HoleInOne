@@ -16087,6 +16087,50 @@ BALLSCAN_DESCENT_SHORT_POINTS = 3
 BALLSCAN_DESCENT_SHORT_BEND_PX = 2.5
 
 
+# HOW MUCH FOOTAGE EITHER SIDE OF THE LANDING WINDOW the descent search
+# needs. The window is worked out from where a ball LANDS, and the chain
+# the tracker links arrives before that -- so it has to reach back far
+# enough to hold the fall itself, plus the tracker's own minimum run-up.
+# The tail is smaller: past the landing there is only bounce and roll,
+# and `last_descent_frame` walks back off those anyway.
+DESCENT_LEAD_SEC = 2.5
+DESCENT_TAIL_SEC = 1.0
+
+
+def _merge_frame_windows(wins: list, gap: int = 15) -> list:
+    """Overlapping [lo, hi] frame ranges merged into the fewest passes.
+
+    Two candidates a couple of seconds apart produce windows that
+    overlap, and scanning the shared seconds once each is the cost this
+    whole change exists to avoid. Ranges closer than `gap` frames are
+    joined too: a seek and a fresh background plate cost more than the
+    handful of frames between them.
+    """
+    if not wins:
+        return []
+    out = []
+    for lo, hi in sorted(wins):
+        if out and lo <= out[-1][1] + gap:
+            out[-1] = (out[-1][0], max(out[-1][1], hi))
+        else:
+            out.append((lo, hi))
+    return out
+
+
+def _d3_probe_frames(path) -> int:
+    """Frame count of a clip, or 0. Used to clamp a search window to the
+    footage that exists rather than seeking past the end."""
+    try:
+        import cv2 as _cv
+        cap = _cv.VideoCapture(str(path))
+        n = int(cap.get(_cv.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+        return max(0, n)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("frame count for %s failed: %s", path, exc)
+        return 0
+
+
 def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
     """Total, per-stage share, and what nothing accounted for.
 
@@ -16174,14 +16218,61 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         # instead of four. So the scan is run once at a permissive gate,
         # the strict gate is applied afterwards, and the near-misses are
         # kept to be reported against the candidate they belong to.
+        # ONLY WHERE A DESCENT COULD BE.
+        #
+        # This scanned the whole green clip, twice over -- MOG2 and the
+        # plate detector each decode every frame, and the plate samples
+        # the range again to build its median. On a two-minute clip that
+        # is the single most expensive thing the produce does, and almost
+        # all of it is spent on footage that cannot contain the answer.
+        #
+        # A ball struck at a known moment lands 5 to 8 seconds later, and
+        # nowhere else. So the search is confined to the union of those
+        # windows -- one per candidate, widened backwards by the length of
+        # a fall so the chain's earlier points are inside it too, since
+        # the window is about where the ball LANDS and the chain arrives
+        # before that. Three candidates on a two-minute clip is about a
+        # tenth of the frames.
+        #
+        # Still one pass per stretch of footage, which is the property
+        # that mattered: candidates whose windows overlap share a scan
+        # rather than scanning the same seconds once each.
+        _n_gf = int(_d3_probe_frames(gp) or 0)
+        _wins = []
+        for sp in spots:
+            _imp = sp.get("gone_frame")
+            if _imp is None:
+                continue
+            _ig = (float(_imp) / tfps) - float(delta)
+            _lo = int(max(0, (_ig + FLIGHT_LO_SEC - DESCENT_LEAD_SEC) * gfps))
+            _hi = int((_ig + FLIGHT_HI_SEC + DESCENT_TAIL_SEC) * gfps)
+            if _n_gf:
+                _hi = min(_hi, _n_gf - 1)
+            if _hi > _lo:
+                _wins.append((_lo, _hi))
+        _wins = _merge_frame_windows(_wins)
+        _covered = sum(b - a + 1 for a, b in _wins)
+        # Nothing to narrow to, or narrowing that saves nothing: one pass
+        # over everything, which is what this always did. Several seeks
+        # into most of a file costs more than reading it straight through.
+        if not _wins or (_n_gf and _covered > 0.7 * _n_gf):
+            _wins = [None]
+        out["windows"] = [list(w) if w else None for w in _wins]
+        out["window_frames"] = _covered if _wins != [None] else _n_gf
+        out["clip_frames"] = _n_gf
         _t = time.perf_counter()
-        rep = _d3.find_descents(
-            gp, gfps,
-            min_points=BALLSCAN_DESCENT_LOOSE_POINTS,
-            max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
-        ) or {}
+        _all_evs = []
+        rep = {}
+        for _w in _wins:
+            _r = _d3.find_descents(
+                gp, gfps, window=_w,
+                min_points=BALLSCAN_DESCENT_LOOSE_POINTS,
+                max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
+            ) or {}
+            rep = _r if not rep else rep
+            _all_evs.extend(_r.get("events") or [])
+        _all_evs.sort(key=lambda e: int(e.get("last_descent_frame") or 0))
         _add("find_descents", time.perf_counter() - _t)
-        _all_evs = list(rep.get("events") or [])
 
         def _strict(e):
             # FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR NEED TO BE.
@@ -16232,7 +16323,16 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         ]
         out["n_seen"] = len(_all_evs)
         out["n_accepted"] = len(evs)
-        out["scan_reason"] = rep.get("reason")
+        # Across every window scanned, not just the first -- with the
+        # search split into stretches, one window's "nothing fell here"
+        # is not the answer for the clip.
+        out["scan_reason"] = (
+            f"{len(_all_evs)} descent(s) across "
+            f"{len(_wins)} window(s) covering "
+            f"{out.get('window_frames') or 0} of "
+            f"{out.get('clip_frames') or 0} green frames"
+            + (f" — {rep.get('reason')}" if len(_wins) == 1
+               and rep.get("reason") else ""))
         out["gates"] = {
             "min_points": BALLSCAN_DESCENT_MIN_POINTS,
             "max_bend_px": BALLSCAN_DESCENT_MAX_BEND_PX,
@@ -16876,10 +16976,15 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
     rep["descents"] = _ball_scan_descents(row, db, spots, progress=progress)
     _t_desc = time.perf_counter() - _t
     _dsub = (rep["descents"] or {}).get("timing") or {}
+    _d3s = rep["descents"] or {}
     _stage(3, "Descent match (green camera)",
-           "The whole green clip segmented and tracked once, then each "
-           "candidate claims the fall that lands in its own flight "
-           "window. Deeper re-scans run only on near-misses. Inside: "
+           f"Only the stretches a ball could land in: "
+           f"{len(_d3s.get('windows') or []) or 1} window(s) covering "
+           f"{_d3s.get('window_frames') or '?'} of "
+           f"{_d3s.get('clip_frames') or '?'} green frames — each "
+           f"segmented and tracked once, then each candidate claims the "
+           f"fall inside its own flight window. Deeper re-scans run only "
+           f"on near-misses. Inside: "
            + (", ".join(f"{k} {v}s" for k, v in sorted(
                _dsub.items(), key=lambda kv: -float(kv[1] or 0))) or "n/a"),
            (rep["descents"] or {}).get("n_matched"), "matched", _t_desc)
