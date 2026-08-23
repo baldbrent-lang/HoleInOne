@@ -7972,6 +7972,81 @@ function HittingAreaModal({ state, onClose, adminPassword }) {
 }
 
 
+/**
+ * WHERE THE RUN SPENT ITS TIME. Same shape Debug3 reports, so the two
+ * can be compared directly rather than by eye across two layouts.
+ *
+ * The bar is the point. A column of seconds has to be read and ranked
+ * before it says anything; the question being asked of this panel is
+ * "which step is the problem", and a bar answers that at a glance.
+ * `unattributed` is the other half of the answer: it is time no step
+ * claimed, which is the only way this table can point at something
+ * nobody thought to measure.
+ */
+function ScanTiming({ stages, timing, nested, nestedLabel, note }) {
+  const list = stages || [];
+  if (!list.length) return null;
+  const total = timing?.total_sec || list.reduce(
+    (a, st) => a + (st.seconds || 0), 0);
+  const worst = list.reduce(
+    (m, st) => ((st.seconds || 0) > (m?.seconds || 0) ? st : m), null);
+  const bar = (sec) => (
+    <div style={{ height: 4, borderRadius: 2, marginTop: 3,
+                  background: "var(--line)" }}>
+      <div style={{
+        height: 4, borderRadius: 2, background: "var(--emerald-700)",
+        width: `${total ? Math.min(100, (100 * (sec || 0)) / total) : 0}%`,
+      }} />
+    </div>
+  );
+  const rows = (arr, indent) => arr.map((st) => (
+    <div key={`${indent}-${st.n}`} className="tiny"
+         style={{ marginTop: 6, paddingLeft: 4 + indent,
+                  borderLeft: "3px solid var(--line)" }}>
+      <b>{st.n} · {st.title}</b>
+      {st.count != null && (
+        <span className="pill" style={{ marginLeft: 6 }}>
+          {st.count} {st.counts}
+        </span>
+      )}
+      <span className="muted">
+        {" "}· {(st.seconds || 0).toFixed(2)}s
+        {total ? ` · ${Math.round(100 * (st.seconds || 0) / total)}%` : ""}
+      </span>
+      {bar(st.seconds)}
+      <div className="muted" style={{ marginTop: 2 }}>{st.detail}</div>
+      {indent === 0 && st.n === 1 && nested?.length ? (
+        <div style={{ marginTop: 4 }}>
+          <div className="tiny muted"><i>{nestedLabel}</i></div>
+          {rows(nested, 12)}
+        </div>
+      ) : null}
+    </div>
+  ));
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="row tiny" style={{ justifyContent: "space-between" }}>
+        <b>Where the time went</b>
+        <span className="muted">
+          {total.toFixed(1)}s total
+          {worst ? ` · slowest: ${worst.title} (${(worst.seconds || 0).toFixed(1)}s)` : ""}
+          {timing?.per_candidate_sec != null
+            ? ` · ${timing.per_candidate_sec}s per candidate` : ""}
+        </span>
+      </div>
+      {note && <div className="tiny muted">{note}</div>}
+      {rows(list, 0)}
+      {timing?.unattributed_sec > 0.05 && (
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          {timing.unattributed_sec}s unattributed — time no step above
+          claimed. Small is bookkeeping; large means there is a step here
+          nobody is measuring yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BallScanModal({ state, onClose }) {
   const rep = state?.report;
   // Scan-and-produce nests the scan under `scan`; a plain scan is flat.
@@ -7997,6 +8072,21 @@ function BallScanModal({ state, onClose }) {
           <div className="err-text" style={{ marginTop: 10 }}>{state.error}</div>
         )}
 
+        {/* A PLAIN SCAN GETS THE SAME TABLE. It is the step that
+            dominates a produce, so the place to look for time in it is
+            the run that does nothing else. Scan-and-produce nests this
+            same list under its own stage 1 instead. */}
+        {!rep?.clips && rep?.stages?.length > 0 && (
+          <div className="card" style={{ margin: "10px 0", padding: 10 }}>
+            <ScanTiming
+              stages={rep.stages}
+              timing={rep.timing}
+              note={"Every candidate here cost the scan below; the video's "
+                + "length sets stage 2 and the candidate count sets stage 4."}
+            />
+          </div>
+        )}
+
         {rep?.clips && (
           <div className="card" style={{ margin: "10px 0", padding: 10 }}>
             <div className="row" style={{ justifyContent: "space-between" }}>
@@ -8010,22 +8100,12 @@ function BallScanModal({ state, onClose }) {
               {rep.min_held_sec}s or longer, which is what a ball waiting to
               be hit does and a speck does not.
             </div>
-            {(rep.stages || []).map((st) => (
-              <div key={st.n} className="tiny"
-                   style={{ marginTop: 6, paddingLeft: 4,
-                            borderLeft: "3px solid var(--line)" }}>
-                <b>{st.n} · {st.title}</b>
-                {st.count != null && (
-                  <span className="pill" style={{ marginLeft: 6 }}>
-                    {st.count} {st.counts}
-                  </span>
-                )}
-                {st.seconds ? (
-                  <span className="muted"> · {st.seconds}s</span>
-                ) : null}
-                <div className="muted" style={{ marginTop: 2 }}>{st.detail}</div>
-              </div>
-            ))}
+            <ScanTiming
+              stages={rep.stages}
+              timing={rep.timing}
+              nested={rep.scan_stages}
+              nestedLabel="inside stage 1, the scan's own steps:"
+            />
             {rep.clips.map((c, i) => (
               <div key={i} className="tiny"
                    style={{ marginTop: 6, borderTop: "1px solid var(--line)",

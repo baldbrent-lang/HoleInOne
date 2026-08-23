@@ -15825,6 +15825,31 @@ BALLSCAN_DESCENT_SHORT_POINTS = 3
 BALLSCAN_DESCENT_SHORT_BEND_PX = 2.5
 
 
+def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
+    """Total, per-stage share, and what nothing accounted for.
+
+    THE UNATTRIBUTED NUMBER IS THE POINT. Per-stage seconds tell you
+    which of the steps you already know about is slow; the remainder
+    tells you there is a step you do NOT know about, which is the only
+    way a timing table finds something its author did not think to
+    measure. Debug3 reports it for the same reason, and it is what makes
+    these two tables comparable.
+    """
+    _total = round(max(0.0, time.perf_counter() - t_run), 3)
+    _staged = sum(float(st.get("seconds") or 0.0)
+                  for st in (rep.get("stages") or []))
+    for st in rep.get("stages") or []:
+        st["seconds"] = round(float(st.get("seconds") or 0.0), 2)
+        st["pct"] = (round(100.0 * st["seconds"] / _total, 1)
+                     if _total else 0.0)
+    rep["timing"] = {
+        "total_sec": _total,
+        "by_stage": {int(st["n"]): st["seconds"]
+                     for st in (rep.get("stages") or [])},
+        "unattributed_sec": round(max(0.0, _total - _staged), 2),
+    }
+
+
 def _ball_scan_descents(row, db, spots, progress=None) -> dict:
     """Match each resting-ball candidate to a descent on the green camera.
 
@@ -15846,7 +15871,13 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
     raises: this confirms candidates, and a failure here should leave
     them unconfirmed rather than take the scan down.
     """
-    out = {"ok": False, "events": [], "n_matched": 0, "reason": None}
+    out = {"ok": False, "events": [], "n_matched": 0, "reason": None,
+           "timing": {}}
+    _dt = out["timing"]
+
+    def _add(name, secs):
+        _dt[name] = round(_dt.get(name, 0.0) + float(secs), 2)
+
     if not spots:
         out["reason"] = "no candidates to match"
         return out
@@ -15881,11 +15912,13 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         # instead of four. So the scan is run once at a permissive gate,
         # the strict gate is applied afterwards, and the near-misses are
         # kept to be reported against the candidate they belong to.
+        _t = time.perf_counter()
         rep = _d3.find_descents(
             gp, gfps,
             min_points=BALLSCAN_DESCENT_LOOSE_POINTS,
             max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
         ) or {}
+        _add("find_descents", time.perf_counter() - _t)
         _all_evs = list(rep.get("events") or [])
 
         def _strict(e):
@@ -15946,7 +15979,9 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
             "searched_from_points": BALLSCAN_DESCENT_LOOSE_POINTS,
             "searched_to_bend_px": BALLSCAN_DESCENT_LOOSE_BEND_PX,
         }
+        _t = time.perf_counter()
         _ball_scan_descent_overview(row, gp, _all_evs, out)
+        _add("overview_image", time.perf_counter() - _t)
         if not evs and not _all_evs:
             out["reason"] = (
                 "nothing fell anywhere on the green camera — "
@@ -15997,7 +16032,9 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                         continue
                     if _k in _taken:
                         continue
+                    _t = time.perf_counter()
                     _ref = _ball_scan_refine_descent(gp, _e, gfps)
+                    _add("deep_rescan", time.perf_counter() - _t)
                     if _ref is None or not _strict(_ref):
                         continue
                     log.info(
@@ -16498,12 +16535,25 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
         "reason": None, "spots": [], "roi": None, "roi_source": None,
         "roi_note": None, "hole": None, "day": None, "course_id": None,
         "frame_url": None, "overview_url": None, "fps": None,
-        "n_frames": None, "n_sampled": None,
+        "n_frames": None, "n_sampled": None, "stages": [],
     }
     import cv2  # type: ignore
 
+    # WHERE THE TIME GOES, itemised the way Debug3 itemises it. A scan
+    # that takes two minutes is a fact about one of these steps and not
+    # about "the scan", and without the split the only way to find out
+    # which is to guess and re-run.
+    _t_run = time.perf_counter()
+
+    def _stage(n, title, detail, count=None, units=None, secs=None):
+        rep["stages"].append({
+            "n": n, "title": title, "detail": detail,
+            "count": count, "counts": units, "seconds": round(secs or 0.0, 2),
+        })
+
     fps = float(probe_fps(src_path) or 0.0) or 30.0
     rep["fps"] = round(fps, 2)
+    _t = time.perf_counter()
     try:
         _roi = _tee_box_roi_fractions(src_path, db, row)
     except Exception as exc:  # noqa: BLE001
@@ -16513,6 +16563,10 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
         "roi_note": _roi.get("note"), "hole": _roi.get("hole"),
         "day": _roi.get("day"), "course_id": getattr(row, "course_id", None),
     })
+    _stage(1, "Tee-box region",
+           "Where to look: the hitting area drawn for this hole, or a "
+           "fallback. Source: " + str(_roi.get("source") or "unknown"),
+           None, None, time.perf_counter() - _t)
 
     if progress:
         progress("Scanning every frame for a ball at rest", 0, 0)
@@ -16525,13 +16579,22 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
     _cap.release()
     expect_r = _ball_radius_px(course, _roi.get("hole") or 0, _fh) if course else None
 
+    _t = time.perf_counter()
     res = ai_scan_resting_balls(
         src_path, roi=_roi.get("roi"), fps=fps, expect_radius_px=expect_r,
     )
+    _t_scan = time.perf_counter() - _t
     rep["reason"] = res.get("reason")
     rep["n_sampled"] = res.get("n_sampled")
     rep["n_frames"] = res.get("n_frames")
     spots = list(res.get("spots") or [])
+    _stage(2, "Resting-ball scan (tee camera)",
+           f"Every sampled frame decoded and searched for a small pale "
+           f"round thing that stays put. {res.get('n_sampled') or 0} of "
+           f"{res.get('n_frames') or 0} frames sampled — this is the one "
+           f"step whose cost is set by the length of the video rather "
+           f"than by what is in it.",
+           len(spots), "candidates", _t_scan)
 
     # PICTURES, because a coordinate is not evidence. Each candidate gets
     # a crop of the frame it was FIRST seen in and of the last one before
@@ -16547,8 +16610,23 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
 
     # THE OTHER CAMERA'S VERDICT. Done before the crops so the pictures
     # below can show which candidates it confirmed.
+    _t = time.perf_counter()
     rep["descents"] = _ball_scan_descents(row, db, spots, progress=progress)
+    _t_desc = time.perf_counter() - _t
+    _dsub = (rep["descents"] or {}).get("timing") or {}
+    _stage(3, "Descent match (green camera)",
+           "The whole green clip segmented and tracked once, then each "
+           "candidate claims the fall that lands in its own flight "
+           "window. Deeper re-scans run only on near-misses. Inside: "
+           + (", ".join(f"{k} {v}s" for k, v in sorted(
+               _dsub.items(), key=lambda kv: -float(kv[1] or 0))) or "n/a"),
+           (rep["descents"] or {}).get("n_matched"), "matched", _t_desc)
+
+    _t = time.perf_counter()
     _ball_scan_descent_images(row, spots, tok, rep)
+    _t_dimg = time.perf_counter() - _t
+
+    _t = time.perf_counter()
     try:
         cap = cv2.VideoCapture(str(src_path))
         for i, sp in enumerate(spots):
@@ -16620,9 +16698,24 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
         cap.release()
     except Exception as exc:  # noqa: BLE001
         log.warning("ball scan: pictures failed: %s", exc)
+    _stage(4, "Evidence pictures",
+           "A crop of each candidate's first and last frame, the descent "
+           "strips, and one overview with every candidate ringed. Two "
+           "seeks per candidate through a long file, so this grows with "
+           "how many candidates there are, not with the video.",
+           len(spots), "candidates", _t_dimg + (time.perf_counter() - _t))
 
     rep["spots"] = spots
     rep["ok"] = bool(spots)
+    _ball_scan_finish_timing(rep, _t_run)
+    log.info(
+        "ball scan timing upload=%s total=%.1fs over %d candidate(s): %s "
+        "| unattributed %.1fs",
+        getattr(row, "id", None), rep["timing"]["total_sec"], len(spots),
+        ", ".join(f"{st['n']}.{st['title']} {st['seconds']}s "
+                  f"({st.get('pct', 0)}%)" for st in rep["stages"]),
+        rep["timing"]["unattributed_sec"],
+    )
     return rep
 
 
@@ -16715,12 +16808,24 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
             "count": count, "counts": units, "seconds": round(secs or 0.0, 2),
         })
 
+    # This run's phase clock. `_d3_fast_produce` and every ffmpeg helper
+    # under it accumulate into it through the `_pt` wrappers, so stage 4
+    # can be itemised rather than reported as one number covering a
+    # render, a cut, a composite and a commit.
+    _pt_reset()
+    _t_run = time.perf_counter()
     fps = float(probe_fps(src_path) or 0.0) or 30.0
     _t = time.perf_counter()
     scan = _ball_scan_run(row, src_path, db, progress=progress)
     rep["scan"] = {k: scan.get(k) for k in
                    ("reason", "roi", "roi_source", "overview_url", "spots",
                     "descents")}
+    # THE SCAN'S OWN BREAKDOWN, carried through. Stage 1 below is the
+    # whole scan as one number, which on a long video is most of the run
+    # -- and "most of the run is the scan" is not an answer, it is the
+    # question restated. These are its four steps.
+    rep["scan_stages"] = scan.get("stages") or []
+    rep["scan_timing"] = scan.get("timing") or {}
     rep["descents"] = scan.get("descents")
     _all = list(scan.get("spots") or [])
     _stage(1, "Resting-ball scan",
@@ -16763,6 +16868,10 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
             f"no candidate sat {min_held:.0f}s or longer — nothing here "
             f"looks like a ball waiting to be hit"
         )
+        # The early exit gets a timing table too. A run that found
+        # nothing still spent its time somewhere, and that is exactly the
+        # run worth knowing the shape of.
+        _ball_scan_finish_timing(rep, _t_run)
         return rep
 
     tok = secrets.token_hex(4)
@@ -16967,13 +17076,35 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
            "both clear and empty. No pose peak and no club arc: those "
            "exist to guess these two numbers, and they are already known.",
            _n_flight, "with a flight", _tflight)
+    _phase = _pt_snapshot()
     _stage(4, "Tracer clip",
            "_d3_fast_produce — the same renderer the edit wizard's Produce "
            "runs: tracer over the tee shot, cut to the green camera, and "
-           "committed to Produced Clips."
+           "committed to Produced Clips. Inside: "
+           + (", ".join(f"{k} {v}s" for k, v in
+                        sorted(_phase.items(), key=lambda kv: -kv[1])
+                        if v > 0) or "nothing measured")
            + (f" Renderer: {rep.get('produce_error')}"
               if rep.get("produce_error") else ""),
            rep["n_traced"], "clips", _trender)
+    rep["render_breakdown"] = {k: round(v, 2)
+                               for k, v in sorted(_phase.items(),
+                                                  key=lambda kv: -kv[1])
+                               if v > 0}
+
+    _ball_scan_finish_timing(rep, _t_run)
+    rep["timing"]["per_candidate_sec"] = (
+        round(rep["timing"]["total_sec"] / len(spots), 2) if spots else None)
+    log.info(
+        "ball scan produce timing upload=%s total=%.1fs over %d "
+        "candidate(s): %s | scan inside: %s | unattributed %.1fs",
+        getattr(row, "id", None), rep["timing"]["total_sec"], len(spots),
+        ", ".join(f"{st['n']}.{st['title']} {st['seconds']}s "
+                  f"({st.get('pct', 0)}%)" for st in rep["stages"]),
+        ", ".join(f"{st['n']}.{st['title']} {st['seconds']}s"
+                  for st in rep["scan_stages"]) or "none",
+        rep["timing"]["unattributed_sec"],
+    )
 
     rep["ok"] = rep["n_traced"] > 0
     rep["reason"] = (
