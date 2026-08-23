@@ -18110,24 +18110,89 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
             out["reason"] = "the green video is missing on disk"
             return out
         _gfps = float(probe_fps(_gp) or 0.0) or 30.0
-        if progress:
-            progress("Finding the balls coming down on the green", 0, 0)
-        _gd = _d3.find_descents(_gp, fps=_gfps)
-        out["sweep"] = _gd
         out["green_fps"] = round(_gfps, 2)
         _delta, _dsrc = _d3_green_delta_sec(db, row)
         out["delta_sec"] = round(float(_delta), 3)
         out["delta_source"] = _dsrc
     except Exception as exc:  # noqa: BLE001
-        log.warning("ascent descents: green pass failed on %s: %s",
+        log.warning("ascent descents: green setup failed on %s: %s",
                     row.id, exc)
         out["reason"] = f"the green pass failed: {exc}"
         return out
 
-    _events = list(_gd.get("events") or [])
+    # ONLY THE SECONDS A BALL COULD BE IN. This is the whole reason the
+    # ascent half runs first, and getting it wrong the first time was
+    # instructive: scanning the entire green clip weighed 1,109 chains
+    # on a two-minute video and called 36 of them descents, over three
+    # swings that between them can only account for nine seconds of
+    # footage. The extra hundred-odd seconds do not merely cost time --
+    # every chain they contribute is a candidate the matcher then has to
+    # choose between, and a wind-shaken branch inside somebody's flight
+    # window beats the real ball as easily as not.
+    #
+    # A struck ball is in the air five to eight seconds, so each swing
+    # names a three-second stretch of the green clip and nothing else is
+    # looked at. Overlapping stretches are merged so the shared seconds
+    # are scanned once.
+    _n_green = _d3_probe_frames(_gp)
+    _wins: list = []
+    for c in _clips:
+        _imp = c.get("impact_frame")
+        if _imp is None:
+            continue
+        _base = float(_imp) / float(fps or 30.0) - float(out["delta_sec"])
+        _lo, _hi = _base + FLIGHT_LO_SEC, _base + FLIGHT_HI_SEC
+        c["landing_window_sec"] = [round(_lo, 2), round(_hi, 2)]
+        _flo = max(0, int(_lo * _gfps))
+        _fhi = int(_hi * _gfps)
+        if _n_green:
+            _fhi = min(_fhi, _n_green - 1)
+        if _fhi > _flo:
+            _wins.append((_flo, _fhi))
+    _wins = _merge_frame_windows(_wins)
+    out["windows"] = [[a, b] for a, b in _wins]
+    out["n_frames_searched"] = sum(b - a + 1 for a, b in _wins)
+    out["n_frames_green"] = _n_green
+    if not _wins:
+        out["reason"] = "no swing had an impact frame to search from"
+        return out
+
+    _events: list = []
+    _considered: list = []
+    _tally: dict = {}
+    _reasons: list = []
+    _sweep: dict = {}
+    for i, (_flo, _fhi) in enumerate(_wins):
+        if progress:
+            progress(f"Looking for the ball coming down, window {i + 1} "
+                     f"of {len(_wins)}", i, len(_wins))
+        try:
+            _gd = _d3.find_descents(_gp, fps=_gfps, window=(_flo, _fhi))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ascent descents: window %s-%s failed on %s: %s",
+                        _flo, _fhi, row.id, exc)
+            continue
+        _events.extend(_gd.get("events") or [])
+        _considered.extend(_gd.get("considered") or [])
+        for k, v in (_gd.get("why_counts") or {}).items():
+            _tally[k] = _tally.get(k, 0) + v
+        _reasons.append(f"f{_flo}-{_fhi}: {_gd.get('reason')}")
+        # The colour key and gate order are the same on every pass; the
+        # last one to answer carries them out.
+        _sweep = {"why_colors": _gd.get("why_colors"),
+                  "why_order": _gd.get("why_order")}
+    _sweep["considered"] = sorted(
+        _considered, key=lambda z: (len(z.get("why") or []),
+                                    -int(z.get("n_points") or 0)))
+    _sweep["n_considered"] = len(_considered)
+    _sweep["why_counts"] = _tally
+    _sweep["reason"] = " · ".join(_reasons)
+    out["sweep"] = _sweep
     out["events"] = _events
     if not _events:
-        out["reason"] = (f"no ball seen coming down: {_gd.get('reason')}")
+        out["reason"] = (
+            f"no ball seen coming down in the {len(_wins)} flight "
+            f"window(s) searched — " + " · ".join(_reasons))
         return out
 
     # NEAREST FIT WINS, AND A DESCENT IS CLAIMED ONCE. Two tee shots
@@ -18146,17 +18211,16 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     #
     # It matters more than a missing comet: a swing given the wrong
     # landing draws its tracer finishing at somebody else's ball.
+    # The windows above were merged before scanning, so an event can sit
+    # inside a merged range without being inside THIS swing's own three
+    # seconds. Each swing is re-checked against its own window here.
     _pairs: list = []
     for ci, c in enumerate(_clips):
-        _imp = c.get("impact_frame")
-        if _imp is None:
+        _w = c.get("landing_window_sec")
+        if not _w:
             continue
-        # green_time = tee_time - delta. The landing is five to eight
-        # seconds after the strike, on the green's own clock.
-        _base = float(_imp) / float(fps or 30.0) - float(out["delta_sec"])
-        _lo, _hi = _base + FLIGHT_LO_SEC, _base + FLIGHT_HI_SEC
+        _lo, _hi = float(_w[0]), float(_w[1])
         _mid = (_lo + _hi) / 2.0
-        c["landing_window_sec"] = [round(_lo, 2), round(_hi, 2)]
         c["landing_reason"] = (
             f"no ball came down between {round(_lo, 1)}s and "
             f"{round(_hi, 1)}s on the green clock")
@@ -18188,8 +18252,10 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     out["ok"] = out["n_matched"] > 0
     out["reason"] = (
         f"{out['n_matched']} of {len(_clips)} swing(s) matched to "
-        f"{len(_events)} ball(s) coming down; the two clocks are "
-        f"{out['delta_sec']}s apart ({out['delta_source']})")
+        f"{len(_events)} ball(s) coming down, from "
+        f"{out['n_frames_searched']} of {out['n_frames_green']} green "
+        f"frame(s) — only the flight windows were searched; the two "
+        f"clocks are {out['delta_sec']}s apart ({out['delta_source']})")
     return out
 
 
