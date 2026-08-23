@@ -16280,6 +16280,7 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         _t = time.perf_counter()
         _all_evs = []
         rep = {}
+        _per_window_reports = []
         for _w in _wins:
             _r = _d3.find_descents(
                 gp, gfps, window=_w,
@@ -16287,9 +16288,22 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                 max_bend_px=BALLSCAN_DESCENT_LOOSE_BEND_PX,
             ) or {}
             rep = _r if not rep else rep
+            _per_window_reports.append(_r)
             _all_evs.extend(_r.get("events") or [])
         _all_evs.sort(key=lambda e: int(e.get("last_descent_frame") or 0))
         _add("find_descents", time.perf_counter() - _t)
+        # WAS THE BALL EVER DETECTED. Summed across the windows, because
+        # "no descent found" means one of two opposite things -- nothing
+        # was detected over the green, or plenty was and none of it
+        # linked -- and only the counts tell them apart.
+        _ds: dict = {}
+        for _r2 in _per_window_reports:
+            for _k2, _v2 in (_r2.get("det_stats") or {}).items():
+                if isinstance(_v2, (int, float)):
+                    _ds[_k2] = round(_ds.get(_k2, 0) + _v2, 2)
+        out["det_stats"] = _ds
+        out["n_tracks"] = sum(int(_r2.get("n_tracks") or 0)
+                              for _r2 in _per_window_reports)
 
         def _strict(e):
             # FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR NEED TO BE.
@@ -16362,8 +16376,14 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
         _ball_scan_descent_overview(row, gp, _all_evs, out)
         _add("overview_image", time.perf_counter() - _t)
         if not evs and not _all_evs:
+            _kept = int((out.get("det_stats") or {}).get("kept") or 0)
             out["reason"] = (
-                "nothing fell anywhere on the green camera — "
+                f"nothing fell anywhere on the green camera — "
+                f"{_kept} ball-sized detection(s) in the windows searched, "
+                f"{out.get('n_tracks') or 0} of which linked into a track. "
+                + ("Detections but no tracks means they did not link; no "
+                   "detections at all means the ball was never seen. "
+                   if _kept else "")
                 + str(rep.get("reason") or ""))
             return out
 

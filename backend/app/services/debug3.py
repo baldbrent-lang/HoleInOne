@@ -222,6 +222,21 @@ def detect_ball_blobs(
     min_area: int = BALL_AREA_MIN,
     max_per_frame: int = MAX_DETS_PER_FRAME,
     body_box=None,
+    # A GOLFER IS A TEE-CAMERA IDEA. Everything below that suppresses
+    # "the big moving thing" and "the pixels that are always busy" was
+    # written for a view with a person swinging in it, where a ball
+    # crossing a moving sleeve genuinely cannot be told from the sleeve.
+    #
+    # A green camera has no golfer. What it does have on a bright windy
+    # day is a CLOUD SHADOW sweeping across the green -- a single
+    # connected component far bigger than the golfer threshold, dilated
+    # by 21px, and therefore an exclusion zone laid over the exact part
+    # of the frame the ball lands in. The busy-pixel filter compounds
+    # it: shadow crossing the same turf repeatedly makes that turf
+    # "always busy", and every detection there is dropped. The result is
+    # detections in the tree line and none on the green, which is not a
+    # tuning problem, it is the wrong question being asked of the view.
+    suppress_bodies: bool = True,
     debug_dir: Path | None = None,
     debug_prefix: str = "d3",
 ) -> dict:
@@ -340,13 +355,14 @@ def detect_ball_blobs(
             # from a moving sleeve, so we do not try.
             golfer = np.zeros((h, w), np.uint8)
             big = False
-            for i in range(1, nb):
-                a = int(statsb[i, cv2.CC_STAT_AREA])
-                bh = int(statsb[i, cv2.CC_STAT_HEIGHT])
-                if a >= golfer_area or bh >= golfer_h:
-                    golfer[labb == i] = 255
-                    out["stats"]["golfer"] += 1
-                    big = True
+            if suppress_bodies:
+                for i in range(1, nb):
+                    a = int(statsb[i, cv2.CC_STAT_AREA])
+                    bh = int(statsb[i, cv2.CC_STAT_HEIGHT])
+                    if a >= golfer_area or bh >= golfer_h:
+                        golfer[labb == i] = 255
+                        out["stats"]["golfer"] += 1
+                        big = True
             if big:
                 golfer = cv2.dilate(golfer, np.ones((21, 21), np.uint8))
 
@@ -421,7 +437,13 @@ def detect_ball_blobs(
         # time. Done after the loop so the threshold is a fraction of the
         # frames actually read rather than the frames requested.
         n_frames = max(1, out["stats"]["frames"])
-        busy = (occ >= max(2, int(BUSY_PIXEL_FRAC * n_frames)))
+        # Off with body suppression, and for the same reason: on a green
+        # view "this turf keeps being foreground" is a cloud crossing it,
+        # not a golfer standing on it, and blanking it removes the
+        # landing zone.
+        busy = ((occ >= max(2, int(BUSY_PIXEL_FRAC * n_frames)))
+                if suppress_bodies
+                else np.zeros_like(occ, dtype=bool))
         out["stats"]["busy_px"] = int(busy.sum())
         kept_dets = []
         for d in dets:
@@ -1541,13 +1563,29 @@ def find_descents(
     # they find both, and the fall-rate band below is what keeps the
     # extra noise from the plate out of the answer.
     try:
-        det = detect_ball_blobs(input_path, f_lo, f_hi)
+        # NO BODY SUPPRESSION ON A GREEN VIEW. This function is for a
+        # green camera and says so at the top; the golfer mask and the
+        # busy-pixel filter are tee-camera machinery, and on a cloudy day
+        # they mask out the green itself. A person walking the green is
+        # not a problem here -- the fall-rate, drop and straightness
+        # gates below throw them out, because a person does not fall at
+        # a third of a frame-height per second in a straight line.
+        det = detect_ball_blobs(input_path, f_lo, f_hi,
+                                suppress_bodies=False)
         dets = list(det.get("dets") or [])
         n_mog = len(dets)
         dets.extend(detect_movers_by_plate(input_path, f_lo, f_hi))
         dets.sort(key=lambda d: d["frame"])
         out["n_dets"] = len(dets)
         out["n_dets_mog2"] = n_mog
+        # WHAT THE DETECTORS THREW AWAY, carried out. "No descent found"
+        # has two completely different causes -- the ball was never
+        # detected, or it was detected and never linked -- and they call
+        # for opposite fixes. Without these counts the two look identical
+        # from the outside, which is how a masked-out green reads as a
+        # tracking problem.
+        out["det_stats"] = dict(det.get("stats") or {})
+        out["det_stats"]["plate"] = len(dets) - n_mog
         tracks = build_tracks(dets, r, min_len=int(min_points))
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"detection failed: {exc}"
