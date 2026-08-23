@@ -799,6 +799,12 @@ const PLOT_WINDOW_POST = 40;
 function RawSyncPlayer({
   teeUrl, greenUrl, teeFps, greenFps, deltaSec, teeStartedAt,
   greenStartedAt, measured,
+  // WHERE BOTH CAMERAS ARE STOPPED, reported up so the impact and
+  // landing frames can be set from here. Only ever called with a pair
+  // while paused, and with null the rest of the time: a moving picture
+  // has no frame worth committing to, and reporting one 30 times a
+  // second would re-render the whole modal for the length of the video.
+  onFrames,
 }) {
   const teeRef = useRef(null);
   const greenRef = useRef(null);
@@ -901,7 +907,18 @@ function RawSyncPlayer({
   const teeFrame = Math.round(teeTime * tfps);
   const greenTime = teeTime - delta;
   const greenFrame = Math.round(greenTime * gfps);
+  const paused = !playing && !rewinding;
   const btn = { width: "auto", padding: "2px 9px" };
+
+  // `null` while it runs, the pair when it stops. Passing the same null
+  // repeatedly is free -- React bails out on an unchanged state value --
+  // so this can sit on deps that tick with the video without costing a
+  // render per frame.
+  useEffect(() => {
+    onFrames?.(paused
+      ? { teeFrame, greenFrame: greenUrl && greenTime >= 0 ? greenFrame : null }
+      : null);
+  }, [paused, teeFrame, greenFrame, greenTime, greenUrl, onFrames]);
 
   return (
     <div style={{
@@ -967,14 +984,15 @@ function RawSyncPlayer({
                 title="Rewind at 3x">
           ◀◀ 3x
         </button>
+        {/* ONE BUTTON. Play and pause are the two states of a single
+            control, and a pair of them means the operator has to read
+            which one is live before pressing either. */}
         <button type="button"
                 className={playing && rate === 1 ? "small" : "ghost small"}
-                style={btn} onClick={() => play(1)} title="Play both">
-          ▶
-        </button>
-        <button type="button" className="ghost small" style={btn}
-                onClick={pause} title="Pause both">
-          ❙❙
+                style={btn}
+                onClick={() => (paused ? play(1) : pause())}
+                title={paused ? "Play both" : "Pause both"}>
+          {paused ? "▶" : "❙❙"}
         </button>
         <button type="button"
                 className={playing && rate === 3 ? "small" : "ghost small"}
@@ -1302,6 +1320,12 @@ function ClickToPlotModal({
   const [placeOnTee, setPlaceOnTee] = useState(null);    // 'tee' | 'pin'
   const [placeOnGreen, setPlaceOnGreen] = useState(null); // 'landing' | 'pin'
   const [teeViewFrame, setTeeViewFrame] = useState(null);
+  // WHERE THE RAW PLAYER IS STOPPED, or null while it is running. The
+  // raw tab is the only place both cameras are on screen at once, so it
+  // is where the impact and landing frames are easiest to actually
+  // FIND -- scrub until the ball leaves, read the tee frame; scrub until
+  // it lands, read the green frame.
+  const [rawFrames, setRawFrames] = useState(null);
   // THE OFFSET BETWEEN THE TWO CAMERAS, in the same order the produce
   // cut uses it: each Pi's own first-frame stamp, then whatever a
   // previous run established, then an assumption of zero. Worked out
@@ -1940,6 +1964,31 @@ function ClickToPlotModal({
     !!ballAtRest &&
     (ballAtRest.x !== (swing.ball?.x ?? null) ||
       ballAtRest.y !== (swing.ball?.y ?? null));
+  // WHATEVER PICTURE IS IN FRONT OF THE OPERATOR. On the tee map that
+  // is the frame stepper; on the raw tab it is the tee player, but only
+  // while it is stopped -- "current" has to mean a frame you are looking
+  // at, not one that has already gone past.
+  const teeCurrent = cam === "raw" ? (rawFrames?.teeFrame ?? null)
+    : teeViewFrame;
+  const greenCurrent = cam === "raw" ? (rawFrames?.greenFrame ?? null)
+    : greenViewFrame;
+  // MOVE THE LANDING TO ANOTHER FRAME, keeping where it is on the green.
+  // The landing frame is not stored: it IS the frame the last green
+  // point is filed under, so setting it means re-keying that point.
+  // Nothing to re-key without a landing spot, which is why this asks for
+  // one rather than inventing a position.
+  function setLandingFrame(f) {
+    if (f == null || !landing || f === landing.frame) return;
+    const from = landing.frame;
+    const xy = { x: landing.x, y: landing.y };
+    setGreenMarks((m) => {
+      const next = { ...m };
+      delete next[from];
+      next[f] = xy;
+      return next;
+    });
+    setCometReason(null);
+  }
   const nChanged =
     pendAdd.length + pendClear.length + (impactMoved ? 1 : 0)
     + (ballMoved ? 1 : 0) + (greenChanged ? 1 : 0)
@@ -2244,6 +2293,7 @@ function ClickToPlotModal({
               greenStartedAt={row.green_recording_started_at
                 || row.base_captured_at}
               measured={!!rawDelta?.measured}
+              onFrames={setRawFrames}
             />
           ) : cam === "tracer" ? (
             bgUrl ? (
@@ -2561,10 +2611,13 @@ function ClickToPlotModal({
           >
             <button type="button" className="ghost small"
                     style={{ width: "100%" }}
-                    disabled={teeViewFrame == null}
-                    onClick={() => setImpactFrame(teeViewFrame)}
-                    title="Use the frame the tee view is showing. Step to the strike with the frame buttons on the picture, then press this.">
-              set to current{teeViewFrame != null ? ` (f${teeViewFrame})` : ""}
+                    disabled={teeCurrent == null}
+                    onClick={() => setImpactFrame(teeCurrent)}
+                    title={cam === "raw"
+                      ? "Use the tee frame the raw player is stopped on. Pause it on the strike, then press this."
+                      : "Use the frame the tee view is showing. Step to the strike with the frame buttons on the picture, then press this."}>
+              set to current{teeCurrent != null ? ` (f${teeCurrent})` : ""}
+              {cam === "raw" && teeCurrent == null ? " — pause first" : ""}
             </button>
             <button type="button" className="ghost small"
                     style={{ width: "100%", marginTop: 3,
@@ -2610,7 +2663,21 @@ function ClickToPlotModal({
               : "The frame it comes down on."}
           >
             <button type="button" className="ghost small"
-                    style={{ width: "100%", color: "var(--danger)" }}
+                    style={{ width: "100%" }}
+                    disabled={greenCurrent == null || !landing
+                      || greenCurrent === landing.frame}
+                    onClick={() => setLandingFrame(greenCurrent)}
+                    title={!landing
+                      ? "Mark the ball landing spot first — this moves that point to another frame, and there is nothing to move without it."
+                      : (cam === "raw"
+                        ? "Use the green frame the raw player is stopped on. Pause it on the bounce, then press this."
+                        : "Use the frame the green view is showing.")}>
+              set to current{greenCurrent != null ? ` (f${greenCurrent})` : ""}
+              {cam === "raw" && greenCurrent == null ? " — pause first" : ""}
+            </button>
+            <button type="button" className="ghost small"
+                    style={{ width: "100%", marginTop: 3,
+                             color: "var(--danger)" }}
                     disabled={!cometPoints.length}
                     onClick={() => { setGreenMarks({}); setCometReason(null); }}
                     title="Remove every plotted descent point for this swing.">
