@@ -14909,15 +14909,21 @@ export default function AdminProduction() {
                     each, and where the time went. On the deployment
                     whose runs are the ones behaving oddly, that is not
                     a debug toy, it is the only view of what happened. */}
-                {produceDebug.enabled && (
-                  <button
-                    className="small ghost"
-                    onClick={() => handleBallScanProduce(row)}
-                    title="What Produce runs, with the report attached — scan for resting balls, then trace every candidate that sat 7s or longer, straight from the measured rest position and the frame it went. Same clips, plus a per-stage timing breakdown."
-                  >
-                    ⚪▶ Scan &amp; produce
-                  </button>
-                )}
+                {/* NOT BEHIND THE DEBUG FLAG. It was, and that flag is
+                    off in production -- so asking for this button there
+                    got nothing. It is no longer a debug tool: it runs
+                    exactly what Produce runs and commits the same clips,
+                    and the only thing it adds is a record of what it
+                    did. Gating the explanation behind a setting that is
+                    off wherever the explaining is needed is backwards. */}
+                <button
+                  className="small ghost"
+                  onClick={() => handleBallScanProduce(row)}
+                  disabled={greyed || busy}
+                  title="What Produce runs, with the report attached — scan for resting balls, then trace every candidate that sat 7s or longer, straight from the measured rest position and the frame it went. Same clips, plus a per-stage timing breakdown."
+                >
+                  ⚪▶ Scan &amp; produce
+                </button>
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles

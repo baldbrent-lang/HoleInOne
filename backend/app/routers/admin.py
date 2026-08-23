@@ -20311,6 +20311,60 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
         log.warning("d3 produce: could not save swing %s: %s", idx, exc)
 
 
+def _detach_clip_refs(db, clip_ids) -> dict:
+    """Clear every foreign key pointing at these clips, so they can go.
+
+    NOTHING MAY STILL POINT AT THE ROW. Each of these is a real foreign
+    key, so one dangling reference turns a delete into an IntegrityError
+    -- and a produce that catches that and carries on adds its new clips
+    to the ones it could not remove. Which is what a camera-sourced
+    upload did on every single re-produce: `produced_clip_id` is stamped
+    on the CameraEvent the moment a clip is produced, so the very next
+    replace hit the constraint and the clip count grew by the size of
+    the run each time.
+
+    THIS IS ALSO WHY DEV AND PRODUCTION DISAGREED. A mirrored upload has
+    no CameraEvent, so on dev nothing pointed at the clips and the
+    replace worked; in production every upload comes from a camera. Same
+    video, same code, opposite behaviour, because of a row that only
+    exists on one of them.
+
+    Nullable references are cleared. View logs are NOT NULL and a view
+    of a clip that no longer exists means nothing, so they go. A
+    shot-of-the-week nomination also goes, and says so, because it is
+    editorial and worth knowing it was lost.
+    """
+    ids = [int(c) for c in (clip_ids or [])]
+    out = {"camera_events": 0, "hole_in_one": 0, "views": 0, "nominees": 0}
+    if not ids:
+        return out
+    from ..models import ShotOfWeekNominee
+
+    out["camera_events"] = db.query(CameraEvent).filter(
+        CameraEvent.produced_clip_id.in_(ids),
+    ).update({"produced_clip_id": None}, synchronize_session=False)
+    for _col in (HoleInOneEvent.tee_clip_id, HoleInOneEvent.wide_clip_id,
+                 HoleInOneEvent.hole_clip_id):
+        out["hole_in_one"] += db.query(HoleInOneEvent).filter(
+            _col.in_(ids),
+        ).update({_col: None}, synchronize_session=False)
+    out["views"] = db.query(BroadcastView).filter(
+        BroadcastView.clip_id.in_(ids),
+    ).delete(synchronize_session=False)
+    _noms = db.query(ShotOfWeekNominee).filter(
+        ShotOfWeekNominee.clip_id.in_(ids),
+    ).all()
+    if _noms:
+        log.warning(
+            "clip replace: dropping %d shot-of-the-week nomination(s) whose "
+            "clip is being replaced (clip ids %s)",
+            len(_noms), sorted({int(n.clip_id) for n in _noms}))
+        for _n in _noms:
+            db.delete(_n)
+        out["nominees"] = len(_noms)
+    return out
+
+
 def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                      hole_number=None, end_green_sec=None,
                      landing=None, replace=True) -> dict:
@@ -20468,6 +20522,11 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 "%d other clip(s) on upload %s",
                 sorted(_slots), len(_all_old) - len(_old), row.id,
             )
+        if _old:
+            _det = _detach_clip_refs(db, [c.id for c in _old])
+            if any(_det.values()):
+                log.info("d3 produce: detached %s before replacing %d clip(s)",
+                         _det, len(_old))
         for _c in _old:
             db.delete(_c)
         if _old:
