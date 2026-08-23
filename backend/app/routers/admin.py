@@ -17758,9 +17758,11 @@ def get_tee_box(upload_id: int, db: Session = Depends(get_db)):
     return out
 
 
-def _ascent_produce_run(row, src_path, db, progress=None) -> dict:
+def _ascent_produce_run(row, src_path, db, progress=None,
+                        hole_number=None) -> dict:
     """Find every ball leaving, then produce a clip for each."""
-    return _ascent_run(row, src_path, db, progress=progress, produce=True)
+    return _ascent_run(row, src_path, db, progress=progress, produce=True,
+                       hole_number=hole_number)
 
 
 def _ascent_find_run(row, src_path, db, progress=None) -> dict:
@@ -17777,7 +17779,8 @@ def _ascent_find_run(row, src_path, db, progress=None) -> dict:
     return _ascent_run(row, src_path, db, progress=progress, produce=False)
 
 
-def _ascent_run(row, src_path, db, progress=None, produce=True) -> dict:
+def _ascent_run(row, src_path, db, progress=None, produce=True,
+                hole_number=None) -> dict:
     """Find every ball leaving, and optionally produce a clip for each.
 
     THE OTHER WAY ROUND. The existing pipeline finds a ball SITTING in
@@ -17891,7 +17894,13 @@ def _ascent_run(row, src_path, db, progress=None, produce=True) -> dict:
                 upload_id=row.id,
                 ball_xy=[float(c["ball"][0]), float(c["ball"][1])],
                 impact_frame=int(c["impact_frame"]),
-                hole_number=_hole_for_upload(db, row),
+                # THE CALLER'S HOLE WINS. A produce started from a
+                # camera event knows which hole fired it; working it
+                # out again from the upload can disagree, and the
+                # hole decides the tee box, the ball radius and where
+                # the clip is filed.
+                hole_number=(hole_number if hole_number is not None
+                             else _hole_for_upload(db, row)),
                 # THE FIRST ONE REPLACES, THE REST APPEND. `solo` means
                 # "keep the upload's other clips", which is right for
                 # the edit dialog adding one swing and wrong for a run
@@ -18478,26 +18487,31 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
 
 def _produce_run(row, src_path, db, progress=None, debug_artifacts=False,
                  hole_number=None) -> dict:
-    """THE production pipeline: find the ball, then produce from it.
+    """THE produce, everywhere: find the ball LEAVING, then produce it.
 
-    Wraps `_ball_scan_produce_run` in the bookkeeping every produce
-    caller needs and `_debug3_run` used to own — the row's terminal
-    status, the clip counts the card reads, and the non-golf screen.
+    Wraps `_ascent_produce_run` in the bookkeeping every produce caller
+    needs — the row's terminal status and the clip counts the card
+    reads. One function, so automatic produce, the Produce button and
+    Re-Produce all run the same detector in both deployments; there is
+    no such thing as "what production does differently".
 
-    WHY THIS AND NOT DEBUG3. Debug3 works forwards from the golfer: find
-    a pose candidate, find the club, guess where the ball was, guess when
-    it left, then look for a flight through those guesses. The ball scan
-    works backwards from the ball itself — it MEASURES where the ball
-    rested and watches that pixel until the spot is clear and empty,
-    which is the strike. Those are the only two numbers a flight needs,
-    and one path measures them while the other infers them. Both then
-    hand the same pair to the same `find_flight` and the same
-    `_d3_fast_produce`, so nothing downstream changes; what changes is
-    that the numbers going in are observed rather than deduced.
+    WHY THE ASCENT AND NOT THE BALL SCAN. Both work backwards from the
+    ball rather than forwards from the golfer, which was the first fix.
+    But the ball scan's claim is that something SAT in the tee box, and
+    a shoe, a clubhead, a headcover and a daisy all sit — that is what
+    it kept producing tracers of. This one's claim is that something
+    LEFT, climbing steeply out of the band above the golfers' heads,
+    straight, fast, from a point inside the hitting area. A shoe never
+    leaves. Only then does it look for the ball at rest, in the few
+    hundred frames before the departure rather than the whole video, and
+    when a playing partner was standing in front of it the whole time it
+    falls back to where the chain was traced from and says so.
 
-    `debug_artifacts` is accepted so this is a drop-in for `_debug3_run`
-    in every caller. The scan writes its own overview images either way
-    and has no film-strips to skip, so it changes nothing here.
+    Downstream is unchanged: the same two numbers go to the same
+    `run_wizard_produce_job` the edit dialog's Save & close calls.
+
+    `debug_artifacts` is accepted so this stays a drop-in for every
+    caller. The sweep writes its own pictures either way.
     """
     upload_id = row.id
 
@@ -18528,32 +18542,35 @@ def _produce_run(row, src_path, db, progress=None, debug_artifacts=False,
 
     _set_status("processing")
     try:
-        rep = _ball_scan_produce_run(row, src_path, db, progress=progress,
-                                     hole_number=hole_number) or {}
+        rep = _ascent_produce_run(row, src_path, db, progress=progress,
+                                  hole_number=hole_number) or {}
     except Exception as exc:  # noqa: BLE001
-        log.exception("produce: the ball scan crashed on %s: %s",
+        log.exception("produce: the ascent produce crashed on %s: %s",
                       upload_id, exc)
         _set_status("failed", f"{exc}"[:2000])
         raise
 
-    n_ok = int(rep.get("n_traced") or 0)
-    n_cand = int(rep.get("n_candidates") or 0)
-    n_seen = len((rep.get("scan") or {}).get("spots") or [])
+    n_ok = int(rep.get("n_produced") or 0)
+    n_cand = len(rep.get("ascents") or [])
 
-    # NOTHING THAT LOOKS LIKE A BALL AT ALL. The scan doubles as the
-    # screen the way the swing detector used to: a capture with no
-    # resting ball anywhere in the tee box is a walk-by, a pet, or an
-    # empty trigger. Only when the scan saw NOTHING -- a candidate that
-    # was seen and then rejected means there was something there, and
-    # deletion is not recoverable from the UI.
-    if n_seen == 0 and settings.auto_delete_non_golf:
-        try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-        _auto_delete_upload(
-            upload_id, "no resting ball found anywhere in the tee box")
-        return rep
+    # AUTO-DELETE IS NOT WIRED TO THIS PIPELINE, DELIBERATELY.
+    #
+    # The old screen was "the scan found no resting ball ANYWHERE in the
+    # tee box", which is very hard to be wrong about: a walk-by, a pet
+    # or an empty trigger has nothing ball-shaped sitting anywhere in
+    # the frame for two minutes. The ascent pipeline's equivalent
+    # sentence is "no ball was seen leaving", and that is a much
+    # stronger claim resting on seven tuned thresholds -- several of
+    # them set from two clips.
+    #
+    # A false negative there would delete real footage, irreversibly and
+    # unattended. Every one of those thresholds has already cost a real
+    # ascent at least once during tuning. So a capture with no ascent is
+    # FAILED with the load-bearing prefix below and kept; the card shows
+    # it and an operator decides. When the detector has a season of
+    # misses behind it rather than a week, this is the decision to
+    # revisit -- `settings.auto_delete_non_golf` is untouched and still
+    # read by the other paths.
 
     if rep.get("clear_error"):
         # Produced, but the upload is now carrying more clips than this
@@ -18572,11 +18589,38 @@ def _produce_run(row, src_path, db, progress=None, debug_artifacts=False,
         # prefix, and say underneath it what the scan actually saw.
         _err = rep.get("produce_error")
         if not _err:
-            _err = (
-                f"no swings detected: {n_seen} resting-ball candidate(s), "
-                f"{n_cand} of them long enough to be a teed ball, "
-                f"no ball flight found"
-            )
+            _sw = rep.get("sweep") or {}
+            _n_ch = _sw.get("n_considered") or 0
+            _tally = _sw.get("why_counts") or {}
+            # WHICH GATE REFUSED THEM ALL is the useful half of this
+            # sentence. "No swings detected" over 400 chains says the
+            # video was empty; the same words with "tilt 27" after them
+            # say a threshold is wrong, and the difference is the whole
+            # question when a shot is missing.
+            if n_cand:
+                # BALLS WERE FOUND. Nothing was detected is the wrong
+                # sentence and the wrong PREFIX: the camera path reads
+                # "no swings detected" as "the Pi did its job and
+                # nobody hit a ball", which would file a renderer
+                # failure as a quiet non-event on a hole where three
+                # people teed off.
+                _err = (
+                    f"{n_cand} ball(s) seen leaving the tee, none "
+                    f"produced: "
+                    + "; ".join(
+                        str(c.get("reason") or "no reason given")
+                        for c in (rep.get("clips") or [])[:3])
+                )
+            else:
+                _err = (
+                    f"no swings detected: {_n_ch} chain(s) rose out of "
+                    f"the band above the golfers, none of them a ball "
+                    f"leaving the tee"
+                    + (" — refused on " + ", ".join(
+                        f"{k} {v}" for k, v in
+                        sorted(_tally.items(), key=lambda kv: -kv[1])
+                        if k != "accepted") if _tally else "")
+                )
         _set_status("failed", str(_err)[:2000], n_ok=0, n_total=n_cand)
     return rep
 

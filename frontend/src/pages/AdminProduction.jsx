@@ -15395,21 +15395,28 @@ export default function AdminProduction() {
                     each, and where the time went. On the deployment
                     whose runs are the ones behaving oddly, that is not
                     a debug toy, it is the only view of what happened. */}
-                {/* NOT BEHIND THE DEBUG FLAG. It was, and that flag is
-                    off in production -- so asking for this button there
-                    got nothing. It is no longer a debug tool: it runs
-                    exactly what Produce runs and commits the same clips,
-                    and the only thing it adds is a record of what it
-                    did. Gating the explanation behind a setting that is
-                    off wherever the explaining is needed is backwards. */}
-                <button
-                  className="small ghost"
-                  onClick={() => handleBallScanProduce(row)}
-                  disabled={greyed || busy}
-                  title="What Produce runs, with the report attached — scan for resting balls, then trace every candidate that sat 7s or longer, straight from the measured rest position and the frame it went. Same clips, plus a per-stage timing breakdown."
-                >
-                  ⚪▶ Scan &amp; produce
-                </button>
+                {/* BACK BEHIND THE DEBUG FLAG, because the sentence
+                    that took it out no longer holds. It was here
+                    unconditionally because it ran exactly what Produce
+                    ran, so it was the only view of what a produce had
+                    done -- gating that behind a setting switched off
+                    wherever the explaining was needed was backwards.
+                    Produce is the ascent path now, and Find ascents is
+                    the button that explains it. This one runs a
+                    detector nothing in production uses any more, and
+                    still commits clips: on the card beside the real
+                    one it is a trap, not a tool. Kept in dev, where
+                    comparing the two on real footage is the point. */}
+                {produceDebug.enabled && (
+                  <button
+                    className="small ghost"
+                    onClick={() => handleBallScanProduce(row)}
+                    disabled={greyed || busy}
+                    title="Dev: the OLD detector — scan for balls at rest, then trace every candidate that sat 7s or longer. Produce no longer uses this; it is here to compare against the ascent path on real footage. It does commit clips."
+                  >
+                    ⚪▶ Scan &amp; produce
+                  </button>
+                )}
                 {/* THE OPPOSITE QUESTION. Scan & produce finds a ball
                     SITTING and infers a swing followed, which is what a
                     shoe and a clubhead can both pass. This finds the
