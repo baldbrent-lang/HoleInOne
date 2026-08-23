@@ -8245,7 +8245,22 @@ function BallScanModal({ state, onClose }) {
                           f{sp.last_frame}{" "}
                           <span className="muted">({sp.last_sec}s)</span>
                         </td>
-                        <td style={{ padding: "3px 8px" }}>{sp.held_sec}s</td>
+                        <td style={{ padding: "3px 8px" }}>
+                          {sp.held_sec}s
+                          {/* HOW FAR THE SIGHTINGS SCATTERED. A teed ball
+                              does not move: every sighting lands on the
+                              same pixel bar the camera's own shake. A
+                              shoe under a waiting player shuffles. Shown
+                              rather than acted on, so the threshold can
+                              be read off real balls and real shoes side
+                              by side instead of guessed. */}
+                          {sp.wobble_px != null && (
+                            <div className="tiny muted"
+                                 title="How far this spot's sightings scattered around their own average. A ball at rest should be a fraction of a pixel; anything that shuffles is not sitting still.">
+                              ±{sp.wobble_px}px
+                            </div>
+                          )}
+                        </td>
                         <td style={{ padding: "3px 8px" }}>
                           {sp.gone_frame != null ? (
                             <b>f{sp.gone_frame}{" "}

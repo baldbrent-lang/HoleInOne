@@ -8174,6 +8174,83 @@ def detect_swings_from_ai_ball(
 SKIN_HUE_MAX = 20
 
 
+# HOW MUCH OF THE RING AROUND A BLOB MAY BE SOMETHING OTHER THAN GRASS
+# BEFORE IT COUNTS AS ATTACHED, as a fraction of the full circle. 0.28 is
+# about 100 degrees.
+#
+# CONTIGUOUS is the whole point, and it is what a fraction cannot say. A
+# ball at the edge of a divot, beside a tee peg, or half in its own
+# shadow has non-grass scattered around it and is still a ball sitting
+# on the ground. A shoe has more shoe on one side; a knee has more leg.
+# The difference is not how much non-grass there is, it is whether it
+# is all in ONE PLACE -- which is what "connected to something" means
+# when the only thing you can measure is a ring of pixels.
+# Measured on synthetic turf patches: a ball on clean grass, beside a
+# tee peg, beside a divot and in its own shadow all score 0.000, because
+# none of that is a STEM. The smallest shoe tried scores 0.194 and a knee
+# 0.333. 0.17 sits between with room on both sides, and it is placed
+# nearer the shoe end on purpose: a shoe kept is one bad clip, a ball
+# rejected is a shot nobody gets.
+_ATTACH_ARC_MAX = 0.17
+_ATTACH_BINS = 36
+
+
+def _ring_attachment(hsv, mask, cx: float, cy: float, rad: float):
+    """The largest unbroken arc of non-grass around a blob, 0..1.
+
+    A resting ball is an ISLAND: turf on every side, all the way round.
+    Whatever else is ball-white and ball-sized in a tee box -- the bright
+    toe of a shoe, a sunlit knuckle, a clubhead -- is a piece of
+    something larger, and the rest of that something occupies a
+    continuous sector of the ring.
+
+    Returns (arc_fraction, bins_attached) so a caller can report the
+    number as well as act on it.
+    """
+    h, w = mask.shape[:2]
+    r_out = 3.2 * rad
+    x0, x1 = max(0, int(cx - r_out)), min(w, int(cx + r_out) + 1)
+    y0, y1 = max(0, int(cy - r_out)), min(h, int(cy + r_out) + 1)
+    if x1 - x0 < 5 or y1 - y0 < 5 or rad <= 0:
+        return 0.0, 0        # at the crop edge there is no ring to read
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    dx = xx - cx
+    dy = yy - cy
+    d2 = dx * dx + dy * dy
+    ring = (d2 >= (1.8 * rad) ** 2) & (d2 <= r_out ** 2)
+    if int(ring.sum()) <= 0:
+        return 0.0, 0
+    sub = hsv[y0:y1, x0:x1]
+    _h, _s, _v = sub[:, :, 0], sub[:, :, 1], sub[:, :, 2]
+    # GRASS, by the same reading the rest of this file uses: green-ish
+    # hue with real saturation. Turf goes golden in late light, so the
+    # band is wide -- this is deciding "is this the ground" and being
+    # wrong towards grass only ever keeps a candidate.
+    grass = (_h >= 20) & (_h <= 95) & (_s >= 40)
+    attached = ((mask[y0:y1, x0:x1] > 0) | ~grass) & ring
+    ang = np.arctan2(dy, dx)
+    bins = ((ang + np.pi) / (2 * np.pi) * _ATTACH_BINS).astype(np.int32)
+    bins = np.clip(bins, 0, _ATTACH_BINS - 1)
+    hot = np.zeros(_ATTACH_BINS, dtype=bool)
+    for b in range(_ATTACH_BINS):
+        m = ring & (bins == b)
+        n = int(m.sum())
+        if n <= 0:
+            continue
+        hot[b] = (float((attached & m).sum()) / n) > 0.5
+    if not hot.any():
+        return 0.0, 0
+    if hot.all():
+        return 1.0, _ATTACH_BINS
+    # Longest run, wrapping: a shoe's stem does not care where bin 0 is.
+    run = best = 0
+    for b in list(range(_ATTACH_BINS)) * 2:
+        run = run + 1 if hot[b] else 0
+        best = max(best, run)
+    best = min(best, _ATTACH_BINS)
+    return round(best / float(_ATTACH_BINS), 3), int(best)
+
+
 def _sits_on_grass(hsv, mask, cx: float, cy: float, rad: float,
                    min_grass: float = 0.8, max_white: float = 0.25,
                    max_skin: float = 0.12) -> bool:
@@ -8304,6 +8381,16 @@ def _gate_ball_blob(c, mask, hsv, scale: float, r_lo: float, r_hi: float,
             return False, "not round", meas
         if (a / float(bw * bh)) < extent_min:
             return False, "does not fill its box", meas
+    # NOT CONNECTED TO ANYTHING. A ball is an island; a shoe's bright toe
+    # has the rest of the shoe behind it and a knuckle has the rest of a
+    # hand. Measured as the longest unbroken arc of the ring that is not
+    # turf, so a ball beside a divot or a tee peg -- scattered non-grass,
+    # no stem -- is untouched by it.
+    _arc, _bins = _ring_attachment(hsv, mask, cx, cy, rad)
+    meas["attach_arc"] = _arc
+    if _arc > _ATTACH_ARC_MAX:
+        return False, (f"attached to something — {round(_arc * 360)}deg of "
+                       f"the ring around it is not grass, in one piece"), meas
     if not _sits_on_grass(hsv, mask, cx, cy, rad):
         return False, "not surrounded by grass", meas
     return True, None, meas
@@ -9470,7 +9557,15 @@ def scan_resting_balls(
         crop_roi = roi_bbox_fractions(roi) if angled else roi
         gap_frames = max(step, int(confirm_frames)
                          or int(round(float(gap_sec) * _fps)))
-        # [sum_x, sum_y, sum_r, votes, first_frame, last_frame, closed]
+        # [sum_x, sum_y, sum_r, votes, first, last, closed, sx2, sy2]
+        #
+        # THE SQUARES ARE FOR STILLNESS. A teed ball does not move: every
+        # sighting of it lands on the same pixel, give or take the
+        # camera's own shake. A shoe under a player waiting to hit
+        # shuffles, and a clubhead is only ever briefly in one place --
+        # so how far the sightings scatter around their own average
+        # separates them, and nothing else here asks that question. Kept
+        # as running sums so it costs nothing per sighting.
         clusters: list = []
         f = seen = 0
         while True:
@@ -9513,9 +9608,12 @@ def scan_resting_balls(
                         cl[2] += r
                         cl[3] += 1
                         cl[5] = f
+                        cl[7] += x * x
+                        cl[8] += y * y
                         break
                 else:
-                    clusters.append([x, y, r, 1.0, f, f, False])
+                    clusters.append([x, y, r, 1.0, f, f, False,
+                                     x * x, y * y])
             f += 1
     except Exception as exc:  # noqa: BLE001
         out["reason"] = f"scan failed: {exc}"
@@ -9531,6 +9629,17 @@ def scan_resting_balls(
             "first_sec": round(int(cl[4]) / _fps, 2),
             "last_sec": round(int(cl[5]) / _fps, 2),
             "held_sec": round((int(cl[5]) - int(cl[4])) / _fps, 2),
+            # HOW FAR THE SIGHTINGS SCATTERED, in pixels. Reported, not
+            # gated -- a number nobody has seen on real footage yet
+            # should not be deciding anything, and the last time a
+            # sensible-sounding gate went in untested it cost real
+            # detections. It is here so the table can show a ball at half
+            # a pixel beside a shoe at four, and the threshold can then
+            # be set from those two columns rather than from reasoning.
+            "wobble_px": round(float(
+                (max(0.0, cl[7] / cl[3] - (cl[0] / cl[3]) ** 2)
+                 + max(0.0, cl[8] / cl[3] - (cl[1] / cl[3]) ** 2)) ** 0.5
+            ), 2),
         }
         for cl in clusters if cl[3] >= min_votes
     ]
