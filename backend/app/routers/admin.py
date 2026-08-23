@@ -17588,9 +17588,14 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
     fps = float(probe_fps(src_path) or 0.0) or 30.0
     _t = time.perf_counter()
     scan = _ball_scan_run(row, src_path, db, progress=progress)
+    # A WHITELIST, so anything the scan learns has to be added here to
+    # come out. `sweep` was not on it, so the sweep ran, drew its
+    # picture, reported "2 seen leaving" in the stage line -- and the
+    # image was dropped on the way out, leaving the commentary with
+    # nothing to point at.
     rep["scan"] = {k: scan.get(k) for k in
                    ("reason", "roi", "roi_source", "overview_url", "spots",
-                    "descents")}
+                    "descents", "sweep")}
     # THE SCAN'S OWN BREAKDOWN, carried through. Stage 1 below is the
     # whole scan as one number, which on a long video is most of the run
     # -- and "most of the run is the scan" is not an answer, it is the
