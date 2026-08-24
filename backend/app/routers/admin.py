@@ -18115,6 +18115,7 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     out["n_frames_searched"] = sum(b - a + 1 for a, b in _wins)
     out["n_frames_green"] = _n_green
     if not _wins:
+        _ascent_window_views(row, _gp, out, _clips, _gfps)
         out["reason"] = "no swing had an impact frame to search from"
         return out
 
@@ -18160,6 +18161,15 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     out["sweep"] = _sweep
     out["events"] = _events
     if not _events:
+        # THE PICTURES MATTER MOST WHEN NOTHING WAS FOUND. This used to
+        # return here, before they were built -- so the one outcome that
+        # cannot be diagnosed from the summary line, "no ball anywhere",
+        # was also the one outcome with no picture to look at. Whether
+        # the detector put dots on the ball and the linker lost them, or
+        # the window is simply pointed at the wrong three seconds, is
+        # visible in the heat map and nowhere else.
+        _ascent_window_views(row, _gp, out, _clips, _gfps)
+        out.pop("dets_all", None)
         out["reason"] = (
             f"no ball seen coming down in the {len(_wins)} flight "
             f"window(s) searched — " + " · ".join(_reasons))
