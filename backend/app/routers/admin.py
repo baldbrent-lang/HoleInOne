@@ -5332,6 +5332,49 @@ def list_long_uploads(
             )
         return out
 
+    def _reap_stalled_produce(row_) -> None:
+        """A run that died leaves the row busy forever. End it.
+
+        SAYING "STALLED" WAS NOT ENOUGH. The card knew: no job was
+        running, the row had claimed to be processing for a quarter of
+        an hour, and it said so in a tooltip -- "press Produce to start
+        again" -- next to a Produce button that the same `processing`
+        status had greyed out. An operator was told to press something
+        they could not press, forever.
+
+        The status is written by whatever starts a run and cleared by
+        whatever finishes it, so a worker that was restarted, deployed
+        over or killed mid-run leaves nothing behind to clear it. This
+        is the thing that clears it: the row is marked failed, with a
+        reason that says what happened rather than blaming the video, so
+        the card goes red, the buttons come back, and Produce is
+        pressable.
+
+        Only ever applied to a row the system has ALREADY concluded is
+        dead -- no live job, and past PRODUCE_STALE_SEC -- so it cannot
+        interrupt a run that is merely slow.
+        """
+        try:
+            row_.processing_status = "failed"
+            row_.processing_completed_at = _utcnow_naive()
+            row_.last_error = (
+                "the produce that claimed this upload is no longer "
+                "running — the worker was most likely restarted or "
+                "deployed over mid-run. Nothing was produced. Press "
+                "Produce to run it again."
+            )
+            db.add(row_)
+            db.commit()
+            log.warning(
+                "produce: upload %s claimed to be processing since %s with "
+                "nothing running — marked failed so the card is usable",
+                row_.id, row_.processing_started_at,
+            )
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            log.warning("produce: could not reap stalled upload %s: %s",
+                        getattr(row_, "id", None), exc)
+
     def _live_produce_stage(row_) -> dict:
         """Which stage this upload is on, if it is producing right now.
         Reported only while running — a stale stage left on a finished
@@ -5352,6 +5395,9 @@ def list_long_uploads(
                 _age = ((_utcnow_naive() - _since).total_seconds()
                         if _since else None)
                 _stalled = _age is None or _age >= PRODUCE_STALE_SEC
+                if _stalled:
+                    # END IT, rather than describing it. See above.
+                    _reap_stalled_produce(row_)
             return {"produce_stage": None, "produce_done": None,
                     "produce_total": None, "produce_stalled": _stalled}
         return {

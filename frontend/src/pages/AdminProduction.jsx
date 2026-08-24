@@ -15257,7 +15257,12 @@ export default function AdminProduction() {
 
       {visibleRows?.map((row) => {
         const state = uploadState(row, busyId === row.id);
-        const greyed = state === "processing";
+        // A STALLED ROW IS NOT A BUSY ROW. The backend reaps these on
+        // sight, but the card may be rendering a payload fetched just
+        // before that happened -- and the one thing it must never do is
+        // grey out the Produce button while telling the operator to
+        // press Produce.
+        const greyed = state === "processing" && !row.produce_stalled;
         const busy = busyId === row.id;
         // THE PREVIEW HAS TO BE THE NEW ONE THE MOMENT THE GREY LIFTS.
         // A re-produce can hand back the same URL with different bytes,
