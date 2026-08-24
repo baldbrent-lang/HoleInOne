@@ -22308,7 +22308,23 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             landing = _landing_arg
             _gfps_l = (float(probe_fps(green_path) or 0.0)
                        if green_path else 0.0)
-            if not landing and green_path and _gfps_l > 0 \
+            # ...BUT NOT FROM A COMET A PREVIOUS RUN LEFT BEHIND.
+            #
+            # This is the other half of the stale-landing bug. A caller
+            # that searched the green and found nothing passes no
+            # landing -- and then this resurrected one from whatever
+            # comet was last saved against the slot, which on a
+            # re-produce is the previous run's own output. The tee half
+            # is then held open for a ball that is not coming, up to
+            # D3_MAX_EXTRA_TEE_SEC of it, which is where a twenty-second
+            # clip comes from.
+            #
+            # `aim_without_landing` already means "this caller looked
+            # and found nothing, so invent nothing". It governs this
+            # too. The wizard, where a saved comet IS the operator's
+            # own work, is unaffected.
+            if not landing and aim_without_landing and green_path \
+                    and _gfps_l > 0 \
                     and _saved_green_track(row, _slot, _gfps_l):
                 _gt = _saved_green_track(row, _slot, _gfps_l)
                 _last = max(_gt, key=lambda q: int(q["frame"]))
