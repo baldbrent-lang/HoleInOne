@@ -2144,6 +2144,12 @@ def find_descents(
                 "why": why, **nums,
             })
 
+    # Detections by frame, for the settle walk below. Built once: it is
+    # read per accepted chain and there is no sense rebuilding it.
+    _by_frame: dict = {}
+    for _d0 in dets:
+        _by_frame.setdefault(int(_d0["frame"]), []).append(_d0)
+
     # EVERY CHAIN KEEPS ITS VERDICT, the way the ascent sweep does.
     #
     # `rejected` above is capped at 40 and holds a sentence each, which
@@ -2307,6 +2313,26 @@ def find_descents(
             _rej(pts, f"{len(pts)} point(s) across {_span_f} frames, "
                       f"{round(100 * _density)}% of them",
                  drop_px=int(drop), fall_rate=round(rate, 3))
+        # THE COMET FINISHES WHERE THE BALL DOES. `kept` ends at the
+        # pitch mark, which is right for measurement and wrong for a
+        # picture: a tracer that stops in mid-air above the ball reads
+        # as one that missed. The bounce and the roll are appended to
+        # what is DRAWN, and to nothing else -- `landing_xy` and
+        # `last_descent_frame` stay on the pitch mark, so the distance
+        # still means where the shot arrived rather than where it
+        # finished rolling.
+        _drawn = list(kept)
+        # The heading it landed on, from the last pair of the fall.
+        _lv = kept[-1], (kept[-2] if len(kept) >= 2 else kept[-1])
+        _svx = float(_lv[0]["x"]) - float(_lv[1]["x"])
+        _svy = float(_lv[0]["y"]) - float(_lv[1]["y"])
+        _settle = _settle_tail(
+            _by_frame, land,
+            min(f_hi, int(land["frame"]) + int(DESCENT_SETTLE_SEC * _fps)),
+            DESCENT_SETTLE_STEP_FRAC * (frame_w or 1280),
+            _svx, _svy or 1.0)
+        if _settle:
+            _drawn = _drawn + _settle
         _entry = {
             "first_frame": int(pts[0]["frame"]),
             "last_frame": int(pts[-1]["frame"]),
@@ -2330,8 +2356,9 @@ def find_descents(
             "points": [
                 {"frame": int(q["frame"]),
                  "x": int(round(q["x"])), "y": int(round(q["y"]))}
-                for q in kept
+                for q in _drawn
             ],
+            "n_settle_points": len(_settle),
             "tilt_deg": round(tilt, 1),
             "step_dev_frac": round(step_dev, 2),
             "density": round(_density, 2),
@@ -2793,6 +2820,75 @@ def _rising_tail(pts):
     while i > 0 and float(pts[i]["y"]) < float(pts[i - 1]["y"]):
         i -= 1
     return pts[i:]
+
+
+# HOW LONG TO FOLLOW A BALL AFTER IT LANDS, and how far it may travel
+# between sightings while it does.
+#
+# The landing is the PITCH MARK -- where the fall flattened -- and that
+# is deliberately where measurement stops, because a distance is about
+# where the shot arrived rather than where it finished rolling. The
+# COMET is a different question: it is a picture, and a picture that
+# stops in mid-air above the ball reads as a tracer that missed.
+#
+# Measured on a real landing: pitch mark at f2270 (1119,376), first
+# bounce at f2275 (1137,419), settled by f2287 at (1139,424) and still
+# there at f2300. A second of following, and a bound of a fiftieth of
+# the frame width between sightings, covers that without wandering off
+# onto whatever else is moving nearby.
+DESCENT_SETTLE_SEC = 1.2
+# HOW FAR THE BALL MAY BE FROM WHERE IT WAS LAST SEEN, as a fraction of
+# frame width. A bounce is not a small step: measured, a ball pitching
+# at (1119,376) was next seen at (1137,419), 47px away, having been
+# airborne in between. A quarter of that would have lost it.
+DESCENT_SETTLE_STEP_FRAC = 0.045
+
+
+def _settle_tail(dets_by_frame, land, f_hi, step_px, vx, vy):
+    """The bounce and the roll, from the pitch mark to where it stops.
+
+    A BOUNCING BALL KEEPS GOING THE WAY IT WAS GOING, and that is the
+    rule this needs rather than "take the nearest". The pitch mark goes
+    on firing the motion detector for a second after the ball has left
+    it -- a divot, a mark, the grass springing back -- so a nearest-first
+    walk sits on the landing pixel at distance zero and never follows
+    the ball anywhere. Measured on a real landing: detections at exactly
+    (1119,376) on every frame from f2271 to f2278 while the ball itself
+    was already at (1137,419).
+
+    So candidates are scored on how far they carry the ball ALONG its
+    heading. The stale mark scores zero, the bounce scores well, and
+    something drifting the other way scores negative and is refused.
+    """
+    out = []
+    cx, cy = float(land["x"]), float(land["y"])
+    _n = (vx * vx + vy * vy) ** 0.5 or 1.0
+    ux, uy = vx / _n, vy / _n
+    f = int(land["frame"]) + 1
+    while f <= f_hi:
+        best = None
+        for d in dets_by_frame.get(f, ()):
+            _dx, _dy = float(d["x"]) - cx, float(d["y"]) - cy
+            if _dx * _dx + _dy * _dy > step_px * step_px:
+                continue
+            _along = _dx * ux + _dy * uy
+            if _along < 0:
+                continue
+            if best is None or _along > best[0]:
+                best = (_along, d)
+        if best is not None:
+            _d = best[1]
+            cx, cy = float(_d["x"]), float(_d["y"])
+            # A DETECTION ON THE SAME PIXEL IS NOT A NEW POSITION. The
+            # ball at rest goes on firing the detector for a while, and
+            # forty comet points on one spot is a blob, not a tail.
+            _prev = out[-1] if out else land
+            if (abs(cx - float(_prev["x"]))
+                    + abs(cy - float(_prev["y"]))) >= 2:
+                out.append({"frame": int(_d["frame"]),
+                            "x": int(round(cx)), "y": int(round(cy))})
+        f += 1
+    return out
 
 
 def _falling_tail(pts):

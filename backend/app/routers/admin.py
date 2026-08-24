@@ -17925,6 +17925,17 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
         if progress:
             progress(f"Producing clip {_idx + 1}", _idx, _n_spot)
         try:
+            # HAND THE COMET OVER BEFORE RENDERING. `_render_green_comet`
+            # prefers a saved track to its own search, and reads it off
+            # the swing record -- so the descent this run measured is
+            # put there first rather than being re-found from scratch
+            # and possibly differently.
+            if c.get("green_track"):
+                _d3_save_swing(db, row.id, _idx,
+                               {"idx": _idx,
+                                "green_track": c["green_track"]},
+                               float((rep.get("descents") or {})
+                                     .get("delta_sec") or 0.0))
             _out = run_wizard_produce_job(
                 upload_id=row.id,
                 ball_xy=[float(c["ball"][0]), float(c["ball"][1])],
@@ -17952,6 +17963,13 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                 # from a real landing, so there is nothing to fabricate.
                 landing_frame=c.get("landing_frame"),
                 landing_spot=c.get("landing_spot"),
+                # NOTHING IS INVENTED WHEN NOTHING WAS SEEN. A swing
+                # with no descent gets the tee tracer and stops where
+                # the ball was last actually tracked -- no arc to the
+                # flag, no comet, no guess about where it came down. A
+                # ball can miss the green, and a tracer that draws it
+                # arriving anyway is worse than one that stops short.
+                aim_without_landing=False,
             ) or {}
             c["ok"] = bool(_out.get("ok"))
             c["clip_url"] = _out.get("url") or _out.get("clip_url")
@@ -18282,6 +18300,13 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
                              int(_e["landing_xy"][1])]
         c["landing_sec"] = _e.get("last_descent_sec")
         c["landing_points"] = _e.get("n_points_drawn")
+        # THE COMET IS THE CHAIN WE ALREADY HAVE. Without this the
+        # renderer re-derives it with `find_path`, walking back from the
+        # landing and capable of a different answer than the search that
+        # produced the landing in the first place -- and it stops at the
+        # pitch mark, where these points carry on through the bounce to
+        # where the ball actually came to rest.
+        c["green_track"] = _e.get("points") or []
         c["landing_reason"] = (
             f"came down at {c['landing_spot'][0]},{c['landing_spot'][1]} "
             f"on the green at f{c['landing_frame']} "
@@ -21240,6 +21265,11 @@ def run_wizard_produce_job(
     # from blobs is exactly what the operator just overruled by hand.
     points=None,
     launch_frame: int | None = None,
+    # AIM AT A SAVED TARGET WHEN NO LANDING WAS FOUND? True for the edit
+    # wizard, where a target on the record is a human's instruction.
+    # False for an automatic produce, where it would be a guess dressed
+    # as a measurement -- see `_d3_fast_produce`.
+    aim_without_landing: bool = True,
 ) -> dict:
     """Stages 4-8, from the operator's ball and impact frame.
 
@@ -21425,6 +21455,7 @@ def run_wizard_produce_job(
                 # it writes, which is right for a re-produce of the whole
                 # thing and catastrophic for "and now there is one more".
                 replace=not solo,
+                aim_without_landing=aim_without_landing,
                 end_green_sec=_end_sec,
                 landing=(
                     {"sec": _land_sec, "xy": list(landing_spot)}
@@ -21938,7 +21969,8 @@ def _detach_clip_refs(db, clip_ids) -> dict:
 
 def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                      hole_number=None, end_green_sec=None,
-                     landing=None, replace=True) -> dict:
+                     landing=None, replace=True,
+                     aim_without_landing=True) -> dict:
     """Build the shipped clip STRAIGHT from Debug3's numbers.
 
     Stage 8 used to re-run the whole production pipeline
@@ -22376,7 +22408,21 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # It is second, not first: the landing is where the ball
             # ACTUALLY went, the flag is where it was aimed, and on a
             # miss those are not the same place.
-            if _target_xy is None:
+            # ...BUT NOT WHEN THE CALLER SAYS NOT TO. An operator who
+            # marked a target asked for the tracer to go there. An
+            # automatic produce that found no descent has been told
+            # nothing of the kind: aiming at the flag then draws the
+            # shot the golfer meant to hit rather than the one they hit,
+            # and on the miss that produced no descent those are not the
+            # same place -- which is exactly the swing where a viewer
+            # can tell.
+            if _target_xy is None and not aim_without_landing:
+                log.info(
+                    "d3 produce: swing %s found no landing and will not "
+                    "be aimed at a target — the tracer stops where the "
+                    "ball was last seen", i,
+                )
+            elif _target_xy is None:
                 _em = row.edit_metrics or {}
                 _sw_t = None
                 for _s in (_em.get("swings") or []):
