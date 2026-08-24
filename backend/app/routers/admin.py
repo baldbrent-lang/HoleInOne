@@ -18073,7 +18073,14 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
                      "from the shots themselves", 0, 0)
         try:
             _t_d = time.perf_counter()
-            _full = _d3.find_descents(_gp, fps=_gfps, detectors=("diff",))
+            # NOT DIFF ALONE. The cheap detector is the right first
+            # choice on a steady camera and useless on a shaking one:
+            # measured on a wind-shaken green, frame differencing found
+            # zero descents in the whole clip where mog2 found the ball.
+            # The plate detector is left out -- it is the one that costs
+            # minutes rather than seconds.
+            _full = _d3.find_descents(_gp, fps=_gfps,
+                                      detectors=("mog2", "diff"))
             _ev_all = list(_full.get("events") or [])
             _d, _n_agree, _pairs_all = _ascent_derive_delta(
                 _clips, _ev_all, fps, _gfps)
@@ -21704,8 +21711,12 @@ def _d3_green_delta_sec(db, row) -> tuple[float, str]:
     if t_tee is not None and t_green is not None:
         return (t_green - t_tee).total_seconds(), "upload_stamps"
     try:
+        # A STORED ZERO IS NOT AN ANSWER. See `_d3_save_swing`: a zero
+        # here is a previous run's assumption written back, and reading
+        # it as a source is what stopped the "these clocks were never
+        # measured" warning from ever being printed again.
         _saved = (row.edit_metrics or {}).get("tee_green_delta_sec")
-        if _saved is not None:
+        if _saved is not None and abs(float(_saved)) > 1e-6:
             return float(_saved), "edit_metrics"
     except (TypeError, ValueError):
         pass
@@ -21758,7 +21769,24 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
         em = dict(r2.edit_metrics or {})
         # Keep the offset that produced this cut, so a later run (or an
         # operator wondering why the green half is early) can see it.
-        em["tee_green_delta_sec"] = round(float(delta_sec), 4)
+        #
+        # BUT NEVER RECORD A ZERO. This is where the offset became a
+        # self-confirming lie: `_d3_green_delta_sec` falls through to an
+        # ASSUMED zero when no camera handed over a wall clock, the
+        # produce then wrote that assumption back here, and the next run
+        # read it as `edit_metrics` -- a source that outranks the
+        # assumption it actually was. One run's guess became every later
+        # run's fact, and the warning that it was a guess stopped being
+        # printed.
+        #
+        # A genuinely measured zero does not happen: it would mean two
+        # cameras began recording in the same microsecond. And nothing
+        # is lost by declining to store it, because zero is exactly what
+        # the fallback already returns.
+        if abs(float(delta_sec)) > 1e-6:
+            em["tee_green_delta_sec"] = round(float(delta_sec), 4)
+        else:
+            em.pop("tee_green_delta_sec", None)
         swings = [s for s in (em.get("swings") or []) if isinstance(s, dict)]
         prior = next(
             (s for s in swings if int(s.get("idx", -1)) == idx), None,
