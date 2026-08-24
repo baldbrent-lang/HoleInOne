@@ -7867,9 +7867,24 @@ function DescentWindow({ view, colors }) {
       <div className="tiny" style={{ marginBottom: 3 }}>
         <b>Swing {view.swing}</b>
         <span className="muted">
-          {" "}— green f{view.frames?.[0]}–{view.frames?.[1]}{" "}
-          ({view.secs?.[0]}–{view.secs?.[1]}s), {view.n_dets} detection(s)
+          {" "}— tee cam cut frame f{view.tee_frame}
+          {view.tee_at ? ` at ${clockOf(view.tee_at)}` : ""}
+          {" "}to green f{view.frames?.[0]}–{view.frames?.[1]}
+          {view.green_at
+            ? ` at ${clockOf(view.green_at)}–${clockOf(view.green_hi_at)}`
+            : ` (${view.secs?.[0]}–${view.secs?.[1]}s)`}
+          , {view.n_dets} detection(s)
         </span>
+        {/* THE OFFSET, WHERE THE ARITHMETIC IS. Two wall-clock times
+            printed side by side make an offset that is wrong by
+            twenty-five seconds obvious; frame numbers alone hide it
+            completely, which is how it survived this long. */}
+        {view.clock_measured === false && (
+          <span className="pill warn" style={{ marginLeft: 6 }}
+                title="These two times were not read off the cameras' clocks — the offset between the two files is being assumed, so this green window may be pointed at the wrong moment entirely.">
+            clocks assumed ({view.clock_source})
+          </span>
+        )}
         {chosen ? (
           <span className="pill ok" style={{ marginLeft: 6 }}>
             landed {chosen.landing_xy?.[0]}, {chosen.landing_xy?.[1]} at{" "}

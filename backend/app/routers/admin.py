@@ -6333,8 +6333,26 @@ def _clip_start_instant(db, row, which: str):
             ev = db.query(CameraEvent).filter(
                 CameraEvent.id == row.camera_event_id,
             ).first()
+        # THE STAMPS A MIRROR CARRIED OVER, read here too. These are
+        # CameraEvent columns and a mirrored pair has no CameraEvent, so
+        # the importer files them in edit_metrics -- `_d3_green_delta_sec`
+        # has read them from there for a while and this did not, which
+        # meant the offset came off the real clocks while the CLOCK
+        # ITSELF fell back to base_captured_at. Same two stamps, same
+        # subtraction, one place they are read.
+        _em = getattr(row, "edit_metrics", None) or {}
+        _key = ("source_green_started_at" if str(which).lower() == "green"
+                else "source_tee_started_at")
+        _mirrored = None
+        if _em.get(_key):
+            try:
+                _mirrored = datetime.fromisoformat(
+                    str(_em[_key]).replace("Z", ""))
+            except (TypeError, ValueError):
+                _mirrored = None
         if str(which).lower() == "green":
-            start = getattr(ev, "green_recording_started_at", None)
+            start = (getattr(ev, "green_recording_started_at", None)
+                     or _mirrored)
             if start is None:
                 _tee = (getattr(ev, "tee_recording_started_at", None)
                         or getattr(row, "base_captured_at", None))
@@ -6342,7 +6360,8 @@ def _clip_start_instant(db, row, which: str):
                     delta, _ = _d3_green_delta_sec(db, row)
                     start = _tee + timedelta(seconds=float(delta))
         else:
-            start = getattr(ev, "tee_recording_started_at", None)
+            start = (getattr(ev, "tee_recording_started_at", None)
+                     or _mirrored)
         return start if start is not None else getattr(
             row, "base_captured_at", None)
     except Exception as exc:  # noqa: BLE001
@@ -18034,6 +18053,12 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         # from the assumed default it was probably written from -- a
         # previous run's assumption saved back and then trusted as if
         # somebody had established it.
+        _tee_start = _clip_start_instant(db, row, "tee")
+        _green_start = _clip_start_instant(db, row, "green")
+        out["tee_clip_starts_at"] = (_tee_start.isoformat()
+                                     if _tee_start else None)
+        out["green_clip_starts_at"] = (_green_start.isoformat()
+                                       if _green_start else None)
         out["delta_measured"] = (
             _dsrc in ("camera_event", "mirrored_stamps", "upload_stamps")
             or (_dsrc == "edit_metrics" and abs(float(_delta)) > 1e-6))
@@ -18122,7 +18147,8 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     out["n_frames_searched"] = sum(b - a + 1 for a, b in _wins)
     out["n_frames_green"] = _n_green
     if not _wins:
-        _ascent_window_views(row, _gp, out, _clips, _gfps)
+        _ascent_window_views(row, _gp, out, _clips, _gfps, fps,
+                             _tee_start, _green_start)
         out["reason"] = "no swing had an impact frame to search from"
         return out
 
@@ -18175,7 +18201,8 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         # the detector put dots on the ball and the linker lost them, or
         # the window is simply pointed at the wrong three seconds, is
         # visible in the heat map and nowhere else.
-        _ascent_window_views(row, _gp, out, _clips, _gfps)
+        _ascent_window_views(row, _gp, out, _clips, _gfps, fps,
+                             _tee_start, _green_start)
         out.pop("dets_all", None)
         out["reason"] = (
             f"no ball seen coming down in the {len(_wins)} flight "
@@ -18264,7 +18291,8 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
             f"{_e.get('tilt_deg')} degrees off vertical")
         out["n_matched"] += 1
 
-    _ascent_window_views(row, _gp, out, _clips, _gfps)
+    _ascent_window_views(row, _gp, out, _clips, _gfps, fps,
+                         _tee_start, _green_start)
     out.pop("dets_all", None)
     out["ok"] = out["n_matched"] > 0
     out["reason"] = (
@@ -18289,7 +18317,9 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
 ASCENT_VIEW_MAX_DOTS = 1200
 
 
-def _ascent_window_views(row, src_green, out, clips, g_fps) -> None:
+def _ascent_window_views(row, src_green, out, clips, g_fps,
+                         tee_fps=None, tee_start=None,
+                         green_start=None) -> None:
     """One picture per swing: its own three seconds, and nothing else.
 
     WHY PER SWING AND NOT ONE PICTURE. A single frame carrying every
@@ -18367,8 +18397,32 @@ def _ascent_window_views(row, src_green, out, clips, g_fps) -> None:
                         "n_points": z.get("n_points"),
                     })
                 _ch.sort(key=lambda t: (not t["chosen"], len(t["why"])))
+                # THE CONVERSION, SPELLED OUT ON THE CLOCK. "green
+                # f2236-2326" is a position in a file and says nothing
+                # about whether it is the right file position. The tee
+                # frame, the wall-clock instant of that frame, and the
+                # green frames it maps to are the whole arithmetic, and
+                # an offset that is wrong by twenty-five seconds is
+                # obvious the moment the two times are printed side by
+                # side -- where it is invisible in frame numbers alone.
+                _tf = c.get("impact_frame")
+                _tee_at = _green_at = _green_hi_at = None
+                if tee_start is not None and _tf is not None and tee_fps:
+                    _tee_at = (tee_start + timedelta(
+                        seconds=float(_tf) / float(tee_fps))).isoformat()
+                if green_start is not None:
+                    _green_at = (green_start + timedelta(
+                        seconds=_flo / g_fps)).isoformat()
+                    _green_hi_at = (green_start + timedelta(
+                        seconds=_fhi / g_fps)).isoformat()
                 _views.append({
                     "swing": ci + 1,
+                    "tee_frame": _tf,
+                    "tee_at": _tee_at,
+                    "green_at": _green_at,
+                    "green_hi_at": _green_hi_at,
+                    "clock_source": out.get("delta_source"),
+                    "clock_measured": bool(out.get("delta_measured")),
                     "frames": [_flo, _fhi],
                     "secs": [round(_flo / g_fps, 2), round(_fhi / g_fps, 2)],
                     "shown_frame": int(_at),
