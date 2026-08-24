@@ -2171,7 +2171,20 @@ def find_descents(
         # See `_falling_tail`. Measured on a hand-plotted landing, this
         # is the difference between "138px at 0.16 with a step deviation
         # of 999" and the six points that are actually the ball.
-        pts = _falling_tail(pts)
+        # AND THEN ONLY THE PART GOING ONE WAY. `_falling_tail` cuts
+        # back to where the chain started going DOWN, which is not the
+        # same frame as where it started going STRAIGHT down, and the
+        # difference is what the ascent side needed `_smooth_tail` for.
+        #
+        # Measured on a real descent: seven consecutive frames dropping
+        # 16, 16, 17, 18, 18, 18, 20 pixels -- gravity, to the pixel --
+        # with two points stapled on the front, one of them 46px
+        # sideways and five frames earlier. Going down by two pixels
+        # counts as falling, so the tail kept both, and the chain then
+        # measured bend 12.9 against a limit of 10 and a step deviation
+        # of 0.98 against 0.35. It was refused twice over for carrying
+        # junk that is not part of the fall.
+        pts = _smooth_tail(_falling_tail(pts), int(min_points))
         if len(pts) < int(min_points):
             continue
         _why: list = []
