@@ -15997,6 +15997,11 @@ def _debugx_set(kind: str, upload_id: int, **fields) -> None:
     with _debugx_lock:
         st = _debugx_state.setdefault((kind, upload_id), {})
         st.update(fields)
+        # WHEN THIS RUN LAST SAID ANYTHING. A run that dies stops
+        # updating and its `running` flag stays True for the life of the
+        # process; `_debugx_start` then refuses to start another one
+        # forever. The timestamp is what lets that refusal expire.
+        st["heartbeat"] = time.monotonic()
 
 
 def _debugx_get(kind: str, upload_id: int) -> dict:
@@ -16007,7 +16012,36 @@ def _debugx_get(kind: str, upload_id: int) -> dict:
 def _debugx_start(kind: str, upload_id: int, runner) -> dict:
     """Kick `runner(row, src_path, db, progress)` on a thread."""
     with _debugx_lock:
-        if (_debugx_state.get((kind, upload_id)) or {}).get("running"):
+        _st0 = _debugx_state.get((kind, upload_id)) or {}
+        # A RUN THAT STOPPED SAYING ANYTHING IS NOT RUNNING.
+        #
+        # This flag lives in memory and is cleared by whatever finishes
+        # the run. A worker killed mid-produce -- restarted, deployed
+        # over, scaled down -- clears nothing, so the flag stays True and
+        # every later attempt is declined with `started: False`. The
+        # caller puts the row's status back and returns, so the card
+        # shows the PREVIOUS run's clips and the button looks like it
+        # produced the wrong thing rather than like it did nothing.
+        #
+        # That is the shape of "Re-Produce still only makes one clip
+        # while Produce ascents makes three": the two buttons file under
+        # different kinds, so one key was stuck and the other was not,
+        # and the same code appeared to behave differently.
+        #
+        # The row-level reaper elsewhere fixes the DATABASE side of the
+        # same death. This is the in-memory side, and it needed the same
+        # treatment.
+        _hb = _st0.get("heartbeat")
+        _dead = (_st0.get("running")
+                 and _hb is not None
+                 and (time.monotonic() - _hb) >= PRODUCE_STALE_SEC)
+        if _dead:
+            log.warning(
+                "%s: upload %s still flagged running with no heartbeat for "
+                "%.0fs — treating it as dead and starting a new run",
+                kind, upload_id, time.monotonic() - _hb,
+            )
+        if _st0.get("running") and not _dead:
             # `started: False` matters to the caller. The Produce endpoint
             # flips the row to "pending" BEFORE calling this, so a decline
             # it cannot see leaves a row queued for a job that will never
@@ -19295,8 +19329,21 @@ def ball_scan_produce_status(upload_id: int):
 
 @router.post("/long-uploads/{upload_id}/ascent-produce")
 def ascent_produce(upload_id: int):
-    """Find every ball LEAVING the tee, then produce a clip for each."""
-    return _debugx_start("ascentproduce", upload_id, _ascent_produce_run)
+    """Find every ball LEAVING the tee, then produce a clip for each.
+
+    THE SAME RUNNER PRODUCE USES, not merely the same detector. It was
+    `_ascent_produce_run` directly while Produce went through
+    `_produce_run`, which wraps it in the row's status bookkeeping --
+    "the same code" in the sense that mattered least, since the two
+    buttons could still behave differently and did. There is now one
+    entry point and one place to change; the only difference left is
+    which `_debugx` kind the progress is filed under, which is what
+    decides whether the card narrates it or the modal does.
+    """
+    return _debugx_start(
+        "ascentproduce", upload_id,
+        functools.partial(_produce_run, debug_artifacts=False),
+    )
 
 
 @router.get("/long-uploads/{upload_id}/ascent-produce/status")
