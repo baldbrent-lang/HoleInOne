@@ -17976,12 +17976,22 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
             # the swing record -- so the descent this run measured is
             # put there first rather than being re-found from scratch
             # and possibly differently.
-            if c.get("green_track"):
-                _d3_save_swing(db, row.id, _idx,
-                               {"idx": _idx,
-                                "green_track": c["green_track"]},
-                               float((rep.get("descents") or {})
-                                     .get("delta_sec") or 0.0))
+            # `landing_searched` says this run LOOKED at the green for
+            # this swing, so a None landing here means "there was
+            # nothing there" rather than "this run had nothing to say".
+            # Without it a stale landing from an earlier run survives
+            # forever and the clip is cut to it -- see `_d3_save_swing`.
+            _d3_save_swing(db, row.id, _idx,
+                           {"idx": _idx,
+                            "landing_searched": True,
+                            "green_track": c.get("green_track") or None,
+                            "landing_frame": c.get("landing_frame"),
+                            "landing_spot": (
+                                {"x": c["landing_spot"][0],
+                                 "y": c["landing_spot"][1]}
+                                if c.get("landing_spot") else None)},
+                           float((rep.get("descents") or {})
+                                 .get("delta_sec") or 0.0))
             _out = run_wizard_produce_job(
                 upload_id=row.id,
                 ball_xy=[float(c["ball"][0]), float(c["ball"][1])],
@@ -18156,7 +18166,23 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     # gates are. So when the offset was never measured, the whole green
     # clip is swept once with the cheap detector, and the offset that
     # explains the most swings at once is recovered from the shots.
-    if not out["delta_measured"] and len(_clips) >= 2:
+    # SOLVING FOR THE OFFSET IS OFF, and the reason is evidence rather
+    # than doubt about the method.
+    #
+    # A MIRRORED PAIR'S TWO FILES ARE CUT FROM THE SAME RECORDING, so
+    # they genuinely do start together and an assumed zero is not a
+    # guess that happens to be tolerable, it is the right answer. The
+    # cut has been correct on these pairs for weeks, which is the whole
+    # proof required.
+    #
+    # Against that, the solver costs a 69-second sweep of the clip and
+    # can, on two coincidental agreements, replace a correct zero with
+    # something else -- turning a working cut into a broken one to fix a
+    # problem the pair does not have. It stays for a pair whose files
+    # really did start apart, and that is not a case anything has yet
+    # produced. Set to True here to run it.
+    _SOLVE_FOR_OFFSET = False
+    if _SOLVE_FOR_OFFSET and not out["delta_measured"] and len(_clips) >= 2:
         if progress:
             progress("No clock on this pair — solving for the offset "
                      "from the shots themselves", 0, 0)
@@ -21937,9 +21963,35 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
         # operator had plotted by hand lost those points to the first
         # produce that could not find one itself, which is every
         # produce, since not finding one is why they were plotted.
+        # KEEP WHAT A PERSON PUT THERE. DROP WHAT A PREVIOUS RUN DID.
+        #
+        # This rule exists so a descent an operator plotted by hand is
+        # not lost to the first produce that cannot find one itself --
+        # which is every produce, since not finding one is why they were
+        # plotted. That is right, and it also quietly made a produce's
+        # OWN stale output immortal: a swing given the wrong landing
+        # once kept it through every later run, because a run that
+        # correctly finds nothing writes None and None never overwrites.
+        #
+        # Measured: swing 1 of one upload carried landing frame f3017,
+        # eighty-five seconds after its own impact, inherited from a run
+        # that had matched it to another swing's ball. The clip was cut
+        # to it every time, which is where the twenty-second clips came
+        # from.
+        #
+        # A hand-plotted comet is the signal that a person was here:
+        # `green_track` is only ever written by click-to-plot or by a
+        # produce that drew one, and `rec` says which of those this is.
+        # With one, everything is kept as before. Without one, a run
+        # that found no landing is believed -- it looked, and there was
+        # nothing there.
+        _by_hand = bool((prior or {}).get("green_track"))
         for _k in ("landing_frame", "landing_spot", "green_track"):
             if prior and prior.get(_k) is not None and rec.get(_k) is None:
-                merged[_k] = prior[_k]
+                if _by_hand or not rec.get("landing_searched"):
+                    merged[_k] = prior[_k]
+                else:
+                    merged.pop(_k, None)
         swings = [s for s in swings if int(s.get("idx", -1)) != idx]
         swings.append(merged)
         swings.sort(key=lambda s: int(s.get("idx", 0)))
