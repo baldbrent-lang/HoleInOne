@@ -15259,7 +15259,7 @@ export default function AdminProduction() {
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>Production queue</h3>
+        <h3 style={{ marginBottom: 4 }}>Production Queue</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
           Every uploaded long video, newest first. Multi-swing rounds
           auto-produce on upload; one-swing clips wait here until you
