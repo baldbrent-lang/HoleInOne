@@ -8047,10 +8047,13 @@ function ProduceStepSummary({ rep }) {
   push("other", "Unattributed", t.unattributed_sec, null, true);
 
   const fmt = (sec) => {
-    const v = sec || 0;
-    if (v < 60) return `${v.toFixed(1)}s`;
-    const m = Math.floor(v / 60);
-    return `${m}m ${String(Math.round(v % 60)).padStart(2, "0")}s`;
+    // ROUND FIRST, THEN SPLIT. Rounding the remainder on its own turns
+    // 119.6s into "1m 60s", because 59.6 rounds to 60 after the minute
+    // has already been taken off. Choosing the format from the rounded
+    // value keeps 59.96s from printing as "60.0s" for the same reason.
+    const v = Math.max(0, Math.round(sec || 0));
+    if (v < 60) return `${(sec || 0).toFixed(1)}s`;
+    return `${Math.floor(v / 60)}m ${String(v % 60).padStart(2, "0")}s`;
   };
   const pct = (sec) => (wall ? Math.round((100 * (sec || 0)) / wall) : 0);
 
@@ -14538,9 +14541,46 @@ export default function AdminProduction() {
               : kind === "ascentproduce" ? api.ascentProduceStatus
                 : kind === "ascentfind" ? api.ascentFindStatus
           : api.debug2Status;
+    // A POLL THAT FINDS NOTHING IS NOT A RUN THAT ENDED.
+    //
+    // The run's progress lives in one backend process's memory. On a
+    // multi-instance deployment this GET can land on a container that
+    // never saw the POST: it answers running=false with no report and no
+    // error, the loop below stops polling, and the dialog sits blank
+    // while the work is still going on elsewhere. That is what "it has
+    // been stuck for fifteen minutes" looks like from the outside.
+    //
+    // So keep asking. Another tick may reach the instance that has it,
+    // and a backend that restarted mid-run will never answer, which is
+    // worth saying out loud rather than showing an empty panel.
+    let unknownTicks = 0;
+    const UNKNOWN_LIMIT = 24;  // ~60s at 2.5s a tick
     const tick = async () => {
       try {
         const st = await statusCall(adminPassword, uploadId);
+        const lost = !st.running && !st.report && !st.error
+          && st.known === false;
+        if (lost && unknownTicks < UNKNOWN_LIMIT) {
+          unknownTicks += 1;
+          setter((prev) => ({
+            ...(prev || {}), running: true, uploadId,
+            stage: `Looking for the run on the backend… (${unknownTicks})`,
+            done: 0, total: 0,
+          }));
+          setTimeout(tick, 2500);
+          return;
+        }
+        if (lost) {
+          setter((prev) => ({
+            ...(prev || {}), running: false, uploadId, report: null,
+            error: "No backend reports a run for this upload. It may still "
+              + "be running on another instance, or the backend restarted "
+              + "and lost track of it. Check the card's status before "
+              + "pressing the button again.",
+          }));
+          setBusyId((cur) => (cur === uploadId ? null : cur));
+          return;
+        }
         // MERGE, do not replace. The opener puts things on this state
         // that no poll knows about -- the admin password and a re-run
         // handle for the tee-box drawer -- and a plain object here

@@ -16111,6 +16111,15 @@ def _resolve_ball(entry: dict, rest: dict, peak_t: float, club: dict) -> None:
 _debugx_lock = threading.Lock()
 _debugx_state: dict[tuple[str, int], dict] = {}
 
+# WHICH BACKEND ANSWERED. `_debugx_state` lives in one process's memory,
+# so on a multi-instance deployment the POST that starts a run and the
+# GET that polls it can land on different containers. The poll then finds
+# no run, honestly reports "not running", and the dialog goes blank while
+# the work carries on somewhere else -- which reads as "stuck" and is the
+# hardest kind of nothing to debug. One id per process makes that visible
+# instead of invisible.
+_INSTANCE_ID = secrets.token_hex(3)
+
 
 def _debugx_set(kind: str, upload_id: int, **fields) -> None:
     with _debugx_lock:
@@ -16125,7 +16134,14 @@ def _debugx_set(kind: str, upload_id: int, **fields) -> None:
 
 def _debugx_get(kind: str, upload_id: int) -> dict:
     with _debugx_lock:
-        return dict(_debugx_state.get((kind, upload_id)) or {"running": False})
+        _raw = _debugx_state.get((kind, upload_id))
+        st = dict(_raw or {"running": False})
+        # `known` separates "this backend watched a run and it finished"
+        # from "this backend has never heard of this upload". Both used to
+        # answer running=False, and only the second one is a problem.
+        st["known"] = _raw is not None
+    st["instance"] = _INSTANCE_ID
+    return st
 
 
 def _debugx_start(kind: str, upload_id: int, runner) -> dict:
