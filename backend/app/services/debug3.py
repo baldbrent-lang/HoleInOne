@@ -554,6 +554,58 @@ def detect_ball_blobs(
 
 # ── stage D: link detections into tracks ───────────────────────────────
 
+# WHEN A TRACK HAS EARNED THE RIGHT TO REACH, and how far across its own
+# line it may reach when it has.
+#
+# Association is a RADIUS -- 37px at df=1, 117px by df=6 -- and it has to
+# widen with the gap or a ball briefly lost is a ball lost for good. But a
+# radius widens in every direction at once, so the longer anything goes
+# unmatched the more of the picture it may claim. Measured on a green
+# where the tee box is in shot: a track sitting on tee-box activity
+# reached 87px sideways, took a detection off a ball falling past it, and
+# carried it away -- the descent lost a point out of its middle and the
+# thief was drawn landing on the tee.
+#
+# So the reach is spent along the line rather than in a circle. A chain
+# that has run straight for three points may follow that line as far as
+# the radius allows and barely stray across it; a chain of three points
+# that is NOT straight has established no heading at all, and is held to
+# a gate that does not grow into one.
+CORRIDOR_MIN_PTS = 3
+# Fitted over the recent tail rather than the whole chain: what matters
+# is the line the track is on NOW, and a track that turned twenty frames
+# ago should not be judged by where it started.
+CORRIDOR_FIT_PTS = 8
+# HOW STRAIGHT IS STRAIGHT, in pixels rms about the fitted line. Real
+# descents on this footage bend 0.1 to 5.3px end to end, so six admits
+# every one of them and still refuses a chain that wanders.
+CORRIDOR_SMOOTH_RMS = 6.0
+# HOW MUCH FASTER A TRACK MAY HAVE BEEN GOING than the last thing it
+# did, when it is reaching across a gap. A descent picks up roughly a
+# quarter of its speed over the half-second it is in view, so half again
+# covers the physics with room to spare -- and still holds something that
+# has been sitting still to a couple of dozen pixels however long it
+# waits.
+CORRIDOR_SPEED_SLACK = 1.5
+
+
+def _smooth_axis(pts, min_pts: int, fit_pts: int, max_rms: float):
+    """The line a track is running on, or None if it is not running straight.
+
+    The test `build_tracks` needs before it lets a track reach: a heading
+    is only worth extrapolating from if the points behind it agree on one.
+    """
+    if len(pts) < int(min_pts):
+        return None
+    tail = pts[-int(fit_pts):]
+    ax = _line_axis(tail)
+    if ax is None:
+        return None
+    rms = math.sqrt(
+        sum(_line_offset(ax, p) ** 2 for p in tail) / len(tail))
+    return ax if rms <= float(max_rms) else None
+
+
 def build_tracks(
     dets: list,
     r: float,
@@ -634,8 +686,23 @@ def build_tracks(
     for f in sorted(by_frame):
         cands = by_frame[f]
         taken: set[int] = set()
-        # Longest first: seniority decides who gets an ambiguous detection.
-        open_tracks.sort(key=lambda t: -len(t["pts"]))
+        # THE LINE EACH TRACK IS ON, recomputed as the chains grow.
+        if corridor_px and corridor_px > 0:
+            for tr in open_tracks:
+                tr["_axis"] = _smooth_axis(tr["pts"], CORRIDOR_MIN_PTS,
+                                           CORRIDOR_FIT_PTS,
+                                           CORRIDOR_SMOOTH_RMS)
+        # SENIORITY IS NOT LENGTH, IT IS PREDICTABILITY. Longest-first
+        # hands an ambiguous detection to whatever has been running the
+        # longest, and on a green with the tee box in shot that is the
+        # tee-box activity rather than the ball that just entered the
+        # frame. A chain running straight knows where its next point
+        # should be; it picks before one that does not.
+        if corridor_px and corridor_px > 0:
+            open_tracks.sort(
+                key=lambda t: (0 if t.get("_axis") else 1, -len(t["pts"])))
+        else:
+            open_tracks.sort(key=lambda t: -len(t["pts"]))
         for tr in open_tracks:
             last = tr["pts"][-1]
             df = f - last["frame"]
@@ -651,27 +718,51 @@ def build_tracks(
             else:
                 speed = math.hypot(tr["vx"], tr["vy"])
                 gate = (1.5 + 0.9 * df) * r + GATE_SPEED_FRAC * speed * df
-            # The track's heading, for the corridor test below. Only
-            # meaningful once it has two points and is actually moving.
-            _ux = _uy = None
-            if corridor_px and corridor_px > 0 and len(tr["pts"]) >= 2:
+            # REACH IS EARNED BY MOTION, NOT BY THE CLOCK.
+            #
+            # The radius above widens with the gap -- it has to, or a ball
+            # briefly lost is a ball lost for good -- but it widens by
+            # `1.5 + 0.9 * df` multiples of r for everything alike, which
+            # is 117px at df=6 for an object that has been moving 1.9px a
+            # frame. That is the whole of the steal: tee-box activity sat
+            # still, went five frames unmatched, and was handed a radius
+            # big enough to take a detection off a ball falling past.
+            #
+            # So an established track may reach as far as its OWN recent
+            # speed says it should have travelled, with slack for the
+            # acceleration a fall picks up, plus the detector's own error.
+            # A falling ball at 13px a frame still gets 131px after six
+            # frames of occlusion. The tee gets 28px, and the ball goes by
+            # untouched.
+            _axis = tr.get("_axis") if (corridor_px and corridor_px > 0) \
+                else None
+            if corridor_px and corridor_px > 0 and \
+                    len(tr["pts"]) >= CORRIDOR_MIN_PTS:
                 _sp = math.hypot(tr["vx"], tr["vy"])
-                if _sp > 1e-6:
-                    _ux, _uy = tr["vx"] / _sp, tr["vy"] / _sp
+                gate = min(gate, _sp * df * CORRIDOR_SPEED_SLACK + r)
             best_i = None
             best_d = None
             for i, c in enumerate(cands):
                 if i in taken:
                     continue
-                if _ux is not None:
-                    # Distance from the line the track is already on, not
-                    # from the point it is at -- a candidate far ALONG
-                    # the heading is a ball the detector missed a frame
-                    # of, and a candidate far ACROSS it is a different
-                    # object.
-                    _dx = c["x"] - last["x"]
-                    _dy = c["y"] - last["y"]
-                    if abs(_dx * -_uy + _dy * _ux) > corridor_px * max(1, df):
+                if _axis is not None:
+                    # Distance from the LINE, not from the last point --
+                    # which may itself be the jittered one, and pivots the
+                    # whole corridor around that error if it is. A
+                    # candidate far ALONG the line is a ball the detector
+                    # missed a frame of; one far ACROSS it is a different
+                    # object, however close the prediction lands.
+                    # ACROSS THE LINE, THE GAP BUYS ALMOST NOTHING. A
+                    # straight object's uncertainty grows ALONG its path
+                    # -- speed varies, frames are missed -- and hardly at
+                    # all across it: the line is still the line. Scaled
+                    # linearly this reached 50px by df=5, which is wide
+                    # enough to take in a ball crossing the picture
+                    # nearby, and that is exactly what it did. Measured:
+                    # a ball lost for six frames came back 6.7px off its
+                    # own line, so the square root is generous already.
+                    if _line_offset(_axis, c) > \
+                            corridor_px * math.sqrt(max(1, df)):
                         continue
                 dist = math.hypot(c["x"] - px, c["y"] - py)
                 if dist <= gate and (best_d is None or dist < best_d):
@@ -1671,13 +1762,18 @@ DESCENT_DIFF_PER_FRAME = 30
 # Real descents on this footage bend 0.1 to 5.3px end to end, so ten is
 # already generous for a single link -- it is here to refuse a sideways
 # jump onto a different object, not to second-guess the flight.
-# OFF. A corridor on the linker is sound in principle -- a falling ball
-# does not turn -- but switched on it matched one descent on a video
-# where the version without it matched three. It refuses a link when the
-# detector loses the ball and the only candidate is slightly off the
-# line, and on this footage that happens more often than a wrong sideways
-# link does. Set a number here to try it again.
-DESCENT_CORRIDOR_PX = None
+# ON, after the axis was fixed. It was off because switching it on
+# matched one descent on a video where the version without it matched
+# three -- it refused a link when the detector lost the ball and the only
+# candidate was slightly off the line. That was the AXIS, not the width:
+# the corridor took its heading from `vx/vy`, a 50/50 running average
+# that one bad link swings by 41 degrees, and measured across from the
+# track's last point, which may be the bad link itself. Measured, that
+# version refuses the track's own next real point at 27px off; the same
+# 10px corridor about a fit through the chain puts it at 0.0px, and puts
+# a ball lost for six frames and recovered 7px off its line comfortably
+# inside a gap-scaled corridor.
+DESCENT_CORRIDOR_PX = 10.0
 
 # THE ABSOLUTE FLOOR ON A DESCENT, wherever one is judged. Two points is
 # a pair of dots with a line between them: any two points are collinear,
