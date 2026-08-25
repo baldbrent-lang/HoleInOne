@@ -415,7 +415,7 @@ export default function AdminBroadcastClips() {
       <ChannelsSection adminPassword={adminPassword} />
 
       <div className="card">
-        <h3 style={{ marginBottom: 4 }}>Broadcast clips</h3>
+        <h3 style={{ marginBottom: 4 }}>Broadcast Clips</h3>
         <p className="small muted" style={{ marginBottom: 0 }}>
           Every dual-camera composite produced by Long upload — tee-side with
           the AI tracer overlay, then a hard cut to the green-side feed for
