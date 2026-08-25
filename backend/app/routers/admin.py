@@ -4059,7 +4059,23 @@ def _process_long_upload_segments(
                     )
                     # FOLLOW-THE-SHOT PAN: drive the 9:16 crop along
                     # the tracked ball flight (camera-operator style).
-                    _trk = [
+                    # PAN ON WHAT IS DRAWN, NOT ON WHAT WAS DETECTED.
+                    # ball_track_frames stops where DETECTION stops; the
+                    # tracer keeps being drawn past it, along the aimed
+                    # continuation toward the landing. Panning on the
+                    # detections therefore parks the crop at the last
+                    # DETECTED point while the drawn head carries on --
+                    # measured on clip 659, the head ended 304px left of
+                    # centre in a 1080-wide vertical while the earlier
+                    # part of the flight sat within 10px of it.
+                    # timed_points ARE the drawn dots, so following them
+                    # keeps the visible end of the tracer centred for as
+                    # long as the tracer is visible.
+                    _drawn = [
+                        r for r in ((tracer_info or {}).get("timed_points") or [])
+                        if r.get("x") is not None and r.get("frame") is not None
+                    ]
+                    _trk = _drawn or [
                         r
                         for r in (
                             (tracer_info or {}).get("ball_track_frames")
@@ -4082,9 +4098,13 @@ def _process_long_upload_segments(
                                 _imp_t = float(_if) / float(_seg_fps)
                         except (TypeError, ValueError):
                             _imp_t = None
+                        _grx = (
+                            _green_focus_x(_vert_src, _cut)
+                            if _cut is not None else None
+                        )
                         _ppath = _vertical_pan_path(
                             _trk, _rxy, float(_seg_fps), _sw, _cut,
-                            golfer_x=_gx, impact_t=_imp_t,
+                            golfer_x=_gx, impact_t=_imp_t, green_x=_grx,
                         )
                         _made = make_vertical_pan(
                             _vert_src, _vert_path, _ppath,
@@ -4601,9 +4621,55 @@ def _probe_golfer_x_frac(clip_path, sample_times=(0.3, 0.9, 1.5)):
         return None
 
 
+def _green_focus_x(video_path, at_sec):
+    """Where the green camera's action is, as a fraction of frame width.
+
+    Used to aim the vertical crop after the tee->green cut. Prefers the
+    flagstick, because the base of the pin IS the hole and a landing is
+    only interesting relative to it -- and because pin_detect can find
+    it in one frame without anything having been persisted first.
+
+    Returns None when it cannot tell, and the caller then falls back to
+    the middle of the frame. Best-effort throughout: a vertical clip
+    that frames the wrong half of the green is a worse clip, not a
+    failed render, so nothing here is allowed to raise.
+    """
+    try:
+        import cv2
+
+        from ..services import pin_detect as pd
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 30.0
+            frames = []
+            # A few frames spread across the green half, so a golfer
+            # walking through one of them cannot decide the framing.
+            for dt in (0.4, 1.0, 1.6, 2.2):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int((at_sec + dt) * fps))
+                ok, f = cap.read()
+                if ok:
+                    frames.append(f)
+        finally:
+            cap.release()
+        if not frames:
+            return None
+        det = pd.detect_pin_stable(frames, min_hits=2) or pd.detect_pin(frames[0])
+        if det is None:
+            return None
+        log.info("vertical: green focus from flagstick x=%.3f conf=%.2f",
+                 det.x, det.confidence)
+        return float(det.x)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("vertical: could not find a green focus point: %s", exc)
+        return None
+
+
 def _vertical_pan_path(
     track, rest_xy, fps, frame_w, cut_dur=None, golfer_x=None,
-    impact_t=None,
+    impact_t=None, green_x=None,
 ):
     """Waypoints (time_sec, x_fraction) for the vertical follow-pan:
     hold on the golfer through address/swing, glide along the tracked
@@ -4666,7 +4732,19 @@ def _vertical_pan_path(
             # landing view. Drifting home early dragged the tracer out
             # of frame while it was still on screen.
             path.append((max(t_last + 0.01, cut_dur - 0.01), x_last))
-            path.append((float(cut_dur), 0.5))
+            # WHERE THE GREEN IS, NOT THE MIDDLE OF THE PICTURE.
+            # This used to pan to 0.5 at the cut -- the geometric centre
+            # of the green frame, which is not where the green is. On
+            # clip 659 that framed bunker and rough with the putting
+            # surface off to the left and the flag out of shot entirely,
+            # so the payoff half of the clip showed nothing worth
+            # seeing. `green_x` is the ball's rest point on the green
+            # when we know it, else the flagstick; 0.5 only survives as
+            # the fallback for when neither is known.
+            _gx_end = 0.5 if green_x is None else min(
+                1.0, max(0.0, float(green_x)),
+            )
+            path.append((float(cut_dur), _gx_end))
         # No cut known: hold x_last to the end of the clip (implicit —
         # interpolation extends the final waypoint).
     return path
