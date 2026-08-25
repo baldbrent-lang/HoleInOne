@@ -5,6 +5,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _default_app_base_url() -> str:
+    # WHAT GETS STAMPED INTO EVERY QR CODE AND EMAIL LINK. Falling through
+    # to localhost off-platform is not a harmless default: it is a gallery
+    # link no golfer can open, baked into the clip row.
+    #
+    # Render injects the service's own public URL.
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if render_url:
+        return render_url.rstrip("/")
     # Replit sets REPLIT_DEV_DOMAIN automatically — use it so QR codes and
     # outbound links point at the public URL without manual config.
     replit_domain = os.environ.get("REPLIT_DEV_DOMAIN")
@@ -165,7 +173,10 @@ class Settings(BaseSettings):
         # production deployment. When it's present, force all dev-only
         # feature flags off regardless of any secret/env-var that may
         # be leaking in from the global secrets store.
-        if os.environ.get("REPLIT_DEPLOYMENT"):
+        # RENDER is set on every Render service. Without it in this gate the
+        # dev-only flags keep their defaults there — including a
+        # `mirror_source_url` pointing the new production box at the old one.
+        if os.environ.get("REPLIT_DEPLOYMENT") or os.environ.get("RENDER"):
             self.produce_debug_enabled = False
             self.mirror_course_id = 0
             self.mirror_source_url = ""
@@ -176,10 +187,20 @@ class Settings(BaseSettings):
             # clip/thumbnail with links that only resolve while the dev
             # workspace happens to be awake. REPLIT_DOMAINS' first entry
             # is the deployment's own public domain — always prefer it.
-            _domains = os.environ.get("REPLIT_DOMAINS", "")
-            _primary = _domains.split(",")[0].strip()
-            if _primary:
-                self.app_base_url = f"https://{_primary}"
+            #
+            # ONLY WHEN NOTHING WAS SET EXPLICITLY. This block used to
+            # overwrite `app_base_url` unconditionally, which is correct on
+            # Replit (where the workspace's value leaks in) and wrong the
+            # day a custom domain is attached anywhere else: every link
+            # would silently revert to the platform hostname.
+            if "APP_BASE_URL" not in os.environ:
+                _render = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+                _domains = os.environ.get("REPLIT_DOMAINS", "")
+                _primary = _domains.split(",")[0].strip()
+                if _render:
+                    self.app_base_url = _render
+                elif _primary:
+                    self.app_base_url = f"https://{_primary}"
         return self
 
     # Swing detector for the produce pipeline. "pose" (default) = the

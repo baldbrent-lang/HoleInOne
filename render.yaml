@@ -1,0 +1,39 @@
+# Optional: define the service in the repo instead of the dashboard.
+# Secrets stay in the dashboard — sync:false means "prompt me, never commit".
+services:
+  - type: web
+    name: golfreelz
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: pro
+    region: oregon
+    healthCheckPath: /health
+    # The disk is what makes storage.py's local-disk-only path the CORRECT
+    # path rather than the degraded one: nothing to wipe, nothing to
+    # rehydrate, no 30-second sweeper standing between a clip and its owner.
+    disk:
+      name: golfreelz-media
+      mountPath: /var/data
+      sizeGB: 20
+    envVars:
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+      - key: MIRROR_COURSE_ID
+        value: "0"
+      - key: MIRROR_SOURCE_URL
+        value: ""
+      - key: PRODUCE_DEBUG_ENABLED
+        value: "0"
+      - key: SCAN_NON_GOLF_ENABLED
+        value: "0"
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_BASE_URL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
