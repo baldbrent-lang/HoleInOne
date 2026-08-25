@@ -8023,6 +8023,25 @@ const ASCENT_WHY_TEXT = {
 // totals what actually elapsed between pressing the button and having an
 // answer, and gives the two invisible steps rows of their own rather
 // than folding them into "unattributed".
+// The `_pt` bucket names from the backend, in English. A name like
+// `ffmpeg_composite` is clear enough to whoever wrote it and opaque to
+// whoever is waiting at a course wondering where four minutes went.
+const PHASE_LABELS = {
+  ffmpeg_cut: "Cutting segments",
+  ffmpeg_compress: "Compressing for email",
+  ffmpeg_transcode: "Transcoding to H.264",
+  ffmpeg_vertical: "Making the vertical crop",
+  ffmpeg_thumbnail: "Thumbnails",
+  ffmpeg_composite: "Splicing tee to green",
+  ffmpeg_overlay: "Burning in the name plate and distance",
+  render_tracer: "Drawing the tracer",
+  detect_swings: "Detecting swings",
+  anchor_ai: "AI · finding the ball at address",
+  anchor_pixel: "Finding the ball at address",
+  launch_plot_ai: "AI · plotting the launch",
+  launch_track_pixel: "Tracking the launch",
+};
+
 function ProduceStepSummary({ rep }) {
   const t = rep?.timing;
   const stages = rep?.stages || [];
@@ -8056,6 +8075,16 @@ function ProduceStepSummary({ rep }) {
     return `${Math.floor(v / 60)}m ${String(v % 60).padStart(2, "0")}s`;
   };
   const pct = (sec) => (wall ? Math.round((100 * (sec || 0)) / wall) : 0);
+
+  // Sorted by cost, because the row that matters is the top one.
+  const phases = Object.entries(t.phases || {})
+    .map(([k, v]) => [k, Number(v) || 0])
+    .filter(([, v]) => v > 0.05)
+    .sort((a, b) => b[1] - a[1]);
+  const phaseTotal = phases.reduce((a, [, v]) => a + v, 0);
+  // Per-clip only means anything when clips were actually produced --
+  // a find-only run has stages and phases but nothing to divide by.
+  const nClips = rep?.n_produced || 0;
 
   return (
     <div className="card" style={{ margin: "10px 0", padding: 12 }}>
@@ -8110,16 +8139,59 @@ function ProduceStepSummary({ rep }) {
         </div>
       )}
 
-      {/* Inside the stages: which ffmpeg/render helper actually spent it,
-          so "the tracer stage took 288s" can be read as encoding or as
-          tracing rather than guessed at. */}
-      {t.phases && Object.keys(t.phases).length > 0 && (
-        <div className="tiny muted" style={{ marginTop: 6 }}>
-          <i>inside those steps</i>
-          {" — "}
-          {Object.entries(t.phases)
-            .map(([k, v]) => `${k} ${Number(v).toFixed(1)}s`)
-            .join(" · ")}
+      {/* INSIDE THE STAGES, AND HOW MANY TIMES EACH.
+          This was one run-on line of "name 12.3s" pairs, which is enough
+          to see that encoding dominates and not enough to do anything
+          about it. A clip is passed through ffmpeg several times over --
+          render, splice, overlay, plate -- and whether a phase is one
+          slow pass or four redundant ones is the whole question. The
+          count answers it, and the per-clip column says whether the cost
+          scales with the number of clips or is paid once. */}
+      {phases.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div className="tiny muted" style={{ marginBottom: 4 }}>
+            <i>inside those steps</i>
+            {phaseTotal > 0 && (
+              <> — {fmt(phaseTotal)} of encoding and rendering
+                {nClips > 0 && <>, {fmt(phaseTotal / nClips)} per clip</>}
+              </>
+            )}
+          </div>
+          {phases.map(([k, v]) => {
+            const n = t.phase_calls?.[k] || 0;
+            return (
+              <div key={k} style={{ marginTop: 5 }}>
+                <div className="row tiny"
+                     style={{ justifyContent: "space-between", gap: 10 }}>
+                  <span className="muted">
+                    {PHASE_LABELS[k] || k}
+                    {n > 0 && (
+                      <span className="pill" style={{ marginLeft: 6 }}>
+                        {n}×{nClips > 0 && n >= nClips
+                          ? ` · ${(n / nClips).toFixed(n % nClips ? 1 : 0)}/clip`
+                          : ""}
+                      </span>
+                    )}
+                  </span>
+                  <span className="muted"
+                        style={{ whiteSpace: "nowrap",
+                                 fontVariantNumeric: "tabular-nums" }}>
+                    {fmt(v)}
+                    {n > 1 && ` · ${fmt(v / n)} each`}
+                    {" · "}{pct(v)}%
+                  </span>
+                </div>
+                <div style={{ height: 3, borderRadius: 2, marginTop: 2,
+                              background: "var(--line)" }}>
+                  <div style={{
+                    height: 3, borderRadius: 2, opacity: 0.75,
+                    background: "var(--emerald-700)",
+                    width: `${Math.min(100, pct(v))}%`,
+                  }} />
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

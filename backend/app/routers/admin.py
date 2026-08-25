@@ -159,11 +159,22 @@ _produce_clock = threading.local()
 
 
 def _pt_add(name: str, secs: float) -> None:
-    """Add `secs` to this thread's `name` bucket."""
+    """Add `secs` to this thread's `name` bucket, and count the call.
+
+    THE COUNT IS HALF THE ANSWER. Seconds alone say a phase is expensive;
+    they cannot say whether that is one slow pass or six redundant ones,
+    and those want opposite fixes. "ffmpeg_overlay 62s" is a mystery;
+    "ffmpeg_overlay 62s over 6 calls, 2 per clip" names the encode that
+    should not be happening twice.
+    """
     buckets = getattr(_produce_clock, "phases", None)
     if buckets is None:
         buckets = _produce_clock.phases = {}
     buckets[name] = round(buckets.get(name, 0.0) + float(secs), 3)
+    counts = getattr(_produce_clock, "counts", None)
+    if counts is None:
+        counts = _produce_clock.counts = {}
+    counts[name] = counts.get(name, 0) + 1
 
 
 @contextmanager
@@ -178,10 +189,16 @@ def _pt(name: str):
 
 def _pt_reset() -> None:
     _produce_clock.phases = {}
+    _produce_clock.counts = {}
 
 
 def _pt_snapshot() -> dict:
     return dict(getattr(_produce_clock, "phases", None) or {})
+
+
+def _pt_counts() -> dict:
+    """How many times each bucket was entered this run."""
+    return dict(getattr(_produce_clock, "counts", None) or {})
 
 
 def _timed(fn, name: str):
@@ -16539,6 +16556,11 @@ def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
         # took 288s" and knowing whether that was encoding or tracing.
         "phases": {k: v for k, v in sorted(
             _pt_snapshot().items(), key=lambda kv: -kv[1]) if v > 0},
+        # HOW MANY TIMES EACH, which is what turns a slow phase into an
+        # actionable one. Six overlay encodes across three clips is two
+        # passes per clip over the same pixels; one 60s encode is a
+        # codec question. The seconds cannot tell those apart.
+        "phase_calls": {k: v for k, v in _pt_counts().items() if v},
         # WHAT IT RAN ON. Two timing tables from two deployments only
         # explain a difference between them if each says what machine it
         # was measured on -- otherwise "production is slower" is a
@@ -22961,7 +22983,20 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             if not _rv.get("ok") or not _tee.exists():
                 raise RuntimeError(
                     f"tracer render failed: {_rv.get('error')}")
-            transcode_for_web(_tee)
+            # NOT TRANSCODED HERE. `render_tracer_video` writes raw mp4v
+            # and its docstring says the caller must get it to H.264
+            # before serving it -- but nothing serves THIS file. It is
+            # either spliced with the green half, and `splice_impact_clip`
+            # re-encodes to libx264 anyway, or renamed to `final`, which
+            # the intro overlay then re-encodes to libx264 as well.
+            #
+            # So the transcode that used to sit here was a full libx264
+            # pass over the whole tee clip whose only output was thrown
+            # away by the very next encode. On a three-clip produce that
+            # is three whole-clip encodes bought and discarded. The
+            # guarantee it was standing in for is kept below, where it
+            # can be made once, on the file that actually ships, and only
+            # when nothing else has already delivered it.
 
             final = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}.mp4"
             green_seg = None
@@ -23098,7 +23133,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 rep.setdefault("warnings", [])
                 if _note not in rep["warnings"]:
                     rep["warnings"].append(_note)
-            apply_intro_overlay_inplace(
+            _intro_ok = apply_intro_overlay_inplace(
                 final,
                 player_name=(
                     participant.name if participant else "Brent Baldwin"
@@ -23108,6 +23143,25 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 par=_par,
                 yardage=_yardage,
             )
+            # THE ONE PLACE H.264 IS ACTUALLY GUARANTEED.
+            #
+            # Every path that gets here has normally already re-encoded:
+            # the splice does it when there is a green half, and the
+            # overlay does it either way. The exception is a tee-only clip
+            # whose overlay declined -- no PIL, no ffmpeg for the plate,
+            # any best-effort failure -- and that one would ship the
+            # renderer's raw mp4v, which browsers refuse to play in a
+            # <video> tag. That is the case the old unconditional
+            # transcode was really covering, at the cost of paying for it
+            # on every clip. Paid for here, on the file that ships, only
+            # when it is genuinely owed.
+            if green_seg is None and not _intro_ok:
+                log.warning(
+                    "d3 produce: swing %s shipped without an intro overlay "
+                    "— transcoding the raw mp4v so a browser can play it",
+                    i,
+                )
+                transcode_for_web(final)
 
             # CLOSEST TO THE PIN, when the green camera can measure it.
             # After the intro overlay so the plate is not painted over,
