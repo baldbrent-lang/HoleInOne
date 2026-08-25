@@ -2190,6 +2190,21 @@ def find_descents(
         # measured bend 12.9 against a limit of 10 and a step deviation
         # of 0.98 against 0.35. It was refused twice over for carrying
         # junk that is not part of the fall.
+        # THROW OUT THE BAD POINTS, NOT THE CHAIN. The corridor in
+        # `build_tracks` is the same test applied as a link veto, and it
+        # is off because vetoing a link starves the track -- it goes
+        # unmatched, closes at `max_gap`, and one descent arrives as two
+        # halves too short to pass a drop gate. Here the chain is already
+        # assembled, so the line can say which points were never the ball
+        # without costing the ones that were.
+        #
+        # Before the tail trims, because both of them read the shape of
+        # the chain: `_falling_tail` stops at the first step that does not
+        # go down, and one speck reached sideways for is enough to make a
+        # step go the wrong way and cut a real fall off above it.
+        _n_raw = len(pts)
+        pts = _line_inliers(pts, DESCENT_LINE_TOL_PX, int(min_points))
+        _n_off_line = _n_raw - len(pts)
         pts = _smooth_tail(_falling_tail(pts), int(min_points))
         if len(pts) < int(min_points):
             continue
@@ -2363,6 +2378,13 @@ def find_descents(
             "step_dev_frac": round(step_dev, 2),
             "density": round(_density, 2),
             "span_frames": _span_f,
+            # WHAT THE TRACKER HANDED OVER, and how much of it was not on
+            # the line. `n_points` has always been the count AFTER the
+            # trims, so a chain cut from twelve points to three read as a
+            # tracker that only ever found three -- the one reading that
+            # sends you to the detector when the linker is the problem.
+            "n_points_raw": int(_n_raw),
+            "n_off_line": int(_n_off_line),
             # THE VERTICAL LEG, which is what "it fell this far" means.
             # `drop_px` is the whole hypotenuse and flatters anything
             # travelling sideways.
@@ -2912,6 +2934,106 @@ def _falling_tail(pts):
     while i > 0 and float(pts[i]["y"]) > float(pts[i - 1]["y"]):
         i -= 1
     return pts[i:]
+
+
+# HOW FAR OFF ITS OWN LINE A POINT MAY SIT AND STILL BE THE BALL, in
+# pixels. Real descents on this footage bend 0.1 to 5.3px end to end,
+# so ten leaves the whole of a real flight inside and still refuses a
+# speck the tracker reached sideways for.
+DESCENT_LINE_TOL_PX = 10.0
+# HOW FAR APART TWO POINTS MAY BE, in list positions, and still be
+# trusted to AIM the line. A pair from the same object gives a line
+# worth testing; a pair straddling the join between the ball and the
+# junk stapled to it gives one that fits neither. Local pairs only,
+# which also keeps the search O(n) seeds rather than O(n^2).
+DESCENT_LINE_SEED_SPAN = 6
+
+
+def _line_axis(pts):
+    """(mx, my, ux, uy): the principal axis of a set of points.
+
+    Total least squares rather than x-against-y, so the answer does not
+    depend on which way the chain happens to lean. A descent is mostly
+    vertical and a fit of x against y is well conditioned for it; the
+    same fit on a chain lying flat is degenerate, and this filter has to
+    give an honest answer on both -- it is deciding which points to keep,
+    not yet whether the chain is a descent.
+    """
+    n = len(pts)
+    if n < 2:
+        return None
+    mx = sum(float(p["x"]) for p in pts) / n
+    my = sum(float(p["y"]) for p in pts) / n
+    sxx = sum((float(p["x"]) - mx) ** 2 for p in pts)
+    syy = sum((float(p["y"]) - my) ** 2 for p in pts)
+    sxy = sum((float(p["x"]) - mx) * (float(p["y"]) - my) for p in pts)
+    if sxx + syy < 1e-9:
+        return None
+    th = 0.5 * math.atan2(2.0 * sxy, sxx - syy)
+    return mx, my, math.cos(th), math.sin(th)
+
+
+def _line_offset(axis, p) -> float:
+    """Perpendicular distance from a point to an axis, in pixels."""
+    mx, my, ux, uy = axis
+    return abs((float(p["x"]) - mx) * uy - (float(p["y"]) - my) * ux)
+
+
+def _line_inliers(pts, tol_px: float, min_points: int):
+    """The largest run of a chain that lies on one straight line.
+
+    A CORRIDOR THAT THROWS OUT POINTS, NOT CHAINS. `build_tracks` carries
+    the same idea as a link veto (`corridor_px`) and it is switched off,
+    because refusing a link starves the chain: the track goes unmatched,
+    closes at `max_gap`, and a real descent comes back in halves. Turned
+    on it matched one descent on a clip where the version without it
+    matched three.
+
+    The test was right and the place was wrong. Association stays
+    permissive -- take the point, keep the chain alive -- and the line is
+    used afterwards, on the assembled chain, to say which of the points
+    on it were ever the ball. A speck the tracker reached 35px sideways
+    for is dropped; the chain it was stapled to survives and is judged on
+    what remains.
+
+    Seeded from local pairs and refitted on their support, so the line
+    is aimed by points that are plausibly the same object rather than by
+    a least-squares fit through ball and junk together -- which lands
+    between them and fits neither.
+
+    Returns the chain unchanged when no line carries `min_points`. That
+    is the conservative answer: this filter exists to remove points it
+    can prove do not belong, and proving nothing means removing nothing.
+    """
+    n = len(pts)
+    if n <= int(min_points):
+        return pts
+    best_keep = None
+    best_score = None
+    for i in range(n - 1):
+        for j in range(i + 1, min(n, i + 1 + DESCENT_LINE_SEED_SPAN)):
+            ax = _line_axis([pts[i], pts[j]])
+            if ax is None:
+                continue
+            keep = [p for p in pts if _line_offset(ax, p) <= tol_px]
+            if len(keep) < int(min_points):
+                continue
+            # AIMED BY TWO, JUDGED BY ALL OF THEM. A pair sets a line
+            # accurate to its own two points and no better; refitting on
+            # everything that fell near it recovers the heading the
+            # object actually had, and a second pass picks up the points
+            # the first line was pointing slightly away from.
+            ax = _line_axis(keep) or ax
+            keep = [p for p in pts if _line_offset(ax, p) <= tol_px]
+            if len(keep) < int(min_points):
+                continue
+            # Most points wins; a tie goes to the one that spans more
+            # frames, which is the one carrying more evidence.
+            score = (len(keep),
+                     int(keep[-1]["frame"]) - int(keep[0]["frame"]))
+            if best_score is None or score > best_score:
+                best_score, best_keep = score, keep
+    return best_keep if best_keep else pts
 
 
 def _smooth_tail(pts, min_points: int = ASCENT_MIN_POINTS):

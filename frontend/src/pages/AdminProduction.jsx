@@ -8309,6 +8309,7 @@ function AscentProduceModal({ state, onClose }) {
                     <tr>
                       <th align="left">at</th>
                       <th align="left">pts</th>
+                      <th align="left">off line</th>
                       <th align="left">drawn</th>
                       <th align="left">drop</th>
                       <th align="left">fell</th>
@@ -8327,7 +8328,12 @@ function AscentProduceModal({ state, onClose }) {
                           style={{ opacity: (z.why || []).length ? 0.6 : 1 }}>
                         <td>{z.last_descent_sec != null
                           ? `${z.last_descent_sec}s` : `f${z.first_frame}`}</td>
-                        <td>{z.n_points}</td>
+                        <td title={z.n_points_raw != null
+                          ? `the tracker handed over ${z.n_points_raw} point(s)`
+                          : undefined}>{z.n_points}</td>
+                        <td title="Points the tracker linked that were not on the chain's own line — a speck it reached sideways for. Thrown out before the chain is judged, so one bad link no longer costs a real descent.">
+                          {z.n_off_line ? `−${z.n_off_line}` : "—"}
+                        </td>
                         <td>{z.n_points_drawn ?? "—"}</td>
                         <td>{z.drop_px}px</td>
                         <td title="The vertical leg — how far it actually descended. This is what decides which candidate a swing claims.">
