@@ -1547,29 +1547,40 @@ DESCENT_MAX_TILT_DEG = 55.0
 # foreground grass a few feet from the lens, waving. None of them was
 # on the green, which is where a ball that lands on the green lands.
 DESCENT_EDGE_MARGIN_FRAC = 0.04
-# HOW UNEVEN A DESCENT'S PER-FRAME STEP MAY BE, as a fraction of its own
-# median step.
+# HOW FAR A DESCENT'S PER-FRAME STEP MAY GO BACKWARDS, as a fraction of
+# its own median step.
 #
-# THE PHYSICS THE GATES WERE MISSING. A ball near the end of its flight
-# falls at a nearly constant rate -- vertical speed at the top of the
-# descent is already most of what it will be at the ground, and gravity
-# adds only a little over the half-second in view. So its points are
-# EVENLY spaced, and the spacing is as much a signature as straightness.
+# THE RHYTHM IS NOT A CONSTANT, IT IS A RAMP. This gate used to measure
+# the worst deviation from the median step, on the reasoning that "a ball
+# near the end of its flight falls at a nearly constant rate -- vertical
+# speed at the top of the descent is already most of what it will be at
+# the ground, and gravity adds only a little over the half-second in
+# view."
 #
-# Nothing else in a green view does that. A chain the tracker assembled
-# out of unrelated speckle jumps -- 4px between one pair, 30px between
-# the next -- because the "object" is a different speck each time, and
-# that is invisible to a straightness test: badly spaced points sit on a
-# perfect line just as happily as well spaced ones.
+# That is the DESCENT_RATE_HI mistake again, and for the same reason. It
+# reasons about metres and applies the answer to pixels. A ball landing
+# on a green the camera is pointed at is falling TOWARD the lens, so
+# perspective multiplies gravity: the same real metres per second sweep
+# more of the frame every frame it gets closer. Measured on the descent
+# an operator could point to on upload 308 -- five points, 42px, bend
+# 0.47px, tilt 17.2 degrees, a point on 83% of the frames it spans -- the
+# per-frame step ran 5, 7, 10, 15. Textbook, and refused as UNEVEN at
+# 0.50 against a limit of 0.35, because tripling its step over five
+# frames is exactly what the old measure called uneven.
 #
-# Measured per FRAME, not per point, so a chain that loses the ball for
-# two frames and picks it up where a constant velocity says it should is
-# judged as consistent -- which is the honest reading of a brief
-# occlusion. A chain that picks it up somewhere else is not.
+# So what is measured is REVERSAL: how far the step sequence goes
+# BACKWARDS. A ball's step only grows -- gravity and perspective both
+# push one way, and neither ever reverses. A chain the tracker assembled
+# out of unrelated speckle jumps 4px, then 30, then 5, then 28, because
+# the "object" is a different speck each time, and it is the going-back
+# that gives it away. Straightness cannot see it: badly spaced points sit
+# on a perfect line just as happily as well spaced ones.
 #
-# This has been computed and reported since the descent search was
-# written, and never once used to decide anything.
-DESCENT_MAX_STEP_DEV = 0.35
+# Measured on 500 simulated descents against 500 speckle chains: the old
+# measure kept 11% of the real ones and 6% of the junk -- barely telling
+# them apart, and refusing nearly everything. This keeps 99% of the real
+# ones and 11% of the junk.
+DESCENT_MAX_STEP_BACK = 0.35
 # HOW MUCH OF ITS OWN TIME SPAN A CHAIN MUST ACTUALLY HAVE POINTS IN.
 #
 # If the detector can see the ball at all it sees it on consecutive
@@ -1975,20 +1986,24 @@ def detect_movers_by_diff(
 
 
 def _descent_step_consistency(pts):
-    """(median per-frame drop, worst deviation as a fraction of it).
+    """(median per-frame drop, worst BACKWARD move as a fraction of it).
 
-    A BALL NEAR THE END OF ITS FLIGHT FALLS AT A NEARLY CONSTANT RATE.
-    Vertical speed at the top of the descent is already most of what it
-    will be at the ground, and the half-second we see adds only a little
-    -- so a real descent's points are evenly spaced down the frame, and
-    the spacing is as much a signature as the straightness is.
+    A FALLING BALL'S STEP ONLY EVER GROWS. Gravity adds to it, and on a
+    green the camera is pointed at the ball is falling toward the lens,
+    so perspective adds to it again -- a descent's per-frame step can
+    comfortably triple over the half-second it is in view. Neither of
+    those ever runs backwards.
 
-    Nothing else in a green view does that. A chain the tracker built
-    out of unrelated speckle jumps: 4px between one pair, 30px between
-    the next, because the "object" is a different speck each time. That
-    is invisible to a straightness test -- badly spaced points can sit
-    on a perfect line -- so it is the one thing the existing gates could
-    not see.
+    Nothing else in a green view keeps that discipline. A chain the
+    tracker built out of unrelated speckle jumps 4px, then 30, then 5,
+    then 28, because the "object" is a different speck each time. The
+    jumping BACK is the signature; a straightness test cannot see it,
+    because badly spaced points sit on a perfect line just as happily as
+    well spaced ones.
+
+    This used to measure the worst deviation from the median step, which
+    scored the acceleration itself as unevenness and refused real
+    descents for accelerating. See DESCENT_MAX_STEP_BACK.
 
     Returns (0.0, 999.0) for anything too short to have a rhythm.
     """
@@ -1998,15 +2013,25 @@ def _descent_step_consistency(pts):
     for a, b in zip(pts, pts[1:]):
         df = max(1, int(b["frame"]) - int(a["frame"]))
         steps.append((float(b["y"]) - float(a["y"])) / df)
-    steps.sort()
-    med = steps[len(steps) // 2]
+    ordered = sorted(steps)
+    # A TRUE MEDIAN. `steps[len // 2]` is the upper of the two middle
+    # values on an even count, which on a chain that is ramping -- every
+    # real descent -- biases the yardstick high and every early step
+    # looks further off it than it is.
+    n = len(ordered)
+    med = (ordered[n // 2] if n % 2
+           else 0.5 * (ordered[n // 2 - 1] + ordered[n // 2]))
     if med <= 0.5:
         # Not falling at all, so there is no rhythm to be consistent
         # with. The fall-rate gate elsewhere is what rejects this; here
         # it just means the question does not apply.
         return med, 999.0
-    worst = max(abs(v - med) / med for v in steps)
-    return med, worst
+    # IN TIME ORDER, not sorted: the question is whether the step ever
+    # shrank as the fall went on, and sorting is precisely what throws
+    # that away.
+    back = max((steps[i] - steps[i + 1] for i in range(len(steps) - 1)),
+               default=0.0)
+    return med, max(0.0, back) / med
 
 
 def find_descents(
@@ -2410,15 +2435,16 @@ def find_descents(
         # bend are: the walk back to the landing keeps only the part
         # that is drawn, and a chain of three that survives it has too
         # few steps left to have a rhythm at all.
-        step_med, step_dev = _descent_step_consistency(pts)
+        step_med, step_back = _descent_step_consistency(pts)
         _span_f = int(pts[-1]["frame"]) - int(pts[0]["frame"]) + 1
         _density = len(pts) / float(max(1, _span_f))
-        if step_dev > DESCENT_MAX_STEP_DEV:
+        if step_back > DESCENT_MAX_STEP_BACK:
             _why.append("uneven")
-            _rej(pts, f"its per-frame step varies by {round(step_dev, 2)} "
-                      f"of its own median, limit {DESCENT_MAX_STEP_DEV}",
+            _rej(pts, f"its per-frame step drops back by "
+                      f"{round(step_back, 2)} of its own median, limit "
+                      f"{DESCENT_MAX_STEP_BACK} — a fall only speeds up",
                  drop_px=int(drop), fall_rate=round(rate, 3),
-                 step_dev=round(step_dev, 2))
+                 step_back=round(step_back, 2))
         if _density < DESCENT_MIN_DENSITY:
             _why.append("sparse")
             _rej(pts, f"{len(pts)} point(s) across {_span_f} frames, "
@@ -2456,7 +2482,7 @@ def find_descents(
             "fall_rate": round(rate, 3),
             "bend_px": round(bend, 2),
             "step_px": round(step_med, 2),
-            "step_dev": round(step_dev, 2),
+            "step_back": round(step_back, 2),
             "sources": sorted({q.get("src") for q in kept if q.get("src")}),
             "peak_px_per_frame": round(peak, 1),
             # THE CHAIN ITSELF, up to the frame it stopped falling.
@@ -2471,7 +2497,7 @@ def find_descents(
             ],
             "n_settle_points": len(_settle),
             "tilt_deg": round(tilt, 1),
-            "step_dev_frac": round(step_dev, 2),
+            "step_back_frac": round(step_back, 2),
             "density": round(_density, 2),
             "span_frames": _span_f,
             # WHAT THE TRACKER HANDED OVER, and how much of it was not on

@@ -16836,16 +16836,16 @@ def _ball_scan_descents(row, db, spots, progress=None) -> dict:
                     f"straight line to count on its own")
 
         def _step_note(e):
-            _d = e.get("step_dev")
+            _d = e.get("step_back")
             if _d is None:
                 return ""
-            return (f" · falls {e.get('step_px')}px per frame, spacing "
-                    f"varies by {round(float(_d) * 100)}%")
+            return (f" · falls {e.get('step_px')}px per frame, never "
+                    f"slowing by more than {round(float(_d) * 100)}%")
 
         evs = [e for e in _all_evs if _strict(e)]
         _keys = ("last_descent_frame", "last_descent_sec", "landing_xy",
                  "n_points", "drop_px", "fall_rate",
-                 "bend_px", "step_px", "step_dev", "sources",
+                 "bend_px", "step_px", "step_back", "sources",
                  "n_points_drawn")
         out["events"] = [
             {**{k: e.get(k) for k in _keys},

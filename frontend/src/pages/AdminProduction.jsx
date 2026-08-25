@@ -8388,7 +8388,7 @@ function AscentProduceModal({ state, onClose }) {
                       <th align="left">fall rate</th>
                       <th align="left">bend</th>
                       <th align="left">tilt</th>
-                      <th align="left">step dev</th>
+                      <th align="left">slows by</th>
                       <th align="left">density</th>
                       <th align="left">landed</th>
                       <th align="left">verdict</th>
@@ -8414,8 +8414,8 @@ function AscentProduceModal({ state, onClose }) {
                         <td>{z.fall_rate}</td>
                         <td>{z.bend_px}</td>
                         <td>{z.tilt_deg}°</td>
-                        <td title="How much its per-frame step varies, as a fraction of its own median. A falling ball is steady.">
-                          {z.step_dev_frac}
+                        <td title="The most its per-frame step ever DROPS BACK, as a fraction of its own median. A fall only speeds up — gravity and, on a ball coming toward the camera, perspective both push one way. Speckle the tracker joined jumps back and forth, and that is what this catches. Not how much the step varies: a real descent's step can triple over the half-second it is in view.">
+                          {z.step_back_frac ?? z.step_dev_frac}
                         </td>
                         <td title={`${z.n_points} point(s) across ${z.span_frames} frame(s)`}>
                           {z.density}

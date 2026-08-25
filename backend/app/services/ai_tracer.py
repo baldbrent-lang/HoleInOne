@@ -4963,6 +4963,33 @@ def render_tracer_video(
 
     try:
         frame_idx = 0
+        # SKIP TO THE SWING RATHER THAN DECODING UP TO IT.
+        #
+        # This loop used to `read()` from frame zero and throw away
+        # everything before `write_start`. A swing thirty seconds into an
+        # upload meant ~900 frames fully decoded -- demuxed, decoded,
+        # colour-converted and copied into a numpy array -- so that all
+        # of them could be dropped on the next line, to write the ~360
+        # that are the clip. Most of the decode was discarded.
+        #
+        # Seeking is what the rest of this module already does; this loop
+        # was the one place that walked. Trusted only when the capture
+        # confirms it landed exactly where it was asked, because a render
+        # that is off by a few frames draws the tracer at the wrong
+        # moments, which is far worse than being slow. When it will not
+        # confirm, walk from zero as before but with `grab()`, which
+        # demuxes and decodes without converting or allocating a frame
+        # nothing is going to look at.
+        _skip_to = int(write_start or 0)
+        if _skip_to > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(_skip_to))
+            if int(cap.get(cv2.CAP_PROP_POS_FRAMES) or -1) == _skip_to:
+                frame_idx = _skip_to
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0.0)
+                frame_idx = 0
+                while frame_idx < _skip_to and cap.grab():
+                    frame_idx += 1
         while True:
             ok, frame = cap.read()
             if not ok:
