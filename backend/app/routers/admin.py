@@ -16130,6 +16130,12 @@ def _debugx_get(kind: str, upload_id: int) -> dict:
 
 def _debugx_start(kind: str, upload_id: int, runner) -> dict:
     """Kick `runner(row, src_path, db, progress)` on a thread."""
+    # THE CLOCK STARTS AT THE BUTTON, not at the first stage. A run's own
+    # `total_sec` begins inside the runner, which is after the queue wait
+    # and after the video has been pulled back from object storage -- so
+    # it can read 90s for a wait the operator experienced as six minutes.
+    # Everything below measures the difference and reports it.
+    _t_request = time.monotonic()
     with _debugx_lock:
         _st0 = _debugx_state.get((kind, upload_id)) or {}
         # A RUN THAT STOPPED SAYING ANYTHING IS NOT RUNNING.
@@ -16185,18 +16191,26 @@ def _debugx_start(kind: str, upload_id: int, runner) -> dict:
         # hand, then handed over to the run's own stages.
         _debugx_set(kind, upload_id,
                     stage="Waiting for the produce queue", running=True)
+        _t_gate = time.monotonic()
         with _produce_gate:
+            _queued_sec = time.monotonic() - _t_gate
             _debugx_set(kind, upload_id, stage="Starting", running=True)
-            _debugx_job(kind, upload_id, runner)
+            _debugx_job(kind, upload_id, runner, _queued_sec)
 
-    def _debugx_job(kind: str, upload_id: int, runner) -> None:
+    def _debugx_job(kind: str, upload_id: int, runner,
+                    queued_sec: float = 0.0) -> None:
         db = SessionLocal()
         try:
             row = db.get(LongVideoUpload, upload_id)
             if not row or not row.tee_filename:
                 raise RuntimeError("upload not found or has no tee video")
+            # A redeploy wipes the ephemeral disk, so this is a silent
+            # multi-hundred-MB download on the first produce after one --
+            # invisible in every stage table until it is its own number.
+            _t_fetch = time.monotonic()
             storage.ensure_local(CLIPS_DIR, row.tee_filename)
             src_path = _local_tee(row)
+            _fetch_sec = time.monotonic() - _t_fetch
             if not src_path.exists():
                 raise RuntimeError("tee source missing on disk")
 
@@ -16205,6 +16219,15 @@ def _debugx_start(kind: str, upload_id: int, runner) -> dict:
                             total=total)
 
             rep = runner(row, src_path, db, _prog)
+            # Additive: a runner with no timing table of its own still
+            # gets the three numbers that bracket it, and one that has
+            # one keeps every key it already set.
+            if isinstance(rep, dict):
+                _tm = rep.setdefault("timing", {})
+                _tm["queued_sec"] = round(max(0.0, queued_sec), 2)
+                _tm["fetch_sec"] = round(max(0.0, _fetch_sec), 2)
+                _tm["wall_sec"] = round(
+                    max(0.0, time.monotonic() - _t_request), 2)
             _debugx_set(kind, upload_id, running=False, report=rep,
                         stage="done",
                         error=(rep or {}).get("error")
@@ -16439,6 +16462,12 @@ def _ball_scan_finish_timing(rep: dict, t_run: float) -> None:
         "by_stage": {int(st["n"]): st["seconds"]
                      for st in (rep.get("stages") or [])},
         "unattributed_sec": round(max(0.0, _total - _staged), 2),
+        # INSIDE THE STAGES. `_pt_reset()` at the top of the run means
+        # this is that run's ffmpeg and render work alone, broken out by
+        # helper -- which is the difference between "the tracer stage
+        # took 288s" and knowing whether that was encoding or tracing.
+        "phases": {k: v for k, v in sorted(
+            _pt_snapshot().items(), key=lambda kv: -kv[1]) if v > 0},
         # WHAT IT RAN ON. Two timing tables from two deployments only
         # explain a difference between them if each says what machine it
         # was measured on -- otherwise "production is slower" is a

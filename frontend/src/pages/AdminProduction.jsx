@@ -8013,6 +8013,117 @@ const ASCENT_WHY_TEXT = {
 };
 
 
+// THE WAIT, AS THE OPERATOR EXPERIENCED IT.
+//
+// A run's own `total_sec` starts at its first stage, which is after the
+// produce queue has been waited on and after the tee video has been
+// pulled back from object storage. Either can dominate, and neither was
+// ever on screen -- so a six-minute wait at the course read as ninety
+// seconds in the dialog and the missing time had nowhere to go. This
+// totals what actually elapsed between pressing the button and having an
+// answer, and gives the two invisible steps rows of their own rather
+// than folding them into "unattributed".
+function ProduceStepSummary({ rep }) {
+  const t = rep?.timing;
+  const stages = rep?.stages || [];
+  if (!t || !stages.length) return null;
+
+  const wall = t.wall_sec || t.total_sec || 0;
+  const rows = [];
+  const push = (key, label, sec, count, overhead) => {
+    if (!(sec > 0.05)) return;
+    rows.push({ key, label, sec, count, overhead });
+  };
+
+  push("queue", "Waiting for the produce queue", t.queued_sec, null, true);
+  push("fetch", "Fetching the tee video", t.fetch_sec, null, true);
+  stages.forEach((st) => push(
+    `s${st.n}`,
+    `${st.n} · ${st.title}`,
+    st.seconds,
+    st.count != null ? `${st.count} ${st.counts || ""}`.trim() : null,
+    false,
+  ));
+  push("other", "Unattributed", t.unattributed_sec, null, true);
+
+  const fmt = (sec) => {
+    const v = sec || 0;
+    if (v < 60) return `${v.toFixed(1)}s`;
+    const m = Math.floor(v / 60);
+    return `${m}m ${String(Math.round(v % 60)).padStart(2, "0")}s`;
+  };
+  const pct = (sec) => (wall ? Math.round((100 * (sec || 0)) / wall) : 0);
+
+  return (
+    <div className="card" style={{ margin: "10px 0", padding: 12 }}>
+      <div className="row"
+           style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+        <b>Step by step</b>
+        <span style={{ fontVariantNumeric: "tabular-nums" }}>
+          <b>{fmt(wall)}</b>
+          <span className="tiny muted"> button to answer</span>
+        </span>
+      </div>
+
+      <div style={{ marginTop: 8 }}>
+        {rows.map((r) => (
+          <div key={r.key} style={{ marginTop: 7 }}>
+            <div className="row tiny"
+                 style={{ justifyContent: "space-between", gap: 10 }}>
+              <span className={r.overhead ? "muted" : ""}>
+                {r.label}
+                {r.count && (
+                  <span className="pill" style={{ marginLeft: 6 }}>
+                    {r.count}
+                  </span>
+                )}
+              </span>
+              <span className="muted"
+                    style={{ whiteSpace: "nowrap",
+                             fontVariantNumeric: "tabular-nums" }}>
+                {fmt(r.sec)} · {pct(r.sec)}%
+              </span>
+            </div>
+            <div style={{ height: 4, borderRadius: 2, marginTop: 3,
+                          background: "var(--line)" }}>
+              <div style={{
+                height: 4, borderRadius: 2,
+                background: "var(--emerald-700)",
+                opacity: r.overhead ? 0.4 : 1,
+                width: `${Math.min(100, pct(r.sec))}%`,
+              }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* The two clocks, and why they disagree. Without this line the
+          stage seconds visibly fail to add up to the total and the
+          natural reading is that one of them is wrong. */}
+      {t.total_sec != null && wall - t.total_sec > 1 && (
+        <div className="tiny muted" style={{ marginTop: 8 }}>
+          The stages themselves ran for {fmt(t.total_sec)}. The rest was
+          queueing and fetching, before the first stage began.
+        </div>
+      )}
+
+      {/* Inside the stages: which ffmpeg/render helper actually spent it,
+          so "the tracer stage took 288s" can be read as encoding or as
+          tracing rather than guessed at. */}
+      {t.phases && Object.keys(t.phases).length > 0 && (
+        <div className="tiny muted" style={{ marginTop: 6 }}>
+          <i>inside those steps</i>
+          {" — "}
+          {Object.entries(t.phases)
+            .map(([k, v]) => `${k} ${Number(v).toFixed(1)}s`)
+            .join(" · ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function AscentProduceModal({ state, onClose }) {
   const rep = state?.report;
   const asc = rep?.ascents || [];
@@ -8040,6 +8151,8 @@ function AscentProduceModal({ state, onClose }) {
           {findOnly && " Nothing is produced and the upload's existing "
             + "clips are left alone."}
         </div>
+
+        <ProduceStepSummary rep={rep} />
 
         {state.running && (
           <div className="small" style={{ marginTop: 10 }}>
