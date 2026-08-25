@@ -16144,6 +16144,61 @@ def _debugx_get(kind: str, upload_id: int) -> dict:
     return st
 
 
+# Kinds whose run drives `LongVideoUpload.processing_status`. Only these
+# can be answered from the row: a debug2/ballscan/ascentfind run touches
+# no row status, so the row would be reporting some OTHER run's outcome.
+_ROW_BACKED_KINDS = {"ascentproduce", "produce"}
+
+
+def _debugx_status(kind: str, upload_id: int) -> dict:
+    """What to tell the dialog, falling back to the row when this process
+    has no memory of the run.
+
+    `_debugx_state` is per-process and a restart clears it, so "this
+    backend has never heard of this upload" is not the same as "nothing is
+    running" -- the work can be going on in another instance, or have been
+    killed mid-run by a redeploy. Answering the first with the second is
+    what leaves a dialog sitting blank in front of an operator while the
+    clips are being written somewhere they cannot see.
+
+    The row survives both, and for the kinds that maintain it, it is the
+    only thing that does.
+    """
+    st = _debugx_get(kind, upload_id)
+    if st.get("known") or kind not in _ROW_BACKED_KINDS:
+        return st
+
+    db = SessionLocal()
+    try:
+        row = db.get(LongVideoUpload, upload_id)
+        status = getattr(row, "processing_status", None) if row else None
+        last_error = getattr(row, "last_error", None) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status fallback: could not read row %s: %s",
+                    upload_id, exc)
+        return st
+    finally:
+        db.close()
+
+    st["row_status"] = status
+    if status in ("processing", "pending"):
+        # Still going, just not here. Say so rather than showing progress
+        # this process cannot actually see.
+        st["running"] = True
+        st["stage"] = ("Running on another backend process — the step "
+                       "detail is only visible where it started")
+    elif status == "failed":
+        st["running"] = False
+        st["error"] = last_error or "the run failed"
+    elif status == "completed":
+        st["running"] = False
+        st["error"] = ("This run finished, but the backend that has its "
+                       "step timings is not the one answering. The clips "
+                       "on the card are the result; reopen after a "
+                       "refresh to see the breakdown.")
+    return st
+
+
 def _debugx_start(kind: str, upload_id: int, runner) -> dict:
     """Kick `runner(row, src_path, db, progress)` on a thread."""
     # THE CLOCK STARTS AT THE BUTTON, not at the first stage. A run's own
@@ -19512,7 +19567,7 @@ def ascent_produce(upload_id: int):
 
 @router.get("/long-uploads/{upload_id}/ascent-produce/status")
 def ascent_produce_status(upload_id: int):
-    return _json_safe(_debugx_get("ascentproduce", upload_id))
+    return _json_safe(_debugx_status("ascentproduce", upload_id))
 
 
 @router.post("/long-uploads/{upload_id}/ascent-find")
@@ -19523,7 +19578,7 @@ def ascent_find(upload_id: int):
 
 @router.get("/long-uploads/{upload_id}/ascent-find/status")
 def ascent_find_status(upload_id: int):
-    return _json_safe(_debugx_get("ascentfind", upload_id))
+    return _json_safe(_debugx_status("ascentfind", upload_id))
 
 
 # ── Swing test ─────────────────────────────────────────────────────────
