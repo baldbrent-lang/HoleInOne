@@ -1341,7 +1341,17 @@ def make_clip_vertical(
                         )
                 if _rxy and _fw > 0:
                     _focus = max(0.15, min(0.85, float(_rxy[0]) / _fw))
-                _trk = [
+                # Prefer the DRAWN dots over the detections: the tracer
+                # is drawn past where detection stops, so panning on
+                # detections parks the crop while the drawn head carries
+                # on out of frame.
+                _drawn = [
+                    {"frame": int(r["frame"]) - _off, "x": r["x"]}
+                    for r in _sw.get("timed_points") or []
+                    if r.get("x") is not None and r.get("frame") is not None
+                    and int(r.get("frame") or 0) >= _off
+                ]
+                _trk = _drawn or [
                     {"frame": int(r["frame"]) - _off, "x": r["x"]}
                     for r in _sw.get("ball_track_frames") or []
                     if r.get("found") and r.get("x") is not None
@@ -1368,11 +1378,42 @@ def make_clip_vertical(
                             _imp_t = max(0.0, (float(_sif) - _off) / _fps)
                     except (TypeError, ValueError):
                         _imp_t = None
+                    # THE CUT, WHICH THIS PATH NEVER PASSED.
+                    # Without cut_dur the green branch of the pan path
+                    # never runs, so the green half stayed framed on the
+                    # TEE's last ball x -- a coordinate that means
+                    # nothing in the green camera's picture, which is
+                    # why the payoff half came out blank. The tee clip's
+                    # own duration IS the cut in a tee-then-green
+                    # composite.
+                    _cut = None
+                    try:
+                        _psrc = _probe_src
+                    except NameError:
+                        # Only bound inside the branch above; a clip that
+                        # skipped it has no tee file to measure.
+                        _psrc = None
+                    if _psrc is not None and _psrc != render_src:
+                        try:
+                            _d = (probe_video_info(_psrc) or {}).get("duration")
+                            _cut = float(_d) if _d else None
+                        except (TypeError, ValueError):
+                            _cut = None
+                    _grx = (
+                        _green_focus_x(render_src, _cut)
+                        if _cut is not None else None
+                    )
                     _ppath = _vertical_pan_path(
-                        _trk, _rxy, _fps, _fw, golfer_x=_gx,
-                        impact_t=_imp_t,
+                        _trk, _rxy, _fps, _fw, _cut, golfer_x=_gx,
+                        impact_t=_imp_t, green_x=_grx,
                     )
                     _made = make_vertical_pan(render_src, out_path, _ppath)
+                    log.info(
+                        "clip %s: vertical cut=%s green_x=%s drawn=%d",
+                        clip.id, _cut,
+                        round(_grx, 3) if _grx is not None else None,
+                        len(_drawn),
+                    )
                 log.info(
                     "clip %s: vertical on-demand — track=%d fw=%s "
                     "golfer_x=%s src=%s -> %s",
