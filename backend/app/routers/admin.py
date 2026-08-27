@@ -8486,38 +8486,56 @@ def _saved_green_track(row, slot: int, fps: float | None = None):
     That is also why the length bound lives here: the span decides how
     long the clip runs and the points decide what is drawn on it, and
     those two must not be bounded differently.
+
+    ONE RECORD PER SLOT, AND A LINE IN THE LOG WHEN THERE IS NOT. This
+    used to take the FIRST record matching the slot while the editor
+    wrote by array POSITION, so with duplicate or reordered idx values
+    the edit landed on one record and this read another. The produce then
+    rebuilt the clip faithfully from the descent that was already there,
+    reported success, and looked untouched -- which is indistinguishable
+    from the save having done nothing. The editor keys by idx now; a row
+    still carrying duplicates from before gets the most recently written
+    of them rather than a silent coin flip.
     """
     try:
-        for _s in ((row.edit_metrics or {}).get("swings") or []):
-            if isinstance(_s, dict) and int(_s.get("idx", -1)) == int(slot):
-                _t = _s.get("green_track")
-                _t = [p for p in (_t or [])
-                      if isinstance(p, dict) and p.get("frame") is not None
-                      and p.get("x") is not None and p.get("y") is not None]
-                if _t:
-                    # BACKWARDS FROM THE LANDING, which is the end of the
-                    # fall and the one point in the chain that is not in
-                    # doubt. Points before the window are dropped rather
-                    # than the whole track rejected: the tail is the
-                    # descent whatever got prepended to it.
-                    _last = max(int(p["frame"]) for p in _t)
-                    _budget = int(round(D3_MAX_COMET_SEC * (fps or 30.0)))
-                    _keep = [p for p in _t
-                             if int(p["frame"]) >= _last - _budget]
-                    if len(_keep) < len(_t):
-                        log.info(
-                            "green track for swing %s: dropped %d point(s) "
-                            "more than %.1fs before the landing at f%d — a "
-                            "descent does not last that long",
-                            slot, len(_t) - len(_keep), D3_MAX_COMET_SEC,
-                            _last)
-                    _t = _keep
-                return _t or None
-        return None
+        _hits = [
+            _s for _s in ((row.edit_metrics or {}).get("swings") or [])
+            if isinstance(_s, dict) and int(_s.get("idx", -1)) == int(slot)
+        ]
+        if len(_hits) > 1:
+            log.warning(
+                "green track for swing %s: %d records share that idx on "
+                "upload %s — reading the last. An edit saved against a "
+                "different one would look like it did nothing.",
+                slot, len(_hits), getattr(row, "id", None),
+            )
+        if not _hits:
+            return None
+        _t = [
+            p for p in (_hits[-1].get("green_track") or [])
+            if isinstance(p, dict) and p.get("frame") is not None
+            and p.get("x") is not None and p.get("y") is not None
+        ]
+        if not _t:
+            return None
+        # BACKWARDS FROM THE LANDING, which is the end of the fall and the
+        # one point in the chain that is not in doubt. Points before the
+        # window are dropped rather than the whole track rejected: the
+        # tail is the descent whatever got prepended to it.
+        _last = max(int(p["frame"]) for p in _t)
+        _budget = int(round(D3_MAX_COMET_SEC * (fps or 30.0)))
+        _keep = [p for p in _t if int(p["frame"]) >= _last - _budget]
+        if len(_keep) < len(_t):
+            log.info(
+                "green track for swing %s: dropped %d point(s) more than "
+                "%.1fs before the landing at f%d — a descent does not last "
+                "that long",
+                slot, len(_t) - len(_keep), D3_MAX_COMET_SEC, _last,
+            )
+        return _keep or None
     except Exception as exc:  # noqa: BLE001
         log.debug("saved green track for slot %s: %s", slot, exc)
         return None
-
 
 def _render_green_comet(green_path, green_seg, g0, land_sec, land_xy, idx,
                         saved_track=None):

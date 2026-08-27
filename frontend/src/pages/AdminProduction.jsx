@@ -2008,6 +2008,13 @@ function ClickToPlotModal({
         : (swing.idx ?? swingPos);
       const patch = (s) => ({
               ...s,
+              // STAMPED, ALWAYS. The produce reads this swing back by
+              // `idx` (`_saved_green_track` matches on it), so a record
+              // that never had one is a record the renderer cannot find
+              // -- it falls through to its own search and the operator's
+              // plotted descent is not used, on a run that otherwise
+              // succeeds and reports success.
+              idx: newIdx,
               impact_frame: impactFrame ?? s.impact_frame,
               // The landing, and the descent found from it. Kept on the
               // swing so a later produce and a later re-open both start
@@ -2062,7 +2069,23 @@ function ClickToPlotModal({
           address_frame: renderWindow?.start_frame ?? 0,
           ...(renderWindow || {}),
         })]
-        : swings.map((s, i) => (i === swingPos ? patch(s) : s));
+        // BY THE SAME KEY THE PRODUCE READS BACK WITH.
+        //
+        // This wrote the swing by ARRAY POSITION while the renderer
+        // finds it by `idx` -- `_saved_green_track` walks the list and
+        // takes the first record whose idx matches the slot it was given.
+        // Those agree only while position and idx agree, and they stop
+        // agreeing the moment a swing is deleted or two records end up
+        // sharing a number. When they diverge the edit lands on one
+        // record and the render reads another, so the clip is genuinely
+        // rebuilt, from the descent that was already there.
+        //
+        // Every record carrying this idx is patched, not just the one at
+        // `swingPos`: if duplicates exist, whichever the renderer's
+        // first-match lands on is then the edited one either way.
+        : swings.map((s, i) => (
+          (swing.idx != null ? s.idx === newIdx : i === swingPos)
+            ? patch(s) : s));
       await api.saveEditMetrics(adminPassword, row.id, {
         swings: nextSwings,
         // Mirrored to the top level ONLY on a single-swing row, which is
@@ -2437,6 +2460,26 @@ function ClickToPlotModal({
                   Clear ({cometPoints.length})
                 </button>
               </>
+            ) : swing?.green_comet_source ? (
+              // WHAT THE LAST PRODUCE ACTUALLY DREW. The renderer has
+              // recorded this since the comet existed and nothing ever
+              // showed it, so "I plotted a descent and the clip came back
+              // the same" had no answer short of reading a server log --
+              // and the two causes, the points not reaching the renderer
+              // and the renderer not drawing them, are indistinguishable
+              // from the clip.
+              <span className={swing.green_comet_source === "operator"
+                ? "pill ok" : "pill warn"}
+                    title={swing.green_comet_why
+                      || "The last produce drew this swing's comet from "
+                         + swing.green_comet_source}>
+                {swing.green_comet_source === "operator"
+                  ? `☄ last produce used your ${
+                    (swing.green_track || []).length} plotted frames`
+                  : swing.green_comet_source === "search"
+                    ? "☄ last produce used its own search, not your points"
+                    : "no comet on the last produce"}
+              </span>
             ) : swing?.green_track ? (
               <span className="tiny" style={{ color: "#3ee37a" }}>
                 {/* MIN AND MAX, not first and last. A saved track is not
