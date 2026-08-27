@@ -29,10 +29,9 @@ _LOGO_CID = "golfreelz-logo"
 # uvicorn from inside backend/, so a bare "frontend/dist/..." resolves to
 # backend/frontend/dist/... and silently finds nothing — emails then go out
 # text-only with no logo and only an INFO line to say so.
-_LOGO_CANDIDATES = (
-    _REPO_ROOT / "frontend" / "dist" / "golfreelz-logo.png",
-    _REPO_ROOT / "frontend" / "public" / "golfreelz-logo.png",
-)
+# Shared with intro_overlay, which had its own list and a different
+# answer -- see services/branding.py.
+from .branding import LOGO_CANDIDATES as _LOGO_CANDIDATES  # noqa: E402
 _LOGO_WIDTH_PX = 280          # 2x the 140px display width, for retina
 
 # The footer as TEXT, for the plain-text alternative.

@@ -208,21 +208,18 @@ def _flag_icon(img: Image.Image, x: int, y: int, size: int, fill):
 
 
 def _find_brand_logo() -> Path | None:
-    """Locate the GolfReelz brand logo on disk. The canonical location
-    is `frontend/public/golfreelz-logo.png` at the repo root; we also
-    check a backend-local copy in case the frontend tree isn't shipped
-    with the backend deploy."""
-    # services/intro_overlay.py → ../../../ = repo root.
-    here = Path(__file__).resolve()
-    repo_root = here.parents[3]
-    candidates = [
-        repo_root / "frontend" / "public" / "golfreelz-logo.png",
-        here.parent.parent / "assets" / "golfreelz-logo.png",
-    ]
-    for p in candidates:
-        if p.exists() and p.stat().st_size > 0:
-            return p
-    return None
+    """The brand logo, from the one lookup both callers share.
+
+    This used to keep its own candidate list, and that list checked
+    `frontend/public/` and a `backend/app/assets/` directory that does
+    not exist. Vite copies `public/` into `dist/` at build time and the
+    Dockerfile ships only `dist`, so in a deployed container neither path
+    was ever there -- every produced clip fell back to the drawn green
+    badge while `notifications`, which checked `dist`, put the real
+    wordmark on every email out of the same build.
+    """
+    from .branding import logo_path
+    return logo_path()
 
 
 def render_right_panel(
