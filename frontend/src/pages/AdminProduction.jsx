@@ -7866,6 +7866,314 @@ function FlagstickModal({ row, adminPassword, onClose, onSaved }) {
   );
 }
 
+// ── closest to the pin, measured by hand ───────────────────────────────
+// Produce measures on its own when the green camera is calibrated AND a
+// pin is marked on it, and stays silent otherwise -- a plate carrying a
+// guess is worse than no plate. This is the way in when it stayed
+// silent: the operator marks the pin and the ball on the green frame,
+// and the SAME homography turns those two pixels into feet. The clicks
+// are what is saved, not just the number, so they can be nudged later
+// and so a Re-Produce re-measures from them.
+function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
+  const [img, setImg] = useState(null);
+  const [dims, setDims] = useState(null);
+  const [state, setState] = useState(null);
+  const [pin, setPin] = useState(null);
+  const [ball, setBall] = useState(null);
+  const [placing, setPlacing] = useState("pin");   // "pin" | "ball"
+  const [measure, setMeasure] = useState(null);    // {ok, distance…} | {ok:false,reason}
+  const [err, setErr] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState(null);
+  const wrapRef = useRef(null);
+  const dragRef = useRef(null);
+
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const [f, st, vm] = await Promise.all([
+          api.getLongUploadFrame(adminPassword, row.id, 0, "green"),
+          api.getDistanceState(adminPassword, row.id),
+          api.getViewMap(adminPassword, row.id).catch(() => null),
+        ]);
+        if (!live) return;
+        if (!f?.image_url) throw new Error("no green frame on this upload");
+        setImg(f.image_url);
+        setDims({ w: f.width || row.green_width || 1280,
+                  h: f.height || row.green_height || 720 });
+        setState(st);
+        const mine = (st?.swings || []).find((s) => s.slot === slot) || {};
+        // Reopening lands on the marks that were made last time. A first
+        // open borrows the flagstick from the hole and the ball from
+        // wherever the pipeline last saw it -- both only as a starting
+        // point, because the whole purpose here is that the operator
+        // moves them.
+        const g = vm?.pin_green ?? vm?.view_map?.pin_green;
+        const p0 = mine.pin_green || (g ? [g[0], g[1]] : null);
+        const b0 = mine.ball_green || mine.auto_ball_green || null;
+        if (p0) setPin({ x: Math.round(p0[0]), y: Math.round(p0[1]) });
+        if (b0) setBall({ x: Math.round(b0[0]), y: Math.round(b0[1]) });
+        if (!mine.pin_green && mine.auto_ball_source === "descent") {
+          setNote("The ball starts where the automatic descent ENDED — "
+            + "that is where it stopped falling, not where it finished "
+            + "rolling. Drag it to where the ball actually came to rest.");
+        }
+        setPlacing(p0 ? (b0 ? "pin" : "ball") : "pin");
+      } catch (e) {
+        if (live) setErr(e?.message || String(e));
+      }
+    })();
+    return () => { live = false; };
+  }, [adminPassword, row.id, slot]);
+
+  // The number tracks the markers. Re-asked on every change rather than
+  // computed here on purpose: the homography lives on the server and a
+  // second copy of that arithmetic in the browser is a second thing to
+  // keep right.
+  useEffect(() => {
+    if (!pin || !ball) { setMeasure(null); return; }
+    let live = true;
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.previewDistance(
+          adminPassword, row.id, [pin.x, pin.y], [ball.x, ball.y]);
+        if (live) setMeasure(r);
+      } catch (e) {
+        if (live) setMeasure({ ok: false, reason: e?.message || String(e) });
+      }
+    }, 120);
+    return () => { live = false; clearTimeout(t); };
+  }, [adminPassword, row.id, pin, ball]);
+
+  function at(ev) {
+    const el = wrapRef.current;
+    if (!el || !dims) return null;
+    const r = el.getBoundingClientRect();
+    const fx = (ev.clientX - r.left) / r.width;
+    const fy = (ev.clientY - r.top) / r.height;
+    return {
+      x: Math.max(0, Math.min(dims.w - 1, Math.round(fx * dims.w))),
+      y: Math.max(0, Math.min(dims.h - 1, Math.round(fy * dims.h))),
+    };
+  }
+
+  // Clicking near a marker grabs THAT one; clicking anywhere else drops
+  // whichever marker the toggle is on. Without the grab, nudging the pin
+  // by a few pixels meant first remembering to flip the toggle.
+  function down(ev) {
+    const p = at(ev);
+    if (!p) return;
+    const near = (m) => m && Math.hypot(m.x - p.x, m.y - p.y)
+      < Math.max(12, dims.w * 0.015);
+    if (near(pin)) { dragRef.current = "pin"; setPlacing("pin"); setPin(p); }
+    else if (near(ball)) { dragRef.current = "ball"; setPlacing("ball"); setBall(p); }
+    else {
+      dragRef.current = placing;
+      if (placing === "pin") setPin(p); else setBall(p);
+    }
+  }
+  function move(ev) {
+    if (!dragRef.current) return;
+    const p = at(ev);
+    if (!p) return;
+    if (dragRef.current === "pin") setPin(p); else setBall(p);
+  }
+  function up() { dragRef.current = null; }
+
+  async function save(stamp) {
+    if (!pin || !ball) return;
+    setSaving(true);
+    setErr(null);
+    try {
+      const out = await api.saveDistance(adminPassword, row.id, {
+        slot,
+        pin_green: [pin.x, pin.y],
+        ball_green: [ball.x, ball.y],
+        stamp: !!stamp,
+      });
+      if (out?.stamp_reason) setErr(out.stamp_reason);
+      onSaved?.(out);
+      if (!out?.stamp_reason) onClose();
+      else setSaving(false);
+    } catch (e) {
+      setErr(e?.message || String(e));
+      setSaving(false);
+    }
+  }
+
+  const mine = (state?.swings || []).find((s) => s.slot === slot) || {};
+  const blocker = state?.blocker;
+  const feet = measure?.ok ? measure.distance_from_pin_display : null;
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Distance to pin"
+         onClick={onClose}
+         style={{ position: "fixed", inset: 0, zIndex: 1200,
+                  background: "rgba(0,0,0,0.75)", display: "flex",
+                  alignItems: "center", justifyContent: "center",
+                  padding: 16 }}>
+      <div className="card" onClick={(e) => e.stopPropagation()}
+           style={{ margin: 0, padding: 16, maxWidth: 1040, width: "100%" }}>
+        <div className="row" style={{ justifyContent: "space-between", gap: 12 }}>
+          <b>⛳ Distance to pin — #{row.id} · swing {slot + 1}</b>
+          <button className="btn ghost" style={{ width: "auto" }}
+                  onClick={onClose}>Close ✕</button>
+        </div>
+
+        <div className="tiny muted" style={{ marginTop: 4 }}>
+          Mark the BASE of the flagstick and the ball where it came to
+          rest. Both are green-camera pixels; the camera's calibration
+          turns them into feet. Click a marker to grab it, or use the
+          toggle to choose which one a click drops.
+        </div>
+        {note && (
+          <div className="tiny" style={{ marginTop: 6, opacity: 0.85 }}>
+            ⚠︎ {note}
+          </div>
+        )}
+        {blocker && (
+          <div className="err-text small" style={{ marginTop: 8 }}>
+            {blocker}
+          </div>
+        )}
+        {err && (
+          <div className="err-text small" style={{ marginTop: 8 }}>{err}</div>
+        )}
+        {!img && !err && (
+          <div className="small" style={{ marginTop: 10 }}>
+            Fetching a frame from the green camera…
+          </div>
+        )}
+
+        {img && (
+          <>
+            <div className="row" style={{ marginTop: 10, gap: 8,
+                                          alignItems: "center" }}>
+              <button
+                className={placing === "pin" ? "btn" : "btn ghost"}
+                style={{ width: "auto" }}
+                onClick={() => setPlacing("pin")}
+              >⚑ Place pin</button>
+              <button
+                className={placing === "ball" ? "btn" : "btn ghost"}
+                style={{ width: "auto" }}
+                onClick={() => setPlacing("ball")}
+              >● Place ball</button>
+              <span style={{ marginLeft: "auto", fontWeight: 700,
+                             fontSize: 20 }}>
+                {feet
+                  ? feet
+                  : (measure && !measure.ok
+                    ? <span className="err-text small">{measure.reason}</span>
+                    : <span className="muted small">
+                        mark both points
+                      </span>)}
+              </span>
+            </div>
+
+            <div
+              ref={wrapRef}
+              onPointerDown={down}
+              onPointerMove={move}
+              onPointerUp={up}
+              onPointerLeave={up}
+              style={{ position: "relative", marginTop: 10,
+                       cursor: "crosshair", borderRadius: 8,
+                       overflow: "hidden", touchAction: "none",
+                       userSelect: "none" }}
+            >
+              <img src={img} alt="Green camera" draggable={false}
+                   style={{ width: "100%", display: "block" }} />
+
+              {/* The line first, so the markers sit on top of it. */}
+              {pin && ball && dims && (
+                <svg viewBox={`0 0 ${dims.w} ${dims.h}`}
+                     style={{ position: "absolute", inset: 0,
+                              width: "100%", height: "100%",
+                              pointerEvents: "none" }}>
+                  <line x1={pin.x} y1={pin.y} x2={ball.x} y2={ball.y}
+                        stroke="#ffd400" strokeWidth={Math.max(2, dims.w / 480)}
+                        strokeDasharray={`${dims.w / 160} ${dims.w / 220}`} />
+                </svg>
+              )}
+
+              {/* Anchored at its BASE — the point being marked is where
+                  the stick meets the green, not the middle of a pennant. */}
+              {pin && dims && (
+                <div style={{
+                  position: "absolute",
+                  left: `${(pin.x / dims.w) * 100}%`,
+                  top: `${(pin.y / dims.h) * 100}%`,
+                  transform: "translate(-1px, -100%)",
+                  pointerEvents: "none",
+                }}>
+                  <div style={{ width: 2, height: 34, background: "#fff",
+                                boxShadow: "0 0 3px rgba(0,0,0,0.8)" }} />
+                  <div style={{
+                    position: "absolute", left: 2, top: 0,
+                    width: 0, height: 0,
+                    borderLeft: "16px solid #ef4444",
+                    borderTop: "6px solid transparent",
+                    borderBottom: "6px solid transparent",
+                  }} />
+                </div>
+              )}
+              {ball && dims && (
+                <div style={{
+                  position: "absolute",
+                  left: `${(ball.x / dims.w) * 100}%`,
+                  top: `${(ball.y / dims.h) * 100}%`,
+                  transform: "translate(-50%, -50%)",
+                  width: 16, height: 16, borderRadius: "50%",
+                  border: "2px solid #22d3ee",
+                  boxShadow: "0 0 4px rgba(0,0,0,0.9)",
+                  pointerEvents: "none",
+                }} />
+              )}
+            </div>
+          </>
+        )}
+
+        <div className="row" style={{ marginTop: 10, gap: 8,
+                                      justifyContent: "flex-end" }}>
+          <span className="tiny muted" style={{ marginRight: "auto" }}>
+            {pin ? `pin ${pin.x}, ${pin.y}` : "no pin"}
+            {" · "}
+            {ball ? `ball ${ball.x}, ${ball.y}` : "no ball"}
+            {mine.plate_stamped
+              ? " · the clip is showing a plate"
+              : ""}
+          </span>
+          <button className="btn ghost" style={{ width: "auto" }}
+                  onClick={onClose}>Cancel</button>
+          <button className="btn ghost" style={{ width: "auto" }}
+                  disabled={!measure?.ok || saving}
+                  title="Keep the marks and the number, and leave the clip's pixels alone. Re-Produce will pick these marks up."
+                  onClick={() => save(false)}>
+            {saving ? "Saving…" : "Save number only"}
+          </button>
+          {/* The visual follows the number. Re-rendered from the clip's
+              pre-plate copy every time, so correcting the marks REPLACES
+              the plate instead of stacking a second one over the first —
+              which is what makes this a thing you can adjust. */}
+          <button className="btn" style={{ width: "auto" }}
+                  disabled={!measure?.ok || saving || !mine.clip_id}
+                  title={mine.clip_id
+                    ? "Save, and put this number on the end of the clip. Rendered from the pre-plate copy, so any earlier number is replaced rather than covered."
+                    : "No produced clip for this swing yet"}
+                  onClick={() => save(true)}>
+            {saving
+              ? "Rendering…"
+              : (mine.plate_stamped ? "Save + update clip"
+                : "Save + show on clip")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // WHAT EACH GATE MEANS, in words. The colours and the order come from
 // the backend so the legend cannot disagree with the picture; only the
 // prose lives here, because that is the one part OpenCV has no use for.
@@ -14728,6 +15036,9 @@ export default function AdminProduction() {
   // any saved map are in hand; { uploadId, loading } while fetching.
   const [greenCal, setGreenCal] = useState(null);
   const [pinModal, setPinModal] = useState(null);
+  // Closest to the pin: {row, slot}. One swing at a time, because a
+  // distance is a fact about one shot.
+  const [distModal, setDistModal] = useState(null);
   const [debugModal, setDebugModal] = useState(null); // { uploadId, ...report }
 
   function pollDebug(uploadId) {
@@ -16090,6 +16401,85 @@ export default function AdminProduction() {
               </div>
             </div>
 
+            {/* ── DISTANCE TO PIN ──────────────────────────────────────
+                Closest to the pin, per swing. Produce fills this in by
+                itself when the green camera is calibrated and a pin is
+                marked on it; when it could not, the row says so and the
+                button opens the picker where the operator marks the pin
+                and the ball themselves. The number is never invented
+                here -- an uncalibrated camera has no scale, and clicks
+                cannot supply one. */}
+            {row.dual_camera && (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: "8px 12px",
+                  borderRadius: 8,
+                  border: "1px solid rgba(120,120,120,0.35)",
+                  background: "rgba(120,120,120,0.06)",
+                }}
+              >
+                <div className="row" style={{ gap: 10, alignItems: "center",
+                                              flexWrap: "wrap" }}>
+                  <b className="small">⛳ Distance to pin</b>
+                  {(row.produced_clips || []).length === 0 && (
+                    <span className="tiny muted">
+                      nothing produced yet — the distance is measured on a
+                      produced clip
+                    </span>
+                  )}
+                  {(row.produced_clips || []).map((c, i) => (
+                    <span
+                      key={c.id}
+                      className="small"
+                      style={{
+                        padding: "3px 10px",
+                        borderRadius: 999,
+                        border: "1px solid "
+                          + (c.distance_from_pin_feet != null
+                            ? "rgba(40,168,92,0.55)"
+                            : "rgba(120,120,120,0.45)"),
+                        background: c.distance_from_pin_feet != null
+                          ? "rgba(40,168,92,0.14)"
+                          : "transparent",
+                      }}
+                    >
+                      {(row.produced_clips || []).length > 1
+                        ? `clip ${i + 1}: ` : ""}
+                      {c.distance_from_pin_feet != null
+                        ? `${c.distance_from_pin_feet} ft`
+                        : "not measured"}
+                    </span>
+                  ))}
+                  <button
+                    className="small ghost"
+                    style={{ width: "auto", marginLeft: "auto" }}
+                    disabled={greyed || busy}
+                    title="Mark the pin and the resting ball on the green camera; the calibration turns those two pixels into feet."
+                    onClick={() => {
+                      // WHICH SWING. The picker measures one swing, so
+                      // it needs a slot: the first swing that has no
+                      // distance yet, or the first swing there is.
+                      const sws = row.edit_metrics?.swings || [];
+                      const clips = row.produced_clips || [];
+                      let pos = sws.findIndex((sw) => {
+                        const c = clips.find((q) => q.id === sw?.clip_id);
+                        return c && c.distance_from_pin_feet == null;
+                      });
+                      if (pos < 0) pos = 0;
+                      const sw = sws[pos];
+                      setDistModal({
+                        row,
+                        slot: (sw && sw.idx != null) ? sw.idx : pos,
+                      });
+                    }}
+                  >
+                    Measure / adjust →
+                  </button>
+                </div>
+              </div>
+            )}
+
             {row.last_error && (
               <div className="err-text small" style={{ marginTop: 10 }}>
                 {row.last_error}
@@ -16292,6 +16682,15 @@ export default function AdminProduction() {
           row={pinModal.row}
           adminPassword={adminPassword}
           onClose={() => setPinModal(null)}
+          onSaved={() => refreshAll()}
+        />
+      )}
+      {distModal && (
+        <DistanceToPinModal
+          row={distModal.row}
+          slot={distModal.slot}
+          adminPassword={adminPassword}
+          onClose={() => setDistModal(null)}
           onSaved={() => refreshAll()}
         />
       )}

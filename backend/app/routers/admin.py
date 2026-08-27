@@ -8,6 +8,7 @@ import math
 import os
 import queue
 import secrets
+import shutil
 import threading
 import time
 from contextlib import contextmanager
@@ -142,7 +143,8 @@ from ..services.video import (
     transcode_for_web,
 )
 from ..services.intro_overlay import (
-    apply_distance_plate_inplace, apply_intro_overlay_inplace,
+    apply_distance_plate, apply_distance_plate_inplace,
+    apply_intro_overlay_inplace,
 )
 
 # ── produce phase clock ────────────────────────────────────────────────
@@ -232,6 +234,9 @@ apply_intro_overlay_inplace = _timed(
 apply_distance_plate_inplace = _timed(
     apply_distance_plate_inplace, "ffmpeg_overlay",
 )
+# The re-plating path renders from the pristine copy, so it is the one
+# that carries the ffmpeg cost now; it belongs on the same clock.
+apply_distance_plate = _timed(apply_distance_plate, "ffmpeg_overlay")
 render_tracer_video = _timed(render_tracer_video, "render_tracer")
 detect_swings_combined = _timed(detect_swings_combined, "detect_swings")
 
@@ -5464,6 +5469,9 @@ def list_long_uploads(
                     "thumbnail_url": c.thumbnail_url,
                     "ball_in_cup": bool(c.ball_in_cup),
                     "is_highlight": bool(c.is_highlight),
+                    # Closest to the pin, so the card's Distance to pin
+                    # section can draw itself from the row it already has.
+                    "distance_from_pin_feet": c.distance_from_pin_feet,
                 }
             )
         return out
@@ -8304,6 +8312,53 @@ def _green_rest_for_swing(db, row, slot: int):
         return None
 
 
+# ── the distance plate is REPLACEABLE ──────────────────────────────────
+# A plate is burned into the pixels, so stamping a second one leaves the
+# first showing underneath. That made a measured distance a one-shot
+# decision: adjust the marks afterwards and the clip kept the old
+# number. So the frame the plate goes onto is kept beside the clip, and
+# every stamp renders from THAT rather than from the clip itself. The
+# number can then be corrected as often as the operator likes and the
+# visual follows it, which is the whole point of a section you adjust.
+_PREPLATE_SUFFIX = ".preplate.mp4"
+
+
+def _stamp_distance_plate(path: Path, display: str,
+                          rest_at_sec: float | None = None) -> bool:
+    """Put `display` on the clip, replacing any plate already on it."""
+    pre = path.with_suffix(path.suffix + _PREPLATE_SUFFIX)
+    if not pre.exists():
+        # Not local: it may still be in the bucket from an earlier stamp
+        # on another dyno. Only when there is genuinely no copy is this
+        # clip un-plated, and the clip itself becomes the pristine one.
+        storage.ensure_local(CLIPS_DIR, pre.name)
+    if not pre.exists():
+        try:
+            shutil.copy2(path, pre)
+        except OSError as exc:
+            log.warning("ctp: could not keep a pre-plate copy of %s: %s",
+                        path.name, exc)
+            return False
+    tmp = path.with_suffix(path.suffix + ".newplate.mp4")
+    ok = apply_distance_plate(pre, tmp, display, rest_at_sec=rest_at_sec)
+    if not ok:
+        tmp.unlink(missing_ok=True)
+        return False
+    try:
+        tmp.replace(path)
+    except OSError as exc:
+        log.warning("ctp: could not swap the re-plated clip in: %s", exc)
+        tmp.unlink(missing_ok=True)
+        return False
+    # The pristine copy has to outlive the local disk, or the next
+    # correction has nothing to render from.
+    try:
+        storage.upload(pre.name, pre)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ctp: pre-plate not uploaded: %s", exc)
+    return True
+
+
 def _apply_distance_plate(db, row, clip, final, slot, rep=None,
                           rest_at_sec=None):
     """Measure the shot and put the number on the clip, or say why not.
@@ -8319,6 +8374,41 @@ def _apply_distance_plate(db, row, clip, final, slot, rep=None,
     """
     try:
         from ..services import ctp as _ctp
+
+        # THE OPERATOR'S OWN CLICKS FIRST. If someone stood in front of
+        # the frame and marked the pin and the ball for this swing, that
+        # is a better description of it than the calibration's stored
+        # pin, which is where the hole was on whatever day the camera
+        # was calibrated. Re-Produce must not quietly overwrite a
+        # hand-measured number with one taken from a stale pin.
+        _pick = (_distance_picks(row) or {}).get(str(int(slot))) or {}
+        if _pick.get("pin_green") and _pick.get("ball_green"):
+            _cam_h = _green_camera_for(db, row)
+            _pos_h = _ctp.measure_pair(
+                (_cam_h.green_homography or {}) if _cam_h else {},
+                _pick["pin_green"], _pick["ball_green"])
+            if _pos_h:
+                _text_h = _ctp.plate_text(_pos_h)
+                if _text_h and _stamp_distance_plate(
+                        final, _text_h,
+                        rest_at_sec=(float(rest_at_sec)
+                                     if rest_at_sec is not None else None)):
+                    try:
+                        clip.distance_from_pin_feet = int(round(
+                            float(_pos_h["distance_from_pin_ft"])))
+                        db.add(clip)
+                    except (TypeError, ValueError, KeyError):
+                        pass
+                    log.info("d3 produce: swing %s measured %s from the "
+                             "operator's marks", slot, _text_h)
+                    if rep is not None:
+                        rep.setdefault("distances", []).append({
+                            "swing": int(slot), "text": _text_h,
+                            "feet": _pos_h.get("distance_from_pin_ft"),
+                            "source": "operator-marked",
+                            "green_xy": _pick["ball_green"],
+                        })
+                    return None
 
         _rest = _green_rest_for_swing(db, row, slot)
         if not _rest:
@@ -8346,7 +8436,7 @@ def _apply_distance_plate(db, row, clip, final, slot, rep=None,
         # WHEN THE BALL STOPS, not when the clip starts. The plate is a
         # caption on a moment, and a number sitting there through the
         # tee shot answers a question nobody has asked yet.
-        if not apply_distance_plate_inplace(
+        if not _stamp_distance_plate(
                 final, _text,
                 rest_at_sec=(float(rest_at_sec)
                              if rest_at_sec is not None else None)):
@@ -9289,6 +9379,230 @@ def save_hole_pin(
             "pin_for_this_swing": (_mine or {}).get("green"),
             "pin_note": _why,
             "n_pins": len(_vm.get("pins") or [])}
+
+
+# ── closest to the pin: measure it by hand ─────────────────────────────
+# The produce path measures automatically when it can (`_apply_distance_
+# plate`), and stays silent when it cannot. These three routes are the
+# operator's way in when it stayed silent: click the pin, click the
+# ball, and the same homography that would have done it unattended turns
+# the two pixels into feet. Nothing here invents a scale -- an
+# uncalibrated camera still refuses.
+
+
+def _distance_blocker(cam) -> str | None:
+    """Why this camera cannot measure, in the operator's words, or None."""
+    if cam is None:
+        return "this upload has no green camera"
+    cal = cam.green_homography or {}
+    if not cal.get("homography"):
+        return (f"green camera {cam.id} is not calibrated — calibrate it on "
+                f"the Cameras page and distances can be measured here")
+    if (cal.get("purpose") or "measure") != "measure":
+        return (f"green camera {cam.id} is calibrated to aim the tracer, "
+                f"not to measure — that fit is not a yardage")
+    return None
+
+
+def _distance_picks(row) -> dict:
+    """The operator's saved pin/ball clicks, keyed by swing slot."""
+    return dict(((row.edit_metrics or {}).get("distance_picks") or {}))
+
+
+def _green_camera_for(db, row):
+    try:
+        _t_id, g_id = _camera_pair_for(db, row)
+        return db.get(Camera, int(g_id)) if g_id else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@router.get("/long-uploads/{upload_id}/distance")
+def get_distance_state(upload_id: int, db: Session = Depends(get_db)):
+    """Everything the Distance to pin section needs to draw itself.
+
+    Per swing: what the clip currently says, where the ball was found
+    automatically (and how trustworthy that is), and what the operator
+    has clicked before. Plus the one blocking reason, when there is one,
+    phrased as the thing to go and do rather than as an error.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    cam = _green_camera_for(db, row)
+    picks = _distance_picks(row)
+    clips = (db.query(VideoClip)
+             .filter(VideoClip.long_upload_id == row.id)
+             .order_by(VideoClip.id.asc()).all())
+    swings = list((row.edit_metrics or {}).get("swings") or [])
+
+    out = []
+    for i, sw in enumerate(swings):
+        slot = int(sw.get("idx", i)) if isinstance(sw, dict) else i
+        clip = next((c for c in clips
+                     if isinstance(sw, dict) and c.id == sw.get("clip_id")),
+                    None)
+        rest = _green_rest_for_swing(db, row, slot)
+        p = picks.get(str(slot)) or {}
+        out.append({
+            "slot": slot,
+            "clip_id": clip.id if clip else None,
+            "clip_url": (clip.tracer_url or clip.source_url) if clip else None,
+            "hole_number": clip.hole_number if clip else None,
+            "feet": clip.distance_from_pin_feet if clip else None,
+            # Where the pipeline thinks the ball stopped, and whether
+            # that is a resting place or only where it stopped falling.
+            "auto_ball_green": (rest or {}).get("xy"),
+            "auto_ball_source": (rest or {}).get("source"),
+            "pin_green": p.get("pin_green"),
+            "ball_green": p.get("ball_green"),
+            "measured_ft": p.get("distance_from_pin_ft"),
+            "measured_display": p.get("distance_from_pin_display"),
+            "measured_at": p.get("measured_at"),
+            # A plate is burned into the pixels. Stamping a second one
+            # would leave the first showing underneath, so the section
+            # offers Re-Produce instead once this is true.
+            "plate_stamped": bool(p.get("plate_stamped")),
+        })
+
+    return {
+        "upload_id": row.id,
+        "green_camera_id": cam.id if cam else None,
+        "calibrated": bool((cam.green_homography or {}).get("homography"))
+        if cam else False,
+        "blocker": _distance_blocker(cam),
+        "green_width": row.green_width,
+        "green_height": row.green_height,
+        "swings": out,
+    }
+
+
+@router.get("/long-uploads/{upload_id}/distance/preview")
+def preview_distance(
+    upload_id: int,
+    pin_x: float, pin_y: float, ball_x: float, ball_y: float,
+    db: Session = Depends(get_db),
+):
+    """Feet between two green pixels, without writing anything.
+
+    The picker calls this as the operator drags, so the number moves
+    with the marker instead of only appearing after a save.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    cam = _green_camera_for(db, row)
+    why = _distance_blocker(cam)
+    if why:
+        return {"ok": False, "reason": why}
+    from ..services import ctp as _ctp
+    pos = _ctp.measure_pair(cam.green_homography or {},
+                            [pin_x, pin_y], [ball_x, ball_y])
+    if pos is None:
+        return {"ok": False,
+                "reason": "one of those points does not land on the "
+                          "green's plane"}
+    return {"ok": True, **pos}
+
+
+@router.post("/long-uploads/{upload_id}/distance")
+def save_distance(
+    upload_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Measure from the operator's two clicks and keep the answer.
+
+    Body: {"slot": int, "pin_green": [x, y], "ball_green": [x, y],
+           "stamp": bool}
+
+    The clicks are stored, not just the number, for two reasons: the
+    operator can reopen and nudge them, and a later Re-Produce can
+    re-measure from them instead of falling back to the calibration's
+    own pin. `stamp` burns the plate onto the finished clip in place —
+    refused when one is already burned in, because the pixels underneath
+    do not come back.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    try:
+        slot = int(payload.get("slot"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "slot is required")
+    pin = payload.get("pin_green")
+    ball = payload.get("ball_green")
+    if not pin or not ball:
+        raise HTTPException(400, "both pin_green and ball_green are required")
+
+    cam = _green_camera_for(db, row)
+    why = _distance_blocker(cam)
+    if why:
+        raise HTTPException(409, why)
+
+    from ..services import ctp as _ctp
+    pos = _ctp.measure_pair(cam.green_homography or {}, pin, ball)
+    if pos is None:
+        raise HTTPException(
+            422, "one of those points does not land on the green's plane")
+
+    picks = _distance_picks(row)
+    prev = picks.get(str(slot)) or {}
+    rec = dict(pos)
+    rec["measured_at"] = _utcnow_naive().isoformat()
+    rec["plate_stamped"] = bool(prev.get("plate_stamped"))
+
+    swings = list((row.edit_metrics or {}).get("swings") or [])
+    sw = next((s for s in swings
+               if isinstance(s, dict) and int(s.get("idx", -1)) == slot), None)
+    clip = None
+    if sw and sw.get("clip_id"):
+        clip = db.get(VideoClip, int(sw["clip_id"]))
+
+    # THE VISUAL FOLLOWS THE NUMBER. Measuring and then having to press a
+    # second thing to see it on the clip left the two able to disagree --
+    # a card reading 22 ft over a video reading 41. Stamping renders from
+    # the pristine pre-plate copy, so correcting the marks corrects what
+    # the viewer sees instead of stacking a second plate on the first.
+    stamped = False
+    stamp_why = None
+    if payload.get("stamp", True):
+        if clip is None or not (clip.tracer_url or clip.source_url):
+            stamp_why = "there is no produced clip for this swing yet"
+        else:
+            # source_url and tracer_url are the SAME file out of produce,
+            # so stamping once covers whichever one the card plays.
+            _u = clip.tracer_url or clip.source_url
+            path = CLIPS_DIR / Path(_u).name
+            storage.ensure_local(CLIPS_DIR, path.name)
+            if not path.exists():
+                stamp_why = f"the produced file is not on disk: {path.name}"
+            elif _stamp_distance_plate(
+                    path, pos["distance_from_pin_display"]):
+                stamped = True
+                rec["plate_stamped"] = True
+                storage.upload(path.name, path)
+            else:
+                stamp_why = "the plate would not render onto the clip"
+
+    picks[str(slot)] = rec
+    em = dict(row.edit_metrics or {})
+    em["distance_picks"] = picks
+    # A fresh dict, so SQLAlchemy sees the assignment as dirty without
+    # needing an explicit flag_modified — the same pattern the rest of
+    # this router uses on edit_metrics.
+    row.edit_metrics = em
+    if clip is not None:
+        clip.distance_from_pin_feet = int(round(
+            float(pos["distance_from_pin_ft"])))
+        db.add(clip)
+    db.add(row)
+    db.commit()
+
+    log.info("ctp: upload %s swing %s measured %s by hand (stamped=%s)",
+             row.id, slot, pos["distance_from_pin_display"], stamped)
+    return {"ok": True, "slot": slot, "stamped": stamped,
+            "stamp_reason": stamp_why, **pos}
 
 
 @router.post("/long-uploads/{upload_id}/tracer-shape")

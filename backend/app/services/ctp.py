@@ -79,3 +79,54 @@ def plate_text(pos: dict | None) -> Optional[str]:
 def distance_plate_for_clip(calibration: dict | None, rest_xy) -> Optional[str]:
     """measure_rest + plate_text, for callers that only want the string."""
     return plate_text(measure_rest(calibration, rest_xy))
+
+
+def measure_pair(calibration: dict | None, pin_xy, ball_xy) -> Optional[dict]:
+    """Distance between TWO operator-chosen green pixels, in feet.
+
+    `measure_rest` answers "how far is this ball from the pin the camera
+    was calibrated against". This answers "how far apart are these two
+    points I just clicked", and the difference matters: the pin marked
+    at calibration time is where the hole was THAT day. Pins move. When
+    an operator can see both the ball and the flag in the frame in front
+    of them, their two clicks describe this swing, and a stored pin from
+    another session does not.
+
+    So this deliberately does NOT require `calibration["pin"]["world"]` —
+    the operator supplies the pin. Everything else it still refuses on:
+    an uncalibrated camera, a fit accepted only for aiming a tracer, or
+    a pixel that does not land on the green's plane all return None,
+    because a hand-placed click cannot rescue a missing scale.
+    """
+    from . import green_calibration as gc
+
+    if not calibration or not calibration.get("homography"):
+        return None
+    if (calibration.get("purpose") or "measure") != "measure":
+        log.info("ctp: calibration is for %s, not measuring",
+                 calibration.get("purpose"))
+        return None
+    try:
+        px, py = float(pin_xy[0]), float(pin_xy[1])
+        bx, by = float(ball_xy[0]), float(ball_xy[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    pin = gc.image_to_green(calibration, px, py)
+    ball = gc.image_to_green(calibration, bx, by)
+    if not pin or not ball:
+        return None
+
+    import math as _math
+    d = _math.hypot(ball["x_ft"] - pin["x_ft"], ball["y_ft"] - pin["y_ft"])
+    return {
+        "distance_from_pin_ft": round(d, 1),
+        # gc's own formatter, not a local one: the coarse rounding is a
+        # measurement decision that green_calibration owns, and a second
+        # copy here would be free to drift into a false precision.
+        "distance_from_pin_display": gc._feet_display(d),
+        "pin_world": [pin["x_ft"], pin["y_ft"]],
+        "ball_world": [ball["x_ft"], ball["y_ft"]],
+        "pin_green": [round(px, 1), round(py, 1)],
+        "ball_green": [round(bx, 1), round(by, 1)],
+    }

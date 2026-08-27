@@ -627,6 +627,32 @@ export const api = {
       body: payload,
       adminPassword: key,
     }),
+  // ---- Closest to the pin: measure by hand ----
+  // The produce path measures on its own when the green camera is
+  // calibrated AND a pin is marked on it. These are the way in when it
+  // could not: the operator clicks the pin and the ball on the green
+  // frame and the same homography turns the two pixels into feet.
+  getDistanceState: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/distance`, {
+      adminPassword: key,
+    }),
+  previewDistance: (key, uploadId, pin, ball) =>
+    // Called as the marker is dragged, so the number tracks the click
+    // instead of only appearing on save. Writes nothing.
+    request(
+      `/api/admin/long-uploads/${uploadId}/distance/preview`
+      + `?pin_x=${pin[0]}&pin_y=${pin[1]}`
+      + `&ball_x=${ball[0]}&ball_y=${ball[1]}`,
+      { adminPassword: key },
+    ),
+  saveDistance: (key, uploadId, payload = {}) =>
+    // { slot, pin_green, ball_green, stamp } — stamp burns the plate
+    // into the finished clip, and is refused if one is already there.
+    request(`/api/admin/long-uploads/${uploadId}/distance`, {
+      method: "POST",
+      body: payload,
+      adminPassword: key,
+    }),
   saveHolePin: (key, uploadId, payload = {}) =>
     // The flagstick, in GREEN pixels, stored against the hole. Mapped
     // to the tee on demand so re-calibrating fixes the target too.
