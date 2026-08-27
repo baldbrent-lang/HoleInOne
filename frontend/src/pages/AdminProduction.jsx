@@ -2018,6 +2018,22 @@ function ClickToPlotModal({
                 ? { tracer_end: [tracerEnd.x, tracerEnd.y] } : {}),
               ...(flightSec != null
                 ? { tracer_flight_sec: flightSec } : {}),
+              // CLEARING IS A VALUE, NOT AN ABSENCE.
+              //
+              // This block used to collapse to `{}` when there was no
+              // landing, and `patch` spreads `...s` first -- so a save
+              // made after Clear descent wrote no landing keys at all
+              // and the previous ones survived untouched. Clear, Save &
+              // close, reopen: the descent was still there, the clip was
+              // rebuilt from it, and nothing the operator did had any
+              // effect. The only way to erase a landing was to have
+              // never set one.
+              //
+              // Sending explicit nulls is what the save endpoint wants:
+              // it merges key by key (`existing[k] = v`) and stores a
+              // null as a null, and the produce-side merge reads a null
+              // `green_track` as "no hand-plotted descent" rather than
+              // as "this run had nothing to say".
               ...(landing
                 ? {
                     landing_frame: landing.frame,
@@ -2025,7 +2041,11 @@ function ClickToPlotModal({
                     green_track: cometPoints.length > 1
                       ? cometPoints : null,
                   }
-                : {}),
+                : {
+                    landing_frame: null,
+                    landing_spot: null,
+                    green_track: null,
+                  }),
               ...(ballAtRest
                 // ball_manual marks it operator-placed; the produce
                 // worker checks that flag before writing a detected rest
@@ -2050,11 +2070,18 @@ function ClickToPlotModal({
         // from. On a multi-swing row the top level is a slot every swing
         // shares, so writing this swing's landing into it is how one
         // clip's landing became every later clip's.
-        ...(landing && soloRow
-          ? {
-              landing_frame: landing.frame,
-              landing_spot: { x: landing.x, y: landing.y },
-            }
+        // Cleared on a solo row has to clear the mirror too, for the
+        // reason above -- a stale top-level landing is read back on
+        // reopen and is just as immortal as a stale one on the swing.
+        // Still never written on a multi-swing row, where the top level
+        // is a slot every swing shares.
+        ...(soloRow
+          ? (landing
+            ? {
+                landing_frame: landing.frame,
+                landing_spot: { x: landing.x, y: landing.y },
+              }
+            : { landing_frame: null, landing_spot: null })
           : {}),
       });
       // 2. PRODUCE, the same way the edit wizard's Produce does.
