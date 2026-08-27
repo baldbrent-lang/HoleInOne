@@ -8010,7 +8010,48 @@ const ASCENT_WHY_TEXT = {
   tilt: "leaning too far off vertical to have come off a tee",
   backrun: "left the tee line too long ago to have been a tee shot",
   outside: "points back outside the hitting area",
+  sparse: "mostly gaps — specks joined across frames the ball was not in",
 };
+
+
+// EVERY POINT, WITH THE FRAME IT CAME FROM.
+//
+// A chain reported as "3pts 269px" is impossible to argue with: three
+// points spread over a quarter of the frame could be a ball the detector
+// kept losing or three unrelated specks half a second apart, and those
+// are opposite problems. The frames say which, and they were in the
+// payload all along with nowhere on screen to appear.
+function PointFrames({ points, span, density }) {
+  if (!points || points.length < 2) return null;
+  const gaps = points.slice(1).map((q, i) => q.frame - points[i].frame);
+  const worst = Math.max(...gaps);
+  return (
+    <details style={{ marginTop: 2 }}>
+      <summary className="tiny muted" style={{ cursor: "pointer" }}>
+        {points.length} point(s)
+        {span ? ` across ${span} frame(s)` : ""}
+        {density != null ? ` · ${Math.round(density * 100)}% of them` : ""}
+        {worst > 1 ? ` · biggest gap ${worst} frames` : " · consecutive"}
+      </summary>
+      <div className="tiny muted"
+           style={{ marginTop: 3, fontVariantNumeric: "tabular-nums",
+                    lineHeight: 1.5 }}>
+        {points.map((q, i) => (
+          <span key={i} style={{ marginRight: 8, whiteSpace: "nowrap" }}>
+            f{q.frame}
+            <span style={{ opacity: 0.65 }}> ({q.x},{q.y})</span>
+            {i > 0 && gaps[i - 1] > 1 && (
+              <span className="pill warn" style={{ marginLeft: 3 }}
+                    title={`${gaps[i - 1]} frames since the previous point`}>
+                +{gaps[i - 1]}
+              </span>
+            )}
+          </span>
+        ))}
+      </div>
+    </details>
+  );
+}
 
 
 // THE WAIT, AS THE OPERATOR EXPERIENCED IT.
@@ -8300,6 +8341,7 @@ function AscentProduceModal({ state, onClose }) {
                       <th align="left">rise</th>
                       <th align="left">rate</th>
                       <th align="left">bend</th>
+                      <th align="left">density</th>
                       <th align="left">straight</th>
                       <th align="left">tilt</th>
                       <th align="left">back</th>
@@ -8319,10 +8361,25 @@ function AscentProduceModal({ state, onClose }) {
                           {z.n_trimmed > 0 && (
                             <span className="muted"> −{z.n_trimmed}</span>
                           )}
+                          <PointFrames points={z.points}
+                                       span={z.span_frames}
+                                       density={z.density} />
                         </td>
                         <td>{z.rise_px}</td>
                         <td>{z.rate}</td>
-                        <td>{z.bend_px}</td>
+                        <td title={z.bend_limit_px != null
+                          ? `limit ${z.bend_limit_px}px for a ${z.n_points}-point chain — a short chain pays for its missing points by being straighter`
+                          : ""}>
+                          {z.bend_px}
+                          {z.bend_limit_px != null && (
+                            <span className="muted"> /{z.bend_limit_px}</span>
+                          )}
+                        </td>
+                        <td title={z.span_frames
+                          ? `${z.n_points} point(s) across ${z.span_frames} frame(s)`
+                          : ""}>
+                          {z.density ?? "—"}
+                        </td>
                         <td>{z.straightness}</td>
                         <td>{z.tilt_deg}°</td>
                         <td>{z.backrun_frames ?? "—"}</td>
@@ -8484,7 +8541,19 @@ function AscentProduceModal({ state, onClose }) {
                       <tr key={i}>
                         <td>{i + 1}</td>
                         <td>f{a.first_frame} ({a.first_sec}s)</td>
-                        <td>{a.n_points}</td>
+                        <td>
+                          {a.n_points}
+                          {a.density != null && a.density < 0.5 && (
+                            <span className="pill warn"
+                                  style={{ marginLeft: 4 }}
+                                  title="Mostly gaps — see the frames below.">
+                              sparse
+                            </span>
+                          )}
+                          <PointFrames points={a.points}
+                                       span={a.span_frames}
+                                       density={a.density} />
+                        </td>
                         <td>{a.rise_px}px</td>
                         <td>{a.rate}</td>
                         <td>{a.straightness}</td>

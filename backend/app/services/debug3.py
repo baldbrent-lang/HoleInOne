@@ -2677,6 +2677,36 @@ ASCENT_MAX_BEND_PX = 14.0        # straighter than a full flight: this is
 # latency and a velocity estimated from a single pair of points -- and
 # because the thing it is refusing (a bird, a cart, a branch, a shoe)
 # misses by the width of the picture rather than by a few pixels.
+# HOW MUCH OF ITS OWN TIME SPAN AN ASCENT MUST HAVE POINTS IN.
+#
+# THE GATE THE DESCENT SIDE HAS AND THIS ONE DID NOT. Same argument, and
+# it applies harder here: if the detector can see the ball at all it sees
+# it on consecutive frames, so a chain with three points and half a
+# second between them is not a ball the tracker briefly lost -- it is
+# three unrelated specks that happened to line up.
+#
+# The sweep links with DESCENT_MAX_GAP, fifteen frames, whose own note
+# says that number "is affordable HERE in a way it would not be on a tee
+# view because the prediction is good: a falling ball holds a
+# near-constant rate". A three-point chain built with that gap may span
+# thirty-one frames -- a density of 0.10 -- and a three-point chain is
+# very nearly free to be straight, so bend and straightness wave it
+# through. Measured on upload 308's sweep: the two real ascents carried
+# 5 and 7 points over 198px and 187px, while five pieces of junk carried
+# exactly 3 each over 225-289px, every one of them a dead-straight line
+# drawn between specks a long way apart.
+ASCENT_MIN_DENSITY = 0.5
+# WHAT A THREE-POINT ASCENT HAS TO BE INSTEAD, in pixels of bend.
+#
+# The descent side already reasons this way -- see `_descent_accepted`,
+# "FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR NEED TO BE" -- and
+# for the same reason: a line fit through three points has one degree of
+# freedom left, so ASCENT_MAX_BEND_PX at 14 is not a test a three-point
+# chain can fail. A shorter chain is still allowed, and pays for the
+# missing point by being straighter.
+ASCENT_SHORT_POINTS = 4
+ASCENT_SHORT_BEND_PX = 3.0
+
 ASCENT_START_NEAR_PX = 120.0
 ASCENT_WINDOW_FRAMES = 45        # after the strike -- the ball is out of
                                  # a tee camera's frame long before this
@@ -2921,6 +2951,8 @@ ASCENT_WHY_COLORS = {
     "backrun": "#b5487d",
     # Points back outside the hitting area.
     "outside": "#c0392b",
+    # Mostly gaps -- specks joined across frames the ball was not in.
+    "sparse": "#8fa03a",
 }
 ASCENT_WHY_ORDER = list(ASCENT_WHY_COLORS)
 
@@ -3374,11 +3406,24 @@ def sweep_ascents(
             if not (ASCENT_RATE_LO <= rate <= ASCENT_RATE_HI):
                 _why.append("rate")
             bend = _path_bend_px(pts)
-            if bend > ASCENT_MAX_BEND_PX:
+            # A SHORT CHAIN PAYS FOR ITS MISSING POINTS BY BEING
+            # STRAIGHTER. Three points leave a line fit one degree of
+            # freedom, so the 14px bar is not one a three-point chain can
+            # fail -- which is how five dead-straight lines drawn between
+            # distant specks came through the sweep on upload 308.
+            _bend_bar = (ASCENT_MAX_BEND_PX if len(pts) >= ASCENT_SHORT_POINTS
+                         else ASCENT_SHORT_BEND_PX)
+            if bend > _bend_bar:
                 _why.append("bend")
             straight = _path_straightness(pts)
             if straight < ASCENT_MIN_STRAIGHT:
                 _why.append("wander")
+            # SEEN ON MOST OF THE FRAMES IT CROSSES, or it is not one
+            # object. See ASCENT_MIN_DENSITY.
+            _span_all = int(pts[-1]["frame"]) - int(pts[0]["frame"]) + 1
+            _density = len(pts) / float(max(1, _span_all))
+            if _density < ASCENT_MIN_DENSITY:
+                _why.append("sparse")
             # WHERE IT CAME FROM. Run the chain back along its own
             # heading to the height of the tee box: on a real ascent that
             # is the ball's resting spot, and it is the number that would
@@ -3440,7 +3485,13 @@ def sweep_ascents(
                 "rise_px": int(round(rise)),
                 "rate": round(rate, 3),
                 "bend_px": round(bend, 2),
+                # The bar this chain was actually held to, so a row
+                # reading "bends 3.4px" next to a limit of 14 does not
+                # look like a gate that fired for no reason.
+                "bend_limit_px": _bend_bar,
                 "straightness": round(straight, 3),
+                "density": round(_density, 2),
+                "span_frames": _span_all,
                 "from_x": _from_x,
                 # THE TEE LINE'S OWN HEIGHT, carried so that a caller
                 # who finds no ball sitting there still has somewhere to
