@@ -8486,7 +8486,18 @@ function AscentProduceModal({ state, onClose }) {
                           ? `${z.last_descent_sec}s` : `f${z.first_frame}`}</td>
                         <td title={z.n_points_raw != null
                           ? `the tracker handed over ${z.n_points_raw} point(s)`
-                          : undefined}>{z.n_points}</td>
+                          : undefined}>
+                          {z.n_points}
+                          {z.short_chain && (
+                            <span className="pill" style={{ marginLeft: 4 }}
+                                  title="A three-point chain passes bend, reversal and density almost by construction, so it answers to tighter bars — shown beside each number.">
+                              short
+                            </span>
+                          )}
+                          <PointFrames points={z.points}
+                                       span={z.span_frames}
+                                       density={z.density} />
+                        </td>
                         <td title="Points the tracker linked that were not on the chain's own line — a speck it reached sideways for. Thrown out before the chain is judged, so one bad link no longer costs a real descent.">
                           {z.n_off_line ? `−${z.n_off_line}` : "—"}
                         </td>
@@ -8496,13 +8507,28 @@ function AscentProduceModal({ state, onClose }) {
                           <b>{z.fall_px}px</b>
                         </td>
                         <td>{z.fall_rate}</td>
-                        <td>{z.bend_px}</td>
-                        <td>{z.tilt_deg}°</td>
+                        <td title={z.bend_limit_px != null
+                          ? `limit ${z.bend_limit_px}px` : ""}>
+                          {z.bend_px}
+                          {z.bend_limit_px != null && (
+                            <span className="muted"> /{z.bend_limit_px}</span>
+                          )}
+                        </td>
+                        <td title={z.tilt_limit_deg != null
+                          ? `limit ${z.tilt_limit_deg}°` : ""}>
+                          {z.tilt_deg}°
+                          {z.tilt_limit_deg != null && (
+                            <span className="muted"> /{z.tilt_limit_deg}</span>
+                          )}
+                        </td>
                         <td title="The most its per-frame step ever DROPS BACK, as a fraction of its own median. A fall only speeds up — gravity and, on a ball coming toward the camera, perspective both push one way. Speckle the tracker joined jumps back and forth, and that is what this catches. Not how much the step varies: a real descent's step can triple over the half-second it is in view.">
                           {z.step_back_frac ?? z.step_dev_frac}
                         </td>
                         <td title={`${z.n_points} point(s) across ${z.span_frames} frame(s)`}>
                           {z.density}
+                          {z.density_limit != null && (
+                            <span className="muted"> /{z.density_limit}</span>
+                          )}
                         </td>
                         <td>{z.landing_xy
                           ? `${z.landing_xy[0]}, ${z.landing_xy[1]}`

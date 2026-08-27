@@ -1613,6 +1613,33 @@ DESCENT_MAX_SPAN = 60
 # How much of its peak fall speed a track must still have to count as
 # still descending. Below this it has landed and is rolling.
 DESCENT_FLATTEN_FRAC = 0.4
+# WHAT A THREE-POINT DESCENT HAS TO BE INSTEAD.
+#
+# THREE POINTS IS NEARLY FREE TO PASS EVERY SHAPE TEST THERE IS. A line
+# fit through three points has one degree of freedom left, so the 10px
+# bend bar is not one it can fail. Two steps make exactly ONE comparison,
+# so the reversal test is a coin flip -- a chain whose second step
+# happens to be the longer scores a perfect zero. And three points across
+# four frames clears the density bar comfortably.
+#
+# Measured, after the reversal test replaced the old evenness one: four
+# chains inside 1.3 seconds of the same green all came back ACCEPTED,
+# every one of them three points -- 395px and 429px of "fall" at 5.5 and
+# 4.5 frame-heights/sec, landing in the foreground grass at y=618 and
+# y=624. The old evenness measure had been refusing them, but it was
+# refusing real descents at the same rate; swapping it for one that
+# understands acceleration was right and left this hole open behind it.
+#
+# So a short chain pays for its missing points by being exceptional
+# instead, which is the rule the produce side already applies -- see
+# `_descent_accepted`, "FOUR POINTS, OR THREE THAT ARE BETTER THAN FOUR
+# NEED TO BE", and BALLSCAN_DESCENT_SHORT_BEND_PX, which this matches.
+# Straighter, seen on very nearly every frame it spans, and genuinely
+# falling rather than leaning across the picture.
+DESCENT_SHORT_POINTS = 4
+DESCENT_SHORT_BEND_PX = 2.5
+DESCENT_SHORT_MIN_DENSITY = 0.75
+DESCENT_SHORT_MAX_TILT_DEG = 35.0
 
 
 def _path_bend_px(pts: list) -> float:
@@ -2344,9 +2371,19 @@ def find_descents(
                  (f"falls at {round(rate, 3)} frame-heights/sec, outside "
                   f"{rate_lo}-{rate_hi}"),
                  drop_px=int(drop), fall_rate=round(rate, 3))
-        if bend > float(max_bend_px):
+        # THE BARS THIS CHAIN IS HELD TO. See DESCENT_SHORT_POINTS: a
+        # three-point chain passes bend, reversal and density almost by
+        # construction, so it answers to tighter ones.
+        _short = len(pts) < DESCENT_SHORT_POINTS
+        _bend_bar = (DESCENT_SHORT_BEND_PX if _short else float(max_bend_px))
+        _tilt_bar = (DESCENT_SHORT_MAX_TILT_DEG if _short
+                     else DESCENT_MAX_TILT_DEG)
+        _dens_bar = (DESCENT_SHORT_MIN_DENSITY if _short
+                     else DESCENT_MIN_DENSITY)
+        if bend > _bend_bar:
             _why.append("bend")
-            _rej(pts, f"bends {round(bend, 2)}px, limit {max_bend_px}px",
+            _rej(pts, f"bends {round(bend, 2)}px, limit {_bend_bar}px"
+                      + (f" for a {len(pts)}-point chain" if _short else ""),
                  drop_px=int(drop), fall_rate=round(rate, 3),
                  bend_px=round(bend, 2))
         # HOW FAR OFF VERTICAL, and HOW FAR IT ACTUALLY FELL.
@@ -2360,10 +2397,11 @@ def find_descents(
         _adx = abs(float(pts[-1]["x"]) - float(pts[0]["x"]))
         tilt = math.degrees(math.atan2(_adx, drop)) if drop > 0 else 90.0
         fall_px = drop * math.cos(math.radians(min(tilt, 89.9)))
-        if tilt > DESCENT_MAX_TILT_DEG:
+        if tilt > _tilt_bar:
             _why.append("tilt")
             _rej(pts, f"leans {round(tilt, 1)} degrees off vertical, "
-                      f"limit {DESCENT_MAX_TILT_DEG}",
+                      f"limit {_tilt_bar}"
+                      + (f" for a {len(pts)}-point chain" if _short else ""),
                  drop_px=int(drop), fall_rate=round(rate, 3),
                  tilt_deg=round(tilt, 1))
 
@@ -2445,7 +2483,7 @@ def find_descents(
                       f"{DESCENT_MAX_STEP_BACK} — a fall only speeds up",
                  drop_px=int(drop), fall_rate=round(rate, 3),
                  step_back=round(step_back, 2))
-        if _density < DESCENT_MIN_DENSITY:
+        if _density < _dens_bar:
             _why.append("sparse")
             _rej(pts, f"{len(pts)} point(s) across {_span_f} frames, "
                       f"{round(100 * _density)}% of them",
@@ -2498,6 +2536,14 @@ def find_descents(
             "n_settle_points": len(_settle),
             "tilt_deg": round(tilt, 1),
             "step_back_frac": round(step_back, 2),
+            # THE BARS THIS CHAIN WAS ACTUALLY HELD TO. A row reading
+            # "bends 3.9px" beside a limit of 10 looks like a gate that
+            # fired for no reason; a three-point chain was answering to
+            # 2.5. Carried so the table can say which.
+            "bend_limit_px": round(float(_bend_bar), 2),
+            "tilt_limit_deg": round(float(_tilt_bar), 1),
+            "density_limit": round(float(_dens_bar), 2),
+            "short_chain": bool(_short),
             "density": round(_density, 2),
             "span_frames": _span_f,
             # WHAT THE TRACKER HANDED OVER, and how much of it was not on
