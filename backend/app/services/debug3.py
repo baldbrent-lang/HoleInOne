@@ -2750,8 +2750,40 @@ ASCENT_MIN_DENSITY = 0.5
 # freedom left, so ASCENT_MAX_BEND_PX at 14 is not a test a three-point
 # chain can fail. A shorter chain is still allowed, and pays for the
 # missing point by being straighter.
-ASCENT_SHORT_POINTS = 4
-ASCENT_SHORT_BEND_PX = 3.0
+# HOW MUCH A CHAIN MAY BEND, AS A FUNCTION OF HOW LONG IT IS.
+#
+# A FLAT BAR IS WRONG IN BOTH DIRECTIONS. Bend is rms distance from a
+# straight line, and a chain that spans more frames has had more time to
+# curve under gravity -- so one number cannot serve a nine-point chain
+# and a twenty-eight-point one. At 14 it was thirty times above the real
+# population and did nothing; tightened flat, it would refuse the long
+# real ascents this file has already measured.
+#
+# Every bend the current pipeline has produced, real against junk:
+#
+#   real     0.36 (10pts)   0.45 (9pts)   3.4 (15pts)   3.9 (14pts)
+#   junk     6.01 (9pts)    4.24 (13pts)  8.97 (28pts)  18.1 (25pts)
+#
+# Flat, those overlap: 3.9 real sits above 4.24-is-junk's neighbourhood
+# and no single number splits them. Against points they separate
+# completely, and this line runs between the two populations across all
+# nine measurements -- the three false ascents on upload 314 included,
+# one of which (f1252, 9 points bending 6.01px) is FASTER across the
+# band than either real ascent on the same clip and is caught by nothing
+# else.
+#
+# The old note's "real 3.9 against trash 18.1, either side of a gate
+# already set at 14" is where the flat bar came from. It is not wrong,
+# it is one pair of points -- and 14 sits hard against the trash rather
+# than between them, which is the placement every other constant in this
+# file was careful to avoid.
+#
+# THE 12.8px REAL ASCENT IN `_rising_tail`'s NOTE IS NOT A COUNTEREXAMPLE.
+# It predates `_smooth_tail`, which exists precisely because one leading
+# corner point takes a real chain "from 3.4px to 13.5px". Both trims run
+# before this is measured, so that chain reads about 3.4 today.
+ASCENT_BEND_BASE_PX = 1.5
+ASCENT_BEND_PER_POINT_PX = 0.25
 
 ASCENT_START_NEAR_PX = 120.0
 ASCENT_WINDOW_FRAMES = 45        # after the strike -- the ball is out of
@@ -2909,8 +2941,17 @@ def find_ascents(
                 _row["why"] = (f"rises at {round(rate, 2)} frame-heights/sec, outside {ASCENT_RATE_LO}-{ASCENT_RATE_HI}")
                 continue
             bend = _path_bend_px(pts)
-            if bend > ASCENT_MAX_BEND_PX:
-                _row["why"] = f"bends {round(bend, 1)}px, limit {ASCENT_MAX_BEND_PX}px"
+            # The same length-scaled bar the sweep uses -- one rule, so
+            # the two searches cannot disagree about what a ball's line
+            # looks like.
+            _bar = min(ASCENT_MAX_BEND_PX,
+                       ASCENT_BEND_BASE_PX + ASCENT_BEND_PER_POINT_PX
+                       * (len(pts) - ASCENT_MIN_POINTS))
+            _row["bend_limit_px"] = round(_bar, 2)
+            if bend > _bar:
+                _row["why"] = (f"bends {round(bend, 1)}px, limit "
+                               f"{round(_bar, 2)}px for a {len(pts)}-point "
+                               f"chain")
                 continue
             _row["why"] = "accepted"
             cand = {
@@ -3452,13 +3493,15 @@ def sweep_ascents(
             if not (ASCENT_RATE_LO <= rate <= ASCENT_RATE_HI):
                 _why.append("rate")
             bend = _path_bend_px(pts)
-            # A SHORT CHAIN PAYS FOR ITS MISSING POINTS BY BEING
-            # STRAIGHTER. Three points leave a line fit one degree of
-            # freedom, so the 14px bar is not one a three-point chain can
-            # fail -- which is how five dead-straight lines drawn between
-            # distant specks came through the sweep on upload 308.
-            _bend_bar = (ASCENT_MAX_BEND_PX if len(pts) >= ASCENT_SHORT_POINTS
-                         else ASCENT_SHORT_BEND_PX)
+            # HOW STRAIGHT, FOR A CHAIN THIS LONG. See the constants: a
+            # three-point chain leaves a line fit one degree of freedom
+            # and is very nearly free to be straight, while a
+            # twenty-eight-point one has had time to curve. The bar
+            # grows with the evidence rather than sitting flat above
+            # every real ascent ever measured.
+            _bend_bar = min(ASCENT_MAX_BEND_PX,
+                            ASCENT_BEND_BASE_PX + ASCENT_BEND_PER_POINT_PX
+                            * (len(pts) - ASCENT_MIN_POINTS))
             if bend > _bend_bar:
                 _why.append("bend")
             straight = _path_straightness(pts)
