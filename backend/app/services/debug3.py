@@ -2637,21 +2637,43 @@ ASCENT_MIN_POINTS = 3
 # 0.78. Tuned on one clip, so they are placed for margin rather than
 # for the tightest possible split.
 ASCENT_MIN_RISE_FRAC = 0.132     # of frame height -- 95px at 720
-# RATE IS NOT THE DISCRIMINATOR, AND WAS COSTING REAL ASCENTS.
+# HOW FAST A STRUCK BALL CROSSES THE BAND, in frame-heights per second.
 #
-# The table above put the floor at 0.45, between a slowest ball of 0.59
-# and a fastest slow-fake of 0.33. A second clip settled it the other
-# way: a plainly real ascent -- 14 points, 152px, bend 3.9px,
-# straightness 0.996 -- came in at 0.44 and was refused by one
-# hundredth. On the FIRST clip the only piece of trash that rose far
-# enough to matter measured rate 0.44 as well, with bend 18.1px.
+# A BALL LEAVES. Everything else up there is loitering. Measured on
+# upload 314, two confirmed ascents against three confirmed fakes:
 #
-# So the two populations are indistinguishable on rate at the bar and
-# separate cleanly on BEND: 3.9 against 18.1, either side of a gate
-# already set at 14. Rate now only excludes drift that is barely moving
-# -- below every real ascent measured, and doing none of the work that
-# smoothness does.
-ASCENT_RATE_LO = 0.25            # frame-heights per second, rising
+#            px/frame   px/sec   rate
+#   balls      26.7      1335    2.06
+#              29.3      1467    2.29
+#   fakes      11.1       557    0.80
+#              10.6       531    0.80
+#
+# The two crawlers spend 28 and 46 frames in a band a ball clears in
+# nine, at a third of the speed. This file's own note elsewhere puts a
+# struck ball at "70px of frame between one frame and the next"; they
+# manage eleven. They are the club and the player, and no other gate
+# touches them -- they are straight, they rise far enough, they lean
+# barely at all, and they trace back to the tee line.
+#
+# THE FLOOR THIS REPLACES WAS 0.25 AND DID NO WORK. It had been lowered
+# there from 0.45 because "a plainly real ascent -- 14 points, 152px,
+# bend 3.9px, straightness 0.996 -- came in at 0.44 and was refused by
+# one hundredth".
+#
+# THAT ASCENT WOULD BE REFUSED BY THIS BAR. It is the one measurement on
+# record that this gate contradicts, and it is a single observation from
+# a different clip against five from this one; the operator who can tell
+# a ball from a club on sight has judged the trade worth making. If a
+# real ascent is ever lost here it will show as a `rate` verdict with the
+# bar printed beside it, which is the reason the limit travels with the
+# row.
+#
+# `peak_rate` is reported alongside and NOT gated: a ball entering the
+# band fast and slowing has an average well under its fastest step,
+# where a club moving steadily has the two nearly equal. If the 0.44
+# ascent turns out to have had a quick foot, peak is the kinder bar and
+# the numbers to move to it will be sitting in the table.
+ASCENT_RATE_LO = 1.2             # frame-heights per second, rising
 # HOW STRAIGHT A STEP MUST STAY to still be the same ball.
 #
 # `_rising_tail` keeps the run at the end of a chain where every step
@@ -3042,6 +3064,24 @@ ASCENT_WHY_COLORS = {
     "sparse": "#8fa03a",
 }
 ASCENT_WHY_ORDER = list(ASCENT_WHY_COLORS)
+
+
+def _peak_rise_rate(pts, fps: float, frame_h: int) -> float:
+    """The fastest single upward step in a chain, in frame-heights/sec.
+
+    The average rate divides the whole rise by the whole span, which
+    understates a ball: it enters the band at its quickest and is slowing
+    the entire time it is in view. A club crossing at a steady pace has
+    an average and a peak that are nearly the same number. Measured, not
+    gated -- see ASCENT_RATE_LO.
+    """
+    best = 0.0
+    for a, b in zip(pts, pts[1:]):
+        df = max(1, int(b["frame"]) - int(a["frame"]))
+        up = (float(a["y"]) - float(b["y"])) / df
+        if up > best:
+            best = up
+    return best * float(fps or 30.0) / float(max(1, frame_h))
 
 
 def _path_straightness(pts) -> float:
@@ -3573,6 +3613,9 @@ def sweep_ascents(
                 "n_points": len(pts),
                 "rise_px": int(round(rise)),
                 "rate": round(rate, 3),
+                "rate_limit": ASCENT_RATE_LO,
+                "peak_rate": round(
+                    _peak_rise_rate(pts, float(fps or 30.0), frame_h), 3),
                 "bend_px": round(bend, 2),
                 # The bar this chain was actually held to, so a row
                 # reading "bends 3.4px" next to a limit of 14 does not

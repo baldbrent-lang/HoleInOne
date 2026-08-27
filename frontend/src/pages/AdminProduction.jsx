@@ -8031,7 +8031,7 @@ const DESCENT_WHY_TEXT = {
 
 const ASCENT_WHY_TEXT = {
   rise: "did not climb far enough",
-  rate: "barely moving",
+  rate: "too slow across the band — a struck ball leaves, a club loiters",
   bend: "not a straight line",
   wander: "doubled back on itself",
   tilt: "leaning too far off vertical to have come off a tee",
@@ -8393,7 +8393,22 @@ function AscentProduceModal({ state, onClose }) {
                                        density={z.density} />
                         </td>
                         <td>{z.rise_px}</td>
-                        <td>{z.rate}</td>
+                        <td title={z.rate_limit != null
+                          ? `must cross the band at ${z.rate_limit} frame-heights/sec or faster — a struck ball leaves, a club loiters`
+                          + (z.peak_rate != null
+                            ? `. Its fastest single step was ${z.peak_rate}, which is measured but not gated.`
+                            : "")
+                          : ""}>
+                          {z.rate}
+                          {z.rate_limit != null && (
+                            <span className="muted"> /{z.rate_limit}</span>
+                          )}
+                          {z.peak_rate != null && (
+                            <div className="tiny muted">
+                              peak {z.peak_rate}
+                            </div>
+                          )}
+                        </td>
                         <td title={z.bend_limit_px != null
                           ? `limit ${z.bend_limit_px}px for a ${z.n_points}-point chain — a short chain pays for its missing points by being straighter`
                           : ""}>
