@@ -2149,6 +2149,20 @@ def _descent_step_consistency(pts):
 # actually falling down.
 DESCENT_BOX_W_FRAC = 0.035       # ~45px at 1280 wide
 DESCENT_BOX_H_FRAC = 0.125       # ~90px at 720 tall
+# HOW MANY BOX-HEIGHTS THE DOWNWARD REACH MAY GROW TO over a gap.
+#
+# Not unbounded, which is what it was: `box_h * df` at the fifteen-frame
+# limit reaches 1350px in a 720-tall frame, so the box stopped being a
+# box and became a 45px-wide column running the whole picture. The chains
+# it built ran from the tree line to the bottom edge with enormous holes
+# in them, which is the opposite of what a search window is for.
+#
+# Two, so a ball briefly lost is still found a box and a bit below where
+# it was, and a chain can never be assembled down the length of the
+# frame. Longer occlusions are the RADIUS linker's job -- these chains are
+# added to its, not swapped for them, and its gate is the one that widens
+# with the gap on purpose.
+DESCENT_BOX_MAX_DF = 2
 
 
 def _box_walk(by_frame, seed, box_w: float, box_h: float,
@@ -2179,9 +2193,18 @@ def _box_walk(by_frame, seed, box_w: float, box_h: float,
                 # across.
                 if dx > box_w * 0.5:
                     continue
-                # Downward: it must have fallen, and this reach does grow
-                # with the gap, because that part really is time passing.
-                if not (0.0 < dy <= box_h * df):
+                # Downward: it must have fallen, and no further than the
+                # box is tall. THIS USED TO SCALE WITH THE GAP -- `box_h *
+                # df` -- on the reasoning that a longer gap is more time
+                # to fall. At the fifteen-frame limit that reaches 1350px
+                # in a 720-tall frame, so the "box" was a 45px-wide column
+                # running the whole height of the picture and the chains
+                # it built ran from the tree line to the bottom edge with
+                # enormous holes in them. The rectangle IS the search
+                # area, at every gap; how far the ball can have fallen is
+                # bounded by how big the box is, which is the whole point
+                # of drawing one.
+                if not (0.0 < dy <= box_h * min(df, DESCENT_BOX_MAX_DF)):
                     continue
                 d = math.hypot(dx, dy)
                 if best is None or d < best[1]:
