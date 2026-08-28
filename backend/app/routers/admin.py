@@ -18740,9 +18740,29 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                 # arriving anyway is worse than one that stops short.
                 aim_without_landing=False,
             ) or {}
-            c["ok"] = bool(_out.get("ok"))
-            c["clip_url"] = _out.get("url") or _out.get("clip_url")
-            c["reason"] = _out.get("error") or c.get("reason")
+            # THE URL IS INSIDE `clips`, NOT AT THE TOP LEVEL.
+            #
+            # `run_wizard_produce_job` returns `_d3_fast_produce`'s own
+            # dict -- {ok, clips: [{clip_id, url, ...}], error} -- and
+            # this read `_out["url"]` and `_out["clip_url"]`, neither of
+            # which exists. So clip_url was None on EVERY ascent produce
+            # however well it went, the table's clip column said "not
+            # produced" for clips that were sitting on the card, and the
+            # per-swing card said NOT PRODUCED beside a picture of the
+            # descent it had just been cut to. The ball-scan path a
+            # thousand lines down reads `_c.get("url")` off the same
+            # list and has been right all along.
+            _made = _out.get("clips") or []
+            _first = _made[0] if _made else {}
+            # A RENDERER THAT MADE NO CLIP DID NOT PRODUCE. `ok` alone
+            # was the test, and it can be true with an empty list.
+            c["ok"] = bool(_out.get("ok")) and bool(_made)
+            c["clip_url"] = _first.get("url") or _first.get("clip_url")
+            c["clip_id"] = _first.get("clip_id")
+            c["reason"] = (
+                _out.get("error") or c.get("reason")
+                or (None if c["ok"] else
+                    "the renderer reported success but produced no clip"))
             if c["ok"]:
                 rep["n_produced"] += 1
         except Exception as exc:  # noqa: BLE001
