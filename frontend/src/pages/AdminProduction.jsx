@@ -8646,6 +8646,18 @@ function AscentProduceModal({ state, onClose }) {
             + "clips are left alone."}
         </div>
 
+        {rep?.clear_error && (
+          <div className="err-text small" style={{ marginTop: 8 }}>
+            ⚠ {rep.clear_error}
+          </div>
+        )}
+        {rep?.cleared_clips > 0 && (
+          <div className="tiny muted" style={{ marginTop: 6 }}>
+            Replaced the upload&apos;s {rep.cleared_clips} previous clip(s) —
+            a re-produce clears the old set before it renders the new one.
+          </div>
+        )}
+
         <ProduceStepSummary rep={rep} />
 
         {state.running && (

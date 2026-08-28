@@ -18570,6 +18570,20 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                  rep["timing"]["total_sec"])
         return rep
     rep["produced"] = True
+    # CLEAR ONCE, BEFORE ANY OF THEM. This used to ride on the first
+    # candidate (`solo=(_idx > 0)` below), which made a re-produce's
+    # correctness depend on that candidate rendering: when it failed the
+    # clear never ran and every later clip was added to the ones already
+    # on the upload. Pressing Produce ascents on an upload that already
+    # has clips is a re-produce, so the old set goes first, once,
+    # whatever happens to the renders after it.
+    _n_cleared, _clear_err = _clear_upload_clips(db, row)
+    rep["cleared_clips"] = _n_cleared
+    if _clear_err:
+        # NOT A FOOTNOTE. The upload now carries this run's clips AND the
+        # ones that could not be removed, which is indistinguishable from
+        # produce having started appending.
+        rep["clear_error"] = _clear_err
     _t = time.perf_counter()
     _idx = 0
     for c in rep["clips"]:
@@ -18610,14 +18624,13 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                 # the clip is filed.
                 hole_number=(hole_number if hole_number is not None
                              else _hole_for_upload(db, row)),
-                # THE FIRST ONE REPLACES, THE REST APPEND. `solo` means
-                # "keep the upload's other clips", which is right for
-                # the edit dialog adding one swing and wrong for a run
-                # that produces the whole clip again -- leave it True
-                # throughout and a second run leaves six clips where
-                # there were three. Clearing on the first and appending
-                # after is what Produce itself does.
-                solo=(_idx > 0), swing_idx=_idx,
+                # EVERY ONE APPENDS, because the clear already happened
+                # above. `solo` means "keep the upload's other clips",
+                # and by this point the only other clips are the ones
+                # this same run has just made. Riding the clear on the
+                # first candidate is what left four new clips sitting on
+                # top of three old ones whenever that candidate failed.
+                solo=True, swing_idx=_idx,
                 # WHERE IT ARRIVED, when the green camera saw it. Both
                 # or neither: the renderer needs the frame to cut to and
                 # the point to draw at, and half of that pair is worse
@@ -22629,6 +22642,46 @@ def _d3_save_swing(db, upload_id: int, idx: int, rec: dict,
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         log.warning("d3 produce: could not save swing %s: %s", idx, exc)
+
+
+def _clear_upload_clips(db, row) -> tuple[int, str | None]:
+    """Drop every clip on an upload. Returns (how many, error or None).
+
+    A RE-PRODUCE CLEARS ONCE, UP FRONT. The ascent produce used to get
+    this as a side effect of its FIRST candidate: it passed
+    `solo=(_idx > 0)`, so the first render replaced and the rest
+    appended. That is correct only while the first candidate renders --
+    and when it does not, `_d3_fast_produce` is never reached, nothing is
+    cleared, and every clip the run does make is added to the ones
+    already there. Four produced onto three left over reads as seven,
+    which is exactly what "produce started appending" looks like from the
+    card.
+
+    Making it its own step means the clear does not depend on any
+    candidate succeeding, and a clear that fails is one error rather than
+    a silent change of meaning for everything after it.
+    """
+    try:
+        _old = (db.query(VideoClip)
+                .filter(VideoClip.long_upload_id == row.id).all())
+        if not _old:
+            return 0, None
+        _det = _detach_clip_refs(db, [c.id for c in _old])
+        if any(_det.values()):
+            log.info("clear clips: detached %s before dropping %d clip(s)",
+                     _det, len(_old))
+        for _c in _old:
+            db.delete(_c)
+        db.commit()
+        log.info("clear clips: dropped %d prior clip(s) on upload %s",
+                 len(_old), row.id)
+        return len(_old), None
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        _msg = (f"could not clear the {row.id} upload's prior clips: {exc} "
+                "— anything produced now is ADDED to them")
+        log.error("clear clips: %s", _msg)
+        return 0, _msg
 
 
 def _detach_clip_refs(db, clip_ids) -> dict:
