@@ -2129,6 +2129,144 @@ def _descent_step_consistency(pts):
     return med, max(0.0, back) / med
 
 
+# THE WINDOW A DESCENT IS SEARCHED IN, as fractions of the frame.
+#
+# NOT ACROSS THE WHOLE PICTURE. `build_tracks` associates on a RADIUS
+# around a predicted position, and the radius has to widen with the gap
+# or an occluded ball is lost -- so the longer a chain goes unmatched the
+# more of the frame it may claim, and on a green with a shaking bush in
+# it that is how a descent walks down to the bush and jumps sideways
+# rather than taking the next point fifteen pixels below.
+#
+# A falling ball is not somewhere in a circle. It is in a tall narrow box
+# directly under where it just was, and the box does not move sideways
+# because the ball does not. Measured off the operator's own sketch on
+# upload 293: about 45px wide and 90px tall in a 1280x720 frame, which is
+# what these fractions are.
+#
+# The box travels WITH the chain -- re-centred on the last point found,
+# every step -- so nothing is ever searched but the strip the ball is
+# actually falling down.
+DESCENT_BOX_W_FRAC = 0.035       # ~45px at 1280 wide
+DESCENT_BOX_H_FRAC = 0.125       # ~90px at 720 tall
+
+
+def _box_walk(by_frame, seed, box_w: float, box_h: float,
+              max_gap: int, f_hi: int):
+    """Walk a chain downward from `seed`, one box at a time.
+
+    THE EARLIEST FRAME THAT OFFERS ANYTHING WINS, and within that frame
+    the nearest point. That is the whole rule, and it is the one the
+    radius could not express: a point on the next frame fifteen pixels
+    below always beats one nine frames later and three hundred pixels
+    across, however well the second fits a predicted position.
+    """
+    chain = [seed]
+    while True:
+        last = chain[-1]
+        f0 = int(last["frame"])
+        lx, ly = float(last["x"]), float(last["y"])
+        best = None
+        for df in range(1, int(max_gap) + 1):
+            f = f0 + df
+            if f > f_hi:
+                break
+            for c in by_frame.get(f, ()):
+                dx = abs(float(c["x"]) - lx)
+                dy = float(c["y"]) - ly
+                # Sideways: the box does NOT widen with the gap. A ball
+                # hidden for six frames is further DOWN, not further
+                # across.
+                if dx > box_w * 0.5:
+                    continue
+                # Downward: it must have fallen, and this reach does grow
+                # with the gap, because that part really is time passing.
+                if not (0.0 < dy <= box_h * df):
+                    continue
+                d = math.hypot(dx, dy)
+                if best is None or d < best[1]:
+                    best = (df, d, c)
+            if best is not None:
+                break
+        if best is None:
+            return chain
+        chain.append(best[2])
+
+
+# HOW MANY BOX CHAINS ARE HANDED ON. Every detection seeds a walk, and
+# on a busy green most of them find two or three neighbours in the strip
+# below -- 465 chains out of 1100 detections on one simulated frame. The
+# ball's is the longest by a wide margin, so ranking on length and taking
+# the head keeps it while sparing the report a table nobody can read.
+DESCENT_BOX_MAX_CHAINS = 60
+
+
+def build_descent_chains(dets: list, frame_w: int, frame_h: int,
+                         max_gap: int = DESCENT_MAX_GAP,
+                         min_len: int = MIN_DESCENT_POINTS,
+                         max_chains: int = DESCENT_BOX_MAX_CHAINS) -> list:
+    """Chains found by walking a box down the picture. See the constants.
+
+    EVERY DETECTION IS A SEED, and the maximal chains are what come out.
+    Consuming points greedily as the walks ran was tried and cost the
+    ball: the bush is in frame long before the shot lands, so its seeds
+    come first in frame order and claim points out from under a descent
+    that had not started yet. Walking from everything and then dropping
+    what is contained in something longer has no such ordering.
+
+    Deduping is exact rather than approximate: the walk is deterministic,
+    so a chain seeded at an interior point of another IS the tail of that
+    other one. Keeping only chains whose seed is nobody else's interior
+    point leaves exactly the maximal ones.
+
+    Returned in `build_tracks`'s shape, because the caller judges these
+    with the same gates as everything else. This ADDS candidates rather
+    than replacing the linker: a chain the radius finds and the box does
+    not is still a chain, and the gates are what decide.
+    """
+    pool = sorted((d for d in (dets or [])),
+                  key=lambda d: (int(d["frame"]), float(d["x"])))
+    if len(pool) < int(min_len):
+        return []
+    by_frame: dict[int, list] = {}
+    for d in pool:
+        by_frame.setdefault(int(d["frame"]), []).append(d)
+    f_hi = max(by_frame)
+    box_w = DESCENT_BOX_W_FRAC * float(frame_w or 1280)
+    box_h = DESCENT_BOX_H_FRAC * float(frame_h or 720)
+
+    chains = []
+    interior: set = set()
+    for seed in pool:
+        chain = _box_walk(by_frame, seed, box_w, box_h, max_gap, f_hi)
+        if len(chain) < int(min_len):
+            continue
+        chains.append(chain)
+        for q in chain[1:]:
+            interior.add(id(q))
+
+    out: list = []
+    for chain in chains:
+        if id(chain[0]) in interior:
+            continue
+        span = math.hypot(float(chain[-1]["x"]) - float(chain[0]["x"]),
+                          float(chain[-1]["y"]) - float(chain[0]["y"]))
+        out.append({
+            "points": [
+                {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"]),
+                 "area": int(q.get("area") or 0), "src": q.get("src")}
+                for q in chain
+            ],
+            "span_px": round(span, 1),
+            "rise_px": round(float(chain[0]["y"]) - float(chain[-1]["y"]), 1),
+        })
+    # Longest first, then furthest fallen -- the two things that make a
+    # chain worth judging, and the order the caller ranks survivors in.
+    out.sort(key=lambda t: (-len(t["points"]),
+                            -(t["points"][-1]["y"] - t["points"][0]["y"])))
+    return out[:int(max_chains)]
+
+
 def find_descents(
     input_path: Path,
     fps: float | None = None,
@@ -2328,6 +2466,23 @@ def find_descents(
                               max_gap=DESCENT_MAX_GAP,
                               corridor_px=DESCENT_CORRIDOR_PX,
                               max_span=DESCENT_MAX_SPAN)
+        # AND THE SAME DETECTIONS WALKED DOWN A BOX. See
+        # DESCENT_BOX_W_FRAC: the linker associates on a radius around a
+        # prediction, which has to widen with the gap and therefore
+        # eventually spans the picture. This looks only in a tall narrow
+        # strip directly below the last point, so a bush thirty pixels
+        # wide and three hundred across cannot be mistaken for the next
+        # frame of a fall.
+        #
+        # ADDED, not substituted. A chain the radius finds and the box
+        # does not is still a chain; the gates below judge both, and the
+        # window picks the one that fell furthest. Duplicates cost
+        # nothing but a row in the table.
+        _box = build_descent_chains(dets, frame_w, frame_h,
+                                    max_gap=DESCENT_MAX_GAP,
+                                    min_len=int(min_points))
+        out["n_box_chains"] = len(_box)
+        tracks = tracks + _box
         _t_det["linking"] = round(time.perf_counter() - _t0, 2)
         out["timing"] = _t_det
         # Both of those are None/4 by default -- see the constants. The
