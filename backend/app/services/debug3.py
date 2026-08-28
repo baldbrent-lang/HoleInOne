@@ -587,6 +587,25 @@ CORRIDOR_SMOOTH_RMS = 6.0
 # has been sitting still to a couple of dozen pixels however long it
 # waits.
 CORRIDOR_SPEED_SLACK = 1.5
+# HOW FAR AHEAD A CHAIN WITH NO ESTABLISHED LINE MAY BE EXTRAPOLATED, in
+# frames.
+#
+# A PREDICTION IS ONLY WORTH THE HEADING BEHIND IT. The gate is measured
+# from where a track is PREDICTED to be, and the prediction runs its
+# velocity forward by the whole gap -- so a chain of specks drifting at
+# 25px a frame, unmatched for eleven, is carried 275px across the picture
+# and then given a radius around wherever that lands. Measured on a green
+# with a shaking bush in it: a four-point bush chain was carried from
+# x=1179 to x=904 and picked up a ball starting at x=900, eleven frames
+# and 279px away, because the prediction had walked over to meet it.
+#
+# A track that has run straight has earned the extrapolation -- gravity
+# and a ball's own momentum say where it will be. A track that has not is
+# guessing, and the guess gets worse with every frame. So its horizon is
+# clamped: it may be carried a few frames, not half a second. Real
+# descents are unaffected, because a chain straight enough to be one has
+# a line and is extrapolated along it.
+CORRIDOR_WANDER_DF = 3
 
 
 def _smooth_axis(pts, min_pts: int, fit_pts: int, max_rms: float):
@@ -686,12 +705,32 @@ def build_tracks(
     for f in sorted(by_frame):
         cands = by_frame[f]
         taken: set[int] = set()
-        # THE LINE EACH TRACK IS ON, recomputed as the chains grow.
+        # THE LINE EACH TRACK IS ON -- AND IT DOES NOT FORGET IT.
+        #
+        # This was reassigned outright every frame, so the moment a
+        # chain's recent tail stopped looking straight its corridor
+        # switched OFF and only the radius was left. That is a vicious
+        # circle with the failure it was added to prevent: a track
+        # passing a shaking bush takes one speck, its tail is no longer
+        # smooth, the corridor disengages, and the widened radius then
+        # lets it reach hundreds of pixels sideways for the next one.
+        # Measured on a green with a bush in it: a descent walked down
+        # to the bush and jumped ~355px across the picture rather than
+        # taking the next point 15px below it.
+        #
+        # A chain that HAS run straight has established a heading, and a
+        # rough tail is evidence the last link was wrong -- not grounds
+        # to stop asking the question. So the line is refreshed while the
+        # tail is smooth and REMEMBERED when it is not. Once a track has
+        # a line it keeps one, and a candidate that would break it is
+        # refused rather than the test being dropped.
         if corridor_px and corridor_px > 0:
             for tr in open_tracks:
-                tr["_axis"] = _smooth_axis(tr["pts"], CORRIDOR_MIN_PTS,
-                                           CORRIDOR_FIT_PTS,
-                                           CORRIDOR_SMOOTH_RMS)
+                _fresh = _smooth_axis(tr["pts"], CORRIDOR_MIN_PTS,
+                                      CORRIDOR_FIT_PTS,
+                                      CORRIDOR_SMOOTH_RMS)
+                if _fresh is not None or tr.get("_axis") is None:
+                    tr["_axis"] = _fresh
         # SENIORITY IS NOT LENGTH, IT IS PREDICTABILITY. Longest-first
         # hands an ambiguous detection to whatever has been running the
         # longest, and on a green with the tee box in shot that is the
@@ -736,10 +775,27 @@ def build_tracks(
             # untouched.
             _axis = tr.get("_axis") if (corridor_px and corridor_px > 0) \
                 else None
-            if corridor_px and corridor_px > 0 and \
-                    len(tr["pts"]) >= CORRIDOR_MIN_PTS:
+            # FROM THE FIRST VELOCITY, not from the first line. A
+            # two-point chain's heading comes from a single link and is
+            # barely better than none -- and it was getting the full
+            # `0.9 * df` growth and the full extrapolation with it.
+            # Measured on the bush: a two-point chain of specks was
+            # carried nine frames and 396px and picked up a ball 293px
+            # away. `ACQUIRE_MAX_DF` already caps this for a ONE-point
+            # track and for exactly this reason; two points is the same
+            # argument one link later.
+            if corridor_px and corridor_px > 0 and len(tr["pts"]) >= 2:
                 _sp = math.hypot(tr["vx"], tr["vy"])
-                gate = min(gate, _sp * df * CORRIDOR_SPEED_SLACK + r)
+                # A CHAIN WITH NO LINE IS NOT PREDICTING, IT IS GUESSING.
+                # See CORRIDOR_WANDER_DF: the reach is clamped AND so is
+                # the extrapolation it is measured from, because a gate
+                # around a prediction that has itself walked 275px is not
+                # a gate at all.
+                _hz = df if _axis is not None else min(df, CORRIDOR_WANDER_DF)
+                if _hz != df:
+                    px = last["x"] + tr["vx"] * _hz
+                    py = last["y"] + tr["vy"] * _hz
+                gate = min(gate, _sp * _hz * CORRIDOR_SPEED_SLACK + r)
             best_i = None
             best_d = None
             for i, c in enumerate(cands):
