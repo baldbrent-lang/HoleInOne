@@ -8326,6 +8326,22 @@ function DescentWindow({ view, colors }) {
                 <title>landed here</title>
               </circle>
             )}
+            {/* WHOSE LANDING THIS IS, written on it. Green said "the one
+                this window used" and nothing more, so on a four-swing
+                upload four pictures each carried an unlabelled green
+                chain and the only way to tell whose was the heading
+                above. The label is on the chain itself now. */}
+            {chosen.points?.length > 0 && (
+              <text x={chosen.points[0].x + 22}
+                    y={Math.max(18, chosen.points[0].y - 10)}
+                    fill="#78ff78" fontSize={20} fontWeight="700"
+                    stroke="#000" strokeWidth={0.6} paintOrder="stroke">
+                swing {chosen.chosen_swing ?? view.swing}
+                {chosen.n_points ? ` · ${chosen.n_points}pts` : ""}
+                {chosen.fall_px != null ? ` · fell ${chosen.fall_px}px` : ""}
+                {chosen.search === "box" ? " · box" : ""}
+              </text>
+            )}
           </g>
         )}
       </svg>

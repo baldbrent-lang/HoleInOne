@@ -17736,7 +17736,7 @@ def _ball_scan_sweep_image(row, src_path, sweep) -> None:
             for q in _p:
                 cv2.circle(im, (q["x"], q["y"]), 4, _col, 2, cv2.LINE_AA)
             if _p:
-                cv2.putText(im, f"{i + 1}  {a['first_sec']}s  "
+                cv2.putText(im, f"swing {i + 1}  {a['first_sec']}s  "
                                 f"{a['n_points']}pts  {a['rise_px']}px",
                             # CLAMPED INTO THE PICTURE. The chains that
                             # rise furthest are the ones worth reading,
@@ -17847,6 +17847,16 @@ def _ball_scan_considered_image(row, src_path, sweep) -> None:
         # WORST FIRST, so an accepted chain is never buried under one
         # that failed six gates. `considered` arrives furthest-first, so
         # this is simply that order reversed.
+        # WHICH SWING EACH ACCEPTED CHAIN BECAME. The label used to be a
+        # running counter incremented as the chains were DRAWN, and they
+        # are drawn worst-first -- so "3" on the picture had nothing to
+        # do with swing 3 in the table below it, and on a four-swing
+        # upload the two numberings ran opposite ways. Swings are
+        # numbered by when the ball left, so that is what this is.
+        _acc = sorted((a for a in _con if not (a.get("why") or [])),
+                      key=lambda a: int(a.get("first_frame") or 0))
+        _swing_no = {int(a.get("first_frame") or 0): i + 1
+                     for i, a in enumerate(_acc)}
         _n_ok = 0
         for a in reversed(_con):
             _why = a.get("why") or []
@@ -17875,12 +17885,14 @@ def _ball_scan_considered_image(row, src_path, sweep) -> None:
             # thing the colours were introduced to replace.
             if not _why:
                 cv2.putText(
-                    im, f"{_n_ok}  {a['first_sec']}s  {a['n_points']}pts",
+                    im,
+                    f"swing {_swing_no.get(int(a.get('first_frame') or 0), _n_ok)}"
+                    f"  {a['first_sec']}s  {a['n_points']}pts",
                     # A LABEL ABOVE THE TOP OF THE FRAME IS NOT A LABEL.
                     # The chains that rise furthest are the ones worth
                     # reading, and they are exactly the ones whose last
                     # point is at y=4.
-                    (min(_p[-1]["x"] + 7, im.shape[1] - 170),
+                    (min(_p[-1]["x"] + 7, im.shape[1] - 230),
                      max(66, _p[-1]["y"] - 3)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, _col, 1, cv2.LINE_AA)
             if a.get("from_x") is not None and _ty:
@@ -19100,13 +19112,26 @@ def _ascent_window_views(row, src_green, out, clips, g_fps,
                 _step = max(1, len(_d) // ASCENT_VIEW_MAX_DOTS)
                 _ch = []
                 for z in (out.get("sweep") or {}).get("considered") or []:
-                    if not (_flo <= int(z["last_descent_frame"]) <= _fhi):
+                    # DEFENSIVELY, because this loop is inside the
+                    # try/except that swallows into "no picture at all".
+                    # A row missing this key used to raise a KeyError on
+                    # the FIRST swing and leave every window without an
+                    # image -- the pictures vanished from the report and
+                    # the only symptom was their absence.
+                    _lf = z.get("last_descent_frame")
+                    if _lf is None or not (_flo <= int(_lf) <= _fhi):
                         continue
                     _ch.append({
                         "points": z.get("points") or [],
                         "why": z.get("why") or [],
                         "why_primary": z.get("why_primary"),
                         "chosen": z.get("chosen_for") == ci + 1,
+                        # WHICH SWING CLAIMED IT, so the picture can say
+                        # so rather than just colouring it green. On a
+                        # four-swing upload "this is the one" is not the
+                        # same statement as "this is swing 2's".
+                        "chosen_swing": z.get("chosen_for"),
+                        "search": z.get("search"),
                         "landing_xy": z.get("landing_xy"),
                         "last_sec": z.get("last_descent_sec"),
                         "fall_px": z.get("fall_px"),

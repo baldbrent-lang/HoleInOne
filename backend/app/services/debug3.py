@@ -2631,8 +2631,14 @@ def find_descents(
             considered.append({
                 "first_frame": int(_raw_pts[0]["frame"]),
                 "last_frame": int(_raw_pts[-1]["frame"]),
+                # CARRIED EVEN THOUGH THERE IS NO LANDING. Every consumer
+                # of a considered row keys off this to decide which
+                # window a chain belongs in, so a row without one is a
+                # row that breaks them -- and a trimmed chain still came
+                # from somewhere, which is the whole reason it is here.
+                "last_descent_frame": int(_raw_pts[-1]["frame"]),
                 "last_descent_sec": round(
-                    int(_raw_pts[0]["frame"]) / _fps, 2),
+                    int(_raw_pts[-1]["frame"]) / _fps, 2),
                 "n_points": len(pts),
                 "n_points_raw": int(_n_raw),
                 "n_off_line": int(_n_off_line),
