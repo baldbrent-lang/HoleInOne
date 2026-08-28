@@ -18764,7 +18764,7 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                 # flag, no comet, no guess about where it came down. A
                 # ball can miss the green, and a tracer that draws it
                 # arriving anyway is worse than one that stops short.
-                aim_without_landing=False,
+                saved_track_as_landing=False,
             ) or {}
             # THE URL IS INSIDE `clips`, NOT AT THE TOP LEVEL.
             #
@@ -22126,7 +22126,7 @@ def run_wizard_produce_job(
     # wizard, where a target on the record is a human's instruction.
     # False for an automatic produce, where it would be a guess dressed
     # as a measurement -- see `_d3_fast_produce`.
-    aim_without_landing: bool = True,
+    saved_track_as_landing: bool = True,
 ) -> dict:
     """Stages 4-8, from the operator's ball and impact frame.
 
@@ -22312,7 +22312,7 @@ def run_wizard_produce_job(
                 # it writes, which is right for a re-produce of the whole
                 # thing and catastrophic for "and now there is one more".
                 replace=not solo,
-                aim_without_landing=aim_without_landing,
+                saved_track_as_landing=saved_track_as_landing,
                 end_green_sec=_end_sec,
                 landing=(
                     {"sec": _land_sec, "xy": list(landing_spot)}
@@ -22893,7 +22893,7 @@ def _detach_clip_refs(db, clip_ids) -> dict:
 def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                      hole_number=None, end_green_sec=None,
                      landing=None, replace=True,
-                     aim_without_landing=True) -> dict:
+                     saved_track_as_landing=True) -> dict:
     """Build the shipped clip STRAIGHT from Debug3's numbers.
 
     Stage 8 used to re-run the whole production pipeline
@@ -23144,11 +23144,18 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # D3_MAX_EXTRA_TEE_SEC of it, which is where a twenty-second
             # clip comes from.
             #
-            # `aim_without_landing` already means "this caller looked
-            # and found nothing, so invent nothing". It governs this
-            # too. The wizard, where a saved comet IS the operator's
-            # own work, is unaffected.
-            if not landing and aim_without_landing and green_path \
+            # `saved_track_as_landing` is what is left of a flag called
+            # `aim_without_landing`, which also used to let the tail aim
+            # at the pin when no landing was found. That is gone -- see
+            # "NO LANDING, NO CONTINUATION" below -- and the one job it
+            # still has is this: may a green track saved on the swing
+            # stand in for a landing the search did not find. True for
+            # the wizard, where a saved comet IS the operator's own work.
+            # False for the ascent produce, which looked at the green
+            # itself: there a saved track is a previous run's output, and
+            # reusing it holds the tee half open for a ball that is not
+            # coming.
+            if not landing and saved_track_as_landing and green_path \
                     and _gfps_l > 0 \
                     and _saved_green_track(row, _slot, _gfps_l):
                 _gt = _saved_green_track(row, _slot, _gfps_l)
@@ -23335,57 +23342,37 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         "landing — %s", i, _t_why,
                     )
 
-            # NO LANDING MARKED? AIM AT THE FLAG. On a par 3 the ball is
-            # going at the pin, and the operator has usually marked it
-            # even when they have not stepped through the green camera
-            # to find the exact frame the ball came down. Without this
-            # the tracer just stops where the blob detector gave up,
-            # which is the whole complaint -- and the target has been
-            # sitting in edit_metrics the entire time, used by the
-            # finalize path and ignored by this one.
+            # NO LANDING, NO CONTINUATION.
             #
-            # It is second, not first: the landing is where the ball
-            # ACTUALLY went, the flag is where it was aimed, and on a
-            # miss those are not the same place.
-            # ...BUT NOT WHEN THE CALLER SAYS NOT TO. An operator who
-            # marked a target asked for the tracer to go there. An
-            # automatic produce that found no descent has been told
-            # nothing of the kind: aiming at the flag then draws the
-            # shot the golfer meant to hit rather than the one they hit,
-            # and on the miss that produced no descent those are not the
-            # same place -- which is exactly the swing where a viewer
-            # can tell.
-            if _target_xy is None and not aim_without_landing:
-                log.info(
-                    "d3 produce: swing %s found no landing and will not "
-                    "be aimed at a target — the tracer stops where the "
-                    "ball was last seen", i,
-                )
-            elif _target_xy is None:
-                _em = row.edit_metrics or {}
-                _sw_t = None
-                for _s in (_em.get("swings") or []):
-                    if isinstance(_s, dict) and int(_s.get("idx", -1)) == i:
-                        _sw_t = _s.get("target")
-                        break
-                _t_saved = _sw_t or _em.get("target") or {}
-                try:
-                    if (_t_saved.get("x") is not None
-                            and _t_saved.get("y") is not None):
-                        _target_xy = (float(_t_saved["x"]),
-                                      float(_t_saved["y"]))
-                        log.info(
-                            "d3 produce: swing %s no landing marked; tracer "
-                            "aimed at the saved target (%.0f, %.0f)",
-                            i, _target_xy[0], _target_xy[1],
-                        )
-                except (AttributeError, TypeError, ValueError):
-                    _target_xy = None
+            # This used to fall back to the flag: on a par 3 the ball is
+            # going at the pin, so aim there when no landing was found.
+            # That draws the shot the golfer MEANT to hit, and on the
+            # miss that produced no descent those are not the same place
+            # -- which is exactly the swing where a viewer can tell.
+            #
+            # Worse than wrong, it bends. The tail leaves the last
+            # measured point along the heading the ball was actually
+            # travelling and then has to reach a pin that is somewhere
+            # else, so the line hooks across the top of the frame. That
+            # hook was the flag, every time.
+            #
+            # The predictive half exists to JOIN two measurements: the
+            # ascent the tee camera tracked and the descent the green
+            # camera saw. With only one of them there is nothing to join,
+            # and what is known -- the mapped ascent -- is drawn on its
+            # own. A tracer that ends where the measurement ends is
+            # obviously incomplete and says so; one drawn confidently to
+            # a place the ball never went does not.
+            #
+            # `landing` above already accepts a saved descent path as a
+            # landing, so an operator's own plotted comet still gets a
+            # continuation. It is the FLAG that is gone, not the
+            # operator.
             if _target_xy is None:
                 log.info(
-                    "d3 produce: swing %s has neither a landing spot nor a "
-                    "target — the tracer will stop where the ball was last "
-                    "seen", i,
+                    "d3 produce: swing %s has no landing and no descent "
+                    "path — drawing the measured ascent only, with no "
+                    "continuation", i,
                 )
 
             # WHEN IT LANDS, IN THIS VIDEO'S FRAMES — not inferred.
