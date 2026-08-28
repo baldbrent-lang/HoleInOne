@@ -2053,10 +2053,22 @@ def _descent_step_consistency(pts):
         # with. The fall-rate gate elsewhere is what rejects this; here
         # it just means the question does not apply.
         return med, 999.0
-    # IN TIME ORDER, not sorted: the question is whether the step ever
-    # shrank as the fall went on, and sorting is precisely what throws
-    # that away.
-    back = max((steps[i] - steps[i + 1] for i in range(len(steps) - 1)),
+    # THE LAST STEP IS THE GROUND, AND THE GROUND IS ALLOWED TO STOP IT.
+    #
+    # A ball's step grows the whole way down and then collapses in the
+    # single step where it arrives -- that is a landing, which is the
+    # thing being looked for, not evidence against one. Measured on a
+    # nine-step fall accelerating toward the lens: the fall alone slows
+    # by 0.00, and the same fall with its touchdown step on the end
+    # slows by 1.25 and is refused as UNEVEN. Every descent tracked
+    # through the moment it lands trips this, and the ones that pass are
+    # the ones the tracker happened to lose in mid-air.
+    #
+    # So the final step is not considered, once there are enough left for
+    # the question to mean anything. What remains is the fall, and the
+    # fall never slows.
+    _cmp = steps[:-1] if len(steps) >= 4 else steps
+    back = max((_cmp[i] - _cmp[i + 1] for i in range(len(_cmp) - 1)),
                default=0.0)
     return med, max(0.0, back) / med
 
@@ -2353,7 +2365,15 @@ def find_descents(
         _n_raw = len(pts)
         pts = _line_inliers(pts, DESCENT_LINE_TOL_PX, int(min_points))
         _n_off_line = _n_raw - len(pts)
+        _n_before_tails = len(pts)
         pts = _smooth_tail(_falling_tail(pts), int(min_points))
+        # WHAT THE TRIMS TOOK OFF THE FRONT. `_falling_tail` cuts back to
+        # where the chain started going down and `_smooth_tail` to where
+        # it started going straight, and both are silent -- so a picture
+        # showing detections above the first drawn point had no way to
+        # say whether the tracker never linked them or the trims threw
+        # them away. Those are opposite problems.
+        _n_tail_trim = _n_before_tails - len(pts)
         if len(pts) < int(min_points):
             continue
         _why: list = []
@@ -2467,13 +2487,22 @@ def find_descents(
         # changes no decision about a chain that is real.
         if len(kept) < MIN_DESCENT_POINTS:
             _why.append("points")
-        # THE RHYTHM AND THE DENSITY, both now gates. See the constants.
+        # THE RHYTHM IS THE FALL'S, NOT THE FALL-PLUS-LANDING'S.
         #
-        # Measured on the WHOLE track for the same reason drop, rate and
-        # bend are: the walk back to the landing keeps only the part
-        # that is drawn, and a chain of three that survives it has too
-        # few steps left to have a rhythm at all.
-        step_med, step_back = _descent_step_consistency(pts)
+        # Drop, rate and bend are measured on the whole track on purpose
+        # -- they want all the evidence the tracker gathered. The rhythm
+        # is the one test where that is wrong: it asks whether the thing
+        # kept falling steadily, and everything after the pitch mark is
+        # precisely where a real ball stops doing that. `kept` is the
+        # part still falling, which the walk back above has just worked
+        # out, so this is not a new judgement -- it is the one already
+        # made, applied to the one test that needs it.
+        #
+        # Falls back to the whole track when the walk back left too
+        # little to have a rhythm at all, which is the case the old
+        # comment here was protecting.
+        _rhythm_on = kept if len(kept) >= MIN_DESCENT_POINTS + 1 else pts
+        step_med, step_back = _descent_step_consistency(_rhythm_on)
         _span_f = int(pts[-1]["frame"]) - int(pts[0]["frame"]) + 1
         _density = len(pts) / float(max(1, _span_f))
         if step_back > DESCENT_MAX_STEP_BACK:
@@ -2553,6 +2582,18 @@ def find_descents(
             # sends you to the detector when the linker is the problem.
             "n_points_raw": int(_n_raw),
             "n_off_line": int(_n_off_line),
+            "n_tail_trim": int(_n_tail_trim),
+            # THE CHAIN THE NUMBERS DESCRIBE. `points` is what is DRAWN,
+            # which is the fall plus the bounce and roll appended for the
+            # picture -- so a row reporting 11 points across 11 frames
+            # was expanding into 16 with a 21-frame gap in it, and the
+            # two disagreeing is not something a reader should have to
+            # reconcile. Every number in the row is measured on this.
+            "fall_points": [
+                {"frame": int(q["frame"]),
+                 "x": int(round(q["x"])), "y": int(round(q["y"]))}
+                for q in kept
+            ],
             # THE VERTICAL LEG, which is what "it fell this far" means.
             # `drop_px` is the whole hypotenuse and flatters anything
             # travelling sideways.

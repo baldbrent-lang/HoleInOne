@@ -8860,9 +8860,28 @@ function AscentProduceModal({ state, onClose }) {
                               short
                             </span>
                           )}
-                          <PointFrames points={z.points}
+                          {z.n_tail_trim > 0 && (
+                            <span className="pill warn"
+                                  style={{ marginLeft: 4 }}
+                                  title="Points trimmed off the FRONT of the chain before it was judged — _falling_tail cuts back to where it started going down, _smooth_tail to where it started going straight. Detections sitting above the first drawn point are these, not points the tracker never linked.">
+                              −{z.n_tail_trim} head
+                            </span>
+                          )}
+                          {/* The FALL, which is what every number in this
+                              row is measured on. `points` is what gets
+                              DRAWN: the fall plus the bounce and the roll
+                              appended for the picture, which is how a row
+                              saying 11 points expanded into 16 with a
+                              21-frame gap in it. */}
+                          <PointFrames points={z.fall_points || z.points}
                                        span={z.span_frames}
                                        density={z.density} />
+                          {z.n_settle_points > 0 && (
+                            <div className="tiny muted">
+                              + {z.n_settle_points} more drawn after it
+                              landed — bounce and roll, not measured
+                            </div>
+                          )}
                         </td>
                         <td title="Points the tracker linked that were not on the chain's own line — a speck it reached sideways for. Thrown out before the chain is judged, so one bad link no longer costs a real descent.">
                           {z.n_off_line ? `−${z.n_off_line}` : "—"}
