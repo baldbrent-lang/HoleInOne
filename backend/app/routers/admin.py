@@ -9489,8 +9489,12 @@ def get_distance_state(upload_id: int, db: Session = Depends(get_db)):
         "calibrated": bool((cam.green_homography or {}).get("homography"))
         if cam else False,
         "blocker": _distance_blocker(cam),
-        "green_width": row.green_width,
-        "green_height": row.green_height,
+        # No frame dimensions here on purpose: green_width/green_height
+        # are keys the LIST endpoint builds out of ffprobe metadata, not
+        # columns on the row, and reading them off the model raised
+        # AttributeError -- which is a 500 on the one request the picker
+        # makes before it can draw anything. The picker takes its
+        # dimensions from the frame it is about to display anyway.
         "swings": out,
     }
 
