@@ -8829,6 +8829,7 @@ function AscentProduceModal({ state, onClose }) {
                 <table className="tiny" style={{ width: "100%" }}>
                   <thead>
                     <tr>
+                      <th align="left" title="Matches the #n drawn on the picture above.">#</th>
                       <th align="left">at</th>
                       <th align="left">pts</th>
                       <th align="left">rise</th>
@@ -8846,6 +8847,10 @@ function AscentProduceModal({ state, onClose }) {
                     {rep.sweep.considered.map((z, i) => (
                       <tr key={i}
                           style={{ opacity: (z.why || []).length ? 0.6 : 1 }}>
+                        <td className="muted"
+                            title="Matches the #n drawn on the picture above — refused chains carry it when they are long enough for the number to sit on something.">
+                          #{z.id ?? i + 1}
+                        </td>
                         <td>f{z.first_frame}</td>
                         <td title={z.n_trimmed
                           ? `${z.n_trimmed} leading point(s) trimmed off a ${z.n_raw_points}-point chain`

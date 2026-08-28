@@ -17843,6 +17843,13 @@ def _ascent_swing_images(row, src_path, sweep) -> None:
                   row.id, exc)
 
 
+# HOW LONG A REFUSED CHAIN MUST BE to carry its row number in the
+# picture. Short chains are a scatter of two-pixel dots and a number
+# beside one of them lands on three others; the table still lists them,
+# and the colour still says which gate refused them.
+ASCENT_LABEL_MIN_POINTS = 5
+
+
 def _key_entry(im, x: int, text: str, col) -> int:
     """One swatch-and-label in the picture's colour key; returns the next x.
 
@@ -17960,9 +17967,23 @@ def _ball_scan_considered_image(row, src_path, sweep) -> None:
             # cannot each carry a word; that is what the colours are
             # for, and a picture with four hundred labels in it is the
             # thing the colours were introduced to replace.
+            # EVERY CHAIN CARRIES ITS ROW NUMBER, not just the ones
+            # that won. Four hundred chains cannot each carry a
+            # sentence -- that is what the colours are for -- but they
+            # can carry the two or three digits that get you from a row
+            # in the table to the line in the picture, which is the one
+            # thing neither could do alone. Only for chains long enough
+            # for the number to sit on something.
+            if _why and len(_p) >= ASCENT_LABEL_MIN_POINTS:
+                cv2.putText(
+                    im, f"#{a.get('id')}",
+                    (min(_p[-1]["x"] + 5, im.shape[1] - 34),
+                     max(66, _p[-1]["y"] - 3)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, _col, 1, cv2.LINE_AA)
             if not _why:
                 cv2.putText(
                     im,
+                    f"#{a.get('id')}  "
                     f"swing {_swing_no.get(int(a.get('first_frame') or 0), _n_ok)}"
                     f"  {a['first_sec']}s  {a['n_points']}pts",
                     # A LABEL ABOVE THE TOP OF THE FRAME IS NOT A LABEL.
@@ -17984,7 +18005,8 @@ def _ball_scan_considered_image(row, src_path, sweep) -> None:
         cv2.putText(
             im,
             f"all {sweep.get('n_considered')} chain(s) the sweep weighed - "
-            f"white is accepted, every other colour is the gate it failed",
+            f"white is accepted, every other colour is the gate it failed; "
+            f"#n matches the table",
             (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1,
             cv2.LINE_AA)
         # THE KEY, DRAWN INTO THE PICTURE. The dialog has a legend beside

@@ -3810,6 +3810,49 @@ def _extend_to_target(pts, target_xy, fps, width, height,
     # confidently to the wrong place does not.
     if target_xy is None or len(pts) < 2:
         return [], None
+    # A BALL DOES NOT FLY BACKWARDS.
+    #
+    # Both models leave the last measured point along the heading the
+    # ball was ALREADY travelling -- that is what keeps the hand-off
+    # smooth -- and then bend to the target. When the target is BEHIND
+    # that heading there is no smooth way to do it: the curve goes out
+    # the way the ball was going, stops, and comes back, which is the
+    # hook an operator sees at the top of the frame. `_turns_back_on
+    # _itself` catches the worst of those after the fact; this catches
+    # the cause, which is that the target was never reachable by a ball
+    # flying that way.
+    #
+    # Measured along the flight, so a target off to the side is fine --
+    # shots curve -- and only one genuinely behind the ball is refused.
+    _pw = list(pts[-12:])
+    if len(_pw) >= 2:
+        _vx = float(_pw[-1][1]) - float(_pw[0][1])
+        _vy = float(_pw[-1][2]) - float(_pw[0][2])
+        _vm = math.hypot(_vx, _vy)
+        if _vm > 1e-6:
+            _du = (((float(target_xy[0]) - float(pts[-1][1])) * _vx)
+                   + ((float(target_xy[1]) - float(pts[-1][2])) * _vy)) / _vm
+            _dv = (((float(target_xy[0]) - float(pts[-1][1])) * -_vy)
+                   + ((float(target_xy[1]) - float(pts[-1][2])) * _vx)) / _vm
+            # THE TURN THE TAIL IS BEING ASKED TO MAKE, on the record.
+            # A hook at the top of the frame is this number being large,
+            # and it has never been written down -- so every round of
+            # "why did the tracer bend left" has been argued from a
+            # screenshot. Logged on every tail, refused only when the
+            # target is genuinely behind, which no ball can reach.
+            _turn = math.degrees(math.atan2(abs(_dv), _du)) if _du else 90.0
+            log.info(
+                "tracer tail: target is %.0fpx along the flight's heading "
+                "and %.0fpx across it — a %.0f degree turn from where the "
+                "ball was going", _du, _dv, _turn,
+            )
+            if _du < 0.0:
+                log.info(
+                    "tracer tail: the target is %.0fpx BEHIND the flight's "
+                    "own heading — a ball does not turn round, so no "
+                    "continuation is drawn rather than a hook", -_du,
+                )
+                return [], None
     tail = _ballistic_tail(pts, target_xy, fps, width, height,
                            land_frame=land_frame)
     kind = "ballistic"

@@ -3988,6 +3988,14 @@ def sweep_ascents(
         # it is also the order the picture draws them in, so an accepted
         # chain is never buried under a rejected one.
         _considered.sort(key=lambda z: (len(z["why"]), -z["n_points"]))
+        # A NUMBER EACH, IN THE ORDER THE TABLE SHOWS THEM. The picture
+        # and the table have been two lists of the same chains with no
+        # way to get from a row to a line -- so "why was THAT one
+        # refused" could be asked of the picture and answered only by
+        # counting. Assigned after the sort, because the sort is the
+        # order the table renders in.
+        for _i, _z in enumerate(_considered):
+            _z["id"] = _i + 1
         for z in _considered:
             # THE COLOUR IT WILL BE DRAWN IN, decided here rather than
             # by whoever draws it, so the picture and the legend cannot
