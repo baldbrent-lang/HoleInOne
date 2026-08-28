@@ -17766,6 +17766,83 @@ def _ball_scan_sweep_image(row, src_path, sweep) -> None:
         log.debug("ball scan: sweep image failed on %s: %s", row.id, exc)
 
 
+def _ascent_swing_images(row, src_path, sweep) -> None:
+    """One picture per ball leaving, on its own frame.
+
+    THE WHOLE-CLIP PICTURE ANSWERS A DIFFERENT QUESTION. It shows every
+    chain the sweep kept, on one frame from the middle of the clip, which
+    is right for "did the sweep find them all" and useless for "is THIS
+    swing's ascent the ball". A shot ninety seconds away is not context
+    for that; it is clutter that looks like evidence -- the same argument
+    `_ascent_window_views` makes for the descent side, which has had a
+    picture per swing for a while and is the reason those are readable.
+
+    Drawn on the frame the chain STARTS on, so the ball is where the
+    picture says it is. Never raises: this is the explanation, and a clip
+    must still produce when the explanation cannot be drawn.
+    """
+    _asc = (sweep or {}).get("ascents") or []
+    if not _asc:
+        return
+    try:
+        import cv2  # type: ignore
+        from ..services.debug3 import TRACK_COLORS as _TC
+
+        cap = cv2.VideoCapture(str(src_path))
+        if not cap.isOpened():
+            return
+        try:
+            _ty = int(sweep.get("tee_line_y") or 0)
+            _band = sweep.get("band")
+            for i, a in enumerate(_asc):
+                _p = a.get("points") or []
+                if not _p:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES,
+                        max(0, int(a.get("first_frame") or 0)))
+                ok, im = cap.read()
+                if not ok or im is None:
+                    continue
+                im = (im.astype("float32") * 0.72).astype("uint8")
+                if _band:
+                    cv2.rectangle(im, (0, 0),
+                                  (int(_band[2]) - 1, int(_band[3])),
+                                  (80, 200, 255), 2)
+                if _ty:
+                    cv2.line(im, (0, _ty), (im.shape[1], _ty),
+                             (80, 200, 255), 1, cv2.LINE_AA)
+                _hex = _TC[i % len(_TC)]
+                _rgb = tuple(int(_hex[k:k + 2], 16) for k in (1, 3, 5))
+                _col = (_rgb[2], _rgb[1], _rgb[0])
+                for u, v in zip(_p, _p[1:]):
+                    cv2.line(im, (u["x"], u["y"]), (v["x"], v["y"]), _col,
+                             3, cv2.LINE_AA)
+                for q in _p:
+                    cv2.circle(im, (q["x"], q["y"]), 5, _col, 2, cv2.LINE_AA)
+                if a.get("from_x") is not None and _ty:
+                    cv2.drawMarker(im, (int(a["from_x"]), _ty), _col,
+                                   cv2.MARKER_TILTED_CROSS, 20, 2,
+                                   cv2.LINE_AA)
+                im[0:34] = (im[0:34].astype("float32") * 0.35).astype("uint8")
+                cv2.putText(
+                    im,
+                    f"swing {i + 1} leaving the tee - f{a.get('first_frame')} "
+                    f"({a.get('first_sec')}s), {a.get('n_points')}pts, "
+                    f"rose {a.get('rise_px')}px, bend {a.get('bend_px')}px, "
+                    f"tilt {a.get('tilt_deg')}deg",
+                    (12, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+                nm = f"ballscan-{row.id}-ascent-{i + 1}.jpg"
+                if cv2.imwrite(str(CLIPS_DIR / nm), im,
+                               [int(cv2.IMWRITE_JPEG_QUALITY), 86]):
+                    a["image_url"] = _clip_url_for(nm)
+        finally:
+            cap.release()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("ball scan: per-swing ascent images failed on %s: %s",
+                  row.id, exc)
+
+
 def _key_entry(im, x: int, text: str, col) -> int:
     """One swatch-and-label in the picture's colour key; returns the next x.
 
@@ -18506,6 +18583,10 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
     sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi")) or {}
     _ball_scan_sweep_image(row, src_path, sweep)
     _ball_scan_considered_image(row, src_path, sweep)
+    # AND ONE PER SWING. The whole-clip pictures answer "did the sweep
+    # find them all"; the dialog below is organised per swing, and per
+    # swing the other chains are clutter.
+    _ascent_swing_images(row, src_path, sweep)
     _ascent_trim_considered(sweep)
     rep["sweep"] = sweep
     _asc = list(sweep.get("ascents") or [])

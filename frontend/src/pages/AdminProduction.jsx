@@ -8636,6 +8636,74 @@ function ProduceStepSummary({ rep }) {
 }
 
 
+// ONE SWING, END TO END: the ball leaving, the ball arriving, and the
+// clip that came out of it. The report had all three and put them in
+// three different places -- the ascent pictures were whole-clip, the
+// descent pictures were per swing further down, and the clip link was a
+// cell in a table between them. Checking one shot meant scrolling
+// between three sections and matching numbers by eye.
+function SwingCard({ n, ascent, view, clip, colors, findOnly }) {
+  const url = clip?.clip_url;
+  return (
+    <div className="card" style={{ margin: "10px 0", padding: 10 }}>
+      <div className="row" style={{ justifyContent: "space-between",
+                                    alignItems: "baseline", gap: 10 }}>
+        <b>Swing {n}</b>
+        <span className="row" style={{ gap: 8, alignItems: "baseline" }}>
+          {ascent?.first_sec != null && (
+            <span className="tiny muted">
+              left at {ascent.first_sec}s
+              {ascent.rise_px != null ? ` · rose ${ascent.rise_px}px` : ""}
+            </span>
+          )}
+          {findOnly ? null : url ? (
+            <a href={url} target="_blank" rel="noreferrer"
+               className="pill ok">▶ produced clip</a>
+          ) : (
+            <span className="pill warn"
+                  title={clip?.reason || "not produced"}>
+              {clip?.reason ? "not produced" : "no clip"}
+            </span>
+          )}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gap: 8, marginTop: 8,
+                    gridTemplateColumns:
+                      "repeat(auto-fit, minmax(320px, 1fr))" }}>
+        <div>
+          <div className="tiny muted" style={{ marginBottom: 3 }}>
+            Leaving the tee
+          </div>
+          {ascent?.image_url ? (
+            <a href={ascent.image_url} target="_blank" rel="noreferrer">
+              <img src={ascent.image_url} alt={`swing ${n} ascent`}
+                   style={{ width: "100%", borderRadius: 6 }} />
+            </a>
+          ) : (
+            <div className="tiny muted">no picture for this ascent</div>
+          )}
+        </div>
+        <div>
+          <div className="tiny muted" style={{ marginBottom: 3 }}>
+            Coming down on the green
+          </div>
+          {view ? (
+            <DescentWindow view={view} colors={colors} />
+          ) : (
+            <div className="tiny muted">
+              {clip?.landing_spot
+                ? "no picture for this descent"
+                : "no ball was matched coming down — the clip is tee-only"}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function AscentProduceModal({ state, onClose }) {
   const rep = state?.report;
   const asc = rep?.ascents || [];
@@ -8701,6 +8769,23 @@ function AscentProduceModal({ state, onClose }) {
               </span>
             </div>
             <ScanTiming stages={rep.stages} timing={rep.timing} />
+          </div>
+        )}
+
+        {/* EVERY SWING, END TO END. Before the whole-clip pictures and
+            the tables, because "is swing 2 right" is the question
+            actually being asked and it was the one the report made
+            hardest to answer. */}
+        {(rep?.ascents || []).length > 0 && (
+          <div style={{ margin: "10px 0" }}>
+            {rep.ascents.map((a, i) => (
+              <SwingCard key={i} n={i + 1} ascent={a}
+                         view={(rep?.descents?.views || [])
+                           .find((v) => v.swing === i + 1)}
+                         clip={(rep?.clips || [])[i]}
+                         colors={rep?.descents?.sweep?.why_colors}
+                         findOnly={findOnly} />
+            ))}
           </div>
         )}
 
