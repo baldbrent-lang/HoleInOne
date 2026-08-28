@@ -1669,6 +1669,13 @@ DESCENT_MAX_SPAN = 60
 # How much of its peak fall speed a track must still have to count as
 # still descending. Below this it has landed and is rolling.
 DESCENT_FLATTEN_FRAC = 0.4
+# HOW FAR THE WRONG WAY A STEP MAY GO and still count as part of the
+# fall, in pixels. `build_tracks` truncates coordinates to whole pixels,
+# so a centroid wobbling by less than one can produce two equal y values
+# or one that goes up -- and `_falling_tail` walked back from the end
+# requiring every step to be strictly down, so one such pixel cut the
+# chain there and discarded the real descent above it.
+DESCENT_FALL_JITTER_PX = 2.0
 # WHAT A THREE-POINT DESCENT HAS TO BE INSTEAD.
 #
 # THREE POINTS IS NEARLY FREE TO PASS EVERY SHAPE TEST THERE IS. A line
@@ -1900,6 +1907,8 @@ DESCENT_WHY_COLORS = {
     "uneven": "#c0392b",
     # Mostly gaps -- specks joined across frames the ball was not in.
     "sparse": "#8fa03a",
+    # Cut below three points by the trims before any gate saw it.
+    "trimmed": "#9b59b6",
 }
 DESCENT_WHY_ORDER = list(DESCENT_WHY_COLORS)
 
@@ -2282,6 +2291,7 @@ def build_descent_chains(dets: list, frame_w: int, frame_h: int,
             ],
             "span_px": round(span, 1),
             "rise_px": round(float(chain[0]["y"]) - float(chain[-1]["y"]), 1),
+            "search": "box",
         })
     # Longest first, then furthest fallen -- the two things that make a
     # chain worth judging, and the order the caller ranks survivors in.
@@ -2597,6 +2607,7 @@ def find_descents(
         # go down, and one speck reached sideways for is enough to make a
         # step go the wrong way and cut a real fall off above it.
         _n_raw = len(pts)
+        _raw_pts = list(pts)
         pts = _line_inliers(pts, DESCENT_LINE_TOL_PX, int(min_points))
         _n_off_line = _n_raw - len(pts)
         _n_before_tails = len(pts)
@@ -2609,6 +2620,36 @@ def find_descents(
         # them away. Those are opposite problems.
         _n_tail_trim = _n_before_tails - len(pts)
         if len(pts) < int(min_points):
+            # A CHAIN KILLED HERE USED TO VANISH. This was a bare
+            # `continue`, so a track the trims cut below three points
+            # left no row, no colour and no tally entry -- and the
+            # chains they damage MOST are exactly the ones that
+            # disappear. Every round of "the obvious descent is not in
+            # the table" has had this as a candidate answer with no way
+            # to check it. It gets a row now, saying what it arrived
+            # with and what took it apart.
+            considered.append({
+                "first_frame": int(_raw_pts[0]["frame"]),
+                "last_frame": int(_raw_pts[-1]["frame"]),
+                "last_descent_sec": round(
+                    int(_raw_pts[0]["frame"]) / _fps, 2),
+                "n_points": len(pts),
+                "n_points_raw": int(_n_raw),
+                "n_off_line": int(_n_off_line),
+                "n_tail_trim": int(_n_tail_trim),
+                "n_points_drawn": 0,
+                "drop_px": int(round(float(_raw_pts[-1]["y"])
+                                     - float(_raw_pts[0]["y"]))),
+                "fall_px": 0,
+                "search": tk.get("search") or "radius",
+                "fall_points": [
+                    {"frame": int(q["frame"]), "x": int(q["x"]),
+                     "y": int(q["y"])} for q in _raw_pts
+                ],
+                "points": [],
+                "why": ["trimmed"],
+                "why_primary": "trimmed",
+            })
             continue
         _why: list = []
         drop = float(pts[-1]["y"]) - float(pts[0]["y"])
@@ -2817,6 +2858,11 @@ def find_descents(
             "n_points_raw": int(_n_raw),
             "n_off_line": int(_n_off_line),
             "n_tail_trim": int(_n_tail_trim),
+            # WHICH SEARCH FOUND IT. Two run over the same detections --
+            # the radius linker and the box walk -- and when the obvious
+            # descent is missing, whether NEITHER built it or one built
+            # it and a gate refused it are opposite problems.
+            "search": tk.get("search") or "radius",
             # THE CHAIN THE NUMBERS DESCRIBE. `points` is what is DRAWN,
             # which is the fall plus the bounce and roll appended for the
             # picture -- so a row reporting 11 points across 11 frames
@@ -3486,8 +3532,18 @@ def _falling_tail(pts):
     thing being measured was not the descent -- it was the descent with
     fifty frames of noise stapled to its front.
     """
+    # A PIXEL THE WRONG WAY IS NOT THE TOP OF THE FALL. This required
+    # each step to be STRICTLY downward, and `build_tracks` stores
+    # coordinates as `int(...)` -- truncated, not rounded -- so on a
+    # centroid drifting by less than a pixel two consecutive points can
+    # come out equal, or one lower. Either ends the walk, and everything
+    # above it is thrown away: measured on a synthetic eight-point fall,
+    # a single pixel of jitter at the fifth point cuts the chain to
+    # three. The tolerance is smaller than any real step a falling ball
+    # takes, so nothing that is actually rising survives it.
     i = len(pts) - 1
-    while i > 0 and float(pts[i]["y"]) > float(pts[i - 1]["y"]):
+    while i > 0 and (float(pts[i]["y"])
+                     >= float(pts[i - 1]["y"]) - DESCENT_FALL_JITTER_PX):
         i -= 1
     return pts[i:]
 

@@ -8378,6 +8378,7 @@ const DESCENT_WHY_TEXT = {
   tilt: "leaning too far off vertical — a branch in wind, not a ball",
   uneven: "its per-frame step jumps about — a ball falls at a steady pace",
   sparse: "mostly gaps — specks joined across frames the ball was not in",
+  trimmed: "cut below three points by the trims before any gate saw it",
 };
 
 const ASCENT_WHY_TEXT = {
@@ -8389,6 +8390,7 @@ const ASCENT_WHY_TEXT = {
   backrun: "left the tee line too long ago to have been a tee shot",
   outside: "points back outside the hitting area",
   sparse: "mostly gaps — specks joined across frames the ball was not in",
+  trimmed: "cut below three points by the trims before any gate saw it",
 };
 
 
@@ -8870,6 +8872,12 @@ function AscentProduceModal({ state, onClose }) {
                             <span className="pill" style={{ marginLeft: 4 }}
                                   title="A three-point chain passes bend, reversal and density almost by construction, so it answers to tighter bars — shown beside each number.">
                               short
+                            </span>
+                          )}
+                          {z.search === "box" && (
+                            <span className="pill" style={{ marginLeft: 4 }}
+                                  title="Found by the box walk — a tall narrow window stepped down the picture — rather than by the radius linker. Both run over the same detections.">
+                              box
                             </span>
                           )}
                           {z.n_tail_trim > 0 && (
