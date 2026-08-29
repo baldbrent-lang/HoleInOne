@@ -20,7 +20,7 @@ Environment variables:
   DEV_COURSE_ID      (required) the course id in dev to attach clips to
   ADMIN_PASSWORD     admin password (used for BOTH prod and dev unless a
                      separate dev one is given). Default: Baldy123
-  PROD_URL           default https://golf-reelz.replit.app
+  PROD_URL           default https://holeinone-s6qm.onrender.com
   DEV_ADMIN_PASSWORD (optional) dev admin password, if different from prod
   TEE_ONLY           set to 1 to mirror tee clips only (skip green) —
                      faster, and enough to test detection + the tracer
@@ -34,7 +34,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-PROD = os.environ.get("PROD_URL", "https://golf-reelz.replit.app").rstrip("/")
+PROD = os.environ.get("PROD_URL", "https://holeinone-s6qm.onrender.com").rstrip("/")
 DEV = (os.environ.get("DEV_URL") or "").rstrip("/")
 PROD_PW = os.environ.get("ADMIN_PASSWORD", "Baldy123")
 DEV_PW = os.environ.get("DEV_ADMIN_PASSWORD") or PROD_PW

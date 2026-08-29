@@ -12,7 +12,7 @@ Usage:
     BASE_URL=https://<dev>.spock.replit.dev python3 scripts/preflight.py
 
 Environment:
-    BASE_URL        backend to check (default https://golf-reelz.replit.app)
+    BASE_URL        backend to check (default https://holeinone-s6qm.onrender.com)
     ADMIN_PASSWORD  admin password (default Baldy123)
     STALE_SECONDS   heartbeat older than this = OFFLINE (default 150)
 """
@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-BASE = os.environ.get("BASE_URL", "https://golf-reelz.replit.app").rstrip("/")
+BASE = os.environ.get("BASE_URL", "https://holeinone-s6qm.onrender.com").rstrip("/")
 PW = os.environ.get("ADMIN_PASSWORD", "Baldy123")
 STALE = int(os.environ.get("STALE_SECONDS", "150"))
 

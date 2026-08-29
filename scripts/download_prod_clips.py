@@ -9,7 +9,7 @@ Run it on a machine that can reach production (e.g. your Mac):
     ADMIN_PASSWORD='your-admin-password' python3 download_prod_clips.py
 
 Optional overrides (env vars):
-    BASE_URL   default https://golf-reelz.replit.app
+    BASE_URL   default https://holeinone-s6qm.onrender.com
     OUT_DIR    default ./prod_clips
 
 The admin password is the one you use to log in to /admin. It's only used
@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = os.environ.get("BASE_URL", "https://golf-reelz.replit.app").rstrip("/")
+BASE = os.environ.get("BASE_URL", "https://holeinone-s6qm.onrender.com").rstrip("/")
 PW = os.environ.get("ADMIN_PASSWORD")
 OUT = Path(os.environ.get("OUT_DIR", "prod_clips"))
 
