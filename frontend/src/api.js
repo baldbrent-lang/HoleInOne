@@ -636,6 +636,15 @@ export const api = {
     request(`/api/admin/long-uploads/${uploadId}/distance`, {
       adminPassword: key,
     }),
+  detectPin: (key, uploadId, refresh = false) =>
+    // Where the flagstick is in THIS clip's own footage. The pin moves
+    // daily, so the position stored against the hole is stale the
+    // moment the cup is re-cut; this asks the picture instead.
+    request(
+      `/api/admin/long-uploads/${uploadId}/distance/detect-pin`
+      + (refresh ? "?refresh=1" : ""),
+      { adminPassword: key },
+    ),
   previewDistance: (key, uploadId, pin, ball) =>
     // Called as the marker is dragged, so the number tracks the click
     // instead of only appearing on save. Writes nothing.

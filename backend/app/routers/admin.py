@@ -9499,6 +9499,157 @@ def get_distance_state(upload_id: int, db: Session = Depends(get_db)):
     }
 
 
+# ── finding the flagstick in THIS clip ─────────────────────────────────
+# The pin moves. Greens get re-cut daily, which is the entire point of a
+# closest-to-the-pin contest, and the flagstick position stored against
+# the hole is only ever as fresh as the last time somebody pressed Set
+# flagstick. Seeding the picker from it put the marker on the right-hand
+# side of a green whose pin was plainly on the left, in every clip shot
+# after the cup moved. So the picker asks the PICTURE instead.
+#
+# pin_detect already does the hard part and does not depend on flag
+# colour; it wants several frames, because one frame is a guess -- a
+# golfer walks through it, the flag blows across its own pole. This is
+# the joint between that detector and one upload's green half.
+_PIN_CACHE: dict = {}
+_PIN_CACHE_MAX = 64
+
+
+@router.get("/long-uploads/{upload_id}/distance/detect-pin")
+def detect_pin_for_upload(upload_id: int, refresh: int = 0,
+                          db: Session = Depends(get_db)):
+    """Where the flagstick is in this upload's own green footage.
+
+    A STARTING POINT, not an answer: it is handed to the operator as a
+    draggable marker, and the number is only ever computed from where
+    the marker ends up. So a soft detection is still worth returning as
+    long as it says how sure it is -- being roughly right saves the drag
+    that being absent would cost.
+    """
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    green = _local_green(row)
+    if not green or not Path(green).exists():
+        return {"ok": False, "reason": "no green footage on this upload"}
+
+    key = (int(row.id), str(getattr(row, "green_filename", "")))
+    if not refresh and key in _PIN_CACHE:
+        return dict(_PIN_CACHE[key], cached=True)
+
+    try:
+        import cv2
+        import numpy as np  # noqa: F401  (cv2 needs it present)
+
+        from ..services import pin_detect as pd
+
+        cap = cv2.VideoCapture(str(green))
+        if not cap.isOpened():
+            return {"ok": False, "reason": "could not open the green video"}
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 30.0
+            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            dur = (n / fps) if (n and fps) else 0.0
+            fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) or 1280
+            fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) or 720
+            # Spread the samples over the whole clip. Clustering them at
+            # the start would put every sample inside the same few
+            # seconds, and whatever is standing in front of the pin at
+            # second one is standing there for all of them.
+            spots = [dur * f for f in
+                     (0.05, 0.15, 0.25, 0.35, 0.45,
+                      0.55, 0.65, 0.75, 0.85, 0.95)] if dur > 0 else \
+                    [i / fps for i in range(0, 300, 30)]
+            frames = []
+            for t in spots:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(t * fps)))
+                ok, f = cap.read()
+                if ok:
+                    frames.append(f)
+        finally:
+            cap.release()
+        if not frames:
+            return {"ok": False, "reason": "could not read the green video"}
+
+        # THE BASE HAS TO BE ON THE PUTTING SURFACE. Without this the
+        # detector is confidently wrong: on the clip this was built
+        # against it locked onto a golf cart parked on the cart path
+        # behind the green and reported it in 18 of 22 frames at 0.5
+        # confidence, which is indistinguishable from a real find. The
+        # base of a flagstick stands on the green by definition, so a
+        # base that does not is not a flagstick -- and find_green
+        # already segments that surface for the detector's own use.
+        # Rejecting per frame, before the median, keeps one good frame
+        # from being dragged toward a consistent wrong answer.
+        import statistics
+
+        kept, rejected = [], 0
+        for f in frames:
+            try:
+                d = pd.detect_pin(f)
+                if d is None:
+                    continue
+                mask, box = pd.find_green(f)
+                if box is None:
+                    continue
+                bx, by = int(d.x * fw), int(d.y * fh)
+                gx, gy, gw, gh = box
+                on_box = (gx <= bx <= gx + gw) and (gy <= by <= gy + gh)
+                on_mask = bool(
+                    mask[min(by, fh - 1)][min(bx, fw - 1)]
+                ) if mask is not None else True
+                if on_box and on_mask:
+                    kept.append(d)
+                else:
+                    rejected += 1
+            except Exception:  # noqa: BLE001
+                continue
+
+        if len(kept) < 3:
+            return {
+                "ok": False, "frames": len(frames), "rejected": rejected,
+                "reason": (
+                    f"no flagstick standing on the green in this clip "
+                    f"({len(kept)} of {len(frames)} frames agreed"
+                    + (f", {rejected} found something off the putting "
+                       f"surface" if rejected else "")
+                    + ") — mark it by hand"
+                ),
+            }
+
+        mx = statistics.median([d.x for d in kept])
+        my = statistics.median([d.y for d in kept])
+        # Spread is the honest part of the confidence. Detections that
+        # disagree with each other should not add up to certainty.
+        spread = max(
+            (abs(d.x - mx) * fw for d in kept), default=0.0)
+        agree = len(kept) / max(1, len(frames))
+        conf = min(
+            statistics.median([float(d.confidence) for d in kept]),
+            agree,
+        ) * (0.5 if spread > 40 else 1.0)
+
+        out = {
+            "ok": True,
+            # PinDetection is in FRACTIONS so a resolution change cannot
+            # silently invalidate it; the picker works in pixels.
+            "pin_green": [round(mx * fw, 1), round(my * fh, 1)],
+            "confidence": round(conf, 2),
+            "method": (f"on the green in {len(kept)} of {len(frames)} "
+                       f"frames, spread {spread:.0f}px"),
+            "detector": kept[0].method,
+            "frames": len(frames),
+            "rejected": rejected,
+        }
+        if len(_PIN_CACHE) >= _PIN_CACHE_MAX:
+            _PIN_CACHE.clear()
+        _PIN_CACHE[key] = out
+        return dict(out, cached=False)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("detect-pin failed on upload %s: %s", upload_id, exc)
+        return {"ok": False, "reason": f"pin detection failed: {exc}"}
+
+
 @router.get("/long-uploads/{upload_id}/distance/preview")
 def preview_distance(
     upload_id: int,

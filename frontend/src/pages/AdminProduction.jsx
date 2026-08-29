@@ -7928,6 +7928,9 @@ function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
   const [err, setErr] = useState(null);
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState(null);
+  const [pinSource, setPinSource] = useState(null);  // saved|detected|hole
+  const [detect, setDetect] = useState(null);
+  const [finding, setFinding] = useState(false);
   const wrapRef = useRef(null);
   const dragRef = useRef(null);
 
@@ -7935,10 +7938,11 @@ function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
     let live = true;
     (async () => {
       try {
-        const [f, st, vm] = await Promise.all([
+        const [f, st, vm, det] = await Promise.all([
           api.getLongUploadFrame(adminPassword, row.id, 0, "green"),
           api.getDistanceState(adminPassword, row.id),
           api.getViewMap(adminPassword, row.id).catch(() => null),
+          api.detectPin(adminPassword, row.id).catch(() => null),
         ]);
         if (!live) return;
         if (!f?.image_url) throw new Error("no green frame on this upload");
@@ -7952,11 +7956,24 @@ function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
         // wherever the pipeline last saw it -- both only as a starting
         // point, because the whole purpose here is that the operator
         // moves them.
+        // WHERE THE PIN STARTS, most specific first. The operator's own
+        // mark for THIS swing wins. Failing that, the flagstick found in
+        // THIS clip's own footage -- the cup is re-cut daily, so the
+        // picture is fresher than anything stored against the hole. The
+        // hole's saved flagstick is last, because it is only as current
+        // as the last time somebody pressed Set flagstick, and seeding
+        // from it put the marker on the right of a green whose pin had
+        // moved to the left.
         const g = vm?.pin_green ?? vm?.view_map?.pin_green;
-        const p0 = mine.pin_green || (g ? [g[0], g[1]] : null);
+        let p0 = mine.pin_green || null;
+        let src = p0 ? "saved" : null;
+        if (!p0 && det?.ok && det.pin_green) { p0 = det.pin_green; src = "detected"; }
+        if (!p0 && g) { p0 = [g[0], g[1]]; src = "hole"; }
         const b0 = mine.ball_green || mine.auto_ball_green || null;
         if (p0) setPin({ x: Math.round(p0[0]), y: Math.round(p0[1]) });
         if (b0) setBall({ x: Math.round(b0[0]), y: Math.round(b0[1]) });
+        setPinSource(src);
+        setDetect(det || null);
         if (!mine.pin_green && mine.auto_ball_source === "descent") {
           setNote("The ball starts where the automatic descent ENDED — "
             + "that is where it stopped falling, not where it finished "
@@ -7969,6 +7986,23 @@ function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
     })();
     return () => { live = false; };
   }, [adminPassword, row.id, slot]);
+
+  async function findPin() {
+    setFinding(true);
+    try {
+      const d = await api.detectPin(adminPassword, row.id, true);
+      setDetect(d);
+      if (d?.ok && d.pin_green) {
+        setPin({ x: Math.round(d.pin_green[0]),
+                 y: Math.round(d.pin_green[1]) });
+        setPinSource("detected");
+      }
+    } catch (e) {
+      setDetect({ ok: false, reason: e?.message || String(e) });
+    } finally {
+      setFinding(false);
+    }
+  }
 
   // The number tracks the markers. Re-asked on every change rather than
   // computed here on purpose: the homography lives on the server and a
@@ -8103,6 +8137,12 @@ function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
                 style={{ width: "auto" }}
                 onClick={() => setPlacing("ball")}
               >● Place ball</button>
+              <button
+                className="btn ghost" style={{ width: "auto" }}
+                disabled={finding}
+                title="Look for the flagstick in this clip's own footage again. Use it when the marker is nowhere near the flag you can see."
+                onClick={findPin}
+              >{finding ? "Looking…" : "⚑ Find pin"}</button>
               <span style={{ marginLeft: "auto", fontWeight: 700,
                              fontSize: 20 }}>
                 {feet
@@ -8186,6 +8226,22 @@ function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
             {ball ? `ball ${ball.x}, ${ball.y}` : "no ball"}
             {mine.plate_stamped
               ? " · the clip is showing a plate"
+              : ""}
+            {/* Say where the marker came from. "Detected" and "carried
+                over from the hole" deserve very different amounts of
+                trust, and the operator cannot tell them apart by
+                looking at the marker. */}
+            {pinSource === "detected" && detect?.ok
+              ? ` · pin found in this clip (${detect.method}, confidence `
+                + `${detect.confidence})`
+              : ""}
+            {pinSource === "hole"
+              ? " · pin carried over from the hole — it may be from another"
+                + " day; press Find pin or drag it"
+              : ""}
+            {pinSource === "saved" ? " · your saved marks" : ""}
+            {detect && !detect.ok && pinSource !== "saved"
+              ? ` · could not find the flagstick: ${detect.reason}`
               : ""}
           </span>
           <button className="btn ghost" style={{ width: "auto" }}
