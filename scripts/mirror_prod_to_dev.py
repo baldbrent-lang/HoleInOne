@@ -24,6 +24,11 @@ Environment variables:
   DEV_ADMIN_PASSWORD (optional) dev admin password, if different from prod
   TEE_ONLY           set to 1 to mirror tee clips only (skip green) —
                      faster, and enough to test detection + the tracer
+  LIMIT              mirror only the N most recent events. Prod has
+                     hundreds going back to the first camera ever set
+                     up, and pulling them oldest-first spends an hour on
+                     footage nobody is looking at. LIMIT=25 is a working
+                     set. Empty or 0 = all of them.
 """
 
 import json
@@ -39,7 +44,12 @@ DEV = (os.environ.get("DEV_URL") or "").rstrip("/")
 PROD_PW = os.environ.get("ADMIN_PASSWORD", "Baldy123")
 DEV_PW = os.environ.get("DEV_ADMIN_PASSWORD") or PROD_PW
 DEV_COURSE_ID = os.environ.get("DEV_COURSE_ID")
-TEE_ONLY = os.environ.get("TEE_ONLY") in ("1", "true", "True", "yes")
+TEE_ONLY = os.environ.get("TEE_ONLY")
+# How many of the NEWEST events to mirror. Empty or 0 = all of them.
+try:
+    LIMIT = int(os.environ.get("LIMIT") or 0)
+except ValueError:
+    LIMIT = 0 in ("1", "true", "True", "yes")
 
 # Ledger of prod event ids we've ALREADY mirrored. Append-only: deleting a
 # clip in dev deliberately does NOT remove its id here, so a delete stays a
@@ -150,6 +160,17 @@ if not events:
 # Newest first from the API; mirror oldest first so dev's ordering matches.
 events = list(reversed(events))
 todo = [e for e in events if e.get("tee_url") and str(e["id"]) not in done]
+# THE RECENT ONES ARE THE ONES BEING WORKED ON. Four hundred events go
+# back to the first camera ever pointed at a tee; a laptop pulling them
+# oldest-first spends an hour on footage nobody is looking at before it
+# reaches this week's. LIMIT takes the N most recent and still mirrors
+# them oldest-first among themselves, so dev's ordering matches prod's.
+if LIMIT:
+    _skipped = max(0, len(todo) - LIMIT)
+    todo = todo[-LIMIT:]
+    if _skipped:
+        print(f"LIMIT={LIMIT}: taking the {len(todo)} most recent, "
+              f"leaving {_skipped} older one(s) unmirrored")
 print(f"{len(events)} prod events, {len(todo)} new to mirror into dev course {DEV_COURSE_ID}\n")
 
 ok = 0
