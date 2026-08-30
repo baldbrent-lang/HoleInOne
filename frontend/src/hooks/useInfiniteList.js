@@ -40,6 +40,10 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   // A next-page request that arrived while something else held the
   // loading flag. See releaseLoading() for why this exists.
   const wantMoreRef = useRef(false);
+  // True while `releaseLoading` is handing the loading flag straight to
+  // a queued page rather than freeing it. The queued call owns the flag
+  // already and must not test for it. See releaseLoading().
+  const drainingRef = useRef(false);
   const loadMoreRef = useRef(null);
   // The refresh currently in flight, so a caller that needs post-change
   // data can queue behind it instead of being turned away.
@@ -62,13 +66,29 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   // So a blocked request is remembered rather than discarded, and
   // whatever was holding the flag runs it on the way out.
   const releaseLoading = useCallback(() => {
-    loadingRef.current = false;
     if (wantMoreRef.current) {
       wantMoreRef.current = false;
+      // HAND THE FLAG OVER, DO NOT DROP IT.
+      //
+      // This cleared the flag first and scheduled the drain on a
+      // macrotask, which leaves a window with the flag free. The
+      // Production page polls every three seconds while anything is
+      // producing and that refresh probes file metadata for every
+      // loaded row, so it is slow and frequent: it takes the flag
+      // inside the window, the drained loadMore finds it held, queues
+      // ITSELF again, and the page never arrives. `setLoadingMore(true)`
+      // is after that check, so the button did not even change to
+      // "Loading more uploads…" -- it looked dead, which is what it was.
+      //
+      // The flag stays held across the handover and the queued page
+      // releases it when it is done. Nothing can get in between.
+      drainingRef.current = true;
       // Out of this call stack: the state updates from the load that
       // just finished have to land first.
       setTimeout(() => loadMoreRef.current?.(), 0);
+      return;
     }
+    loadingRef.current = false;
   }, []);
 
   const reload = useCallback(async () => {
@@ -90,9 +110,22 @@ export function useInfiniteList(fetcher, { pageSize = 25, deps = [] } = {}) {
   }, [pageSize, releaseLoading]);
 
   const loadMore = useCallback(async () => {
-    if (!hasMore) return;
-    if (loadingRef.current) {
+    // Whether this call already owns the loading flag, handed over by
+    // releaseLoading rather than taken here.
+    const owned = drainingRef.current;
+    drainingRef.current = false;
+    if (!hasMore) {
+      if (owned) loadingRef.current = false;
+      setLoadingMore(false);
+      return;
+    }
+    if (!owned && loadingRef.current) {
       wantMoreRef.current = true;
+      // SAY THAT THE CLICK LANDED. `setLoadingMore(true)` was below
+      // this check, so a queued page left the button reading "Load 25
+      // more uploads" exactly as before it was pressed -- indis-
+      // tinguishable from a dead button, which is how it was reported.
+      setLoadingMore(true);
       return;
     }
     loadingRef.current = true;
