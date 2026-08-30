@@ -9952,14 +9952,19 @@ def tracer_shape(
                               "work from"}
         end_xy = _guessed
 
-    tail, kind = _extend_to_target(pts, end_xy, _fps, _w, _h,
-                                   land_frame=_lf, apex_lift=lift,
-                                   apex_at=at)
+    tail, kind, why = _extend_to_target(pts, end_xy, _fps, _w, _h,
+                                        land_frame=_lf, apex_lift=lift,
+                                        apex_at=at)
     # Subsampled the same way the renderer records it: the editor is
     # drawing a line, not animating one.
     step = max(1, len(tail) // 60)
     return {
         "kind": kind,
+        # The editor already shows `reason` when it gets nothing back;
+        # before this the only empty-tail reason it could show was its
+        # own generic one, so a refusal the renderer had a sentence for
+        # arrived on screen as "the model could not draw a tail here".
+        "reason": why,
         "tail": [[int(x), int(y)] for _f, x, y in tail[::step]]
                + ([[int(tail[-1][1]), int(tail[-1][2])]] if tail else []),
         "n": len(tail),
@@ -18992,6 +18997,11 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
             c["ok"] = bool(_out.get("ok")) and bool(_made)
             c["clip_url"] = _first.get("url") or _first.get("clip_url")
             c["clip_id"] = _first.get("clip_id")
+            # WHERE THE TRACER WAS AIMED, AND WHY IT WAS NOT. Carried up
+            # to the row the operator is already looking at: a clip can
+            # produce perfectly and still show a line that stops in
+            # mid-air, and that is a different failure from "no clip".
+            c["tracer_aim"] = _first.get("tracer_aim")
             c["reason"] = (
                 _out.get("error") or c.get("reason")
                 or (None if c["ok"] else
@@ -20051,6 +20061,7 @@ def _ball_scan_produce_run(row, src_path, db, progress=None,
                     _entry["clip_url"] = _c.get("url")
                     _entry["tee_window_sec"] = _c.get("tee_window_sec")
                     _entry["green"] = _c.get("green")
+                    _entry["tracer_aim"] = _c.get("tracer_aim")
                     rep["n_traced"] += 1
                 else:
                     _entry["reason"] = _c.get("error") or "the renderer made no clip"
@@ -23531,6 +23542,14 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # Uncalibrated, this stays None and the tracer ends where it
             # always did. Aiming at a guess would be worse.
             _target_xy = None
+            # WHY THE TRACER STOPS WHERE IT DOES, in a sentence, kept
+            # beside the answer rather than in a log line. Every step
+            # from here to the drawn tail can decline -- no descent was
+            # found, the hole has no green->tee mapping, the landing
+            # maps behind the flight -- and all of them look identical
+            # on screen: a tracer that ends in mid-air. This is the only
+            # thing that tells them apart.
+            _aim_why = None
             if landing and landing.get("xy"):
                 _gi = probe_video_info(green_path) or {} if green_path else {}
                 _t_xy, _t_why = _map_landing_to_tee(
@@ -23548,6 +23567,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                         _target_xy[0], _target_xy[1],
                     )
                 else:
+                    _aim_why = _t_why
                     log.info(
                         "d3 produce: swing %s tracer NOT aimed at the "
                         "landing — %s", i, _t_why,
@@ -23580,6 +23600,11 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # continuation. It is the FLAG that is gone, not the
             # operator.
             if _target_xy is None:
+                if _aim_why is None:
+                    _aim_why = ("no descent was found on the green for this "
+                                "swing and none is plotted, so there is "
+                                "nothing to fly to — the tracer stops where "
+                                "the ball was last tracked")
                 log.info(
                     "d3 produce: swing %s has no landing and no descent "
                     "path — drawing the measured ascent only, with no "
@@ -23961,6 +23986,20 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 # round of "the tracer still looks wrong" was spent
                 # guessing at exactly these numbers.
                 "tracer_tail": (_rv or {}).get("tail"),
+                # AND WHY IT DID THAT. `tracer_tail` says what was drawn
+                # and is absent altogether when nothing was -- which is
+                # the case somebody is looking at when they ask why the
+                # line stops in mid-air. The aim reason is filled in
+                # whether or not there is a tail, from whichever step
+                # declined: the landing search, the green->tee mapping,
+                # or the tail models themselves.
+                "tracer_aim": {
+                    "target": ([round(_target_xy[0], 1),
+                                round(_target_xy[1], 1)]
+                               if _target_xy is not None else None),
+                    "why": (_aim_why
+                            or ((_rv or {}).get("tail") or {}).get("why")),
+                },
                 # The ball's own path on the green camera, when one was
                 # found. Kept so the wizard can draw it without
                 # re-scanning, and so "why is there no comet" has an
@@ -24004,6 +24043,20 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                 "green": green_seg is not None,
                 "plot_background": bool(_bg),
                 "url": _url,
+                # SAID WHERE THE PRODUCE IS WATCHED FROM. The wizard has
+                # the full record, but "why did the tracer not reach the
+                # landing" is asked while looking at the ascents dialog,
+                # and answering it meant opening a second screen per
+                # swing or reading the server log.
+                "tracer_aim": {
+                    "target": ([round(_target_xy[0], 1),
+                                round(_target_xy[1], 1)]
+                               if _target_xy is not None else None),
+                    "why": (_aim_why
+                            or ((_rv or {}).get("tail") or {}).get("why")),
+                    "kind": ((_rv or {}).get("tail") or {}).get("kind"),
+                    "frames": ((_rv or {}).get("tail") or {}).get("frames"),
+                },
             })
             log.info(
                 "d3 produce: upload=%s swing=%s tee [%.3f, %.3f]s "

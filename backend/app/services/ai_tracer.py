@@ -3768,7 +3768,14 @@ def _shape_tail(tail, lift=0.0, at=0.5):
 def _extend_to_target(pts, target_xy, fps, width, height,
                       land_frame=None, apex_lift=0.0,
                       apex_at=0.5):
-    """Points continuing `pts` to `target_xy`, or [] if it cannot.
+    """(points continuing `pts` to `target_xy`, model, why not).
+
+    The third value is the whole point of the signature: every refusal
+    below is a sentence an operator can act on -- calibrate the hole,
+    re-plot the descent, check the landing -- and until now all three
+    lived in a server log nobody standing on a tee box can read. What
+    reached the screen was a tracer that stopped in mid-air with no
+    explanation, which is indistinguishable from a broken renderer.
 
     Two ways to draw the rest of the flight, and both leave the last
     tracked point along the direction the ball was already going --
@@ -3808,8 +3815,12 @@ def _extend_to_target(pts, target_xy, fps, width, height,
     # So the line stops where the measurement stops. A tracer that ends
     # early is obviously incomplete and says so; a tracer drawn
     # confidently to the wrong place does not.
-    if target_xy is None or len(pts) < 2:
-        return [], None
+    if target_xy is None:
+        return [], None, ("no landing to fly to — the tracer stops where "
+                          "the ball was last tracked")
+    if len(pts) < 2:
+        return [], None, ("the flight is a single point, so there is no "
+                          "heading to continue along")
     # A BALL DOES NOT FLY BACKWARDS.
     #
     # Both models leave the last measured point along the heading the
@@ -3852,7 +3863,13 @@ def _extend_to_target(pts, target_xy, fps, width, height,
                     "own heading — a ball does not turn round, so no "
                     "continuation is drawn rather than a hook", -_du,
                 )
-                return [], None
+                return [], None, (
+                    f"the landing is {-_du:.0f}px BEHIND the direction the "
+                    f"ball was travelling when it was last tracked — a ball "
+                    f"does not turn round, so the line stops rather than "
+                    f"hooking back. Either the landing is mapped to the "
+                    f"wrong place or the flight points at the end are not "
+                    f"the ball")
     tail = _ballistic_tail(pts, target_xy, fps, width, height,
                            land_frame=land_frame)
     kind = "ballistic"
@@ -3869,8 +3886,11 @@ def _extend_to_target(pts, target_xy, fps, width, height,
                         "— drawing no continuation rather than a loop")
             tail = None
     if not tail:
-        return [], None
-    return _shape_tail(tail, apex_lift, apex_at), kind
+        return [], None, (
+            "both continuation models curled back on themselves, so no "
+            "line was drawn rather than a loop. The flight time or the "
+            "landing is wrong")
+    return _shape_tail(tail, apex_lift, apex_at), kind, None
 
 
 # A BALL DOES NOT FLY IN A LOOP.
@@ -4522,10 +4542,20 @@ def render_tracer_video(
         # along the ball's current direction, then bends to the target
         # (quadratic Bézier), so there's no kink/squiggle at the join. With
         # no target we simply stop at the last plotted point.
-        _tail, _bt = _extend_to_target(
+        _tail, _bt, _twhy = _extend_to_target(
             pts, target_xy, fps, width, height, land_frame=target_frame,
             apex_lift=apex_lift, apex_at=apex_at,
         )
+        if not _tail:
+            info["tail"] = {
+                "kind": None, "frames": 0, "why": _twhy,
+                "target": ([round(float(target_xy[0]), 1),
+                            round(float(target_xy[1]), 1)]
+                           if target_xy is not None else None),
+                "land_frame": (int(target_frame)
+                               if target_frame is not None else None),
+            }
+            log.info("tracer tail: none drawn — %s", _twhy)
         if _tail:
             smoothed_points.extend(_tail)
             # THE SAME NUMBERS THE OTHER BRANCH RECORDS. This one is
@@ -4795,7 +4825,7 @@ def render_tracer_video(
             # built from a shorter list would draw the tail and then
             # never uncover it -- the same symptom as not drawing it at
             # all, and far harder to see the cause of.
-            _tail, _bt = _extend_to_target(
+            _tail, _bt, _twhy = _extend_to_target(
                 smoothed_points, target_xy, fps, width, height,
                 land_frame=target_frame, apex_lift=apex_lift,
                 apex_at=apex_at,
@@ -4839,15 +4869,21 @@ def render_tracer_video(
                      else "no target — free flight to the frame edge"),
                     target_frame, info["tail"]["apex_y"],
                 )
-            elif target_xy is not None:
+            else:
+                # RECORDED EVEN WITH NO TARGET. This arm used to run only
+                # when something had been aimed at, so the one case an
+                # operator actually asks about -- the line stopping in
+                # mid-air -- left no record at all and the wizard showed
+                # a blank where the explanation belongs.
                 info["tail"] = {
-                    "kind": None, "frames": 0,
+                    "kind": None, "frames": 0, "why": _twhy,
                     "target": ([round(float(target_xy[0]), 1),
                                 round(float(target_xy[1]), 1)]
                                if target_xy is not None else None),
                     "land_frame": (int(target_frame)
                                    if target_frame is not None else None),
                 }
+                log.info("tracer tail (fit): none drawn — %s", _twhy)
 
             # The projection goes on AFTER the fitted curve and BEFORE
             # the reveal schedule, for the reason given just above: a

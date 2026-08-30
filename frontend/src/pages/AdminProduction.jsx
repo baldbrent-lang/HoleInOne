@@ -4184,17 +4184,23 @@ function EditWizard({
                   ? ` · aimed (${lastTail.target[0]}, ${lastTail.target[1]})`
                   : ""}
                 {lastTail.apex_y != null ? ` · apex y${lastTail.apex_y}` : ""}
+                {/* THE REFUSAL, IN WORDS. A tail of zero frames is the
+                    case somebody is actually looking at, and it read
+                    here as "no tail" with nothing after it. */}
+                {lastTail.why ? ` · ${lastTail.why}` : ""}
               </span>
             )}
+            {/* THE FLAG FALLBACK IS GONE -- the tail aims at a measured
+                landing or is not drawn -- and this still promised it,
+                so an operator with no landing was told the tracer would
+                fly to the pin and then watched it stop dead. */}
             {draft?.landingFrame != null && draft?.landingSpot
               ? "Tracer will fly to the landing spot, timed off the two "
                 + "camera clocks."
-              : draft?.target
-                ? "No landing frame + spot — the tracer will aim at the "
-                  + "flag with an ESTIMATED flight time. Set both landing "
-                  + "fields for the real arc."
-                : "No landing spot and no target — the tracer will stop "
-                  + "where the ball was last detected."}
+              : "No landing frame + spot — the tracer stops where the ball "
+                + "was last detected. It flies on only to a landing that "
+                + "was measured or plotted; set both landing fields for "
+                + "the arc."}
           </span>
           {/* ONE BUTTON. Stages 1-3 exist to find the ball and the impact
               frame; by the time the wizard is open the operator has found
@@ -8755,6 +8761,36 @@ function SwingCard({ n, ascent, view, clip, colors, findOnly }) {
           )}
         </div>
       </div>
+
+      {/* WHERE THE TRACER FINISHED, AND WHY. A clip can produce
+          perfectly and still show a line that stops in mid-air, and
+          the reason was only ever in the server log: no descent to fly
+          to, an uncalibrated hole, a landing that maps behind the
+          flight. All three look identical on screen. */}
+      {!findOnly && clip?.tracer_aim && (
+        <div className="tiny" style={{ marginTop: 6 }}>
+          {clip.tracer_aim.target ? (
+            <span style={{ color: "#3ee37a" }}>
+              tracer flies on to the landing at (
+              {clip.tracer_aim.target[0]}, {clip.tracer_aim.target[1]})
+              {clip.tracer_aim.kind
+                ? ` — ${clip.tracer_aim.kind} arc, `
+                  + `${clip.tracer_aim.frames} frames`
+                : ""}
+            </span>
+          ) : (
+            <span style={{ color: "#f59e0b" }}>
+              tracer stops at the last tracked point
+              {clip.tracer_aim.why ? ` — ${clip.tracer_aim.why}` : ""}
+            </span>
+          )}
+          {clip.tracer_aim.target && clip.tracer_aim.why && (
+            <span style={{ color: "#f59e0b" }}>
+              {" "}· but no continuation was drawn: {clip.tracer_aim.why}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
