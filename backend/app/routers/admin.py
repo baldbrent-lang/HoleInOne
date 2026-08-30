@@ -19052,8 +19052,18 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
             # produce perfectly and still show a line that stops in
             # mid-air, and that is a different failure from "no clip".
             c["tracer_aim"] = _first.get("tracer_aim")
+            # NOT `c.get("reason")` AS THE FALLBACK. By this point that
+            # key holds `_ascent_tee_spot`'s description of where the
+            # ball sat -- "ball at 1073,392 sat 7.8s and went at f1316"
+            # -- which is a success sentence. Falling back to it meant a
+            # render that failed without a top-level error reported the
+            # ball's resting place as the reason no clip was made, and
+            # the camera card and the Production card both showed that.
+            # It is kept, under its own name, because it is worth having
+            # next to the failure; it is just not the failure.
+            c["spot_reason"] = c.get("reason")
             c["reason"] = (
-                _out.get("error") or c.get("reason")
+                _out.get("error") or _first.get("error")
                 or (None if c["ok"] else
                     "the renderer reported success but produced no clip"))
             if c["ok"]:
@@ -24128,6 +24138,18 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             out["clips"].append({"error": f"{exc}"})
 
     out["ok"] = any(c.get("clip_id") for c in out["clips"])
+    # THE FAILURE IS INSIDE `clips`, AND NOTHING WAS LIFTING IT OUT.
+    # `out["error"]` is set only for "no swing with a flight to produce";
+    # every real per-swing failure is appended as {"error": ...} to
+    # `clips` and left there. Callers check `out["error"]`, find None,
+    # and report something else entirely -- the ascent produce reported
+    # the sentence describing where the ball was teed, as though that
+    # were why no clip came out. If nothing produced, the reason the
+    # clips give IS the run's reason.
+    if not out["ok"] and not out.get("error"):
+        _errs = [str(c["error"]) for c in out["clips"] if c.get("error")]
+        if _errs:
+            out["error"] = "; ".join(dict.fromkeys(_errs))
     return out
 
 
