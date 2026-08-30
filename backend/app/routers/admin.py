@@ -8753,7 +8753,7 @@ def hole_facts(db, course, hole):
     return name, par, yards, ("; ".join(notes) or None)
 
 
-def _view_map_for(db, row):
+def _view_map_for(db, row, hole_hint=None):
     """(course, hole, view_map). The mapping keyed by hole on the course.
 
     KEYED BY HOLE RATHER THAN BY CAMERA. It describes two viewpoints of
@@ -8764,9 +8764,14 @@ def _view_map_for(db, row):
     """
     course = db.get(Course, row.course_id) if row.course_id else None
     hole, _src = _hole_for_upload_ex(db, row)
+    if _src == "default" and hole_hint:
+        try:
+            hole = int(hole_hint)
+        except (TypeError, ValueError):
+            pass
     if course is None:
         return None, hole, None
-    key, legacy, _why = _view_map_key(db, row)
+    key, legacy, _why = _view_map_key(db, row, hole_hint=hole_hint)
     maps = course.view_maps or {}
     vm = maps.get(key)
     if vm is None and legacy is not None:
@@ -8805,10 +8810,33 @@ def _view_map_for(db, row):
 #   upload:N    nothing identifiable. PRIVATE to this upload -- it cannot
 #               clobber anyone and no one inherits it, which is the only
 #               safe thing to do with an identity you do not have.
-def _view_map_key(db, row) -> tuple[str, str | None, str]:
-    """(key, legacy key to fall back to on read, what decided it)."""
+def _view_map_key(db, row, hole_hint=None) -> tuple[str, str | None, str]:
+    """(key, legacy key to fall back to on read, what decided it).
+
+    `hole_hint` is for a caller that KNOWS the hole while the row is
+    momentarily unable to say -- which is not a hypothetical. A
+    re-produce deletes the upload's clips before it renders, and on an
+    upload with no camera event and no recorded hole those clips were
+    the only thing `_hole_for_upload_ex` could read the hole from. So
+    for the length of the run the hole went "default", this key went
+    `upload:N`, and the hole's calibration -- filed under `hole:N`,
+    sitting right there -- was invisible to the very produce that needed
+    it. The visible symptom: a swing whose green mapping had been done
+    reported "this hole has no green->tee mapping yet" and drew no
+    continuation, on the FIRST swing only, because by the second one a
+    clip existed again.
+
+    The hint is used only when the row genuinely cannot answer. A hole
+    the row does know always wins -- a caller passing the wrong one must
+    not be able to redirect an upload's calibration.
+    """
     t_id, g_id = _camera_pair_for(db, row)
     hole, src = _hole_for_upload_ex(db, row)
+    if src == "default" and hole_hint:
+        try:
+            hole, src = int(hole_hint), "caller"
+        except (TypeError, ValueError):
+            pass
     # The pre-key records are stored under the bare hole number, and are
     # readable ONLY when the hole is genuinely known. A defaulted 1 must
     # never inherit them -- that pooling is the bug being fixed.
@@ -8900,7 +8928,8 @@ def _view_map_mismatch(db, row, vm):
     return None
 
 
-def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
+def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None,
+                        hole_hint=None):
     """A landing marked on the green camera -> a pixel in the tee frame.
 
     Returns (xy, reason). Exactly one is set: either the mapped point or
@@ -8912,7 +8941,7 @@ def _map_landing_to_tee(db, row, spot, green_size=None, tee_size=None):
 
     if not spot:
         return None, "no landing spot marked on the green"
-    course, hole, vm = _view_map_for(db, row)
+    course, hole, vm = _view_map_for(db, row, hole_hint=hole_hint)
     if course is None:
         return None, "this upload is not attached to a course"
     if not vm or not vm.get("homography"):
@@ -18884,6 +18913,14 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                  rep["timing"]["total_sec"])
         return rep
     rep["produced"] = True
+    # WHICH HOLE, ASKED BEFORE THE CLEAR. On an upload with no camera
+    # event and no recorded hole, `_hole_for_upload` can only read the
+    # hole off a clip this upload has already produced -- so asking it
+    # after the clear below answers "1, by default" whatever hole this
+    # actually is. That answer travels: it stamps the new clips, and it
+    # keys the green->tee mapping the tracer needs to aim at a landing.
+    _hole_for_run = (hole_number if hole_number is not None
+                     else _hole_for_upload(db, row))
     # CLEAR ONCE, BEFORE ANY OF THEM. This used to ride on the first
     # candidate (`solo=(_idx > 0)` below), which made a re-produce's
     # correctness depend on that candidate rendering: when it failed the
@@ -18960,8 +18997,7 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                 # out again from the upload can disagree, and the
                 # hole decides the tee box, the ball radius and where
                 # the clip is filed.
-                hole_number=(hole_number if hole_number is not None
-                             else _hole_for_upload(db, row)),
+                hole_number=_hole_for_run,
                 # EVERY ONE APPENDS, because the clear already happened
                 # above. `solo` means "keep the upload's other clips",
                 # and by this point the only other clips are the ones
@@ -23571,6 +23607,13 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
                     green_size=(int(_gi.get("width") or 0),
                                 int(_gi.get("height") or 0)),
                     tee_size=(_src_w or 0, _src_h or 0),
+                    # THE HOLE THIS RUN IS PRODUCING AS, worked out
+                    # above while the upload's clips still existed. By
+                    # the time this runs they have been deleted, and on
+                    # an upload whose hole is only knowable FROM those
+                    # clips the mapping would otherwise be looked up
+                    # under `upload:N` and not found.
+                    hole_hint=_hole,
                 )
                 if _t_xy:
                     _target_xy = (float(_t_xy[0]), float(_t_xy[1]))
