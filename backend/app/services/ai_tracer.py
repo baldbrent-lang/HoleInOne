@@ -3511,10 +3511,20 @@ def _ballistic_tail(pts, target_xy, fps, width, height, max_sec=12.0,
         # OFF THE TOP IS NOT THE END OF THE FLIGHT. On a wedge from a
         # camera this close behind, the ball leaves the frame on the way
         # up, spends a second or two out of view, and comes back down to
-        # a green near the horizon. Skip what cannot be seen and keep
-        # going; the renderer already understands a gap in the points.
-            if not (0 <= bx < width and 0 <= by < height):
-                continue
+        # a green near the horizon.
+        #
+        # THE POINTS OUT OF VIEW ARE KEPT. They used to be dropped, on
+        # the reasoning that nothing can be drawn there -- but the
+        # renderer joins consecutive points with a straight segment, and
+        # dropping the middle of the flight does not remove it, it
+        # replaces it with a chord. Measured on upload 68 swing 1: the
+        # ball left the top at f595 and came back at f730, and the line
+        # ran up to the edge, jogged 34px sideways along it, and came
+        # back down -- the unnatural wiggle at the top of the frame,
+        # drawn between two points a hundred and thirty-five frames
+        # apart. Kept, the segment is geometrically the real flight and
+        # OpenCV clips it at the frame edge, so the line simply leaves
+        # the picture and returns.
             out.append((f_a + i, int(round(bx)), int(round(by))))
         if not _bad:
             break
@@ -3672,8 +3682,10 @@ def _arc_tail(pts, target_xy, fps, width, height, land_frame=None):
             + 3 * mt * (t ** 2) * p2x + (t ** 3) * tx
         by = (mt ** 3) * y_a + 3 * (mt ** 2) * t * p1y \
             + 3 * mt * (t ** 2) * p2y + (t ** 3) * ty
-        if not (0 <= bx < width and 0 <= by < height):
-            continue
+        # KEPT EVEN WHEN OUT OF VIEW -- see _ballistic_tail. Dropping
+        # the part of the arc above the frame does not remove it, it
+        # replaces it with a straight chord along the top edge between
+        # the two points either side of the hole.
         out.append((f_a + i, int(round(bx)), int(round(by))))
     if len(out) < 2:
         return None
@@ -3737,12 +3749,11 @@ def _shape_tail(tail, lift=0.0, at=0.5):
     if ny > 0:
         nx, ny = -nx, -ny
 
-    # PARAMETERISED BY FRAME, not by position in the list. A tail is
-    # allowed to have holes -- the renderer skips the part of the flight
-    # that is above the top of the frame -- and treating the list as
-    # evenly spaced squeezes the parameter across the hole, which would
-    # put the crest in the wrong place on exactly the shots that leave
-    # the frame. Frames are the flight's own clock and have no hole.
+    # PARAMETERISED BY FRAME, not by position in the list. The tails
+    # emit one point per frame of the flight and are free to run off
+    # the top of the picture, so a list index is a position in a
+    # drawing while a frame is a moment in a flight. Only the second
+    # puts the crest where the ball actually peaks.
     _f0 = float(tail[0][0])
     _fl = (float(tail[-1][0]) - _f0) or 1.0
 
