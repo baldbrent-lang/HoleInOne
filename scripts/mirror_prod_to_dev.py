@@ -49,7 +49,7 @@ TEE_ONLY = os.environ.get("TEE_ONLY")
 try:
     LIMIT = int(os.environ.get("LIMIT") or 0)
 except ValueError:
-    LIMIT = 0 in ("1", "true", "True", "yes")
+    LIMIT = 0
 
 # Ledger of prod event ids we've ALREADY mirrored. Append-only: deleting a
 # clip in dev deliberately does NOT remove its id here, so a delete stays a
@@ -102,6 +102,73 @@ def _multipart(fields: dict, files: dict) -> tuple[str, bytes]:
         parts.append(data + b"\r\n")
     parts.append(f"--{boundary}--\r\n".encode())
     return boundary, b"".join(parts)
+
+
+def _post_json(path: str, body: dict) -> int:
+    req = urllib.request.Request(
+        f"{DEV}{path}",
+        data=json.dumps(body).encode(),
+        headers={
+            "X-Admin-Password": DEV_PW,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.status
+
+
+def _backfill_clocks(events: list) -> None:
+    """Give already-mirrored uploads the two camera clocks.
+
+    THE OFFSET IS NOT A DETAIL. Everything cross-camera is worked out
+    from (green first frame - tee first frame): with no stamps, dev
+    assumes the two recordings started together and every landing
+    window lands in the wrong stretch of the green clip. Earlier runs of
+    this script posted the clips without the stamps, so the uploads they
+    made are all sitting on that assumption -- and re-mirroring them
+    means re-downloading gigabytes to fix two datetimes.
+
+    So: match dev's uploads back to their prod events by the filename
+    this script uploaded them under, and merge the stamps in. Only rows
+    that are missing them are touched, so this is safe to re-run and
+    never overwrites an offset somebody established by hand.
+    """
+    by_name = {}
+    for e in events:
+        eid = str(e.get("id"))
+        if e.get("tee_recording_started_at") or e.get("green_recording_started_at"):
+            by_name[f"event-{eid}-tee.mp4"] = e
+    if not by_name:
+        return
+    try:
+        rows = _get_json(f"{DEV}/api/admin/long-uploads?limit=500", DEV_PW)
+    except Exception as ex:  # noqa: BLE001
+        print(f"(clock backfill skipped: could not list dev uploads: {ex})")
+        return
+    fixed = 0
+    for r in rows or []:
+        e = by_name.get(r.get("tee_original_filename") or "")
+        if not e:
+            continue
+        _em = r.get("edit_metrics") or {}
+        if _em.get("source_tee_started_at") and _em.get("source_green_started_at"):
+            continue
+        body = {}
+        if e.get("tee_recording_started_at"):
+            body["source_tee_started_at"] = e["tee_recording_started_at"]
+        if e.get("green_recording_started_at"):
+            body["source_green_started_at"] = e["green_recording_started_at"]
+        if not body:
+            continue
+        try:
+            _post_json(f"/api/admin/long-uploads/{r['id']}/edit-metrics", body)
+            fixed += 1
+        except Exception as ex:  # noqa: BLE001
+            print(f"  (upload {r.get('id')}: clock backfill failed: {ex})")
+    if fixed:
+        print(f"clock backfill: gave {fixed} already-mirrored upload(s) the "
+              f"tee/green start stamps they were uploaded without\n")
 
 
 def _post_upload(fields: dict, files: dict) -> int:
@@ -173,6 +240,10 @@ if LIMIT:
               f"leaving {_skipped} older one(s) unmirrored")
 print(f"{len(events)} prod events, {len(todo)} new to mirror into dev course {DEV_COURSE_ID}\n")
 
+# Repair what earlier runs uploaded without the clocks, before mirroring
+# anything new -- it costs two API calls and nothing downloads.
+_backfill_clocks(events)
+
 ok = 0
 for i, e in enumerate(todo, 1):
     eid = str(e["id"])
@@ -193,6 +264,20 @@ for i, e in enumerate(todo, 1):
             # so detection results in dev match what prod's camera path does.
             "motion_only": "true",
         }
+        # THE TWO CAMERAS' WALL CLOCKS, CARRIED OVER. A mirrored pair
+        # gets no CameraEvent in dev, and those two stamps -- the
+        # instant each file's first frame was captured -- are the only
+        # thing that says how far apart the recordings started. Without
+        # them dev cuts on an ASSUMED zero offset, which is not a small
+        # error: it lands directly on the frame the green half is
+        # entered at, so every landing search looks in the wrong three
+        # seconds and mirrored footage behaves unlike the same footage
+        # on prod. Prod hands both stamps over in the very listing
+        # these clips came from.
+        for _f, _k in (("tee_started_at", "tee_recording_started_at"),
+                       ("green_started_at", "green_recording_started_at")):
+            if e.get(_k):
+                fields[_f] = e[_k]
         status = _post_upload(fields, files)
         mb = sum(len(v[1]) for v in files.values()) / 1e6
         print(f"{tag}: uploaded {len(files)} clip(s), {mb:.1f} MB -> dev HTTP {status}")

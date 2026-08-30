@@ -5078,6 +5078,8 @@ async def upload_long_video(
     motion_ratio: float = Form(2.0),
     combined_pair_window_sec: float = Form(3.0),
     tee_green_delta_sec: float = Form(0.0),
+    tee_started_at: str | None = Form(None),
+    green_started_at: str | None = Form(None),
     motion_only: bool = Form(False),
     db: Session = Depends(get_db),
 ):
@@ -5108,6 +5110,19 @@ async def upload_long_video(
       ai_tracer_model: (optional) override the AI tracer model used
                        on the tee cut in dual-camera mode. Falls back
                        to TRACER_AI_MODEL env / Opus 4.7 default.
+      tee_started_at / green_started_at: (optional) ISO 8601 wall-clock
+                       instants of each file's FIRST FRAME. This is the
+                       only thing that tells the producer how far apart
+                       the two recordings really started, and that
+                       offset alone decides which stretch of the green
+                       clip each swing's landing is searched in. A pair
+                       posted without them is cut on an ASSUMED zero
+                       offset. A client copying clips from another
+                       system (scripts/mirror_prod_to_dev.py) has both
+                       stamps in the listing it read the files from --
+                       passing them here is what keeps the copy timed
+                       like the original instead of by seconds into a
+                       file.
     """
     course = db.get(Course, course_id)
     if not course:
@@ -5141,6 +5156,26 @@ async def upload_long_video(
             base_dt = base_dt.astimezone().replace(tzinfo=None)
     except ValueError:
         raise HTTPException(400, "invalid base_captured_at; use ISO 8601")
+
+    # THE TWO CLOCKS, IF THE CALLER HAS THEM -- the wall-clock instant
+    # of each file's first frame. They are CameraEvent columns and this
+    # row gets no CameraEvent, so they are filed under the keys
+    # `_d3_first_frame_instants` reads for exactly that case, the same
+    # ones the mirror importer writes. Validated here, before a
+    # gigabyte is written to disk, so a bad stamp costs nothing.
+    _stamps: dict[str, str] = {}
+    for _field, _raw in (("tee_started_at", tee_started_at),
+                         ("green_started_at", green_started_at)):
+        if not _raw:
+            continue
+        try:
+            _dt = datetime.fromisoformat(str(_raw).replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(400, f"invalid {_field}; use ISO 8601")
+        if _dt.tzinfo is not None:
+            _dt = _dt.astimezone().replace(tzinfo=None)
+        _stamps["source_" + _field.replace("_started_at", "") +
+                "_started_at"] = _dt.isoformat()
 
     data = await video.read()
     if not data:
@@ -5193,6 +5228,7 @@ async def upload_long_video(
         green_original_filename=(
             video_green.filename if video_green is not None else None
         ),
+        edit_metrics=(_stamps or None),
         processing_status="pending",
     )
     db.add(upload_row)
@@ -6577,24 +6613,13 @@ def _frame_wall_clock(db, row, which: str, frame_idx: int, fps: float):
     if fps is None or fps <= 0:
         return None
     try:
-        start = None
-        ev = None
-        if getattr(row, "camera_event_id", None):
-            ev = db.query(CameraEvent).filter(
-                CameraEvent.id == row.camera_event_id,
-            ).first()
-        if str(which).lower() == "green":
-            start = getattr(ev, "green_recording_started_at", None)
-            if start is None:
-                _tee = getattr(ev, "tee_recording_started_at", None) or getattr(
-                    row, "base_captured_at", None)
-                if _tee is not None:
-                    delta, _ = _d3_green_delta_sec(db, row)
-                    start = _tee + timedelta(seconds=float(delta))
-        else:
-            start = getattr(ev, "tee_recording_started_at", None)
-        if start is None:
-            start = getattr(row, "base_captured_at", None)
+        # SAME START INSTANT THE REST OF THE PIPELINE USES. This had its
+        # own copy of the lookup, and the copy asked the CameraEvent
+        # only -- so on a mirrored upload (no CameraEvent, both stamps
+        # in edit_metrics) the offset was measured off the real clocks
+        # while the clock printed on the frame fell back to the trigger
+        # time. One reader now, so the two cannot disagree.
+        start = _clip_start_instant(db, row, which)
         if start is None:
             return None
         return (start + timedelta(seconds=float(frame_idx) / fps)).isoformat()
@@ -19075,7 +19100,7 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         out["green_clip_starts_at"] = (_green_start.isoformat()
                                        if _green_start else None)
         out["delta_measured"] = (
-            _dsrc in ("camera_event", "mirrored_stamps", "upload_stamps")
+            _dsrc in ("camera_event", "mirrored_stamps")
             or (_dsrc == "edit_metrics" and abs(float(_delta)) > 1e-6))
     except Exception as exc:  # noqa: BLE001
         log.warning("ascent descents: green setup failed on %s: %s",
@@ -22761,6 +22786,49 @@ D3_MAX_GREEN_SEC = 12.0
 LANDING_TAIL_SEC = 1.5
 
 
+def _d3_first_frame_instants(db, row):
+    """(tee first frame, green first frame, where they came from).
+
+    ONE PLACE THE TWO WALL CLOCKS ARE READ. Both stamps live on
+    CameraEvent -- `tee_recording_started_at` / `green_recording_started_at`,
+    the instant each Pi captured its first frame -- and an upload that
+    has no CameraEvent (a hand upload, or anything a mirror pulled in)
+    carries the same two values in `edit_metrics` under
+    `source_tee_started_at` / `source_green_started_at`, because there
+    is no event row to hang them on.
+
+    They were previously read in three places with three different
+    ideas of where to look: the offset read the event and the mirrored
+    stamps, the clock overlay read the event only, and the produce
+    panel read `row.tee_recording_started_at` -- a column
+    LongVideoUpload does not have, so it was always None and the panel
+    reported no clocks on an upload whose offset had just been measured
+    from them. Returning None here means the two clocks genuinely were
+    not measured; it is the only thing that should make a caller assume.
+
+    Returns (None, None, None) when either side is missing -- half a
+    pair says nothing about the offset between them."""
+    if getattr(row, "camera_event_id", None):
+        ev = db.get(CameraEvent, row.camera_event_id)
+        if ev is not None:
+            t_tee = ev.tee_recording_started_at
+            t_green = ev.green_recording_started_at
+            if t_tee is not None and t_green is not None:
+                return t_tee, t_green, "camera_event"
+    _em = getattr(row, "edit_metrics", None) or {}
+    _mt, _mg = (_em.get("source_tee_started_at"),
+                _em.get("source_green_started_at"))
+    if _mt and _mg:
+        try:
+            return (datetime.fromisoformat(str(_mt).replace("Z", "")),
+                    datetime.fromisoformat(str(_mg).replace("Z", "")),
+                    "mirrored_stamps")
+        except (TypeError, ValueError) as exc:
+            log.debug("d3: mirrored stamps on upload %s unparseable: %s",
+                      getattr(row, "id", None), exc)
+    return None, None, None
+
+
 def _d3_green_delta_sec(db, row) -> tuple[float, str]:
     """(green_start − tee_start) in seconds, and where it came from.
 
@@ -22774,13 +22842,18 @@ def _d3_green_delta_sec(db, row) -> tuple[float, str]:
         green_time = tee_time − delta
 
     Sources, best first:
-      * `camera_event`  — the wall clocks. The real answer.
-      * `edit_metrics`  — an offset a previous run or the operator
-                          established for this upload.
-      * `assumed_zero`  — no better information: treat the two files as
-                          having started together, which is exactly what
-                          the rest of the pipeline already defaults to
-                          (`tee_green_delta_sec: float = 0.0`).
+      * `camera_event`     — the wall clocks. The real answer.
+      * `mirrored_stamps`  — those same two wall clocks, carried over
+                             onto an upload that has no CameraEvent of
+                             its own (a mirror import, or a client that
+                             posted them with the files).
+      * `edit_metrics`     — an offset a previous run or the operator
+                             established for this upload.
+      * `assumed_zero`     — no better information: treat the two files
+                             as having started together, which is
+                             exactly what the rest of the pipeline
+                             already defaults to
+                             (`tee_green_delta_sec: float = 0.0`).
 
     The fallback matters: a manually uploaded pair has no camera event,
     and refusing to cut without one means dual-camera uploads silently
@@ -22788,52 +22861,9 @@ def _d3_green_delta_sec(db, row) -> tuple[float, str]:
     caller log it and the panel show whether sync was MEASURED or
     ASSUMED, so a visibly wrong cut points at the offset rather than at
     the code."""
-    if getattr(row, "camera_event_id", None):
-        ev = db.get(CameraEvent, row.camera_event_id)
-        if ev is not None:
-            t_tee = ev.tee_recording_started_at
-            t_green = ev.green_recording_started_at
-            if t_tee is not None and t_green is not None:
-                return (t_green - t_tee).total_seconds(), "camera_event"
-    # THE STAMPS A MIRROR CARRIED OVER. `tee_recording_started_at` is a
-    # CameraEvent column and NOT a LongVideoUpload one, so the getattr
-    # below has always returned None -- it reads as a second source and
-    # is not one. The importer files the source event's two stamps in
-    # edit_metrics instead (a mirrored upload has no CameraEvent to hang
-    # them on), and this is where they come back: same two wall clocks,
-    # same subtraction, so a mirrored pair cuts on the clock the way the
-    # original did instead of falling through to an assumed zero.
-    _em = row.edit_metrics or {}
-    _mt, _mg = (_em.get("source_tee_started_at"),
-                _em.get("source_green_started_at"))
-    if _mt and _mg:
-        try:
-            _dt = (datetime.fromisoformat(str(_mg).replace("Z", ""))
-                   - datetime.fromisoformat(str(_mt).replace("Z", "")))
-            return _dt.total_seconds(), "mirrored_stamps"
-        except (TypeError, ValueError) as exc:
-            log.debug("d3: mirrored stamps on upload %s unparseable: %s",
-                      getattr(row, "id", None), exc)
-    # The upload's own stamps, if the model ever grows them.
-    #
-    # LongVideoUpload carries `tee_recording_started_at` and
-    # `green_recording_started_at` -- the instant each camera's FIRST
-    # FRAME was captured, as the Pi reported it -- and this function
-    # asked only the CameraEvent for them. An upload with no camera
-    # event (a hand upload, or anything the mirror importer pulled in)
-    # therefore fell all the way through to assumed_zero while both
-    # clocks sat unread on the row, and every frame-to-frame conversion
-    # downstream was out by however far apart the two recordings
-    # actually started.
-    #
-    # This is the answer to "are we timing it by the clock, or just by
-    # seconds into the file". With either source it is the clock. Before
-    # this, on an upload without a camera event, it was neither -- it
-    # was an assumption that the two files began together.
-    t_tee = getattr(row, "tee_recording_started_at", None)
-    t_green = getattr(row, "green_recording_started_at", None)
+    t_tee, t_green, _src = _d3_first_frame_instants(db, row)
     if t_tee is not None and t_green is not None:
-        return (t_green - t_tee).total_seconds(), "upload_stamps"
+        return (t_green - t_tee).total_seconds(), _src
     try:
         # A STORED ZERO IS NOT AN ANSWER. See `_d3_save_swing`: a zero
         # here is a previous run's assumption written back, and reading
@@ -23141,8 +23171,7 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
     # the instants when they exist, rather than passing as a number like
     # any other.
     delta, delta_src = _d3_green_delta_sec(db, row)
-    _t_start = getattr(row, "tee_recording_started_at", None)
-    _g_start_wall = getattr(row, "green_recording_started_at", None)
+    _t_start, _g_start_wall, _ = _d3_first_frame_instants(db, row)
     if delta_src == "assumed_zero":
         log.warning(
             "d3 produce: upload %s is cutting on an ASSUMED tee/green "

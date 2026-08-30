@@ -10178,16 +10178,25 @@ function Debug3Modal({ state, onClose }) {
                       {c.green ? (
                         <>
                           {" "}· cut to green at Δ{c.green_delta_sec}s{" "}
+                          {/* MIRRORED STAMPS ARE CAMERA CLOCKS. They
+                              are the source event's own two stamps,
+                              carried onto an upload that has no camera
+                              event of its own; calling them "ASSUMED 0"
+                              sent an operator hunting a sync problem
+                              that had already been solved. */}
                           <b style={{
-                            color: c.green_delta_source === "camera_event"
+                            color: (c.green_delta_source === "camera_event"
+                              || c.green_delta_source === "mirrored_stamps")
                               ? "var(--emerald-700, #16a34a)"
                               : "var(--danger, #c0392b)",
                           }}>
                             {c.green_delta_source === "camera_event"
                               ? "measured from camera clocks"
-                              : c.green_delta_source === "edit_metrics"
-                                ? "saved offset"
-                                : "ASSUMED 0 — no camera clocks"}
+                              : c.green_delta_source === "mirrored_stamps"
+                                ? "measured from camera clocks (mirrored)"
+                                : c.green_delta_source === "edit_metrics"
+                                  ? "saved offset"
+                                  : "ASSUMED 0 — no camera clocks"}
                           </b>
                         </>
                       ) : (
