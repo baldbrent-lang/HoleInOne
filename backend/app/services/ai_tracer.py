@@ -3765,6 +3765,20 @@ def _shape_tail(tail, lift=0.0, at=0.5):
     return out
 
 
+# HOW MUCH SIDEWAYS TRAVEL BEFORE ITS SIGN IS WORTH ANYTHING. Measured
+# over the last dozen tracked points. A shot 3 degrees off vertical --
+# an ordinary drive on a camera behind the tee -- moves about ten pixels
+# across in that window, and which way is as much jitter as flight.
+_TAIL_DOWNRANGE_MIN_PX = 12.0
+
+# ...AND HOW FAR THE WRONG WAY IS STILL JUST A SHOT THAT CURVES. The
+# tracked part of a flight is its first second; a fade does most of its
+# work in the four after that, so the landing sitting somewhat the other
+# side of the last tracked point is ordinary golf rather than a
+# contradiction.
+_TAIL_BACK_SLACK_PX = 60.0
+
+
 def _extend_to_target(pts, target_xy, fps, width, height,
                       land_frame=None, apex_lift=0.0,
                       apex_at=0.5):
@@ -3821,55 +3835,72 @@ def _extend_to_target(pts, target_xy, fps, width, height,
     if len(pts) < 2:
         return [], None, ("the flight is a single point, so there is no "
                           "heading to continue along")
-    # A BALL DOES NOT FLY BACKWARDS.
+    # A BALL DOES NOT REVERSE DOWNRANGE. It reverses VERTICALLY on every
+    # single shot, which is the entire point of the continuation.
     #
-    # Both models leave the last measured point along the heading the
-    # ball was ALREADY travelling -- that is what keeps the hand-off
-    # smooth -- and then bend to the target. When the target is BEHIND
-    # that heading there is no smooth way to do it: the curve goes out
-    # the way the ball was going, stops, and comes back, which is the
-    # hook an operator sees at the top of the frame. `_turns_back_on
-    # _itself` catches the worst of those after the fact; this catches
-    # the cause, which is that the target was never reachable by a ball
-    # flying that way.
+    # This guard used to measure the landing against the ball's full
+    # heading, and refuse anything behind it. On a shot going up the
+    # frame -- a tee camera behind the golfer, which is most of them --
+    # the last tracked heading points UP, and the landing is always
+    # BELOW it, because the blob detector loses the ball on the way up
+    # and the ball comes down afterwards. So the normal case measured as
+    # "490px behind the direction of travel" and was refused as
+    # impossible. It was the guard that was impossible: it forbade the
+    # parabola from turning over, which is the one thing a flight does.
     #
-    # Measured along the flight, so a target off to the side is fine --
-    # shots curve -- and only one genuinely behind the ball is refused.
+    # What a ball genuinely cannot do is set off downrange and arrive
+    # back the other way. So only the HORIZONTAL sense is tested, and
+    # only when the flight has enough sideways travel for its sign to
+    # mean anything -- on a shot 3 degrees off vertical the horizontal
+    # component is noise, and noise must not decide whether a tracer is
+    # drawn. Shots curve, so a landing on the wrong side by less than
+    # `_TAIL_BACK_SLACK_PX` is a fade, not a contradiction.
+    #
+    # Everything the old test was really protecting against is still
+    # covered downstream, and by models rather than by a heuristic:
+    # `_ballistic_tail` refuses a landing that would need the ball to
+    # curve upward for its whole flight and refuses an arc that doubles
+    # back horizontally, and `_turns_back_on_itself` catches a loop
+    # whichever model drew it.
     _pw = list(pts[-12:])
     if len(_pw) >= 2:
         _vx = float(_pw[-1][1]) - float(_pw[0][1])
         _vy = float(_pw[-1][2]) - float(_pw[0][2])
         _vm = math.hypot(_vx, _vy)
+        _dx = float(target_xy[0]) - float(pts[-1][1])
+        _dy = float(target_xy[1]) - float(pts[-1][2])
         if _vm > 1e-6:
-            _du = (((float(target_xy[0]) - float(pts[-1][1])) * _vx)
-                   + ((float(target_xy[1]) - float(pts[-1][2])) * _vy)) / _vm
-            _dv = (((float(target_xy[0]) - float(pts[-1][1])) * -_vy)
-                   + ((float(target_xy[1]) - float(pts[-1][2])) * _vx)) / _vm
+            _du = (_dx * _vx + _dy * _vy) / _vm
+            _dv = (_dx * -_vy + _dy * _vx) / _vm
             # THE TURN THE TAIL IS BEING ASKED TO MAKE, on the record.
-            # A hook at the top of the frame is this number being large,
-            # and it has never been written down -- so every round of
-            # "why did the tracer bend left" has been argued from a
-            # screenshot. Logged on every tail, refused only when the
-            # target is genuinely behind, which no ball can reach.
+            # Still logged -- it is the number every "why did the tracer
+            # bend" argument needs -- but it no longer decides anything
+            # on its own. A large turn is what a shot photographed from
+            # behind LOOKS like, not evidence of a bad landing.
             _turn = math.degrees(math.atan2(abs(_dv), _du)) if _du else 90.0
             log.info(
-                "tracer tail: target is %.0fpx along the flight's heading "
-                "and %.0fpx across it — a %.0f degree turn from where the "
-                "ball was going", _du, _dv, _turn,
+                "tracer tail: target is %.0fpx along the flight's heading, "
+                "%.0fpx across it (a %.0f degree turn), and %.0fpx "
+                "downrange of a flight that moved %.0fpx sideways",
+                _du, _dv, _turn, _dx, _vx,
             )
-            if _du < 0.0:
-                log.info(
-                    "tracer tail: the target is %.0fpx BEHIND the flight's "
-                    "own heading — a ball does not turn round, so no "
-                    "continuation is drawn rather than a hook", -_du,
-                )
-                return [], None, (
-                    f"the landing is {-_du:.0f}px BEHIND the direction the "
-                    f"ball was travelling when it was last tracked — a ball "
-                    f"does not turn round, so the line stops rather than "
-                    f"hooking back. Either the landing is mapped to the "
-                    f"wrong place or the flight points at the end are not "
-                    f"the ball")
+        if (abs(_vx) >= _TAIL_DOWNRANGE_MIN_PX
+                and _dx * _vx < 0.0
+                and abs(_dx) > _TAIL_BACK_SLACK_PX):
+            log.info(
+                "tracer tail: the flight moved %.0fpx sideways and the "
+                "landing is %.0fpx the OTHER way — a ball does not come "
+                "back downrange, so no continuation is drawn", _vx, _dx,
+            )
+            return [], None, (
+                f"the flight was moving {abs(_vx):.0f}px "
+                f"{'right' if _vx > 0 else 'left'} across the frame and the "
+                f"landing is {abs(_dx):.0f}px to the "
+                f"{'left' if _dx < 0 else 'right'} of where the ball was "
+                f"last seen — a ball does not come back downrange, so the "
+                f"line stops rather than hooking across. Either the landing "
+                f"is mapped to the wrong place or the flight points at the "
+                f"end are not the ball")
     tail = _ballistic_tail(pts, target_xy, fps, width, height,
                            land_frame=land_frame)
     kind = "ballistic"
