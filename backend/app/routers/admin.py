@@ -18856,9 +18856,33 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
         rep["clear_error"] = _clear_err
     _t = time.perf_counter()
     _idx = 0
-    for c in rep["clips"]:
+    for _ci, c in enumerate(rep["clips"]):
         if not c.get("ball"):
             continue
+        # THE SWEEP ALREADY MEASURED THIS FLIGHT. Hand it over.
+        #
+        # This called the renderer without `points`, so the job ran
+        # `find_flight` and re-derived from blobs the very thing stage 1
+        # had just measured -- with a different detector, a different
+        # window and different gates. When the two disagree the sweep's
+        # answer is thrown away and the clip is not produced at all:
+        # measured on upload 42, stage 1 found a 7-point chain rising
+        # 176px, dead straight, and find_flight's best of six candidates
+        # rose 21.2px and was refused as "does not rise". One ball seen
+        # leaving, zero clips.
+        #
+        # A swept ascent is a measurement, not a hint -- the same class
+        # of evidence as an operator's plotted line, which this job has
+        # always accepted and skipped find_flight for. So it goes the
+        # same way, and the two searches can no longer disagree about a
+        # shot only one of them was built to find.
+        _a = (_asc[_ci] if _ci < len(_asc) else None) or {}
+        _apts = [
+            {"frame": int(q["frame"]), "x": int(q["x"]), "y": int(q["y"])}
+            for q in (_a.get("points") or [])
+            if q.get("frame") is not None and q.get("x") is not None
+            and q.get("y") is not None
+        ]
         if progress:
             progress(f"Producing clip {_idx + 1}", _idx, _n_spot)
         try:
@@ -18909,6 +18933,13 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
                 # from a real landing, so there is nothing to fabricate.
                 landing_frame=c.get("landing_frame"),
                 landing_spot=c.get("landing_spot"),
+                # See above: the sweep's own chain IS the flight. Two
+                # points is the floor find_flight itself works to, and
+                # below it there is nothing to hand over, so the job
+                # falls back to searching as before.
+                points=(_apts if len(_apts) >= 2 else None),
+                launch_frame=(_apts[0]["frame"] if len(_apts) >= 2
+                              else None),
                 # NOTHING IS INVENTED WHEN NOTHING WAS SEEN. A swing
                 # with no descent gets the tee tracer and stops where
                 # the ball was last actually tracked -- no arc to the
