@@ -5070,7 +5070,7 @@ async def upload_long_video(
     base_captured_at: str = Form(...),
     segments: str = Form("[]"),
     auto_detect_swings: bool = Form(False),
-    starting_hole: int = Form(1),
+    starting_hole: int | None = Form(None),
     video: UploadFile = File(...),
     video_green: UploadFile | None = File(None),
     ai_tracer_model: str | None = Form(None),
@@ -5164,6 +5164,20 @@ async def upload_long_video(
     # ones the mirror importer writes. Validated here, before a
     # gigabyte is written to disk, so a bad stamp costs nothing.
     _stamps: dict[str, str] = {}
+    # WHICH HOLE THIS IS, WRITTEN DOWN. `starting_hole` decided the
+    # produce's hole and was then thrown away, so `_hole_for_upload_ex`
+    # could only recover it by finding a clip this upload had already
+    # produced -- and until then the hole was "default", which is not a
+    # hole at all. The green->tee mapping is keyed on it: an upload
+    # whose hole is unknown files its calibration under `upload:N`,
+    # private to that one upload, so calibrating a mirrored pair
+    # aimed nothing but itself and an upload that produced no clips
+    # could never share a mapping with anything. Recorded only when the
+    # caller actually said which hole -- a defaulted 1 must stay a
+    # default, since pooling every unidentifiable upload into hole 1 is
+    # the bug that keying exists to avoid.
+    if starting_hole is not None:
+        _stamps["source_hole_number"] = int(starting_hole)
     for _field, _raw in (("tee_started_at", tee_started_at),
                          ("green_started_at", green_started_at)):
         if not _raw:

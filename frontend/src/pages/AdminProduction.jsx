@@ -16659,6 +16659,26 @@ export default function AdminProduction() {
                 >
                   🛫 Produce ascents
                 </button>
+                {/* THE CALIBRATOR, REACHABLE. `openGreenCal` was written
+                    to be opened from the card -- the mapping is a
+                    property of the two CAMERAS, not of a swing -- and
+                    then nothing was ever wired to it, so the only way
+                    in stayed buried in the Edit wizard's Landing row.
+                    Without this mapping the tracer cannot place a
+                    green-camera landing in the tee frame at all, so the
+                    predictive half is simply never drawn, and the
+                    button that fixes that was unreachable from the page
+                    where you notice. */}
+                {row.dual_camera && (
+                  <button
+                    className="small ghost"
+                    onClick={() => openGreenCal(row)}
+                    disabled={busy}
+                    title="Map the green camera's view onto the tee camera's by clicking the same ground features in both pictures. Done ONCE per hole — every swing these two cameras record is aimed by it, and without it the tracer has no way to place the landing in the tee frame and stops where the ball was last tracked."
+                  >
+                    ⊹ Calibrate tee ↔ green
+                  </button>
+                )}
                 {(() => {
                   // Broadcast button is enabled when the wizard has
                   // produced a clip on this upload. Toggles
