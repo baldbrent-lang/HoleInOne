@@ -23795,10 +23795,30 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             # never enters that branch.
             _comet_src, _comet_why = "none", "no green camera on this clip"
             _tee = CLIPS_DIR / f"d3prod-{row.id}-{tok}-{i}-tee.mp4"
+            # THE FRAME THE BALL LEFT, NOT THE FRAME IT WAS FIRST SEEN.
+            # `launch_frame` on an ascent produce is the first frame of
+            # the swept chain -- where MOG2 picked the ball up, already
+            # well up the flight. The renderer puts the resting-ball
+            # anchor on the frame it is given, so handing it that one
+            # claims the ball was on the tee at a moment it was
+            # measurably in the air. The departure watch's own answer is
+            # on the swing as `impact_frame`; it is the earlier of the
+            # two whenever the watch concluded, and equal when it did
+            # not (the renderer's own guard covers that case).
+            #
+            # `launch_f` still sets the clip's window and pre-roll --
+            # only the anchor's frame changes.
+            _rest_f = launch_f
+            try:
+                _if = sw.get("impact_frame")
+                if _if is not None:
+                    _rest_f = min(int(_if), launch_f)
+            except (TypeError, ValueError):
+                _rest_f = launch_f
             _rv = render_tracer_video(
                 src_path, _tee,
                 (float(ball[0]), float(ball[1])),
-                launch_f, pts,
+                _rest_f, pts,
                 write_start=int(round(t0 * fps)),
                 write_end=int(round(t_render_end * fps)),
                 rest_verified=True,

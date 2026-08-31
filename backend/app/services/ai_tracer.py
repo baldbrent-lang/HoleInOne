@@ -4450,6 +4450,64 @@ def render_tracer_video(
                         rx, ry, _orig[0], _orig[1],
                     )
                     rx, ry = _orig
+            # THE BALL CANNOT BE ON THE TEE AND IN THE AIR AT THE SAME
+            # INSTANT, and it was being told exactly that.
+            #
+            # `REST_ANCHOR_FRAMES_BEFORE_IMPACT` is 0, so the rest
+            # anchor lands on `impact_frame_idx` -- and the ascent
+            # produce passes the frame MOG2 FIRST SAW THE BALL AIRBORNE
+            # as that. On a swing where the departure watch never
+            # concluded they are the same number, so the fit was given
+            # the ball at the tee and 240px up the flight at one frame.
+            #
+            # Everything that looks wrong in the finished clip follows
+            # from that one contradiction. Measured on event 349: the
+            # three lowest tracked points were thrown out as outliers,
+            # the y-curvature needed to climb 240px in a single frame
+            # put a FAKE APEX inside the tracked range at f3665, the
+            # apex truncation then stopped the line three dots early,
+            # and approaching that fake apex the curve flattened and ran
+            # sideways -- a tracer visibly curving right over a chain of
+            # dots that is dead straight.
+            #
+            # So when the anchor is not strictly before the flight, it
+            # is moved back by the flight's OWN measured speed over the
+            # gap it has to cross. The ball is faster near the tee than
+            # where it was tracked, so this errs on the early side --
+            # the line starts a fraction before the strike rather than
+            # asking the curve to do something impossible. Same swing,
+            # anchor moved back: nothing rejected, every dot drawn, the
+            # line within 8px of all of them, and the apex back out at
+            # f3680 where it belongs.
+            _tp = sorted(points_by_frame.items())[:6]
+            if _tp and rest_anchor_frame is not None \
+                    and rest_anchor_frame >= _tp[0][0]:
+                _f1, (_x1, _y1, _m1) = _tp[0]
+                _sp = 0.0
+                if len(_tp) >= 2:
+                    _df = float(_tp[-1][0] - _tp[0][0])
+                    if _df > 0:
+                        _sp = math.hypot(
+                            _tp[-1][1][0] - _x1, _tp[-1][1][1] - _y1) / _df
+                _gap = math.hypot(rx - _x1, ry - _y1)
+                _back = 1
+                if _sp > 0.5 and _gap > 0:
+                    _back = max(1, min(90, int(round(_gap / _sp))))
+                log.info(
+                    "ai_tracer: the rest anchor sat on f%d, the same frame "
+                    "as the first tracked point %.0fpx away — moving it "
+                    "back %d frame(s) to f%d at the flight's own %.1fpx/"
+                    "frame, so the fit is not asked to be in two places "
+                    "at once",
+                    rest_anchor_frame, _gap, _back, _f1 - _back, _sp,
+                )
+                info["rest_anchor_backdated"] = {
+                    "from_frame": int(rest_anchor_frame),
+                    "to_frame": int(_f1 - _back),
+                    "gap_px": round(float(_gap), 1),
+                    "flight_px_per_frame": round(float(_sp), 2),
+                }
+                rest_anchor_frame = max(0, int(_f1) - _back)
             anchors.append((rest_anchor_frame, rx, ry))
             rest_added = True
     else:
