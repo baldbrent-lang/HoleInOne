@@ -134,10 +134,53 @@ Three things look identical in a finished clip, and this separates them:
 | What you see | Cause | Fix |
 |---|---|---|
 | A *static* object at the golfer's distance scores low here | focus | the lens ring |
-| Scores fine here, but *moving* things smear in the video | motion blur | shutter speed / more light |
+| Scores fine here, but *moving* things smear in the video | motion blur | `shutter_us` in config.yaml — see below |
 | Scores fine and the saved 100% crop is sharp, but the uploaded clip is soft | compression | bitrate (green uploads 720p @ 1500 kbps) |
 
 **If the saved `_crop100.jpg` is sharp, focus is not the problem.**
+
+### Shutter speed and the ball against a pale sky
+
+The tracer finds the ball with a frame-to-frame difference thresholded
+at 8 grey levels. A struck ball crosses ~1100px/s in the tee frame, so
+under auto-exposure on an overcast day — a long shutter — a 4px ball
+smears across ~18px at 1/60s, and each pixel along that smear only sees
+the ball for a fifth of the exposure. Its contrast against the sky
+arrives divided by five.
+
+Against blue sky the ball still clears the threshold. Against a bright
+pale overcast sky, where the ball is only 20-30 levels brighter than the
+background to begin with, it does not, and no chain forms. This is why
+detection is sky-dependent rather than random.
+
+Pin the shutter in `config.yaml`:
+
+```yaml
+camera:
+  shutter_us: 2000      # 1/500s
+```
+
+1/500s takes the smear to about 2px, which is under the ball's own size —
+shorter than that wins nothing and only adds noise, since three stops of
+shutter is roughly eight times the gain.
+
+Not every driver accepts manual exposure through libcamerify's V4L2
+shim. Check what yours exposes, and read the agent's own log line back
+after restarting:
+
+```bash
+sudo systemctl stop golfreelz-agent
+libcamerify v4l2-ctl -d /dev/video0 --list-ctrls   # look for exposure_time_absolute
+sudo systemctl start golfreelz-agent
+journalctl -u golfreelz-agent -n 50 | grep "camera shutter"
+```
+
+`camera shutter: asked for 2000µs (1/500 s), driver reports 2000µs` means
+it took. A warning that the driver reports nothing back means this path
+does not control exposure on your camera, and the shutter has to be set
+through Picamera2 instead — which needs the agent venv rebuilt with
+`--system-site-packages`, since `python3-picamera2` is an apt package and
+`install.sh` builds an isolated venv.
 
 Two things worth doing while you are out there:
 

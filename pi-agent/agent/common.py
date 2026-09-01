@@ -1734,6 +1734,62 @@ def open_camera(cam_cfg: dict):
         width, height, fps, actual_w, actual_h, actual_fps,
     )
 
+    # SHUTTER SPEED, when the operator has pinned one.
+    #
+    # WHY IT MATTERS MORE THAN IT LOOKS. Auto-exposure on an overcast
+    # day picks a long shutter, and a struck ball crosses ~1100px/s in
+    # this frame -- so at 1/60s it smears over ~18px while the ball
+    # itself is about 4. Every pixel along that smear sees the ball for
+    # only a fifth of the exposure, so the ball's contrast against the
+    # sky arrives divided by five. The band detector thresholds a
+    # frame-to-frame difference at 8 grey levels; against blue sky the
+    # ball clears that even smeared, against a pale overcast sky it
+    # does not, and the chain never forms. Shortening the shutter
+    # concentrates the same photons into fewer pixels: at 1/500s the
+    # smear is ~2px and the contrast comes back almost whole.
+    #
+    # The cost is gain. Three stops of shutter is eight times the gain
+    # and roughly 2.8x the noise, so this buys about 1.6x in true
+    # signal-to-noise -- but against a FIXED 8-level threshold it is
+    # the contrast that decides, and that goes up 4-5x. Below about
+    # 1/1000 there is nothing left to win: the smear is already
+    # shorter than the ball, and only the noise keeps climbing.
+    #
+    # UNSET = AUTO, exactly as before. This is opt-in per camera, and
+    # what the driver actually accepted is read back and logged rather
+    # than assumed -- through libcamerify's V4L2 shim a control can be
+    # silently ignored, and a shutter you believe you set but did not
+    # is worse than one you never touched.
+    _shutter_us = cam_cfg.get("shutter_us")
+    if _shutter_us:
+        try:
+            _us = int(_shutter_us)
+            # V4L2 exposure_time_absolute is in 100µs units; OpenCV
+            # passes the value straight through to it.
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 1 = manual
+            cap.set(cv2.CAP_PROP_EXPOSURE, _us / 100.0)
+            _gain = cam_cfg.get("gain")
+            if _gain:
+                cap.set(cv2.CAP_PROP_GAIN, float(_gain))
+            _got = float(cap.get(cv2.CAP_PROP_EXPOSURE) or 0.0) * 100.0
+            if _got > 0:
+                log.info(
+                    "camera shutter: asked for %dµs (1/%d s), driver "
+                    "reports %.0fµs (1/%d s)",
+                    _us, round(1e6 / _us), _got, round(1e6 / max(1.0, _got)),
+                )
+            else:
+                log.warning(
+                    "camera shutter: asked for %dµs but the driver "
+                    "reports nothing back — this camera may not accept "
+                    "manual exposure through the V4L2 shim. Check with: "
+                    "libcamerify v4l2-ctl -d /dev/video0 --list-ctrls",
+                    _us,
+                )
+        except (TypeError, ValueError) as exc:
+            log.warning("camera shutter: shutter_us=%r unusable (%s) — "
+                        "leaving auto-exposure alone", _shutter_us, exc)
+
     # Warm up the sensor before handing the camera to the capture loop.
     # The IMX477 (and most libcamera pipelines) deliver several all-black
     # frames right after open while auto-exposure / auto-white-balance

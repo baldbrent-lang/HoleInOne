@@ -43,6 +43,31 @@ camera:
   width: 1920
   height: 1080
   fps: 30
+  # SHUTTER SPEED in microseconds. Leave commented out for auto (the
+  # long-standing behaviour).
+  #
+  # A struck ball crosses roughly 1100px/s in this frame. Auto-exposure
+  # under overcast picks a long shutter, and the smear that follows is
+  # what makes a white ball vanish against a pale sky:
+  #
+  #     1/60s   16667µs   ~18px smear   ball's contrast /5
+  #     1/250s   4000µs   ~4.4px
+  #     1/500s   2000µs   ~2.2px        <- a good target
+  #     1/1000s  1000µs   ~1.1px        diminishing; noise keeps rising
+  #
+  # The ball is about 4px across at tee-camera distance, so once the
+  # smear is under that there is nothing further to win. Shortening the
+  # shutter costs gain (1/60 -> 1/500 is three stops, ~8x gain, ~2.8x
+  # noise), so do not go shorter than the sky actually needs.
+  #
+  # Not every driver accepts this through libcamerify's V4L2 shim.
+  # Check first, and read the agent's log line back:
+  #     sudo systemctl stop golfreelz-agent
+  #     libcamerify v4l2-ctl -d /dev/video0 --list-ctrls
+  # shutter_us: 2000
+  # Sensor gain to go with a pinned shutter. Unset leaves the driver's
+  # own choice, which is usually what you want.
+  # gain: 8.0
 
 # ---------------------------------------------------------------------
 # Tee-side ONLY: where in the camera's frame the "tee box" lives.
