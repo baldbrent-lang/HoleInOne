@@ -59,9 +59,9 @@ for st in loop.body:
     if (isinstance(st, ast.AnnAssign) and getattr(st.target, "id", "") == "_why"):
         started = True
     if started:
-        if isinstance(st, ast.If) and any(
-                isinstance(x, ast.Name) and x.id == "kept"
-                for x in ast.walk(st)):
+        if (isinstance(st, ast.Assign)
+                and getattr(st.targets[0], "id", "") == "kept"):
+            stmts.append(st)
             break
         stmts.append(st)
 print(f"extracted {len(stmts)} statements of the real gate block\n")
@@ -123,8 +123,10 @@ for name, pts, want in CASES:
     why = ns["_why"]
     got = not why
     ok += (got == want)
+    _land = ns.get("land", {})
     print(f"{name:38s} bend {ns['bend']:5.2f} (whole {ns['bend_all']:5.2f})"
-          f"  rate {ns['rate']:.3f}  -> "
+          f"  lands f{_land.get('frame')} "
+          f"({_land.get('x')},{_land.get('y')})  -> "
           + (", ".join(why) if why else "accepted")
           + ("" if got == want else "   <-- MISMATCH"))
 print(f"\n{ok}/{len(CASES)} as intended")

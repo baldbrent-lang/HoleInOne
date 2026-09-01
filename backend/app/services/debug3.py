@@ -2860,6 +2860,29 @@ def find_descents(
                     last_i = i + 1
                     break
         land = pts[last_i]
+        # ...AND THE LANDING IS THE LAST POINT THAT IS STILL ON THE
+        # FLIGHT. The walk back above asks "was it still falling fast",
+        # which a point 16px to the SIDE can answer yes to -- it fell
+        # 98px in four frames, faster than anything before it, so the
+        # walk back keeps it and calls it the landing.
+        #
+        # Measured on the chain the operator pointed at: eight points
+        # from f2290 to f2298 lying on one line to within 0.45px, then
+        # f2302 at (546,483), 19.7px off that line. Whatever that
+        # detection is -- the pitch mark, a shadow, the ball merged with
+        # something as it arrived -- it is not where the flight was
+        # going, and taking it as the landing puts the comet's end and
+        # the tracer's aim 16px off to one side.
+        #
+        # So the same test the shape gates use is applied to the
+        # landing: walk back off the end while a point is demonstrably
+        # not on the line the ones before it make. Bounded by the point
+        # floor, and it removes nothing from a chain whose last point
+        # is where the line says it should be.
+        _flight = _descent_flight_shape(pts[:last_i + 1], int(min_points))
+        if len(_flight) < last_i + 1:
+            last_i = len(_flight) - 1
+            land = pts[last_i]
         # SEE DESCENT_EDGE_MARGIN_FRAC. Checked here rather than with
         # the other gates because it is a fact about the LANDING, and
         # the landing is not known until the walk back above has run.
