@@ -1567,11 +1567,24 @@ def ransac_parabola(
 # the turf: 4.472. It was refused as impossible while three chains in
 # the wind-shaken tree line were accepted.
 #
-# So the ceiling is now only a guard against the absurd, in the spirit
-# of ASCENT_RATE_HI, and the discriminating is done by the tilt gate
-# below and by ranking on how far a chain actually fell.
+# So the ceiling was widened to 12.0 -- a guard against the absurd
+# rather than a discriminator.
+#
+# AND THEN THE OPERATOR MEASURED THE OTHER SIDE OF IT. Across two
+# uploads of real landings the fall rates come out 0.319, 0.367, 0.415,
+# 0.435, 0.53, 0.63, 0.649, 0.671, 0.699 -- every one of them under
+# 0.7. The chains that are not balls sit far above: 5.486 on a
+# three-point chain that "fell" 389px in four frames and was accepted
+# over the real descent beside it.
+#
+# So 1.0, which is above every real descent on record by a third and
+# far below the junk. NOTE what this costs, because it is the thing the
+# widening was for: the landing measured at 4.472 above WOULD be
+# refused by this. That was one clip, on a green much closer to its
+# camera than these; if a real descent starts coming back refused on
+# "rate", this is the number that did it.
 DESCENT_RATE_LO = 0.30
-DESCENT_RATE_HI = 12.0
+DESCENT_RATE_HI = 1.0
 # HOW FAR OFF VERTICAL A FALLING BALL MAY LEAN, in degrees.
 #
 # The mirror of ASCENT_MAX_TILT_DEG, and the gate the descent side never
@@ -1699,8 +1712,15 @@ DESCENT_FALL_JITTER_PX = 2.0
 # NEED TO BE", and BALLSCAN_DESCENT_SHORT_BEND_PX, which this matches.
 # Straighter, seen on very nearly every frame it spans, and genuinely
 # falling rather than leaning across the picture.
-DESCENT_SHORT_POINTS = 4
-DESCENT_SHORT_BEND_PX = 2.5
+# FIVE, because the floor moved to four. These are the bars for the
+# SHORTEST chains that are allowed at all -- when the floor was three
+# they applied to three-point chains, and leaving them here after the
+# floor became four would mean nothing ever answered to them.
+DESCENT_SHORT_POINTS = 5
+# Never looser than the bar it is supposed to tighten: the general one
+# is 2.0 now, and a "stricter" 2.5 would have let the shortest chains
+# bend further than the long ones.
+DESCENT_SHORT_BEND_PX = 2.0
 DESCENT_SHORT_MIN_DENSITY = 0.75
 DESCENT_SHORT_MAX_TILT_DEG = 35.0
 
@@ -1880,7 +1900,15 @@ DESCENT_CORRIDOR_PX = 10.0
 # a pair of dots with a line between them: any two points are collinear,
 # so a two-point chain passes a straightness test by construction and
 # carries no evidence at all.
-MIN_DESCENT_POINTS = 3
+# FOUR, not three. Three points cannot be judged: bend is the
+# deviation of the one middle point from the line through the other
+# two, tilt is the angle of a two-segment line, and the rhythm has two
+# steps to be consistent across. Measured on a real upload, a
+# three-point chain "fell" 389px in four frames -- 97px a frame against
+# 10-15 for every real descent on the clip -- scored 0.1px of bend and
+# 10.2 degrees of tilt, and was accepted over the true descent beside
+# it. It did not pass the gates; there was nothing for them to hold.
+MIN_DESCENT_POINTS = 4
 
 # WHAT COLOUR EACH DESCENT VERDICT IS DRAWN IN, and the order the gates
 # are listed in. The ascent side's `ASCENT_WHY_COLORS`, for the same
@@ -2369,24 +2397,41 @@ def find_descents(
     fps: float | None = None,
     window: tuple[int, int] | None = None,
     r: float = 14.0,
-    # THREE POINTS IS A DESCENT. Four was the first guess and it threw a
-    # real shot away: on a clip whose two landings a person can point at,
-    # the earlier one gave three detections and then nothing for the
-    # eleven frames before it hit the ground. That is not a tracking
-    # failure to tune around -- the ball genuinely is not in the picture
-    # in any way a detector can see. Three is enough because the
-    # fall-rate band does the discriminating, not the point count.
-    min_points: int = 3,
+    # FOUR POINTS. Three was tried, on a clip where a real landing gave
+    # three detections and then nothing for the eleven frames before it
+    # hit the ground -- the ball genuinely was not in the picture in any
+    # way a detector could see, and refusing it threw away a shot.
+    #
+    # The other side of that trade turned out to be worse. The
+    # reasoning was that the fall-rate band would do the discriminating
+    # instead, and it did not: a three-point chain covering four frames
+    # can "fall" 389px, score 0.1px of bend because three points lie on
+    # a line by construction, and beat the real descent beside it. See
+    # MIN_DESCENT_POINTS.
+    min_points: int = MIN_DESCENT_POINTS,
     min_drop_frac: float = 0.05,
     rate_lo: float = DESCENT_RATE_LO,
     rate_hi: float = DESCENT_RATE_HI,
     # A FALLING BALL IS STRAIGHT. Over the half-second a descent lasts,
-    # gravity bends the path far less than the image is wide, so x against
-    # y is very nearly a line. A chain of unrelated speckles the tracker
-    # happened to link is not. Measured rms across three real descents on
-    # two clips: 0.1, 2.2 and 5.3 px. The two false positives: 17.6 and
-    # 21.7. This is the cleanest single discriminator of the lot.
-    max_bend_px: float = 10.0,
+    # gravity bends the path far less than the image is wide, so x
+    # against y is very nearly a line. A chain of unrelated speckles the
+    # tracker happened to link is not. This is the cleanest single
+    # discriminator of the lot.
+    #
+    # ...AND TWO PIXELS OF IT. Ten was set from a sample of five: three
+    # real descents at 0.1, 2.2 and 5.3px against two false ones at
+    # 17.6 and 21.7, and the bar was put between the populations. The
+    # operator's own reading of a much larger table is that a real
+    # descent is straighter than that -- and the 5.3 in that sample was
+    # never confirmed to be a ball.
+    #
+    # WHAT THIS COSTS: on the upload this was tightened from, chains
+    # measuring 4.21, 4.47 and 4.8px of bend were being ACCEPTED, and
+    # every one of them is now refused. One of those was the descent
+    # swing 1 used, which is the point -- it was the wrong chain. If a
+    # descent a person can see starts coming back refused on "bend",
+    # this is the number that did it and 3.0 is the obvious next stop.
+    max_bend_px: float = 2.0,
     merge_sec: float = 1.0,
     max_events: int = 20,
     # WHICH DETECTORS TO RUN. Measured on 200 frames of 720p with a ball
