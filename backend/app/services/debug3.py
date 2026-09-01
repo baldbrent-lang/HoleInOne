@@ -2111,6 +2111,12 @@ def detect_movers_by_diff(
 # over three frames it is the ball.
 DESCENT_RATE_SPAN_FRAMES = 3
 
+# HOW LITTLE A "STEP" HAS TO BE TO BE NO STEP AT ALL. See
+# `_descent_step_consistency`: the slowest descent the rate gate admits
+# still moves seven pixels a frame, so anything under three is one
+# sighting reported twice rather than a ball that paused.
+DESCENT_DUP_PX = 3.0
+
 
 def _descent_rates(pts, span: int) -> list:
     """Per-frame fall rates measured over at least `span` frames.
@@ -2192,6 +2198,27 @@ def _descent_step_consistency(pts):
     # 4/28/5: the span reading is 0.00 and the adjacent reading 4.60.
     # So a short chain is judged the old way, where its point count is
     # the gate that really matters anyway.
+    # ONE SIGHTING TWICE IS NOT THE BALL STOPPING.
+    #
+    # Two consecutive detections at the same height, in a chain falling
+    # eighteen pixels a frame, are the same sighting emitted twice --
+    # the motion smear lighting the same fragment on two frames. The
+    # operator's chain has exactly that at f2293/f2294, both at y=306,
+    # and it is enough on its own: the three-frame window straddling the
+    # stall reads 12.0 against 18.0 either side, which is a 0.41 slow-
+    # down against a 0.35 bar. The chain was refused as UNEVEN for a
+    # duplicate.
+    #
+    # A real descent cannot produce this. DESCENT_RATE_LO is 0.30
+    # frame-heights per second, which on a 720-tall green at 30fps is
+    # seven pixels a frame at the very slowest -- so a step under three
+    # is not a slow ball, it is the same ball counted again.
+    _seq = [pts[0]]
+    for _q in pts[1:]:
+        if abs(float(_q["y"]) - float(_seq[-1]["y"])) < DESCENT_DUP_PX:
+            continue
+        _seq.append(_q)
+    pts = _seq if len(_seq) >= 3 else pts
     steps = _descent_rates(pts, DESCENT_RATE_SPAN_FRAMES)
     if len(steps) < 3:
         steps = [(float(b["y"]) - float(a["y"]))
@@ -2770,6 +2797,64 @@ def find_descents(
         drop = float(pts[-1]["y"]) - float(pts[0]["y"])
         span_f = max(1, int(pts[-1]["frame"]) - int(pts[0]["frame"]))
         rate = (drop / span_f) * _fps / frame_h
+        # WHERE IT LANDED, not where the tracker gave up. The seed keeps
+        # producing points through the bounce and the roll, so the last
+        # point of the track can be a second after the ball touched
+        # down. Walk back to the last frame it was still falling at a
+        # decent share of its peak speed.
+        peak = 0.0
+        vys = []
+        for a, b in zip(pts, pts[1:]):
+            df = max(1, int(b["frame"]) - int(a["frame"]))
+            v = (float(b["y"]) - float(a["y"])) / df
+            vys.append(v)
+            peak = max(peak, v)
+        last_i = len(pts) - 1
+        if peak > 0:
+            for i in range(len(vys) - 1, -1, -1):
+                if vys[i] >= DESCENT_FLATTEN_FRAC * peak:
+                    last_i = i + 1
+                    break
+        land = pts[last_i]
+        # ...AND THE LANDING IS THE LAST POINT THAT IS STILL ON THE
+        # FLIGHT. The walk back above asks "was it still falling fast",
+        # which a point 16px to the SIDE can answer yes to -- it fell
+        # 98px in four frames, faster than anything before it, so the
+        # walk back keeps it and calls it the landing.
+        #
+        # Measured on the chain the operator pointed at: eight points
+        # from f2290 to f2298 lying on one line to within 0.45px, then
+        # f2302 at (546,483), 19.7px off that line. Whatever that
+        # detection is -- the pitch mark, a shadow, the ball merged with
+        # something as it arrived -- it is not where the flight was
+        # going, and taking it as the landing puts the comet's end and
+        # the tracer's aim 16px off to one side.
+        #
+        # So the same test the shape gates use is applied to the
+        # landing: walk back off the end while a point is demonstrably
+        # not on the line the ones before it make. Bounded by the point
+        # floor, and it removes nothing from a chain whose last point
+        # is where the line says it should be.
+        _flight = _descent_flight_shape(pts[:last_i + 1], int(min_points))
+        if len(_flight) < last_i + 1:
+            last_i = len(_flight) - 1
+            land = pts[last_i]
+        # THE SHAPE GATES MEASURE THE FLIGHT, NOT THE TRACK.
+        #
+        # `pts` is everything the tracker linked, and on a green that
+        # runs on through the bounce and the roll -- 14 points where 8
+        # are the descent. Drop and rate are measured on all of it on
+        # purpose (see `kept` below: re-measuring THOSE on the truncated
+        # chain cost real descents, because a magnitude wants all the
+        # evidence). Bend and tilt are the opposite case. They ask what
+        # SHAPE the flight had, and six points of a ball running along
+        # the sand are not that shape.
+        #
+        # Measured on the chain the operator pointed at: over the whole
+        # 14-point track it bends 4.8px and is refused at a 2px bar;
+        # over the 8 points of the flight it bends 0.50px. Same chain,
+        # and only one of those numbers is about a descent.
+        kept = pts[:last_i + 1]
         # THE TOUCHDOWN IS NOT PART OF THE FLIGHT'S SHAPE.
         #
         # `bend` asks how straight the ball's path through the AIR was.
@@ -2790,7 +2875,7 @@ def find_descents(
         # landing, which is the whole answer the search produces. It
         # just does not get a vote on how straight the flight was, and
         # only when there is enough chain left to still mean something.
-        _shape = _descent_flight_shape(pts, int(min_points))
+        _shape = kept
         bend = _path_bend_px(_shape)
         bend_all = _path_bend_px(pts)
         if drop < min_drop:
@@ -2841,48 +2926,6 @@ def find_descents(
                  drop_px=int(drop), fall_rate=round(rate, 3),
                  tilt_deg=round(tilt, 1))
 
-        # WHERE IT LANDED, not where the tracker gave up. The seed keeps
-        # producing points through the bounce and the roll, so the last
-        # point of the track can be a second after the ball touched
-        # down. Walk back to the last frame it was still falling at a
-        # decent share of its peak speed.
-        peak = 0.0
-        vys = []
-        for a, b in zip(pts, pts[1:]):
-            df = max(1, int(b["frame"]) - int(a["frame"]))
-            v = (float(b["y"]) - float(a["y"])) / df
-            vys.append(v)
-            peak = max(peak, v)
-        last_i = len(pts) - 1
-        if peak > 0:
-            for i in range(len(vys) - 1, -1, -1):
-                if vys[i] >= DESCENT_FLATTEN_FRAC * peak:
-                    last_i = i + 1
-                    break
-        land = pts[last_i]
-        # ...AND THE LANDING IS THE LAST POINT THAT IS STILL ON THE
-        # FLIGHT. The walk back above asks "was it still falling fast",
-        # which a point 16px to the SIDE can answer yes to -- it fell
-        # 98px in four frames, faster than anything before it, so the
-        # walk back keeps it and calls it the landing.
-        #
-        # Measured on the chain the operator pointed at: eight points
-        # from f2290 to f2298 lying on one line to within 0.45px, then
-        # f2302 at (546,483), 19.7px off that line. Whatever that
-        # detection is -- the pitch mark, a shadow, the ball merged with
-        # something as it arrived -- it is not where the flight was
-        # going, and taking it as the landing puts the comet's end and
-        # the tracer's aim 16px off to one side.
-        #
-        # So the same test the shape gates use is applied to the
-        # landing: walk back off the end while a point is demonstrably
-        # not on the line the ones before it make. Bounded by the point
-        # floor, and it removes nothing from a chain whose last point
-        # is where the line says it should be.
-        _flight = _descent_flight_shape(pts[:last_i + 1], int(min_points))
-        if len(_flight) < last_i + 1:
-            last_i = len(_flight) - 1
-            land = pts[last_i]
         # SEE DESCENT_EDGE_MARGIN_FRAC. Checked here rather than with
         # the other gates because it is a fact about the LANDING, and
         # the landing is not known until the walk back above has run.
@@ -2907,8 +2950,7 @@ def find_descents(
         #
         # So the walk back to the landing happens first, and the drop,
         # rate, bend and count are all measured on what survives it.
-        kept = pts[:last_i + 1]
-        # THE DROP, RATE AND BEND ARE THE WHOLE TRACK'S.
+        # THE DROP AND RATE ARE THE WHOLE TRACK'S.
         #
         # Re-measuring them on the truncated chain was tried and cost
         # real descents: a chain of three points that survives the walk

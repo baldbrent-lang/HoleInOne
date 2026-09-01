@@ -59,9 +59,9 @@ for st in loop.body:
     if (isinstance(st, ast.AnnAssign) and getattr(st.target, "id", "") == "_why"):
         started = True
     if started:
+        # Stop at the row dict: everything before it is the gates.
         if (isinstance(st, ast.Assign)
-                and getattr(st.targets[0], "id", "") == "kept"):
-            stmts.append(st)
+                and getattr(st.targets[0], "id", "") == "_entry"):
             break
         stmts.append(st)
 print(f"extracted {len(stmts)} statements of the real gate block\n")
@@ -73,7 +73,12 @@ def run(pts, fps=30.0, frame_h=720):
                "rate_lo": g["DESCENT_RATE_LO"], "rate_hi": g["DESCENT_RATE_HI"],
                "max_bend_px": 2.0, "_rej": lambda *a, **k: None,
                "frame_w": 1280, "edge_px": 0.04 * 720,
-               "land": pts[-1], "kept": pts})
+               "land": pts[-1], "kept": pts,
+               "_by_frame": {}, "dets": [], "tk": {},
+               "considered": [], "events": [],
+               "f_hi": pts[-1]["frame"] + 200,
+               "f_lo": max(0, pts[0]["frame"] - 200),
+               "_fps": fps, "merge_sec": 1.0})
     exec(compile(ast.Module(body=stmts, type_ignores=[]), "<gates>", "exec"), ns)
     return ns
 
@@ -87,16 +92,26 @@ def raw(rows, f0=0):
 CASES = [
     # The chain the operator pointed at: eight points of a real descent
     # plus one that arrives 19.7px off their line. 30fps green.
+    # The chain the operator pointed at, exactly as the table lists it:
+    # eight points of a real descent (including a duplicate sighting at
+    # f2293/f2294, both y=306), a ninth 19.7px off their line, and the
+    # bounce-and-roll the tracker carried on with.
     ("upload's chain #3, the real one",
      raw([(2290,535,252),(2291,534,270),(2292,533,288),(2293,532,306),
-          (2294,532,326),(2296,532,346),(2297,530,365),(2298,530,385),
-          (2302,546,483)]), True),
+          (2294,532,306),(2296,532,346),(2297,530,365),(2298,530,385),
+          (2302,546,483),(2303,566,478),(2305,590,474),(2306,614,476),
+          (2307,640,479),(2308,668,481)]), True),
     # ...and the same eight points with a ninth that is genuinely on the
     # line: nothing should be trimmed and it should still pass.
     ("same chain, touchdown on the line",
      raw([(2290,535,252),(2291,534,270),(2292,533,288),(2293,532,306),
           (2294,532,326),(2296,532,346),(2297,530,365),(2298,530,385),
           (2302,526,483)]), True),
+    # A ball that really does stall mid-fall must still be refused —
+    # the duplicate collapse must not rescue it.
+    ("a fall that genuinely stalls",
+     raw([(0,500,100),(1,500,118),(2,500,136),(3,500,140),(4,500,144),
+          (5,500,162),(6,500,180),(7,500,198)]), False),
     ("straight fall, touchdown kicks 14px",
      chain(YS, [500,502,504,506,508,510,512,514,530]), True),
     ("straight fall, clean touchdown",
