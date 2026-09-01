@@ -8294,6 +8294,18 @@ function DistanceToPinModal({ row, slot, adminPassword, onClose, onSaved }) {
 function DescentWindow({ view, colors }) {
   const w = view.w || 1280;
   const h = view.h || 720;
+  // THE REFUSED CHAINS ARE OFF BY DEFAULT, and the picture only became
+  // usable when they were. On a wind-shaken green the sweep considers
+  // hundreds of chains and every one of them was drawn, numbered, and
+  // laid over the others -- a wall of coloured lines and labels through
+  // which the two that matter cannot be seen at all. What the picture
+  // is for is "did we pick the right chain", and that question is
+  // answered by the ones that PASSED.
+  //
+  // They are one click away rather than gone: "why was that one
+  // refused" is the second question, always, and it needs them.
+  const [showRefused, setShowRefused] = useState(false);
+  const [showDots, setShowDots] = useState(false);
   if (!view.image_url) {
     return (
       <div className="tiny muted" style={{ margin: "8px 0" }}>
@@ -8302,6 +8314,10 @@ function DescentWindow({ view, colors }) {
     );
   }
   const chosen = (view.chains || []).find((c) => c.chosen);
+  const nPassed = (view.chains || [])
+    .filter((c) => !c.chosen && !c.why?.length).length;
+  const nRefused = (view.chains || [])
+    .filter((c) => !c.chosen && c.why?.length).length;
   return (
     <div style={{ margin: "10px 0" }}>
       <div className="tiny" style={{ marginBottom: 3 }}>
@@ -8343,13 +8359,15 @@ function DescentWindow({ view, colors }) {
         {/* THE HEAT MAP: every detection in the window. This is the
             prior question — was the ball SEEN at all — and it is
             answerable only from the dots, not from the chains. */}
-        {(view.dots || []).map((d, i) => (
+        {showDots && (view.dots || []).map((d, i) => (
           <circle key={`d${i}`} cx={d.x} cy={d.y} r={3}
                   fill="rgba(255,255,255,0.55)">
             <title>f{d.f}</title>
           </circle>
         ))}
-        {(view.chains || []).filter((c) => !c.chosen).map((c, i) => (
+        {(view.chains || [])
+          .filter((c) => !c.chosen && (showRefused || !c.why?.length))
+          .map((c, i) => (
           <g key={`c${i}`}>
             <polyline
               points={(c.points || []).map((q) => `${q.x},${q.y}`).join(" ")}
@@ -8424,6 +8442,32 @@ function DescentWindow({ view, colors }) {
       </svg>
       <div className="tiny muted" style={{ marginTop: 2 }}>
         {view.reason}
+      </div>
+      {/* WHAT IS BEING HIDDEN, AND HOW TO GET IT BACK. A picture that
+          quietly drops most of what it knows is worse than a cluttered
+          one -- the counts say exactly what is not on screen. */}
+      <div className="tiny muted row" style={{ gap: 10, marginTop: 2,
+                                               flexWrap: "wrap" }}>
+        <span>
+          showing {nPassed} chain(s) that passed every gate
+          {chosen ? ", the one this swing used in green" : ""}
+        </span>
+        {nRefused > 0 && (
+          <button type="button" className="ghost small"
+                  style={{ width: "auto", padding: "0 6px" }}
+                  onClick={() => setShowRefused((v) => !v)}
+                  title="Every chain the sweep considered and turned down, in the colour of the gate that refused it. Off by default because there are usually hundreds and they bury the ones that matter.">
+            {showRefused ? "hide" : "show"} {nRefused} refused
+          </button>
+        )}
+        {(view.dots || []).length > 0 && (
+          <button type="button" className="ghost small"
+                  style={{ width: "auto", padding: "0 6px" }}
+                  onClick={() => setShowDots((v) => !v)}
+                  title="Every detection in the window, chain or not. This answers the prior question — was the ball SEEN at all — which the chains cannot.">
+            {showDots ? "hide" : "show"} detections
+          </button>
+        )}
       </div>
     </div>
   );
