@@ -2793,7 +2793,11 @@ def find_descents(
         if bend > _bend_bar:
             _why.append("bend")
             _rej(pts, f"bends {round(bend, 2)}px, limit {_bend_bar}px"
-                      + (f" for a {len(pts)}-point chain" if _short else ""),
+                      + (f" for a {len(pts)}-point chain" if _short else "")
+                      + (f" — measured over the {len(_shape)} points "
+                         f"before it touched down; with the touchdown it "
+                         f"is {round(bend_all, 2)}px"
+                         if len(_shape) != len(pts) else ""),
                  drop_px=int(drop), fall_rate=round(rate, 3),
                  bend_px=round(bend, 2))
         # HOW FAR OFF VERTICAL, and HOW FAR IT ACTUALLY FELL.
@@ -2938,6 +2942,12 @@ def find_descents(
             "drop_px": int(round(drop)),
             "fall_rate": round(rate, 3),
             "bend_px": round(bend, 2),
+            # The same measurement over the whole chain,
+            # touchdown included, so a row can say what the
+            # arriving point was doing to the number that
+            # judged the flight.
+            "bend_all_px": round(bend_all, 2),
+            "n_bend_points": len(_shape),
             "step_px": round(step_med, 2),
             "step_back": round(step_back, 2),
             "sources": sorted({q.get("src") for q in kept if q.get("src")}),

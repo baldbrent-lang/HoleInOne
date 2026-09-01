@@ -9246,8 +9246,14 @@ function AscentProduceModal({ state, onClose }) {
                           <b>{z.fall_px}px</b>
                         </td>
                         <td>{z.fall_rate}</td>
-                        <td title={z.bend_limit_px != null
-                          ? `limit ${z.bend_limit_px}px` : ""}>
+                        <td title={(z.bend_limit_px != null
+                          ? `limit ${z.bend_limit_px}px for a ${z.n_points}-point chain`
+                          : "")
+                          + (z.bend_all_px != null
+                             && z.n_bend_points != null
+                             && z.bend_all_px !== z.bend_px
+                            ? ` — measured over the ${z.n_bend_points} points before it touched down; with the touchdown the chain bends ${z.bend_all_px}px. Arriving is a change of direction, so that one point sits off the aerial line and an rms is a poor place for a single outlier.`
+                            : "")}>
                           {z.bend_px}
                           {z.bend_limit_px != null && (
                             <span className="muted"> /{z.bend_limit_px}</span>
