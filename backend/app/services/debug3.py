@@ -3295,7 +3295,15 @@ ASCENT_MIN_RISE_FRAC = 0.132     # of frame height -- 95px at 720
 # where a club moving steadily has the two nearly equal. If the 0.44
 # ascent turns out to have had a quick foot, peak is the kinder bar and
 # the numbers to move to it will be sitting in the table.
-ASCENT_RATE_LO = 1.2             # frame-heights per second, rising
+#
+# LOWERED 1.2 -> 1.0 by the operator. The bar above was set from five
+# measurements on one clip and has been refusing chains since. Note what
+# this does and does not recover: the 0.44 ascent described above is
+# still refused, because 0.44 is nowhere near 1.0 -- what moves is the
+# band between, the chains rising at 1.0 to 1.2 frame-heights a second
+# that the old bar cut by a whisker. That is the shape of a bar set on
+# a small sample: the losses cluster just underneath it.
+ASCENT_RATE_LO = 1.0             # frame-heights per second, rising
 # HOW STRAIGHT A STEP MUST STAY to still be the same ball.
 #
 # `_rising_tail` keeps the run at the end of a chain where every step
