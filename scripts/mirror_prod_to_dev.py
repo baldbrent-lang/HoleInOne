@@ -24,6 +24,18 @@ Environment variables:
   DEV_ADMIN_PASSWORD (optional) dev admin password, if different from prod
   TEE_ONLY           set to 1 to mirror tee clips only (skip green) —
                      faster, and enough to test detection + the tracer
+  It also carries three things across that are not clips, because dev
+  behaving unlike prod on the same footage defeats the point of
+  mirroring it at all:
+
+    * each camera's first-frame wall clock, so the tee/green offset is
+      measured rather than assumed;
+    * the hole number, so a mirrored upload knows which green it is of;
+    * prod's green->tee CALIBRATION for each hole (and its flagstick),
+      re-keyed on the way over. Without that the tracer has no way to
+      place a landing in the tee frame and stops in mid-air. A hole
+      already calibrated in dev is never overwritten.
+
   LIMIT              mirror only the N most recent events. Prod has
                      hundreds going back to the first camera ever set
                      up, and pulling them oldest-first spends an hour on
@@ -171,6 +183,107 @@ def _backfill_clocks(events: list) -> None:
               f"tee/green start stamps they were uploaded without\n")
 
 
+def _mirror_view_maps(events: list) -> None:
+    """Copy prod's green->tee calibration for every hole being mirrored.
+
+    THE MAPPING IS THE DIFFERENCE BETWEEN A TRACER THAT REACHES THE
+    LANDING AND ONE THAT STOPS IN MID-AIR. The landing is marked on the
+    GREEN camera, and putting it in the tee frame -- which is where the
+    line is drawn -- needs a homography between the two views. Without
+    one the produce has nothing to aim at and draws only the tracked
+    ascent.
+
+    Dev never had those. They live in `course.view_maps` on the prod
+    database and this script copies clips, so every hole had to be
+    re-calibrated by hand in dev to test the very thing the calibration
+    feeds -- on footage whose mapping prod had already fitted.
+
+    RE-KEYED ON THE WAY OVER. A prod upload has a CameraEvent, so its
+    map is filed under `cam:<tee>-<green>`; a mirrored upload has none
+    and resolves to `hole:<n>`. Copying the record verbatim would file
+    it under a key nothing in dev ever looks up. So the POINTS are sent
+    to dev's own calibrate endpoint against an upload of that hole, and
+    dev fits and files it under whatever key it resolves for itself.
+    That also means dev re-runs the same held-out check prod did rather
+    than trusting a number that travelled.
+
+    Never overwrites: a hole dev has already calibrated is left alone,
+    because that one may have been fitted on purpose.
+    """
+    holes = {}
+    for e in events:
+        h = e.get("hole_number")
+        if h:
+            holes.setdefault(int(h), []).append(f"event-{e['id']}-tee.mp4")
+    if not holes:
+        return
+    try:
+        _prod = _get_json(f"{PROD}/api/admin/long-uploads?limit=200", PROD_PW)
+        _dev = _get_json(f"{DEV}/api/admin/long-uploads?limit=500", DEV_PW)
+    except Exception as ex:  # noqa: BLE001
+        print(f"(calibration copy skipped: {ex})")
+        return
+
+    # Which prod upload to read each hole's map from: any dual-camera one
+    # the source filed under that hole.
+    _prod_by_hole = {}
+    for r in _prod or []:
+        h = (r.get("source") or {}).get("hole_number")
+        if h and r.get("dual_camera"):
+            _prod_by_hole.setdefault(int(h), r["id"])
+    # ...and which dev upload to write it against: one this script made,
+    # matched by the filename it uploaded under.
+    _dev_by_hole = {}
+    for r in _dev or []:
+        for h, names in holes.items():
+            if r.get("tee_original_filename") in names:
+                _dev_by_hole.setdefault(h, r["id"])
+
+    copied, skipped = 0, 0
+    for h in sorted(holes):
+        _pid, _did = _prod_by_hole.get(h), _dev_by_hole.get(h)
+        if _pid is None or _did is None:
+            continue
+        try:
+            _src = _get_json(
+                f"{PROD}/api/admin/long-uploads/{_pid}/view-map", PROD_PW)
+            _vm = (_src or {}).get("view_map") or {}
+            if not _vm.get("homography") or not _vm.get("points"):
+                continue
+            _dst = _get_json(
+                f"{DEV}/api/admin/long-uploads/{_did}/view-map", DEV_PW)
+            if ((_dst or {}).get("view_map") or {}).get("homography"):
+                skipped += 1
+                continue
+            _post_json(f"/api/admin/long-uploads/{_did}/view-map", {
+                "points": _vm["points"],
+                "green_size": _vm.get("green_size"),
+                "tee_size": _vm.get("tee_size"),
+            })
+            copied += 1
+            print(f"  hole {h}: copied prod's calibration "
+                  f"({len(_vm['points'])} pairs) onto dev upload {_did}")
+            # THE FLAG COMES TOO. It is stored in green pixels beside the
+            # mapping and is what the distance-to-pin measurement reads;
+            # without it dev can aim a tracer but not say how close the
+            # shot finished.
+            _pin = _vm.get("pin_green") or (_src or {}).get("pin_green")
+            if _pin:
+                try:
+                    _post_json(
+                        f"/api/admin/long-uploads/{_did}/hole-pin",
+                        {"green": list(_pin)})
+                    print(f"  hole {h}: and its flagstick at "
+                          f"{int(_pin[0])},{int(_pin[1])}")
+                except Exception as ex:  # noqa: BLE001
+                    print(f"  hole {h}: flag not copied: {ex}")
+        except Exception as ex:  # noqa: BLE001
+            print(f"  hole {h}: calibration not copied: {ex}")
+    if copied or skipped:
+        print(f"calibration: {copied} hole(s) copied from prod, "
+              f"{skipped} left alone (already calibrated in dev)\n")
+
+
 def _post_upload(fields: dict, files: dict) -> int:
     boundary, body = _multipart(fields, files)
     req = urllib.request.Request(
@@ -289,6 +402,12 @@ for i, e in enumerate(todo, 1):
         print(f"{tag}: FAILED HTTP {ex.code} {ex.reason}: {body}")
     except Exception as ex:  # noqa: BLE001
         print(f"{tag}: FAILED {ex}")
+
+# LAST, because it writes against dev uploads and some of them were
+# only created a moment ago. Considers every hole in the source listing,
+# not just the ones mirrored this run, so a hole imported before this
+# existed still picks its calibration up on the next pass.
+_mirror_view_maps(events)
 
 print(f"\nDone — mirrored {ok}/{len(todo)} new event(s) into dev. "
       f"Re-run anytime to pull new ones (state in {STATE}).")
