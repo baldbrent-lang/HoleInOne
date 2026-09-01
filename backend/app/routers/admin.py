@@ -18842,10 +18842,14 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
     rep["ascents"] = _asc
     _stage(1, "Balls leaving the tee",
            "One frame-difference pass over the band above the golfers, "
-           "every frame. A chain counts as a ball if it rises far enough, "
-           "fast enough and straight enough -- straightness alone is not "
-           "sufficient, because the worst false positive measured was a "
-           "dead-straight 25-point chain that was not a ball. "
+           "every frame, at scan level "
+           + str(sweep.get("sens") or "?")
+           + " of 3 -- the same depth the map's Scan harder button "
+           "reaches, run first rather than second. A chain counts as a "
+           "ball if it rises far enough, fast enough and straight enough "
+           "-- straightness alone is not sufficient, because the worst "
+           "false positive measured was a dead-straight 25-point chain "
+           "that was not a ball. "
            + str(sweep.get("reason") or ""),
            len(_asc), "seen leaving", time.perf_counter() - _t)
     if not _asc:

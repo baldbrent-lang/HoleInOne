@@ -4113,7 +4113,29 @@ def sweep_ascents(
     input_path: Path,
     fps: float,
     roi: dict | None = None,
-    sens: int = 2,
+    # THE DEEP LEVEL, ALWAYS -- not level 2 with a level 3 retry behind
+    # it. The operator's map has climbed to "Scan harder" often enough
+    # on ascents that the deep level is the one that works, and running
+    # it second means paying for the shallow pass first and then paying
+    # again.
+    #
+    # What level 3 changes here is the diff threshold (8 -> 5) and the
+    # blob area cap (900 -> 1400). Neither costs what it would on the
+    # green view, because this sweep runs `three_frame=True`: a blob has
+    # to appear in the SAME place in the diff against the frame before
+    # AND the frame after, which is a condition random sensor and
+    # compression noise almost never meets. A lower threshold on an AND
+    # of two diffs buys dim balls without buying speckle.
+    #
+    # The one thing to watch is SWEEP_PER_FRAME, which stays at 10 at
+    # every level: if level 3 puts more than ten qualifying blobs in the
+    # band on a frame, the surplus is dropped largest-first and the ball
+    # is competing on size. On a tee camera that is the safe direction --
+    # the ball has just been struck, so it is near, fast and smeared,
+    # and it is one of the BIGGER things crossing a band of sky. It is
+    # the green view, where the ball is forty yards off and three pixels
+    # across, that a largest-first cut can starve.
+    sens: int = 3,
     min_points: int = ASCENT_MIN_POINTS,
 ) -> dict:
     """Every ball leaving the tee in the WHOLE video, found from above.
@@ -4134,8 +4156,11 @@ def sweep_ascents(
     Returns {ok, ascents, n_tracks, n_dets, seconds, band, reason}.
     Never raises.
     """
+    # `sens` is reported because "the sweep found two of three" is a
+    # different fact at each level, and a report that does not say which
+    # one ran cannot be compared with the one from last week.
     out = {"ok": False, "ascents": [], "n_tracks": 0, "n_dets": 0,
-           "seconds": 0.0, "band": None, "reason": None}
+           "seconds": 0.0, "band": None, "reason": None, "sens": int(sens)}
     if not HAS_CV:
         out["reason"] = "opencv not installed"
         return out
