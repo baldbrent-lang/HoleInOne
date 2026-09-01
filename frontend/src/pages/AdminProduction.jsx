@@ -11438,6 +11438,21 @@ function PlotHeatCanvas({
     if (f == null) return null;
     return Math.max(frameLo, Math.min(frameHi, f + d));
   });
+  // JUMP STRAIGHT TO A FRAME. The steppers move by one and ten, which
+  // is right for looking around where you already are and useless for
+  // getting somewhere: a frame number read off the descent table is
+  // hundreds of frames away, and reaching it meant holding ‹‹ down.
+  // Every number worth typing here comes from somewhere else on the
+  // screen — a chain's point list, a landing frame, an impact frame.
+  const [goFrame, setGoFrame] = useState("");
+  const goToFrame = () => {
+    const n = parseInt(goFrame, 10);
+    if (!Number.isFinite(n)) return;
+    // Clamped rather than refused: a frame outside this clip's window
+    // is a number typed from the wrong swing, and landing on the
+    // nearest end of the range shows that faster than an error does.
+    setViewFrame(Math.max(frameLo, Math.min(frameHi, n)));
+  };
 
   // MOG2 dots, hideable. They are the point of this screen and they are
   // also what covers the picture: on a frame where the ball is a
@@ -12150,6 +12165,30 @@ function PlotHeatCanvas({
             for being able to see one instant properly. */}
         {canStep && viewFrame != null && (
           <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+            {/* GO TO A FRAME, to the left of the steppers. Enter works
+                as well as the button; the field is narrow because a
+                frame number is four or five digits. */}
+            <input
+              type="text"
+              inputMode="numeric"
+              value={goFrame}
+              onChange={(e) => setGoFrame(e.target.value.replace(/\D/g, ""))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); goToFrame(); }
+              }}
+              placeholder={`${frameLo}–${frameHi}`}
+              title={`Type a frame number and press Go (or Enter) to jump straight to it. This clip covers f${frameLo}–f${frameHi}.`}
+              style={{
+                ...zoomBtn, width: 84, padding: "0 6px", textAlign: "center",
+                fontSize: 12, fontWeight: 600, cursor: "text",
+              }}
+            />
+            <button type="button"
+                    style={{ ...zoomBtn, width: "auto", padding: "0 8px" }}
+                    disabled={!goFrame}
+                    onClick={goToFrame}
+                    title="Jump to the frame typed on the left">Go</button>
+            <span style={{ width: 6 }} />
             <button type="button" style={{ ...zoomBtn, width: 28 }}
                     disabled={viewFrame <= frameLo}
                     onClick={() => stepFrame(-10)}
