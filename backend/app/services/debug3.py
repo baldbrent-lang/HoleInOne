@@ -2077,6 +2077,35 @@ def detect_movers_by_diff(
     return out
 
 
+# OVER HOW MANY FRAMES A FALL RATE IS WORTH MEASURING. See
+# `_descent_step_consistency`: between adjacent detections the number is
+# dominated by where the centroid landed inside the ball's motion smear;
+# over three frames it is the ball.
+DESCENT_RATE_SPAN_FRAMES = 3
+
+
+def _descent_rates(pts, span: int) -> list:
+    """Per-frame fall rates measured over at least `span` frames.
+
+    Walks a second index forward until it is far enough ahead to be a
+    measurement rather than a difference of two jitters, then divides by
+    the frames actually spanned -- so a chain with holes in it is
+    measured on the same footing as a dense one.
+    """
+    rates: list = []
+    j = 0
+    for i in range(len(pts)):
+        j = max(j, i + 1)
+        while (j < len(pts)
+               and int(pts[j]["frame"]) - int(pts[i]["frame"]) < span):
+            j += 1
+        if j >= len(pts):
+            break
+        rates.append((float(pts[j]["y"]) - float(pts[i]["y"]))
+                     / float(int(pts[j]["frame"]) - int(pts[i]["frame"])))
+    return rates
+
+
 def _descent_step_consistency(pts):
     """(median per-frame drop, worst BACKWARD move as a fraction of it).
 
@@ -2101,10 +2130,45 @@ def _descent_step_consistency(pts):
     """
     if len(pts) < 3:
         return 0.0, 999.0
-    steps = []
-    for a, b in zip(pts, pts[1:]):
-        df = max(1, int(b["frame"]) - int(a["frame"]))
-        steps.append((float(b["y"]) - float(a["y"])) / df)
+    # MEASURED OVER THREE FRAMES, NOT BETWEEN NEIGHBOURS.
+    #
+    # The claim is about the ball's RATE, and a rate taken from two
+    # adjacent detections is mostly centroid jitter. A struck ball is
+    # motion-blurred over roughly its own length per frame, and the
+    # three-frame difference lights the part of that smear which is not
+    # in the frames either side -- a fragment that sits sometimes at the
+    # leading edge and sometimes at the trailing one. The centroid then
+    # fails to advance on a frame, and the next frame makes up for it.
+    #
+    # Measured on upload 88 swing 2, a descent the operator could see
+    # plainly, adjacent steps came out:
+    #
+    #     0  16  16  1  16  28  1  40   px/frame
+    #
+    # A ball falling 16px a frame cannot move 0 or 1, so those three are
+    # the jitter, not the ball. Against them this scored 1.66 and the
+    # chain was refused as UNEVEN. Over three-frame spans the same chain
+    # reads 12 16 11 18 24 19 and scores 0.29, which is what the eye
+    # sees.
+    #
+    # Three, specifically. Two still scores it 0.47 and refuses it; four
+    # smooths so hard that speckle passes as well -- on synthetic chains
+    # built to the pattern in the docstring above (4, 30, 5, 28...) a
+    # four-frame span scores 0.00 and lets every one of them through,
+    # while three still refuses them at 0.53-0.59.
+    # ...BUT ONLY WHERE THERE IS ENOUGH CHAIN TO SPAN. A four-point
+    # chain over four frames yields a single three-frame rate, and one
+    # number has no rhythm to be inconsistent with -- worse, taking the
+    # two-frame fallback there averages a speckle chain's alternation
+    # into a straight line and lets it through. Measured on a synthetic
+    # 4/28/5: the span reading is 0.00 and the adjacent reading 4.60.
+    # So a short chain is judged the old way, where its point count is
+    # the gate that really matters anyway.
+    steps = _descent_rates(pts, DESCENT_RATE_SPAN_FRAMES)
+    if len(steps) < 3:
+        steps = [(float(b["y"]) - float(a["y"]))
+                 / max(1, int(b["frame"]) - int(a["frame"]))
+                 for a, b in zip(pts, pts[1:])]
     ordered = sorted(steps)
     # A TRUE MEDIAN. `steps[len // 2]` is the upper of the two middle
     # values on an even count, which on a chain that is ramping -- every
