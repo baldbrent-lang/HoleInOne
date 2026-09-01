@@ -1718,9 +1718,9 @@ DESCENT_FALL_JITTER_PX = 2.0
 # floor became four would mean nothing ever answered to them.
 DESCENT_SHORT_POINTS = 5
 # Never looser than the bar it is supposed to tighten: the general one
-# is 2.0 now, and a "stricter" 2.5 would have let the shortest chains
-# bend further than the long ones.
-DESCENT_SHORT_BEND_PX = 2.0
+# is 1.0 now, and a "stricter" number above that would let the shortest
+# chains bend further than the long ones.
+DESCENT_SHORT_BEND_PX = 1.0
 DESCENT_SHORT_MIN_DENSITY = 0.75
 DESCENT_SHORT_MAX_TILT_DEG = 35.0
 
@@ -2452,13 +2452,21 @@ def find_descents(
     # descent is straighter than that -- and the 5.3 in that sample was
     # never confirmed to be a ball.
     #
-    # WHAT THIS COSTS: on the upload this was tightened from, chains
-    # measuring 4.21, 4.47 and 4.8px of bend were being ACCEPTED, and
-    # every one of them is now refused. One of those was the descent
-    # swing 1 used, which is the point -- it was the wrong chain. If a
-    # descent a person can see starts coming back refused on "bend",
-    # this is the number that did it and 3.0 is the obvious next stop.
-    max_bend_px: float = 2.0,
+    # ...AND THEN ONE PIXEL OF IT. The 4.21, 4.47 and 4.8 that prompted
+    # the first tightening turned out not to be flights at all: bend was
+    # being measured over the whole tracked chain, bounce and roll
+    # included. Measured on the flight, the real descents on that upload
+    # come in at 0.18, 0.43, 0.50, 0.51 and 0.61 -- so a bar of 1.0 sits
+    # clear above every one of them and well below anything that is not
+    # a ball falling. A chain of unrelated speckle scores 18.65 and one
+    # bent along its whole length 3.67.
+    #
+    # If a descent a person can plainly see starts coming back refused
+    # on "bend", this is the number that did it. But check the SHAPE
+    # window first -- the gate measures `kept`, the part still falling,
+    # and a chain whose landing walk-back went wrong will be judged on
+    # points that are not the flight.
+    max_bend_px: float = 1.0,
     merge_sec: float = 1.0,
     max_events: int = 20,
     # WHICH DETECTORS TO RUN. Measured on 200 frames of 720p with a ball

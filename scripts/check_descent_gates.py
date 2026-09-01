@@ -71,7 +71,7 @@ def run(pts, fps=30.0, frame_h=720):
     ns.update({"pts": pts, "_fps": fps, "frame_h": frame_h,
                "min_drop": 0.05 * frame_h, "min_points": g["MIN_DESCENT_POINTS"],
                "rate_lo": g["DESCENT_RATE_LO"], "rate_hi": g["DESCENT_RATE_HI"],
-               "max_bend_px": 2.0, "_rej": lambda *a, **k: None,
+               "max_bend_px": 1.0, "_rej": lambda *a, **k: None,
                "frame_w": 1280, "edge_px": 0.04 * 720,
                "land": pts[-1], "kept": pts,
                "_by_frame": {}, "dets": [], "tk": {},
