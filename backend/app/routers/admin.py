@@ -6551,6 +6551,13 @@ def auto_detect_long_upload(upload_id: int, db: Session = Depends(get_db)):
 FLIGHT_LO_SEC = 5.0
 FLIGHT_HI_SEC = 8.0
 
+# HOW LONG THE BALL IS VISIBLY COMING DOWN before it lands. The two
+# constants above bracket the touchdown; the green search needs the
+# approach as well, because a descent chain is built out of the frames
+# BEFORE the ball arrives. See the window block in `_ascent_descents`
+# for the swing this was measured on.
+ASCENT_DESCENT_LEAD_SEC = 2.0
+
 
 def _clip_start_instant(db, row, which: str):
     """When a clip's FIRST frame happened, as a datetime (or None).
@@ -19260,7 +19267,36 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         if _imp is None:
             continue
         _base = float(_imp) / float(fps or 30.0) - float(out["delta_sec"])
-        _lo, _hi = _base + FLIGHT_LO_SEC, _base + FLIGHT_HI_SEC
+        # A WINDOW ON THE LANDING IS NOT A WINDOW ON THE DESCENT.
+        #
+        # FLIGHT_LO_SEC/FLIGHT_HI_SEC bracket the instant the ball comes
+        # DOWN, and this searched exactly that: 5.0s to 8.0s after the
+        # strike. But the thing being looked for is a CHAIN, and a chain
+        # needs the second before the landing as much as the landing
+        # itself -- that is where the ball is falling through open sky
+        # with points to link.
+        #
+        # Measured on upload 88 swing 1: the operator plotted the
+        # descent at green f1364-f1381, the window opened at f1374, and
+        # ten of those eighteen frames were outside it. The ball touched
+        # down 0.22s after the window opened, so what was searched was
+        # almost entirely the empty green AFTER the shot. The report
+        # said NO BALL FOUND over 975 detections and the frames listed
+        # on the card looked right, because the landing really was
+        # inside them -- only the descent was not.
+        #
+        # So the floor drops by a descent's worth of flight. A tee shot
+        # is visibly falling for roughly the last third of its time in
+        # the air; on the shortest flight this band admits (5.0s) that
+        # is about 1.7s, and two seconds covers it with room for the
+        # timing to be a little off.
+        #
+        # The ceiling is left alone. It bounds the LANDING, and a tail
+        # past it would only buy frames of the ball sitting still --
+        # every one of them a chance for a wind-shaken branch to be
+        # weighed against the real thing.
+        _lo = _base + FLIGHT_LO_SEC - ASCENT_DESCENT_LEAD_SEC
+        _hi = _base + FLIGHT_HI_SEC
         c["landing_window_sec"] = [round(_lo, 2), round(_hi, 2)]
         _flo = max(0, int(_lo * _gfps))
         _fhi = int(_hi * _gfps)
