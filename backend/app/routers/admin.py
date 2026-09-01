@@ -16969,18 +16969,10 @@ def debug3_status(upload_id: int):
 # a candidate is a real swing, and proof should cost more than a hint.
 # Four linked points that fall and barely bend is not something the tree
 # line produces.
-# HOW FAR BACK FROM THE SWEEP'S ESTIMATE to look for the ball that was
-# sitting there. The estimate is linear and lands early, by about a
-# second and a half on the one measured, so the window reaches back
-# well past it. There is no lookahead: the far end of the window is the
-# frame the sweep saw the ball airborne, and it cannot have been on the
-# tee after that.
-ASCENT_SPOT_LOOKBACK_SEC = 6.0
-# HOW CLOSE TO THE ESTIMATE still counts as "this chain's ball". Wide,
-# because the estimate it is measured against is a linear run-back that
-# the sweep itself flags as approximate -- this is a contention bar, not
-# an identification.
-ASCENT_SPOT_NEAR_PX = 80
+# (The two constants that sized the ascent path's resting-ball scan --
+# how far back to look, and how near the estimate a spot had to sit to
+# be this chain's ball -- went with the scan itself. See
+# `_ascent_tee_spot`.)
 
 BALLSCAN_DESCENT_MIN_POINTS = 4
 # How straight. `find_descents` measures the chain's bend as the rms of
@@ -18874,20 +18866,17 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
         _entry.update(_spot)
         rep["clips"].append(_entry)
     _n_spot = sum(1 for c in rep["clips"] if c.get("ball"))
-    _n_est = sum(1 for c in rep["clips"] if c.get("estimated"))
     _stage(2, "Tee spot and impact frame",
-           "The sweep says roughly WHERE and WHEN each ball left, but its "
-           "run back to the tee line is linear while a struck ball slows "
-           "as it climbs, so it lands early. The resting-ball scan is run "
-           "in a short window around that estimate -- seconds of footage "
-           "rather than the whole clip -- and the ball it finds sitting "
-           "there is the tee spot, with the frame it went as the impact "
-           "frame. When the ball was never visible sitting there -- a "
-           "playing partner standing in the line is enough -- the chain's "
-           "own run back to the tee line is used instead, marked `est`: "
-           "early rather than exact, and better than not producing a shot "
-           "the sweep watched fly."
-           + (f" {_n_est} of these are estimated." if _n_est else ""),
+           "Each chain is run back along its own heading to the tee line. "
+           "Where it crosses is the tee spot and when it crosses is the "
+           "impact frame. Both are estimates and both are early -- the "
+           "run back is linear where a struck ball decelerates -- which "
+           "is the harmless direction for the frame the tracer starts "
+           "on. The resting-ball scan that used to run here is gone: it "
+           "found nothing whenever a playing partner stood in the line, "
+           "its watch often failed to conclude on a tee that stays "
+           "bright after the ball has left, and it was the most "
+           "expensive step in the run.",
            _n_spot, "located", time.perf_counter() - _t)
 
     # ── 3. where each one came down ───────────────────────────────────
@@ -18913,7 +18902,7 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
         rep["ok"] = _n_spot > 0
         rep["reason"] = (
             f"{len(_asc)} ball(s) seen leaving, {_n_spot} with a tee spot"
-            + (f" ({_n_est} estimated)" if _n_est else "")
+
             + " — nothing was produced, and the upload's existing clips "
               "were left alone")
         log.info("ascent find upload=%s: %s in %.1fs", row.id, rep["reason"],
@@ -19681,31 +19670,33 @@ def _ascent_derive_delta(clips, events, fps, g_fps):
     return _delta, _n, _cand
 
 
-def _ascent_spot_fallback(out: dict, ascent: dict, seen, why: str) -> dict:
-    """Produce anyway, from the chain alone, and say that is what happened.
+def _ascent_spot_from_chain(out: dict, ascent: dict, seen,
+                            why: str = "") -> dict:
+    """The tee spot and the impact frame, worked out from the chain.
 
-    A BALL BEHIND A PERSON IS STILL A BALL THAT LEFT. The resting-ball
-    scan needs to SEE the ball sitting there, and on a busy tee it often
-    cannot -- a playing partner stands in the line, and the whole window
-    passes with the spot covered. Refusing to produce then throws away a
-    shot the sweep watched fly, on the grounds that it could not also
-    watch it wait.
+    THE CHAIN ANSWERS BOTH QUESTIONS ALREADY. Run back along its own
+    heading at its foot -- the part nearest the tee, and the only part
+    that says anything about where it came from -- it crosses the tee
+    line at a point on the turf, and it says when it got there. The
+    sweep computed both while it was judging the chain; nothing here is
+    a second search.
 
-    The chain already carries an answer to both questions. It was run
-    back along its own heading to the tee line, which is a point on the
-    turf; and it says when it got there. Neither is as good as seeing
-    the ball -- the run back is linear where a struck ball decelerates,
-    so it lands EARLY -- but early by tens of frames is a usable impact
-    frame, and the alternative on offer is nothing at all.
+    Marked `estimated` throughout, and it means what it says: the run
+    back is linear where a struck ball decelerates, so the frame lands
+    EARLY -- 8 to 23 frames on real ascents, capped by
+    ASCENT_MAX_BACKRUN_SEC. Early is the harmless direction. It is
+    where the drawn line begins, and a tracer that starts a fraction
+    before the ball moves reads as a tracer; one that starts after it
+    has gone reads as a bug.
 
-    Marked `estimated` throughout, because a guess that cannot be told
-    from a measurement is worse than no guess: the report and the modal
-    both show which of the two produced each clip.
+    `why` is prepended when a caller has something to add about how it
+    got here. Empty is the normal case now that this is the only path.
     """
     _x, _y, _f = (ascent.get("from_x"), ascent.get("from_y"),
                   ascent.get("from_frame"))
     if _x is None or _y is None or _f is None:
-        out["reason"] = why + " — and the chain gave no origin to fall back on"
+        out["reason"] = ((why + " — and ") if why else "")\
+            + "the chain gave no origin to work back from"
         return out
     # NEVER AFTER THE BALL IS IN THE AIR. The sweep saw it airborne at
     # `seen`; it was not on the tee at any frame after that, whatever
@@ -19718,140 +19709,51 @@ def _ascent_spot_fallback(out: dict, ascent: dict, seen, why: str) -> dict:
     out["estimated"] = True
     out["watch_concluded"] = False
     out["reason"] = (
-        f"{why} — estimated from the chain instead: it was traced back to "
-        f"{int(_x)},{int(_y)} on the tee line at f{out['impact_frame']}. The "
-        f"run back is linear and a struck ball slows as it climbs, so this "
-        f"is early rather than exact.")
+        ((why + " — ") if why else "")
+        + f"traced back along its own heading to {int(_x)},{int(_y)} on the "
+          f"tee line at f{out['impact_frame']}. The run back is linear and a "
+          f"struck ball slows as it climbs, so this is early rather than "
+          f"exact.")
     return out
 
 
 def _ascent_tee_spot(row, src_path, db, ascent, fps, roi):
     """Where the ball was sitting, and the frame it went.
 
-    The sweep's own estimate of where the chain came from is linear and
-    therefore early -- measured, 72 frames back where the strike was
-    nearer 20. So it is used only to pick a WINDOW, and the resting-ball
-    scan is run inside it. That scan is the expensive one, and this is
-    the whole reason for running the sweep first: it turns a search over
-    six thousand frames into a search over a few hundred.
+    FROM THE CHAIN, ALWAYS. There used to be a resting-ball scan here:
+    a windowed search for a ball-sized thing sitting still on the tee,
+    then a frame-by-frame watch of that spot until it went clear. When
+    it worked it gave an observed departure frame, which is better than
+    any estimate. It did not work often enough to be worth what it
+    cost:
+
+      * on a busy tee the spot is behind a playing partner for the
+        whole window, and the scan finds nothing;
+      * the tee, the divot and the shadow stay bright after the ball
+        has gone, so the watch frequently never concluded and the
+        impact frame came back later than the strike -- upload 645's
+        failure said exactly that;
+      * it was the most expensive step in the run, a seek and a
+        full-rate watch per candidate spot.
+
+    So every swing now uses what the sweep already measured. The chain's
+    heading at its FOOT -- the part nearest the tee -- is run back to
+    the tee line, which gives both a point on the turf and the frame it
+    was there. The gates upstream already require that point to land
+    inside this hole's hitting area, so a chain that traces back to the
+    cart path never gets here.
+
+    It is an estimate and says so. The run back is linear where a struck
+    ball decelerates, so it lands EARLY -- measured on real ascents, 8
+    to 23 frames before the strike, and `ASCENT_MAX_BACKRUN_SEC` caps
+    the rest. Early is the harmless direction: it is where the tracer's
+    line begins, and a line that starts a fraction before the ball moves
+    reads as a tracer, while one that starts after it has gone reads as
+    a bug.
     """
-    out: dict = {"ball": None, "impact_frame": None, "reason": None}
-    _f = ascent.get("from_frame")
-    _seen = ascent.get("first_frame")
-    if _f is None and _seen is None:
-        out["reason"] = "the chain gave no origin to search around"
-        return out
-    _centre = int(_f if _f is not None else _seen)
-    _lo = max(0, _centre - int(ASCENT_SPOT_LOOKBACK_SEC * fps))
-    # THE BALL IS AIRBORNE AT `_seen`, SO IT IS NOT ON THE TEE AFTER IT.
-    #
-    # This ran a second past that, and the extra second was not free:
-    # measured on two of three chains, the spot kept reading as present
-    # after the strike -- the tee, the divot and the shadow are still
-    # bright -- so the watch never concluded, `last_frame` walked to the
-    # ceiling, and the impact frame came out 150 frames LATE on a ball
-    # that had plainly gone. The sweep saw it leave; nothing after that
-    # is evidence about where it was sitting.
-    _hi = int(_seen if _seen is not None else _centre)
-    out["window"] = [_lo, _hi]
-    _x = ascent.get("from_x")
-    try:
-        course = db.get(Course, row.course_id) if row.course_id else None
-        # The expected radius is a fraction of the FRAME HEIGHT, so it
-        # has to be the real one -- a 1080-tall clip measured against an
-        # assumed 720 looks for a ball two-thirds the size it is.
-        _r = _ball_radius_px(course, _hole_for_upload(db, row),
-                             _frame_height(src_path)) if course else None
-        res = ai_scan_resting_balls(
-            src_path, roi=roi, fps=fps, expect_radius_px=_r,
-            window=(_lo, _hi),
-            # A SHORT WATCH, BECAUSE THE SWEEP ALREADY SAID WHEN.
-            #
-            # The default is 500 frames -- ten seconds -- and it has to
-            # be, because a plain scan has no idea when the ball went
-            # and a player can stand over it that long. Here the sweep
-            # has already seen the ball airborne, so the departure is
-            # within a second or two of the last sighting and every
-            # frame watched past that is cost with no answer in it.
-            #
-            # This is the step that dominated: the watch runs at FULL
-            # rate with a seek per spot, so 24 spots x 500 frames is
-            # twelve thousand decodes, which is more than the whole
-            # windowed scan it was supposed to be making cheap.
-            confirm_frames=int(max(60, round(2.0 * float(fps or 30.0)))),
-            # AND WATCH ONLY THE FEW THAT COULD BE IT. The watch is the
-            # cost -- every spot that survives the trim gets one -- and
-            # the chain has already said which part of the tee line the
-            # ball left from. Ranking by that instead of by how long
-            # each sat is also more correct here: the ball this chain
-            # belongs to need not be the one that sat longest.
-            near_x=_x, max_spots=(4 if _x is not None else 24),
-        ) or {}
-    except Exception as exc:  # noqa: BLE001
-        out["reason"] = f"resting-ball scan failed: {exc}"
-        return out
-    spots = list(res.get("spots") or [])
-    if not spots:
-        return _ascent_spot_fallback(
-            out, ascent, _seen,
-            f"no ball found sitting in f{_lo}-{_hi}"
-            + (f": {res.get('reason')}" if res.get("reason") else ""))
-    # THE ONE NEAREST WHERE THE CHAIN CAME FROM, along the tee line. The
-    # window can hold several balls -- a group tees off one after
-    # another from the same strip of turf -- and the chain says which.
-    if _x is not None:
-        # NEAR, THEN CONCLUDED, THEN NEAREST.
-        #
-        # Distance alone picked the wrong spot on a measured chain: a
-        # candidate 20px from the estimate whose watch never concluded
-        # beat one 23px away that was seen to go at f5945 -- three
-        # pixels of a back-extrapolation the code itself calls
-        # approximate, traded for the difference between an observation
-        # and a fallback. So distance decides only whether a spot is in
-        # contention at all; among those that are, a departure the watch
-        # actually saw wins.
-        spots.sort(key=lambda sp: (
-            0 if abs(int(sp["x"]) - int(_x)) <= ASCENT_SPOT_NEAR_PX else 1,
-            0 if sp.get("gone_frame") is not None else 1,
-            abs(int(sp["x"]) - int(_x)),
-        ))
-    else:
-        spots.sort(key=lambda sp: -float(sp.get("held_sec") or 0.0))
-    sp = spots[0]
-    # A SPOT ACROSS THE TEE BOX IS NOT THIS CHAIN'S BALL. The scan
-    # returns whatever it found in the window, and on a busy tee that
-    # can be somebody else's ball forty yards away while this one stayed
-    # hidden behind a playing partner the whole time. Producing from it
-    # would put the tracer on the wrong ball, which is worse than
-    # producing from the chain's own estimate.
-    if _x is not None and abs(int(sp["x"]) - int(_x)) > ASCENT_SPOT_NEAR_PX:
-        return _ascent_spot_fallback(
-            out, ascent, _seen,
-            f"the nearest ball sitting in f{_lo}-{_hi} was at {sp['x']}, "
-            f"{abs(int(sp['x']) - int(_x))}px from where this chain was "
-            f"traced back to")
-    out["ball"] = [int(sp["x"]), int(sp["y"])]
-    _imp = int(sp.get("gone_frame") or sp.get("last_frame") or 0)
-    # CLAMPED TO THE FRAME THE SWEEP SAW IT LEAVE. The watch can fail to
-    # conclude -- the spot goes on reading bright after the strike, and
-    # then `last_frame` is wherever the watch ran out rather than where
-    # the ball went. Measured on two of three chains, that was 150
-    # frames after the ball was already in the air. The sweep's sighting
-    # is an observation, not an estimate, so it wins.
-    out["watch_concluded"] = sp.get("gone_frame") is not None
-    if _seen is not None and _imp > int(_seen):
-        _imp = int(_seen)
-        out["clamped"] = True
-    out["impact_frame"] = _imp
-    out["held_sec"] = sp.get("held_sec")
-    out["from_x"] = _x
-    out["reason"] = (
-        f"ball at {sp['x']},{sp['y']} sat {sp.get('held_sec')}s and went "
-        f"at f{_imp}"
-        + ("" if out["watch_concluded"]
-           else " (the watch never saw the spot go clear; this is the "
-                "frame the sweep first saw the ball airborne)"))
-    return out
+    return _ascent_spot_from_chain(
+        {"ball": None, "impact_frame": None, "reason": None},
+        ascent, ascent.get("first_frame"))
 
 
 def _ball_scan_produce_run(row, src_path, db, progress=None,

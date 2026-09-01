@@ -8753,20 +8753,19 @@ function SwingCard({ n, ascent, view, clip, colors, findOnly }) {
               chain back along its own heading, which is a far weaker
               claim, and nothing on this card said which of the two had
               happened. */}
-          {clip && (clip.ball || clip.estimated) && (
-            <div className="tiny" style={{ marginTop: 4 }}>
-              {clip.estimated ? (
-                <span style={{ color: "#f59e0b" }}>
-                  ⚠ the ball was never seen sitting on the tee — this
-                  spot is worked back from the chain
-                  {clip.spot_reason ? `: ${clip.spot_reason}` : ""}
-                </span>
-              ) : (
-                <span style={{ color: "#3ee37a" }}>
-                  ball seen resting at {clip.ball[0]}, {clip.ball[1]}
-                  {clip.spot_reason ? ` — ${clip.spot_reason}` : ""}
-                </span>
-              )}
+          {/* WHERE THE TRACER STARTS, AND THAT IT IS AN ESTIMATE. This
+              was an amber warning while the resting-ball scan was the
+              normal path and working back from the chain the fallback.
+              The scan is gone, so every swing comes this way and an
+              alarm on every card is just noise -- but the number is
+              still an estimate and the card should not imply it was
+              measured. */}
+          {clip && clip.ball && (
+            <div className="tiny muted" style={{ marginTop: 4 }}>
+              tee spot {clip.ball[0]}, {clip.ball[1]} — traced back from
+              the chain{clip.impact_frame != null
+                ? `, impact f${clip.impact_frame}` : ""}
+              {clip.spot_reason ? ` · ${clip.spot_reason}` : ""}
             </div>
           )}
         </div>
@@ -9238,27 +9237,19 @@ function AscentProduceModal({ state, onClose }) {
                         <td>{a.rate}</td>
                         <td>{a.straightness}</td>
                         <td>{c.ball ? (
-                          <span title={c.reason || ""}>
+                          <span title={c.spot_reason || c.reason || ""}>
                             {c.ball[0]}, {c.ball[1]}
-                            {c.estimated && (
-                              <span className="pill warn"
-                                    style={{ marginLeft: 4 }}
-                                    title="The ball was never seen sitting there — hidden behind a person, most likely. This is where the chain was traced back to on the tee line.">
-                                est
-                              </span>
-                            )}
                           </span>
                         ) : <span className="muted">—</span>}</td>
+                        {/* EVERY ONE OF THESE IS AN ESTIMATE NOW. The
+                            column used to say which were measured and
+                            which were not, because a resting-ball scan
+                            ran first and sometimes answered. It does
+                            not run any more, so the distinction is gone
+                            and marking every row "est" says nothing. */}
                         <td>{c.impact_frame != null ? (
-                          <span title={c.estimated
-                            ? "Estimated: the linear run back to the tee line, which lands early because a struck ball slows as it climbs."
-                            : (c.watch_concluded
-                              ? "Measured: the watch saw the spot go clear and empty."
-                              : "The watch never concluded; this is the frame the sweep first saw the ball airborne.")}>
-                            f{c.impact_frame}
-                            {!c.estimated && !c.watch_concluded && (
-                              <span className="muted"> ~</span>
-                            )}
+                          <span title="Where the chain, run back along its own heading, crosses the tee line. The run back is linear and a struck ball slows as it climbs, so this lands a little early.">
+                            f{c.impact_frame}<span className="muted"> ~</span>
                           </span>
                         ) : <span className="muted">—</span>}</td>
                         <td title={c.landing_reason || ""}>{c.landing_spot ? (
