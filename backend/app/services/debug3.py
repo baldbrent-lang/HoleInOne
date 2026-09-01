@@ -2790,7 +2790,7 @@ def find_descents(
         # landing, which is the whole answer the search produces. It
         # just does not get a vote on how straight the flight was, and
         # only when there is enough chain left to still mean something.
-        _shape = (pts[:-1] if len(pts) > MIN_DESCENT_POINTS else pts)
+        _shape = _descent_flight_shape(pts, int(min_points))
         bend = _path_bend_px(_shape)
         bend_all = _path_bend_px(pts)
         if drop < min_drop:
@@ -3817,6 +3817,50 @@ def _line_offset(axis, p) -> float:
     """Perpendicular distance from a point to an axis, in pixels."""
     mx, my, ux, uy = axis
     return abs((float(p["x"]) - mx) * uy - (float(p["y"]) - my) * ux)
+
+
+def _descent_flight_shape(pts, min_points: int):
+    """The leading run of a chain that is still the ball in the AIR.
+
+    THE END OF A DESCENT CHAIN IS NOT THE DESCENT. The ball arrives, and
+    arriving is a change of direction -- it bounces, or it runs out --
+    so the detections after that moment sit off the line the flight
+    made. Shape gates ask how straight the FLIGHT was, and an rms is a
+    poor place for even one such point: over nine, a single point 14px
+    off scores 4.7px on its own while the eight before it lie within
+    half a pixel.
+
+    Measured on a real chain the operator pointed at, nine points from
+    f2290 to f2302:
+
+        f2290 (535,252) ... f2298 (530,385)   eight points, bend 0.45px
+        f2302 (546,483)                       19.7px off that line
+
+    Judged whole it bends 3.87px and is refused. Judged on the flight it
+    bends 0.45px, which is what the eye sees.
+
+    So points are walked off the END while they are demonstrably not on
+    the line the ones before them make -- the same evidence
+    `_line_inliers` uses, applied where it matters. NOT "trim until the
+    gate passes": that is fitting the answer, and with a four-point
+    floor almost any speckle chain has four points near some line. A
+    point is dropped because it is provably off the flight, or it stays.
+
+    The chain itself is untouched; this is only what the shape gates
+    are measured over. The landing is the last point of the CHAIN, which
+    is exactly the point being excluded here -- it is the answer the
+    search exists to produce, it just does not get a vote on how
+    straight the flight that reached it was.
+    """
+    _keep = list(pts)
+    while len(_keep) > int(min_points):
+        _ax = _line_axis(_keep[:-1])
+        if _ax is None:
+            break
+        if _line_offset(_ax, _keep[-1]) <= DESCENT_LINE_TOL_PX:
+            break
+        _keep = _keep[:-1]
+    return _keep
 
 
 def _line_inliers(pts, tol_px: float, min_points: int):
