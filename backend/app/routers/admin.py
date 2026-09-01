@@ -19334,11 +19334,41 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
         # The colour key and gate order are the same on every pass; the
         # last one to answer carries them out.
         _sweep = {"why_colors": _gd.get("why_colors"),
-                  "why_order": _gd.get("why_order")}
+                  "why_order": _gd.get("why_order"),
+                  # AND THE GATES THEMSELVES. `find_descents` publishes
+                  # what each gate requires; this dict is what the panel
+                  # reads, and dropping the key here meant the block
+                  # explaining the gates never rendered at all.
+                  "gates": _gd.get("gates")}
     out["dets_all"] = _dets
     _sweep["considered"] = sorted(
         _considered, key=lambda z: (len(z.get("why") or []),
                                     -int(z.get("n_points") or 0)))
+    # RENUMBERED ACROSS THE WHOLE TABLE. `find_descents` numbers its own
+    # chains 1..n, and it runs ONCE PER WINDOW -- so a three-swing
+    # upload came back with three chains called #1, three called #2, and
+    # a table whose numbers pointed at nothing in particular. The id has
+    # to be unique over the list the table actually renders, which is
+    # this one, after this sort.
+    #
+    # WHICH SWING'S THREE SECONDS IT FELL IN, on the same row. The
+    # windows are merged before searching, so one search can cover two
+    # swings and a chain in the middle belongs to whichever window
+    # contains it -- sometimes both. Without this the number identifies
+    # the chain but not the picture to look for it in.
+    _wsecs = []
+    for ci, c in enumerate(_clips):
+        _wd = c.get("landing_window_sec")
+        if _wd:
+            _wsecs.append((ci + 1,
+                           max(0, int(float(_wd[0]) * _gfps)),
+                           int(float(_wd[1]) * _gfps)))
+    for _i, _z in enumerate(_sweep["considered"]):
+        _z["id"] = _i + 1
+        _lf = _z.get("last_descent_frame")
+        _z["in_windows"] = ([n for n, a, b in _wsecs
+                             if _lf is not None and a <= int(_lf) <= b]
+                            if _wsecs else [])
     _sweep["n_considered"] = len(_considered)
     _sweep["why_counts"] = _tally
     _sweep["reason"] = " · ".join(_reasons)

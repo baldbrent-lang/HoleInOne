@@ -9127,7 +9127,8 @@ function AscentProduceModal({ state, onClose }) {
                 <table className="tiny" style={{ width: "100%" }}>
                   <thead>
                     <tr>
-                      <th align="left" title="The same number the chain is labelled with in the pictures above.">#</th>
+                      <th align="left" title="The same number the chain is labelled with in the pictures above. Unique across the whole table.">#</th>
+                      <th align="left" title="Which swing's three-second window this chain fell inside — that is the picture to find it in. Blank means it fell outside every swing's window.">swing</th>
                       <th align="left">at</th>
                       <th align="left">pts</th>
                       <th align="left">off line</th>
@@ -9148,6 +9149,9 @@ function AscentProduceModal({ state, onClose }) {
                       <tr key={i}
                           style={{ opacity: (z.why || []).length ? 0.6 : 1 }}>
                         <td><b>{z.id ?? i + 1}</b></td>
+                        <td>{(z.in_windows || []).length
+                          ? z.in_windows.join(", ")
+                          : <span className="muted">—</span>}</td>
                         <td>{z.last_descent_sec != null
                           ? `${z.last_descent_sec}s` : `f${z.first_frame}`}</td>
                         <td title={z.n_points_raw != null
