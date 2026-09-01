@@ -2960,8 +2960,68 @@ def find_descents(
     # picture draws them in, so an accepted chain is never buried under
     # one that failed three gates.
     considered.sort(key=lambda z: (len(z["why"]), -z["n_points"]))
+    # A NUMBER EACH, IN THE ORDER THE TABLE SHOWS THEM -- the same thing
+    # the ascent sweep does, and for the same reason: the picture and the
+    # table are two views of one list of chains, and without a shared
+    # label the only way from a line in the picture to its row is to
+    # count. Assigned after the sort, because the sort is the order the
+    # table renders in.
+    for _i, _z in enumerate(considered):
+        _z["id"] = _i + 1
     out["considered"] = considered
     out["n_considered"] = len(considered)
+    # THE GATES AND THEIR LIMITS, PUBLISHED FROM THE CODE THAT APPLIES
+    # THEM. Every row above says which gate refused it; nothing said
+    # what any gate actually requires, so reading the table meant asking
+    # someone with the source open. Emitted here rather than written
+    # into the page, because a number typed into a UI drifts from the
+    # constant it describes and then quietly lies.
+    _px = int(round(float(min_drop_frac) * frame_h))
+    out["gates"] = [
+        {"key": "points", "limit": f"{min_points}+",
+         "what": "how many linked points the chain has. Fewer than this "
+                 "and the shape gates below mean nothing — three points "
+                 "sit on a line by construction."},
+        {"key": "drop", "limit": f"{_px}px",
+         "what": f"how far it moved down the frame, end to end "
+                 f"({min_drop_frac:g} of the frame height)."},
+        {"key": "rate", "limit": f"{rate_lo}–{rate_hi}",
+         "what": "frame-heights per second. Deliberately wide at the top: "
+                 "these are ANGULAR units, so a ball close to the lens "
+                 "sweeps far faster than the same ball far from it, and a "
+                 "tight ceiling once refused a real landing at 4.5."},
+        {"key": "bend", "limit": f"{max_bend_px}px "
+                                 f"({DESCENT_SHORT_BEND_PX}px under "
+                                 f"{DESCENT_SHORT_POINTS} points)",
+         "what": "rms of x against y. A falling ball is very nearly a "
+                 "straight line; a chain of unrelated speckle is not. "
+                 "Measured: real descents 0.1–5.3px, false ones 17.6 and "
+                 "21.7."},
+        {"key": "tilt", "limit": f"{DESCENT_MAX_TILT_DEG}° "
+                                 f"({DESCENT_SHORT_MAX_TILT_DEG}° under "
+                                 f"{DESCENT_SHORT_POINTS} points)",
+         "what": "how far off vertical it leans. A branch swaying across "
+                 "the frame collects net drop the same way a fall does; "
+                 "this is what tells them apart."},
+        {"key": "uneven", "limit": f"{DESCENT_MAX_STEP_BACK}",
+         "what": "worst backward move in the fall rate, as a fraction of "
+                 "the chain's own median. A fall only ever speeds up. "
+                 "Measured over "
+                 f"{DESCENT_RATE_SPAN_FRAMES}-frame spans, because "
+                 "between adjacent frames the number is mostly where the "
+                 "centroid landed inside the ball's motion blur."},
+        {"key": "sparse", "limit": f"{DESCENT_MIN_DENSITY} "
+                                   f"({DESCENT_SHORT_MIN_DENSITY} under "
+                                   f"{DESCENT_SHORT_POINTS} points)",
+         "what": "points divided by the frames they span. A real descent "
+                 "is seen on most of the frames it crosses."},
+        {"key": "edge", "limit": f"{DESCENT_EDGE_MARGIN_FRAC:g} of the frame",
+         "what": "how close to the frame edge it ran. A chain hugging the "
+                 "border is the picture moving, not a ball."},
+        {"key": "trimmed", "limit": "—",
+         "what": "points were cut off the front of the chain before it "
+                 "was judged, and what remained was too short to judge."},
+    ]
     out["why_colors"] = dict(DESCENT_WHY_COLORS)
     out["why_order"] = list(DESCENT_WHY_ORDER)
     _tally: dict = {}

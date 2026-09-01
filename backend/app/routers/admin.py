@@ -19551,6 +19551,10 @@ def _ascent_window_views(row, src_green, out, clips, g_fps,
                     if _lf is None or not (_flo <= int(_lf) <= _fhi):
                         continue
                     _ch.append({
+                        # THE ROW NUMBER, so the line in the picture and
+                        # the row in the table are the same chain said
+                        # twice rather than two lists to reconcile.
+                        "id": z.get("id"),
                         "points": z.get("points") or [],
                         "why": z.get("why") or [],
                         "why_primary": z.get("why_primary"),

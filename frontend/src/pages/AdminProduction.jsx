@@ -8362,12 +8362,26 @@ function DescentWindow({ view, colors }) {
                       stroke={c.why?.length
                         ? (colors?.[c.why_primary] || "#888") : "#fff"}>
                 <title>
-                  f{q.frame} — {c.why?.length
+                  #{c.id} · f{q.frame} — {c.why?.length
                     ? `refused: ${c.why.join(", ")}`
                     : "passed the gates but lost"}
                 </title>
               </circle>
             ))}
+            {/* ITS ROW NUMBER, ON THE LINE. The table below lists the
+                same chains and until now the only way from one to the
+                other was to count — so "why was THAT one refused" could
+                be asked of the picture and not answered from it. */}
+            {c.id != null && c.points?.length > 0 && (
+              <text x={c.points[0].x + 8}
+                    y={Math.max(12, c.points[0].y - 6)}
+                    fill={c.why?.length
+                      ? (colors?.[c.why_primary] || "#888") : "#fff"}
+                    fontSize={15} fontWeight="700"
+                    stroke="#000" strokeWidth={0.6} paintOrder="stroke">
+                #{c.id}
+              </text>
+            )}
           </g>
         ))}
         {chosen && (
@@ -8398,6 +8412,7 @@ function DescentWindow({ view, colors }) {
                     y={Math.max(18, chosen.points[0].y - 10)}
                     fill="#78ff78" fontSize={20} fontWeight="700"
                     stroke="#000" strokeWidth={0.6} paintOrder="stroke">
+                {chosen.id != null ? `#${chosen.id} · ` : ""}
                 swing {chosen.chosen_swing ?? view.swing}
                 {chosen.n_points ? ` · ${chosen.n_points}pts` : ""}
                 {chosen.fall_px != null ? ` · fell ${chosen.fall_px}px` : ""}
@@ -9059,11 +9074,60 @@ function AscentProduceModal({ state, onClose }) {
             <WhyLegend
               sweep={rep.descents.sweep} texts={DESCENT_WHY_TEXT}
               acceptedText="a ball coming down — green if a swing used it" />
+            {/* WHAT EACH GATE ACTUALLY REQUIRES. The table says which
+                gate refused a chain and the legend says what the gate
+                is called; neither said what it wants, so reading a
+                refusal meant asking someone with the source open. The
+                limits come from the sweep itself rather than being
+                written here, so they cannot drift from the constants
+                that were applied. */}
+            {(rep.descents.sweep?.gates || []).length > 0 && (
+              <details style={{ marginTop: 6 }}>
+                <summary className="tiny muted" style={{ cursor: "pointer" }}>
+                  the gates, and what each one requires
+                </summary>
+                <table className="tiny" style={{ marginTop: 4 }}>
+                  <thead>
+                    <tr>
+                      <th align="left">gate</th>
+                      <th align="left">must be</th>
+                      <th align="left">what it is</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rep.descents.sweep.gates.map((g) => (
+                      <tr key={g.key}>
+                        <td style={{ paddingRight: 8,
+                                     verticalAlign: "top" }}>
+                          <span style={{
+                            display: "inline-block", width: 10, height: 10,
+                            borderRadius: 2, marginRight: 5,
+                            background: rep.descents.sweep
+                              .why_colors?.[g.key] || "transparent",
+                          }} />
+                          <b>{g.key}</b>
+                        </td>
+                        <td style={{ paddingRight: 8, whiteSpace: "nowrap",
+                                     verticalAlign: "top" }}>{g.limit}</td>
+                        <td className="muted">{g.what}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="tiny muted" style={{ marginTop: 4 }}>
+                  A chain must clear every one of these. The
+                  <b> # </b> in the table below is the same number the
+                  chain is labelled with in the pictures above, so a
+                  line you can see has a row you can read.
+                </div>
+              </details>
+            )}
             {(rep.descents.sweep?.considered || []).length > 0 && (
               <div style={{ overflowX: "auto", marginTop: 6 }}>
                 <table className="tiny" style={{ width: "100%" }}>
                   <thead>
                     <tr>
+                      <th align="left" title="The same number the chain is labelled with in the pictures above.">#</th>
                       <th align="left">at</th>
                       <th align="left">pts</th>
                       <th align="left">off line</th>
@@ -9083,6 +9147,7 @@ function AscentProduceModal({ state, onClose }) {
                     {rep.descents.sweep.considered.map((z, i) => (
                       <tr key={i}
                           style={{ opacity: (z.why || []).length ? 0.6 : 1 }}>
+                        <td><b>{z.id ?? i + 1}</b></td>
                         <td>{z.last_descent_sec != null
                           ? `${z.last_descent_sec}s` : `f${z.first_frame}`}</td>
                         <td title={z.n_points_raw != null
