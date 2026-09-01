@@ -2944,7 +2944,28 @@ def find_descents(
 # sitting on and does not return, and that is a fact the tee camera can
 # establish on its own -- no calibration, no green half, no flight
 # window.
-ASCENT_MIN_POINTS = 3
+# FOUR, NOT THREE, AND THE REASON IS THAT THE GATES CANNOT SEE THREE.
+#
+# Everything that follows this floor judges a chain's SHAPE -- how
+# straight it is, how much it bends, how far off vertical it leans --
+# and none of those mean anything at three points. "Bend" is the
+# deviation of the one middle point from the line through the other
+# two, so a three-point chain scores well by construction; tilt is the
+# angle of a two-segment line; rate and density are measured over a
+# span of three frames, where anything moving fast enough passes.
+#
+# Measured on upload 88 swing 2: three points, bend 0.95px against a
+# limit of 1.50, tilt 1.3 degrees, rose 134px -- accepted, produced,
+# and not a ball. It did not pass the gates so much as slip under them.
+# The two real shots on the same clip carry ten and thirteen points: a
+# ball crossing the band gets seen many times, and three is what a
+# bird, a clubhead glint or a ball from the next tee gets.
+#
+# The bend allowance is scaled from this floor
+# (ASCENT_BEND_BASE_PX + per-point), so raising it also tightens every
+# longer chain by a quarter-pixel. Both real ascents above sit at
+# 0.37 and 0.39px against allowances near 4, so there is room.
+ASCENT_MIN_POINTS = 4
 # WHAT SEPARATES A BALL FROM THE REST OF WHAT MOVES UP THERE.
 #
 # Measured on a clip with three known ascents and eleven pieces of

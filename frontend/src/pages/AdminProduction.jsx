@@ -8745,6 +8745,30 @@ function SwingCard({ n, ascent, view, clip, colors, findOnly }) {
           ) : (
             <div className="tiny muted">no picture for this ascent</div>
           )}
+          {/* WAS THE BALL SEEN SITTING THERE, OR WORKED OUT FROM THE
+              CHAIN? The resting-ball scan is the one independent check
+              that a chain came off THIS tee -- a bird, a clubhead
+              glint and a ball from the next tee all fail it. When it
+              cannot see the ball the produce falls back to running the
+              chain back along its own heading, which is a far weaker
+              claim, and nothing on this card said which of the two had
+              happened. */}
+          {clip && (clip.ball || clip.estimated) && (
+            <div className="tiny" style={{ marginTop: 4 }}>
+              {clip.estimated ? (
+                <span style={{ color: "#f59e0b" }}>
+                  ⚠ the ball was never seen sitting on the tee — this
+                  spot is worked back from the chain
+                  {clip.spot_reason ? `: ${clip.spot_reason}` : ""}
+                </span>
+              ) : (
+                <span style={{ color: "#3ee37a" }}>
+                  ball seen resting at {clip.ball[0]}, {clip.ball[1]}
+                  {clip.spot_reason ? ` — ${clip.spot_reason}` : ""}
+                </span>
+              )}
+            </div>
+          )}
         </div>
         <div>
           <div className="tiny muted" style={{ marginBottom: 3 }}>
