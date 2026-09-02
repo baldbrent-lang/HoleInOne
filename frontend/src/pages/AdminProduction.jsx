@@ -8989,24 +8989,6 @@ function AscentProduceModal({ state, adminPassword, onClose }) {
                 </div>
               </details>
             )}
-            {/* AND THE LIMITS ARE EDITABLE, right here. Every gate above
-                was measured on one or two holes, and they generalise
-                less well than they look: a tee camera sitting close and
-                square sees a ball leave at twice the frame-heights per
-                second of one shooting down a long par 5. Tuned for both
-                at once a gate is loose enough to admit junk on the easy
-                hole and still refuse real flights on the hard one.
-                Keyed per camera pair and hole, so nothing here can
-                reach another hole. */}
-            {rep.upload_id && adminPassword && (
-              <details style={{ marginTop: 6 }}>
-                <summary className="tiny muted" style={{ cursor: "pointer" }}>
-                  tune these gates for this hole only
-                </summary>
-                <GateTuning adminPassword={adminPassword}
-                            uploadId={rep.upload_id} />
-              </details>
-            )}
             {(rep.descents.sweep?.considered || []).length > 0 && (
               <div style={{ overflowX: "auto", marginTop: 6 }}>
                 <table className="tiny" style={{ width: "100%" }}>
@@ -9151,6 +9133,29 @@ function AscentProduceModal({ state, adminPassword, onClose }) {
                 reading anything below as a detector problem.
               </div>
             )}
+          </details>
+        )}
+
+        {/* THE LIMITS, EDITABLE — OUTSIDE THE COLLAPSIBLE ABOVE.
+            It was inside it, which meant reaching the tuning required
+            expanding a section of pictures and tables first, and the
+            tuning applies to the ascent gates every bit as much as the
+            descent ones it happened to be filed under. Out here it sits
+            under both, which is what it governs.
+
+            Every gate was measured on one or two holes and they
+            generalise less well than they look: a tee camera sitting
+            close and square sees a ball leave at twice the
+            frame-heights per second of one shooting down a long par 5.
+            Keyed per camera pair and hole, so nothing here reaches
+            another hole. */}
+        {rep.upload_id && adminPassword && (
+          <details style={{ margin: "10px 0" }}>
+            <summary className="small" style={{ cursor: "pointer" }}>
+              Tune these gates for this hole only
+            </summary>
+            <GateTuning adminPassword={adminPassword}
+                        uploadId={rep.upload_id} />
           </details>
         )}
 
