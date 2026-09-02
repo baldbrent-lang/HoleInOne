@@ -144,7 +144,7 @@ from ..services.video import (
 )
 from ..services.intro_overlay import (
     apply_distance_plate, apply_distance_plate_inplace,
-    apply_intro_overlay_inplace,
+    apply_intro_overlay_inplace, placeholder_player_name,
 )
 
 # ── produce phase clock ────────────────────────────────────────────────
@@ -1468,7 +1468,7 @@ def make_clip_vertical(
             log.warning("clip %s vertical overlay: %s", clip_id, _note)
         apply_intro_overlay_inplace(
             out_path,
-            player_name=_pname or "Brent Baldwin",
+            player_name=_pname or placeholder_player_name(clip_id),
             course_name=_cname,
             hole_number=int(clip.hole_number),
             par=_par,
@@ -3515,10 +3515,12 @@ def _process_long_upload_segments(
         try:
             apply_intro_overlay_inplace(
                 fpath,
-                # Default to 'Brent Baldwin' when the clip didn't match a
-                # registered participant — keeps the on-screen graphic
-                # populated instead of showing a blank '—'.
-                player_name=(participant.name if participant else "Brent Baldwin"),
+                # A stand-in when the clip didn't match a registered
+                # participant — keeps the on-screen graphic populated
+                # instead of showing a blank '—'. Seeded on the clip id,
+                # so re-producing this clip shows the same name again.
+                player_name=(participant.name if participant
+                             else placeholder_player_name(clip.id)),
                 course_name=course_name,
                 hole_number=int(clip.hole_number),
                 par=par,
@@ -3550,7 +3552,8 @@ def _process_long_upload_segments(
             if apply_intro_overlay_inplace(
                 fpath,
                 player_name=(
-                    participant.name if participant else "Brent Baldwin"
+                    participant.name if participant
+                    else placeholder_player_name(clip.id)
                 ),
                 course_name=_cname or course_name,
                 hole_number=int(clip.hole_number),
@@ -10303,7 +10306,7 @@ def finalize_wizard_video(
     final URL into edit_metrics.finalized_video_url and returns it.
 
     Optional body keys (override per-call):
-      player_name (str): defaults to None (no name shown).
+      player_name (str): omitted or empty draws a stand-in name.
       hole_number (int): defaults to 1.
     """
     row = db.get(LongVideoUpload, upload_id)
@@ -10500,7 +10503,12 @@ def finalize_wizard_video(
         yardage = _course_yards
     if _note:
         log.warning("finalize %s: %s", upload_id, _note)
-    player_name = payload.get("player_name") or "Brent Baldwin"
+    # The wizard sends whatever is in its name box; empty means nobody
+    # typed one, so a stand-in is drawn. Seeded on the upload, because
+    # the wizard finalizes one clip per upload and re-finalizing after
+    # a graphics tweak must not rename the golfer.
+    player_name = (payload.get("player_name")
+                   or placeholder_player_name(upload_id))
 
     # Target pixel for the 'TO HOLE / N YDS' stake overlay. Pulled
     # from the wizard's saved target on Step 1 (red flag pin). The
@@ -23959,7 +23967,11 @@ def _d3_fast_produce(row, src_path, db, rep, fps, progress=None,
             _intro_ok = apply_intro_overlay_inplace(
                 final,
                 player_name=(
-                    participant.name if participant else "Brent Baldwin"
+                    participant.name if participant
+                    # Seeded on the output filename: unique per swing,
+                    # and already settled by the time we get here, where
+                    # clip.id is not until the session flushes.
+                    else placeholder_player_name(final.name)
                 ),
                 course_name=_cname,
                 hole_number=int(_hole),

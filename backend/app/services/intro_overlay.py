@@ -21,6 +21,7 @@ overlay step breaks.
 from __future__ import annotations
 
 import logging
+import random
 import shutil
 import subprocess
 import tempfile
@@ -65,6 +66,52 @@ FONT_CANDIDATES_REGULAR = [
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
     "/System/Library/Fonts/HelveticaNeue.ttc",
 ]
+
+
+# ── placeholder player names ─────────────────────────────────────────
+#
+# WHY THERE IS A NAME AT ALL when nobody has been identified. The intro
+# panel is a layout, and a blank where the name goes does not read as
+# "unknown player", it reads as broken software. So a clip that matched
+# no registered participant gets a stand-in.
+#
+# THE STAND-IN USED TO BE THE OWNER'S OWN NAME, hard-coded in five
+# places, which meant every demo clip of every golfer on the range went
+# out under one person's name. Plainly wrong on a shared clip and
+# confusing on a review screen.
+#
+# Ordinary invented names, deliberately not the names of real touring
+# professionals: a placeholder that reads as a real golfer somebody
+# could look up is a worse placeholder, not a better one.
+_PLACEHOLDER_FIRST = (
+    "Alex", "Jordan", "Casey", "Morgan", "Riley", "Taylor", "Drew",
+    "Quinn", "Avery", "Reese", "Blake", "Cameron", "Hayden", "Emerson",
+    "Rowan", "Sawyer", "Parker", "Finley", "Marlow", "Ellis",
+)
+_PLACEHOLDER_LAST = (
+    "Hollis", "Vance", "Ashby", "Merritt", "Calloway", "Renfro",
+    "Thorne", "Bexley", "Waverly", "Lockhart", "Danforth", "Ainsley",
+    "Croft", "Pemberton", "Halloway", "Whitfield", "Stanhope",
+    "Marchetti", "Okonkwo", "Lindqvist",
+)
+
+
+def placeholder_player_name(seed=None) -> str:
+    """A stand-in name for a clip that matched no registered participant.
+
+    STABLE FOR A GIVEN CLIP, random across clips. `seed` should be
+    something that identifies the clip -- its id, its filename -- and
+    the same seed always returns the same name. That matters because
+    re-rendering happens: an overlay is reapplied when a clip is
+    re-produced or its graphics are edited, and a name that changed
+    every time would make the same swing look like a different golfer
+    on every pass, with no way to tell a re-render from a real change.
+
+    Called with no seed it is genuinely random, which is the right
+    behaviour only where nothing identifies the clip.
+    """
+    rnd = random.Random(seed) if seed is not None else random.Random()
+    return f"{rnd.choice(_PLACEHOLDER_FIRST)} {rnd.choice(_PLACEHOLDER_LAST)}"
 
 
 def _find_font(candidates: list[str], size: int):
@@ -117,7 +164,10 @@ def render_left_panel(
     bold_med = _find_font(FONT_CANDIDATES_BOLD, 18)
     reg_med = _find_font(FONT_CANDIDATES_REGULAR, 17)
 
-    player_text = (player_name or "Brent Baldwin").upper()
+    # No seed here: by the time a name reaches the renderer the
+    # caller has had every chance to supply one, and this floor
+    # exists so the panel is never blank.
+    player_text = (player_name or placeholder_player_name()).upper()
     course_text = course_name or ""
     # WHAT IS NOT KNOWN IS NOT PRINTED. These used to fall back to
     # "PAR 3" and "101 YDS", and 101 is the number that shipped to

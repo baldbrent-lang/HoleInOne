@@ -3189,7 +3189,12 @@ function EditWizard({
   // edit_metrics; default yardage comes from the course's hole_yardages
   // for the chosen hole_number.
   const [graphics, setGraphics] = useState({
-    player_name: "Brent Baldwin",
+    // EMPTY, NOT A NAME. This box used to be prefilled with the owner's
+    // own name, so every clip anybody produced without editing it went
+    // out under one person's name. Left blank the backend draws a
+    // stand-in instead, seeded on the upload so it is stable across
+    // re-finalizes.
+    player_name: "",
     hole_number: 1,
     yardage: 101,
   });
@@ -3259,7 +3264,7 @@ function EditWizard({
     const yards = s.finalized_yardage
       ?? (courseYards != null ? Number(courseYards) : 101);
     const g = {
-      player_name: s.finalized_player_name || "Brent Baldwin",
+      player_name: s.finalized_player_name || "",
       hole_number: hole,
       yardage: yards,
     };
@@ -13553,7 +13558,7 @@ function FinalizeStep({
               type="text"
               value={graphics.player_name || ""}
               onChange={(e) => setGraphics((g) => ({ ...g, player_name: e.target.value }))}
-              placeholder="Player name"
+              placeholder="Player name — blank draws a stand-in"
               disabled={finalizing}
             />
           </div>
