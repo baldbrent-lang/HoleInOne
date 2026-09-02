@@ -9,6 +9,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import { Brand } from "../components/Brand.jsx";
 import { ViewMapModal } from "../components/ViewMapModal.jsx";
+import { DailyMarksModal } from "../components/DailyMarksModal.jsx";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -698,6 +699,9 @@ export default function AdminCameras() {
   const [revealedToken, setRevealedToken] = useState({}); // {camera_id: true}
   const [cal, setCal] = useState(null);  // green→tee calibrator
   const [calibratingCam, setCalibratingCam] = useState(null);
+  // The pin and the tee box: set daily, from the camera, by whoever is
+  // standing there — unlike the calibration above, which is done once.
+  const [dailyCam, setDailyCam] = useState(null);
   const [movingCam, setMovingCam] = useState(null); // camera_id whose move form is open
   const [moveDraft, setMoveDraft] = useState({ courseId: "", hole: "", role: "", name: "", ballSide: "" });
 
@@ -1348,6 +1352,23 @@ export default function AdminCameras() {
                       >
                         ⊹ Calibrate green→tee
                       </button>
+                      {/* AND THE TWO THINGS THAT CHANGE EVERY MORNING.
+                          The calibration above is a property of where
+                          the cameras are bolted; the pin is cut to a
+                          new spot each day and the tee markers are
+                          walked forward or back. Same pair of pictures,
+                          opposite lifetime -- so a separate button,
+                          rather than a step inside a calibration
+                          nobody should be redoing daily. */}
+                      <button
+                        type="button" className="ghost small"
+                        style={{ marginTop: 4, width: "100%" }}
+                        onClick={() => setDailyCam(cam)}
+                        disabled={isBusy}
+                        title="Today's flag stick on the green view, and today's tee box on the tee view. Both move overnight; the calibration does not."
+                      >
+                        ⛳ Today&apos;s flag &amp; tee box
+                      </button>
                     </span>
                   ) : candidates.length > 0 ? (
                     <select
@@ -1646,6 +1667,14 @@ export default function AdminCameras() {
           onSaved={() => { setCal(null); load(); }}
         />
       ))}
+
+      {dailyCam && (
+        <DailyMarksModal
+          adminPassword={adminPassword}
+          cam={dailyCam}
+          onClose={() => { setDailyCam(null); load(); }}
+        />
+      )}
 
       {calibratingCam && (
         <GreenCalibrationModal

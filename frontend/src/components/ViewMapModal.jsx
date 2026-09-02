@@ -15,8 +15,9 @@ import { api } from "../api.js";
 /* One clickable still, with the marks made on it. Used twice by the
    view-map modal — once per camera — so the two panes cannot drift
    apart in how a click becomes a coordinate. */
-function ClickableStill({ title, frame, marks, pending, colour, onClick,
-                         onMoveMark, selected = null, onSelect }) {
+export function ClickableStill({ title, frame, marks, pending, colour,
+                                onClick, onMoveMark, selected = null,
+                                onSelect }) {
   const ref = useRef(null);
   const hasDims = !!(frame?.width && frame?.height);
   // ZOOM IS NOT A CONVENIENCE ON THE TEE PANE. From 180 m back the whole
