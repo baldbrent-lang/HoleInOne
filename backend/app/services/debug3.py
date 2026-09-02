@@ -3551,6 +3551,28 @@ ASCENT_MAX_STEP_FRAMES = 5
 # It predates `_smooth_tail`, which exists precisely because one leading
 # corner point takes a real chain "from 3.4px to 13.5px". Both trims run
 # before this is measured, so that chain reads about 3.4 today.
+# HOW FAR OFF THE CHAIN'S OWN LINE A LEADING POINT MAY SIT.
+#
+# The mirror of DESCENT_LINE_TOL_PX, at the other end of the flight.
+# `_rising_tail` and `_smooth_tail` cut a chain back to the run that
+# goes one way, which is the right question and does not catch this
+# one: a point can rise, and rise steadily, and still be a different
+# object from the nine after it.
+#
+# Measured on upload 356's ascent #3 -- an 11-point chain refused for
+# bending 3.285px against a 3.25 bar, by three hundredths. Its first
+# point sits 14.55px off the line the other ten make; the next sits
+# 0.71px off. Every step after the first moves 4px left, the first
+# moves 22. Dropping it takes the bend from 3.285 to 0.328, a factor of
+# ten, and the chain is then accepted comfortably.
+#
+# Eight, between those two by a wide margin either way -- anything from
+# about three to about thirteen gives the same answer on that chain.
+# Below three it would start eating the real curvature: the trailing
+# points of that same chain sit 2.0 to 2.8px off their own line and
+# every one of them belongs.
+ASCENT_LEAD_TOL_PX = 8.0
+
 ASCENT_BEND_BASE_PX = 1.5
 ASCENT_BEND_PER_POINT_PX = 0.25
 
@@ -4019,6 +4041,34 @@ def _line_offset(axis, p) -> float:
     return abs((float(p["x"]) - mx) * uy - (float(p["y"]) - my) * ux)
 
 
+def _ascent_lead_trim(pts, min_points: int, tol_px: float = ASCENT_LEAD_TOL_PX):
+    """Drop leading points that are provably off the line the rest make.
+
+    THE DESCENT'S PROBLEM, AT THE OTHER END. `_descent_flight_shape`
+    walks points off the END of a falling chain because the ball lands
+    and the roll is not the flight. A rising chain has the same trouble
+    at its START: the tracker links whatever was nearest before the ball
+    was really moving, and one speck two frames early sits on a line the
+    rest of the flight has nothing to do with.
+
+    A point comes off only when it is off the line the REMAINING points
+    make -- not the line including itself, which it would drag toward
+    its own position and so hide behind. Bounded by `min_points`,
+    because a chain trimmed to nothing proves nothing.
+
+    Returns (kept, how many came off).
+    """
+    keep = list(pts)
+    n = 0
+    while len(keep) > int(min_points):
+        axis = _line_axis(keep[1:])
+        if axis is None or _line_offset(axis, keep[0]) <= float(tol_px):
+            break
+        keep = keep[1:]
+        n += 1
+    return keep, n
+
+
 def _descent_flight_shape(pts, min_points: int):
     """The leading run of a chain that is still the ball in the AIR.
 
@@ -4306,6 +4356,8 @@ def sweep_ascents(
     ASCENT_RATE_LO = _G["ascent_rate_lo"]
     ASCENT_RATE_HI = _G["ascent_rate_hi"]
     ASCENT_MAX_BEND_PX = _G["ascent_max_bend_px"]
+    ASCENT_BEND_BASE_PX = _G["ascent_bend_base_px"]
+    ASCENT_BEND_PER_POINT_PX = _G["ascent_bend_per_point_px"]
     ASCENT_MIN_STRAIGHT = _G["ascent_min_straight"]
     ASCENT_MAX_TILT_DEG = _G["ascent_max_tilt_deg"]
     ASCENT_MIN_DENSITY = _G["ascent_min_density"]
@@ -4381,6 +4433,11 @@ def sweep_ascents(
             # and then only the part of it that goes one way.
             _n_raw_pts = len(pts)
             pts = _smooth_tail(_rising_tail(pts), int(min_points))
+            # AND THE STRAGGLERS AT THE FRONT. See ASCENT_LEAD_TOL_PX:
+            # the tail trims keep the run that goes one way, which a
+            # speck linked two frames early can satisfy while sitting
+            # fifteen pixels off the line the real flight makes.
+            pts, _n_lead = _ascent_lead_trim(pts, int(min_points))
             if len(pts) < int(min_points):
                 continue
             _why: list = []
@@ -4514,6 +4571,11 @@ def sweep_ascents(
                 "backrun_frames": (int(pts[0]["frame"]) - _from_f
                                    if _from_f is not None else None),
                 "n_raw_points": _n_raw_pts,
+                # Split out from n_trimmed, because "the rising tail was
+                # shorter than the chain" and "one point was off the
+                # line" are different findings and only the second one
+                # says a link was wrong.
+                "n_lead_outliers": _n_lead,
                 "n_trimmed": _n_raw_pts - len(pts),
                 "why": _why,
             }
@@ -6050,6 +6112,16 @@ GATE_SPEC = {
     "ascent_min_rise_frac":     (ASCENT_MIN_RISE_FRAC,  0.01,    0.9, False),
     "ascent_rate_lo":           (ASCENT_RATE_LO,        0.05,   20.0, False),
     "ascent_rate_hi":           (ASCENT_RATE_HI,         0.5,  100.0, False),
+    # THE BEND BAR IS NOT ONE NUMBER, and exposing only the ceiling made
+    # this gate untunable in practice. The bar a chain is actually held
+    # to is `min(max_bend_px, base + per_point * (n - min_points))`, so
+    # for an 11-point chain it is 1.5 + 0.25*7 = 3.25 and the ceiling
+    # plays no part -- a chain would need FIFTY-FOUR points before 14
+    # binds. Setting max_bend_px to 5 or to 40 changed nothing anybody
+    # could see. The two that move it are here now; the ceiling stays,
+    # because on a very long chain it is the one that bites.
+    "ascent_bend_base_px":      (ASCENT_BEND_BASE_PX,   0.05,   50.0, False),
+    "ascent_bend_per_point_px": (ASCENT_BEND_PER_POINT_PX, 0.0,  5.0, False),
     "ascent_max_bend_px":       (ASCENT_MAX_BEND_PX,     0.1,  200.0, False),
     "ascent_min_straight":      (ASCENT_MIN_STRAIGHT,    0.0,    1.0, False),
     "ascent_max_tilt_deg":      (ASCENT_MAX_TILT_DEG,    1.0,   90.0, False),
@@ -6070,6 +6142,7 @@ GATE_SPEC = {
 GATE_VERDICT = {
     "ascent_min_points": "points", "ascent_min_rise_frac": "rise",
     "ascent_rate_lo": "rate", "ascent_rate_hi": "rate",
+    "ascent_bend_base_px": "bend", "ascent_bend_per_point_px": "bend",
     "ascent_max_bend_px": "bend", "ascent_min_straight": "wander",
     "ascent_max_tilt_deg": "tilt", "ascent_min_density": "sparse",
     "ascent_max_step_frames": "gap", "ascent_max_backrun_sec": "backrun",
