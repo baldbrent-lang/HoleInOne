@@ -15,7 +15,8 @@ import { api } from "../api.js";
 /* One clickable still, with the marks made on it. Used twice by the
    view-map modal — once per camera — so the two panes cannot drift
    apart in how a click becomes a coordinate. */
-function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
+function ClickableStill({ title, frame, marks, pending, colour, onClick,
+                         onMoveMark, selected = null, onSelect }) {
   const ref = useRef(null);
   const hasDims = !!(frame?.width && frame?.height);
   // ZOOM IS NOT A CONVENIENCE ON THE TEE PANE. From 180 m back the whole
@@ -45,12 +46,61 @@ function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
     };
   }
 
-  // A drag pans, a click places. Told apart by distance, so a slightly
-  // shaky click is still a click rather than a 2px pan that eats it.
+  // WHICH MARK IS UNDER THE CURSOR, if any. Measured in frame units at
+  // the radius the ring is DRAWN at -- which is itself divided by the
+  // zoom -- so the grab target is the same size on screen at 1x and at
+  // 16x. What looks grabbable is grabbable.
+  function markUnder(pt) {
+    if (!pt || !onMoveMark) return null;
+    const reach = frame.width / 110 / zoom;
+    let best = null;
+    let bestD = reach;
+    marks.forEach((m, i) => {
+      const d = Math.hypot(m.x - pt.x, m.y - pt.y);
+      if (d <= bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+
+  // A drag pans, a click places, and a drag that STARTS on an existing
+  // mark moves that mark. The third case is why this component exists
+  // in its current form: a calibration used to be append-only, so a
+  // pair clicked two pixels off could be corrected only by undoing
+  // every pair placed after it. Nudging the one that is wrong is the
+  // whole job.
+  //
+  // A mark is only grabbed when no pair is half-placed. With a pending
+  // point waiting for its partner, every click on this side means
+  // "here is the partner" -- including one that lands on top of an
+  // older mark, which happens whenever two holes share a bunker corner.
   function onDown(e) {
     if (!hasDims || !ref.current) return;
     const startX = e.clientX;
     const startY = e.clientY;
+    const grab = pending ? null : markUnder(toFrame(e));
+    if (grab != null) {
+      const t = e.currentTarget;
+      t.setPointerCapture?.(e.pointerId);
+      let dragged = false;
+      const mv = (ev) => {
+        if (!dragged && Math.hypot(ev.clientX - startX,
+                                   ev.clientY - startY) < 3) return;
+        dragged = true;
+        const p = toFrame(ev);
+        if (p) onMoveMark(grab, p);
+      };
+      const done = () => {
+        t.releasePointerCapture?.(e.pointerId);
+        t.removeEventListener("pointermove", mv);
+        t.removeEventListener("pointerup", done);
+        // A grab that never moved is a click ON a mark: select it, so
+        // the footer can offer to delete that one pair.
+        if (!dragged) onSelect?.(grab === selected ? null : grab);
+      };
+      t.addEventListener("pointermove", mv);
+      t.addEventListener("pointerup", done);
+      return;
+    }
     const r = ref.current.getBoundingClientRect();
     const from = { ...focus };
     let moved = false;
@@ -158,6 +208,16 @@ function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
             >
               {marks.map((m, i) => (
                 <g key={i}>
+                  {/* THE SELECTED PAIR WEARS A HALO on both pictures at
+                      once, which is the point of selecting one: pair 4
+                      is only meaningful if you can see which dot it is
+                      in each view without counting labels. */}
+                  {i === selected && (
+                    <circle cx={m.x} cy={m.y} r={frame.width / 90 / zoom}
+                            fill="none" stroke="#fff"
+                            strokeWidth={frame.width / 300 / zoom}
+                            opacity={0.9} />
+                  )}
                   {/* Sized in SCREEN terms: divided by the zoom so a
                       marker stays the same size on screen instead of
                       swelling into a blob that hides its own target. */}
@@ -169,7 +229,7 @@ function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
                   <text x={m.x + frame.width / 110 / zoom}
                         y={m.y - frame.width / 220 / zoom}
                         fontSize={frame.width / 40 / zoom} fontWeight={700}
-                        fill={colour} stroke="#000"
+                        fill={i === selected ? "#fff" : colour} stroke="#000"
                         strokeWidth={frame.width / 500 / zoom}
                         paintOrder="stroke">
                     {i + 1}
@@ -195,7 +255,7 @@ function ClickableStill({ title, frame, marks, pending, colour, onClick }) {
             background: "rgba(0,0,0,0.6)", padding: "1px 6px",
             borderRadius: 4, pointerEvents: "none",
           }}>
-            drag to pan · scroll to zoom
+            drag to pan · scroll to zoom · drag a numbered dot to nudge it
           </div>
         )}
       </div>
@@ -234,6 +294,27 @@ export function ViewMapModal({
   const [pending, setPending] = useState(null);   // {side, x, y}
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState(null);
+  // WHICH PAIR IS BEING WORKED ON. Selecting one is what makes deleting
+  // a single pair possible; before this the only remover was "undo the
+  // last one", so correcting pair 2 of 9 meant destroying seven good
+  // pairs to reach it.
+  const [selected, setSelected] = useState(null);
+
+  // NUDGE ONE END OF ONE PAIR. Dragging a mark rewrites that side's
+  // coordinate and leaves the other alone -- the two views are clicked
+  // independently and are wrong independently, so a pair whose tee dot
+  // is two pixels off does not want its green dot touched.
+  function moveMark(side, i, pt) {
+    setPairs((p) => p.map((q, j) => (
+      j === i ? { ...q, [side]: [pt.x, pt.y] } : q
+    )));
+    setSelected(i);
+  }
+
+  function dropPair(i) {
+    setPairs((p) => p.filter((_, j) => j !== i));
+    setSelected(null);
+  }
 
   function place(side, pt) {
     if (!pending) { setPending({ side, ...pt }); return; }
@@ -294,8 +375,10 @@ export function ViewMapModal({
           {scope && <span className="small">{scope}</span>}
           {preloaded > 0 && (
             <span className="tiny" style={{ color: "#3ee37a" }}>
-              already mapped — {preloaded} saved pairs loaded. Adjust or
-              add to them, or just Close; this does not need redoing.
+              already mapped — {preloaded} saved pairs loaded. Drag any
+              numbered dot to nudge it, click one to delete just that
+              pair, or add more. Or just Close; this does not need
+              redoing.
             </span>
           )}
           {mismatch && (
@@ -331,6 +414,9 @@ export function ViewMapModal({
             marks={pairs.map((p) => ({ x: p.tee[0], y: p.tee[1] }))}
             pending={pending?.side === "tee" ? pending : null}
             onClick={(pt) => place("tee", pt)}
+            onMoveMark={(i, pt) => moveMark("tee", i, pt)}
+            selected={selected}
+            onSelect={setSelected}
           />
           <ClickableStill
             title={`Green camera · frame ${greenFrame?.frame ?? "—"}`}
@@ -339,6 +425,9 @@ export function ViewMapModal({
             marks={pairs.map((p) => ({ x: p.green[0], y: p.green[1] }))}
             pending={pending?.side === "green" ? pending : null}
             onClick={(pt) => place("green", pt)}
+            onMoveMark={(i, pt) => moveMark("green", i, pt)}
+            selected={selected}
+            onSelect={setSelected}
           />
         </div>
 
@@ -348,12 +437,41 @@ export function ViewMapModal({
             {pending
               ? `Now click the SAME feature on the ${
                 pending.side === "tee" ? "green" : "tee"} picture`
-              : `${pairs.length} pair${pairs.length === 1 ? "" : "s"}`
-                + (ready
-                  ? (pairs.length >= 8 ? " — good" : " — enough; 8 is better")
-                  : ` — need ${MIN_PAIRS - pairs.length} more`)}
+              : selected != null
+                ? `Pair ${selected + 1} selected — drag either dot to nudge it`
+                : `${pairs.length} pair${pairs.length === 1 ? "" : "s"}`
+                  + (ready
+                    ? (pairs.length >= 8 ? " — good" : " — enough; 8 is better")
+                    : ` — need ${MIN_PAIRS - pairs.length} more`)}
           </span>
-          {pairs.length > 0 && (
+          {/* ADJUSTING BEATS REDOING. A calibration is eight pairs of
+              hand-clicked pixels and the whole fit is only as good as
+              the worst of them, so the useful operation is almost never
+              "start again" -- it is "pair 3 is a bit high". Drag it on
+              either picture; delete just that one if it is hopeless. */}
+          {selected != null && (
+            <>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto" }}
+                onClick={() => dropPair(selected)}
+                title={"Remove this pair only — the ones after it move "
+                  + "up a number, and nothing else is touched"}
+              >
+                Delete pair {selected + 1}
+              </button>
+              <button
+                type="button"
+                className="ghost small"
+                style={{ width: "auto" }}
+                onClick={() => setSelected(null)}
+              >
+                Deselect
+              </button>
+            </>
+          )}
+          {pairs.length > 0 && selected == null && (
             <button
               type="button"
               className="ghost small"
