@@ -3020,6 +3020,34 @@ def find_descents(
         # little to have a rhythm at all, which is the case the old
         # comment here was protecting.
         _rhythm_on = kept if len(kept) >= MIN_DESCENT_POINTS + 1 else pts
+        # AND NOT THE ARRIVAL POINT EITHER.
+        #
+        # "A fall only speeds up" is true IN FLIGHT and false AT
+        # ARRIVAL. A ball landing a hundred and fifty metres away comes
+        # in on the shallowest part of its arc, so its image-space
+        # vertical rate genuinely flattens over the last frame or two
+        # before the pitch mark -- and this gate was reading that
+        # flattening as unevenness and refusing the descent for it.
+        #
+        # Measured on upload 356 swing 1, two chains an operator could
+        # see plainly: an 11-point descent scored 0.678 and a 10-point
+        # one 0.492, both against a 0.35 bar, both entirely because of
+        # their final point. Without it they score 0.182 and 0.176.
+        # Their span-3 rates accelerate 11 -> 17.7 -> 24.3 exactly as a
+        # fall should, then read 14.5 and 13.0 across the touchdown.
+        #
+        # The walk back above already drops the bounce and the roll;
+        # this drops the one point where the ball has arrived but not
+        # yet bounced, which is the last place its rate can still be
+        # rising. The same trim on the speckle pattern this gate exists
+        # to refuse (4, 30, 5, 28...) moves it the other way -- 0.51 to
+        # 0.63, still refused -- because speckle alternates all the way
+        # along a chain while a real descent only flattens at the end.
+        #
+        # Only when there is chain to spare: the point count is the gate
+        # that matters on a short chain anyway.
+        if len(_rhythm_on) >= MIN_DESCENT_POINTS + 2:
+            _rhythm_on = _rhythm_on[:-1]
         step_med, step_back = _descent_step_consistency(_rhythm_on)
         _span_f = int(pts[-1]["frame"]) - int(pts[0]["frame"]) + 1
         _density = len(pts) / float(max(1, _span_f))
@@ -3074,6 +3102,12 @@ def find_descents(
             "n_bend_points": len(_shape),
             "step_px": round(step_med, 2),
             "step_back": round(step_back, 2),
+            # HOW MANY POINTS THE RHYTHM WAS ACTUALLY READ FROM. Not
+            # len(points) and not len(kept): the bounce, the roll and
+            # the arrival point are all excluded, so a row reading
+            # "slows by 0.68" over a 14-point chain does not say which
+            # 11 of them the number came from unless this is here.
+            "n_rhythm_points": len(_rhythm_on),
             "sources": sorted({q.get("src") for q in kept if q.get("src")}),
             "peak_px_per_frame": round(peak, 1),
             # THE CHAIN ITSELF, up to the frame it stopped falling.
@@ -3184,11 +3218,14 @@ def find_descents(
                  "this is what tells them apart."},
         {"key": "uneven", "limit": f"{DESCENT_MAX_STEP_BACK}",
          "what": "worst backward move in the fall rate, as a fraction of "
-                 "the chain's own median. A fall only ever speeds up. "
-                 "Measured over "
+                 "the chain's own median. A fall only ever speeds up -- "
+                 "in flight. Measured over "
                  f"{DESCENT_RATE_SPAN_FRAMES}-frame spans, because "
                  "between adjacent frames the number is mostly where the "
-                 "centroid landed inside the ball's motion blur."},
+                 "centroid landed inside the ball's motion blur; and on "
+                 "the flight only, dropping the bounce, the roll AND the "
+                 "arrival point, which is where a real ball stops "
+                 "accelerating."},
         {"key": "sparse", "limit": f"{DESCENT_MIN_DENSITY} "
                                    f"({DESCENT_SHORT_MIN_DENSITY} under "
                                    f"{DESCENT_SHORT_POINTS} points)",
