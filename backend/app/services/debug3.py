@@ -2435,10 +2435,15 @@ def find_descents(
     # can "fall" 389px, score 0.1px of bend because three points lie on
     # a line by construction, and beat the real descent beside it. See
     # MIN_DESCENT_POINTS.
-    min_points: int = MIN_DESCENT_POINTS,
+    # None means "take it from this hole's gates". An explicit number
+    # still wins: the ball-scan passes deliberately loose values to
+    # WIDEN THE SEARCH, which is a different thing from the verdict
+    # gates an operator tunes, and must not be quietly tightened by
+    # a hole's tuning.
+    min_points: int | None = None,
     min_drop_frac: float = 0.05,
-    rate_lo: float = DESCENT_RATE_LO,
-    rate_hi: float = DESCENT_RATE_HI,
+    rate_lo: float | None = None,
+    rate_hi: float | None = None,
     # A FALLING BALL IS STRAIGHT. Over the half-second a descent lasts,
     # gravity bends the path far less than the image is wide, so x
     # against y is very nearly a line. A chain of unrelated speckles the
@@ -2466,8 +2471,10 @@ def find_descents(
     # window first -- the gate measures `kept`, the part still falling,
     # and a chain whose landing walk-back went wrong will be judged on
     # points that are not the flight.
-    max_bend_px: float = 1.0,
+    max_bend_px: float | None = None,
     merge_sec: float = 1.0,
+    # THIS HOLE'S GATES, or None for the module defaults.
+    gates: dict | None = None,
     max_events: int = 20,
     # WHICH DETECTORS TO RUN. Measured on 200 frames of 720p with a ball
     # falling past a textured tree line:
@@ -2527,7 +2534,29 @@ def find_descents(
 
     Returns {ok, events, n_tracks, reason}. Never raises.
     """
-    out: dict = {"ok": False, "events": [], "n_tracks": 0, "reason": None}
+    # SAME TRICK AS sweep_ascents: bind the tuned values to the names the
+    # gates below already use, at the very top, so nothing reads a module
+    # default by accident. Nothing may reference these names above this
+    # block -- the try/except below would turn an UnboundLocalError into
+    # a "reason" string and hide it.
+    _G = resolve_gates(gates)
+    DESCENT_MAX_TILT_DEG = _G["descent_max_tilt_deg"]
+    DESCENT_MAX_STEP_BACK = _G["descent_max_step_back"]
+    DESCENT_MIN_DENSITY = _G["descent_min_density"]
+    # The four that are already parameters keep the caller's value when
+    # one was passed. The ball scan widens min_points and max_bend_px on
+    # purpose -- that is a SEARCH width, not a verdict -- and a hole's
+    # tuning must not narrow it back.
+    if min_points is None:
+        min_points = _G["descent_min_points"]
+    if rate_lo is None:
+        rate_lo = _G["descent_rate_lo"]
+    if rate_hi is None:
+        rate_hi = _G["descent_rate_hi"]
+    if max_bend_px is None:
+        max_bend_px = _G["descent_max_bend_px"]
+    out: dict = {"ok": False, "events": [], "n_tracks": 0, "reason": None,
+                 "gates_used": dict(_G), "gates_tuned": gates_diff(gates)}
     try:
         cap = cv2.VideoCapture(str(input_path))
         if not cap.isOpened():
@@ -4184,7 +4213,11 @@ def sweep_ascents(
     # the green view, where the ball is forty yards off and three pixels
     # across, that a largest-first cut can starve.
     sens: int = 3,
-    min_points: int = ASCENT_MIN_POINTS,
+    # None, not the constant: the floor is a tuned gate now, and a
+    # default evaluated at import time could not follow it.
+    min_points: int | None = None,
+    # THIS HOLE'S GATES, or None for the module defaults. See GATE_SPEC.
+    gates: dict | None = None,
 ) -> dict:
     """Every ball leaving the tee in the WHOLE video, found from above.
 
@@ -4207,8 +4240,35 @@ def sweep_ascents(
     # `sens` is reported because "the sweep found two of three" is a
     # different fact at each level, and a report that does not say which
     # one ran cannot be compared with the one from last week.
+    # THE TUNED VALUES, BOUND AS LOCALS. Assigning these names here makes
+    # them locals for the whole function, so every gate below reads the
+    # tuned number through the name it already used -- no call site
+    # changes, and therefore no chance of one gate being tuned and the
+    # one beside it silently still reading the module default.
+    #
+    # The corollary: nothing may read these names ABOVE this block, or
+    # Python raises UnboundLocalError -- which the try/except around the
+    # body would turn into a bland "reason" string rather than a crash.
+    # Hence the very top, and hence the test that runs this for real.
+    _G = resolve_gates(gates)
+    ASCENT_MIN_POINTS = _G["ascent_min_points"]
+    ASCENT_MIN_RISE_FRAC = _G["ascent_min_rise_frac"]
+    ASCENT_RATE_LO = _G["ascent_rate_lo"]
+    ASCENT_RATE_HI = _G["ascent_rate_hi"]
+    ASCENT_MAX_BEND_PX = _G["ascent_max_bend_px"]
+    ASCENT_MIN_STRAIGHT = _G["ascent_min_straight"]
+    ASCENT_MAX_TILT_DEG = _G["ascent_max_tilt_deg"]
+    ASCENT_MIN_DENSITY = _G["ascent_min_density"]
+    ASCENT_MAX_STEP_FRAMES = _G["ascent_max_step_frames"]
+    ASCENT_MAX_BACKRUN_SEC = _G["ascent_max_backrun_sec"]
+    if min_points is None:
+        min_points = ASCENT_MIN_POINTS
     out = {"ok": False, "ascents": [], "n_tracks": 0, "n_dets": 0,
-           "seconds": 0.0, "band": None, "reason": None, "sens": int(sens)}
+           "seconds": 0.0, "band": None, "reason": None, "sens": int(sens),
+           # What this run was actually held to, and which of those an
+           # operator changed. A report that does not say cannot be
+           # compared with one from a differently tuned hole.
+           "gates_used": dict(_G), "gates_tuned": gates_diff(gates)}
     if not HAS_CV:
         out["reason"] = "opencv not installed"
         return out
@@ -5909,3 +5969,111 @@ __all__ = [
     "pick_flight",
     "ransac_parabola", "launch_from_ground", "rest_check_image", "refine_ball_from_flight",
 ]
+
+
+# ── PER-HOLE GATE TUNING ──────────────────────────────────────────────
+#
+# WHY THE NUMBERS ABOVE ARE ONLY THE DEFAULTS NOW.
+#
+# Every constant above was measured on footage from one or two holes.
+# They generalise less well than they look: a hole where the tee camera
+# sits close and square sees a ball leave at twice the frame-heights per
+# second of one shooting down a long par 5, and the descent onto a green
+# ringed by trees is a different detection problem from one against open
+# sky. Tuned for both at once, a gate is loose enough to admit junk on
+# the easy hole and still refuse real flights on the hard one.
+#
+# So each hole -- keyed the way the green->tee map is keyed, which is to
+# say per camera pair -- may carry its own values for the gates that
+# produce a VERDICT. Anything not overridden falls through to the
+# constant above, so a hole nobody has tuned behaves exactly as it did.
+#
+# ONLY THE VERDICT GATES ARE HERE, deliberately. These are the numbers
+# an operator can reason about, because the report prints the measured
+# value beside the limit for each one: "rises at 0.9, outside 1.0-12.0"
+# is a sentence you can act on. The box sizes, smoothing spans and
+# linking tolerances are not -- they are internal, they interact, and a
+# per-hole copy of them would be a per-hole fork of the detector.
+GATE_SPEC = {
+    # key                        default                  lo     hi   int
+    "ascent_min_points":        (ASCENT_MIN_POINTS,        2,     20, True),
+    "ascent_min_rise_frac":     (ASCENT_MIN_RISE_FRAC,  0.01,    0.9, False),
+    "ascent_rate_lo":           (ASCENT_RATE_LO,        0.05,   20.0, False),
+    "ascent_rate_hi":           (ASCENT_RATE_HI,         0.5,  100.0, False),
+    "ascent_max_bend_px":       (ASCENT_MAX_BEND_PX,     0.1,  200.0, False),
+    "ascent_min_straight":      (ASCENT_MIN_STRAIGHT,    0.0,    1.0, False),
+    "ascent_max_tilt_deg":      (ASCENT_MAX_TILT_DEG,    1.0,   90.0, False),
+    "ascent_min_density":       (ASCENT_MIN_DENSITY,    0.05,    1.0, False),
+    "ascent_max_step_frames":   (ASCENT_MAX_STEP_FRAMES,   1,    120, True),
+    "ascent_max_backrun_sec":   (ASCENT_MAX_BACKRUN_SEC, 0.1,   30.0, False),
+    "descent_min_points":       (MIN_DESCENT_POINTS,       2,     20, True),
+    "descent_rate_lo":          (DESCENT_RATE_LO,       0.01,   10.0, False),
+    "descent_rate_hi":          (DESCENT_RATE_HI,       0.05,   50.0, False),
+    "descent_max_bend_px":      (1.0,                   0.05,  200.0, False),
+    "descent_max_tilt_deg":     (DESCENT_MAX_TILT_DEG,   1.0,   90.0, False),
+    "descent_max_step_back":    (DESCENT_MAX_STEP_BACK, 0.01,   10.0, False),
+    "descent_min_density":      (DESCENT_MIN_DENSITY,   0.05,    1.0, False),
+}
+
+# What each one refuses, in the words the report already uses. Kept
+# beside the spec so the editor and the verdict legend cannot drift.
+GATE_VERDICT = {
+    "ascent_min_points": "points", "ascent_min_rise_frac": "rise",
+    "ascent_rate_lo": "rate", "ascent_rate_hi": "rate",
+    "ascent_max_bend_px": "bend", "ascent_min_straight": "wander",
+    "ascent_max_tilt_deg": "tilt", "ascent_min_density": "sparse",
+    "ascent_max_step_frames": "gap", "ascent_max_backrun_sec": "backrun",
+    "descent_min_points": "points", "descent_rate_lo": "rate",
+    "descent_rate_hi": "rate", "descent_max_bend_px": "bend",
+    "descent_max_tilt_deg": "tilt", "descent_max_step_back": "uneven",
+    "descent_min_density": "sparse",
+}
+
+GATE_DEFAULTS = {k: v[0] for k, v in GATE_SPEC.items()}
+
+
+def resolve_gates(overrides=None) -> dict:
+    """Every gate value for one run: the defaults, with overrides applied.
+
+    NEVER RAISES AND NEVER RETURNS A PARTIAL. A tuning row is operator
+    input that has been sitting in a JSON column since whenever, and the
+    detector is not the place to discover that somebody typed a bend
+    limit of "1.o". An unknown key, a non-number, a NaN or a value
+    outside the spec's range is dropped and the default stands -- the
+    run is then merely untuned, which is where every hole starts.
+
+    Clamped rather than rejected at the edges, because the ranges are
+    sanity rails and not physics: a bend limit of 500px is not what
+    anyone meant, but neither is refusing to produce because of it.
+    """
+    out = dict(GATE_DEFAULTS)
+    if not isinstance(overrides, dict):
+        return out
+    for k, v in overrides.items():
+        spec = GATE_SPEC.get(k)
+        if spec is None:
+            continue
+        _dflt, lo, hi, as_int = spec
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        # NaN fails every comparison, so it would sail through a range
+        # check written the obvious way and poison every gate it touches.
+        if f != f or f in (float("inf"), float("-inf")):
+            continue
+        f = max(float(lo), min(float(hi), f))
+        out[k] = int(round(f)) if as_int else float(f)
+    return out
+
+
+def gates_diff(overrides=None) -> dict:
+    """Only the values that actually differ from the defaults.
+
+    What the report shows as "tuned", and what gets stored -- a tuning
+    row that repeats the defaults back is indistinguishable from an
+    untuned hole in every way that matters, and storing it would freeze
+    today's defaults against any later change to them.
+    """
+    got = resolve_gates(overrides)
+    return {k: v for k, v in got.items() if v != GATE_DEFAULTS[k]}

@@ -106,6 +106,10 @@ def _migrate() -> None:
             # Per-hole, per-day ball search areas. Left NULL: no box for
             # a hole/day simply falls back the way it did before.
             statements.append("ALTER TABLE courses ADD COLUMN tee_boxes JSON")
+        if "gate_tuning" not in course_cols:
+            # Per-hole detector gate tuning. NULL runs the module
+            # defaults, exactly as every hole did before this existed.
+            statements.append("ALTER TABLE courses ADD COLUMN gate_tuning JSON")
         if "ball_sizes" not in course_cols:
             # Calibrated ball radius per hole. NULL falls back to the
             # size-agnostic filters, exactly as before.

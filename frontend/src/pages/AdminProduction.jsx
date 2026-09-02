@@ -92,6 +92,7 @@ class Boundary extends Component {
 import { parseApiDate } from "../time.js";
 import { ViewMapModal } from "../components/ViewMapModal.jsx";
 import { D3TeeBox } from "../components/TeeBoxEditor.jsx";
+import { GateTuning } from "../components/GateTuning.jsx";
 
 const ADMIN_PW_STORAGE = "golfreelz.adminPassword";
 const LEGACY_ADMIN_PW_STORAGE = "parone.adminPassword";
@@ -8700,7 +8701,7 @@ function SwingCard({ n, ascent, view, clip, colors, findOnly }) {
 }
 
 
-function AscentProduceModal({ state, onClose }) {
+function AscentProduceModal({ state, adminPassword, onClose }) {
   const rep = state?.report;
   const asc = rep?.ascents || [];
   const clips = rep?.clips || [];
@@ -8986,6 +8987,24 @@ function AscentProduceModal({ state, onClose }) {
                   chain is labelled with in the pictures above, so a
                   line you can see has a row you can read.
                 </div>
+              </details>
+            )}
+            {/* AND THE LIMITS ARE EDITABLE, right here. Every gate above
+                was measured on one or two holes, and they generalise
+                less well than they look: a tee camera sitting close and
+                square sees a ball leave at twice the frame-heights per
+                second of one shooting down a long par 5. Tuned for both
+                at once a gate is loose enough to admit junk on the easy
+                hole and still refuse real flights on the hard one.
+                Keyed per camera pair and hole, so nothing here can
+                reach another hole. */}
+            {rep.upload_id && adminPassword && (
+              <details style={{ marginTop: 6 }}>
+                <summary className="tiny muted" style={{ cursor: "pointer" }}>
+                  tune these gates for this hole only
+                </summary>
+                <GateTuning adminPassword={adminPassword}
+                            uploadId={rep.upload_id} />
               </details>
             )}
             {(rep.descents.sweep?.considered || []).length > 0 && (
@@ -16936,7 +16955,7 @@ export default function AdminProduction() {
                        onClose={() => setBallScan(null)} />
       )}
       {ascProd && (
-        <AscentProduceModal state={ascProd}
+        <AscentProduceModal state={ascProd} adminPassword={adminPassword}
                             onClose={() => setAscProd(null)} />
       )}
       {hitArea && (

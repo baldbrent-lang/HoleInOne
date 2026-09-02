@@ -138,6 +138,16 @@ class Course(Base):
     # Null until calibrated, and a null means the tracer stops where the
     # ball was last seen rather than being aimed at a guess.
     view_maps: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # PER-HOLE DETECTOR GATE TUNING, keyed exactly like view_maps
+    # above (cam:T-G / hole:N / upload:N) because it is tuned for the
+    # same thing the map is fitted for: one pair of viewpoints on one
+    # hole. NULL, or a key with no entry, means the hole runs on the
+    # module defaults -- which is where every hole starts and where
+    # most of them will stay. Only values that DIFFER from the
+    # defaults are stored, so raising a default later lifts every
+    # untuned hole with it instead of leaving them pinned to a copy.
+    gate_tuning: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     tee_times: Mapped[list[TeeTime]] = relationship(back_populates="course", cascade="all, delete-orphan")

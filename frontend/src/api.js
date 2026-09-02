@@ -662,6 +662,21 @@ export const api = {
       body: payload,
       adminPassword: key,
     }),
+  // This hole's detector gates: the spec, the defaults, what is in
+  // force and which of those an operator set. Keyed per camera pair and
+  // hole, so tuning one hole cannot reach another.
+  getGateTuning: (key, uploadId) =>
+    request(`/api/admin/long-uploads/${uploadId}/gate-tuning`, {
+      adminPassword: key,
+    }),
+  // {gates: {name: number | null}} — null clears one back to the
+  // default, {} clears the hole.
+  setGateTuning: (key, uploadId, gates) =>
+    request(`/api/admin/long-uploads/${uploadId}/gate-tuning`, {
+      method: "POST",
+      body: { gates },
+      adminPassword: key,
+    }),
   saveHolePin: (key, uploadId, payload = {}) =>
     // The flagstick, in GREEN pixels, stored against the hole. Mapped
     // to the tee on demand so re-calibrating fixes the target too.

@@ -8860,6 +8860,35 @@ def _view_map_key(db, row, hole_hint=None) -> tuple[str, str | None, str]:
             "mapping is private to this upload")
 
 
+def _gate_tuning_for(db, row, hole_hint=None) -> tuple[dict, str, str]:
+    """(overrides, key, where it came from) for this upload's hole.
+
+    Keyed by `_view_map_key`, so a hole's tuning and its green->tee map
+    live under the same name and move together. That is not tidiness:
+    both are properties of one pair of viewpoints looking at one hole,
+    and a tuning that outlived a re-pairing would be numbers measured on
+    a camera that is no longer there.
+
+    Returns {} when nothing is stored, which every hole does until
+    somebody tunes it -- and {} is exactly what `resolve_gates` wants in
+    order to hand back the defaults.
+    """
+    key, legacy, why = _view_map_key(db, row, hole_hint)
+    course = None
+    try:
+        course, _hole, _vm = _view_map_for(db, row, hole_hint)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("gate tuning: no course for upload %s: %s",
+                  getattr(row, "id", None), exc)
+    store = dict(getattr(course, "gate_tuning", None) or {}) if course else {}
+    got = store.get(key)
+    if got is None and legacy:
+        got = store.get(legacy)
+        if got is not None:
+            why = f"{why} (under the pre-key name {legacy})"
+    return (dict(got) if isinstance(got, dict) else {}), key, why
+
+
 def _camera_pair_for(db, row):
     """(tee_camera_id, green_camera_id) for this upload, or (None, None).
 
@@ -9367,6 +9396,105 @@ def camera_calibration_source(camera_id: int, db: Session = Depends(get_db)):
         "key": key, "key_reason": why,
         "mismatch": _view_map_mismatch(db, row, vm),
     }
+
+
+@router.get("/long-uploads/{upload_id}/gate-tuning")
+def get_gate_tuning(upload_id: int, db: Session = Depends(get_db)):
+    """This hole's detector gates: the defaults, and what overrides them.
+
+    Everything the editor needs in one call -- the spec (range and type
+    per gate), the module defaults, the values in force, and which of
+    those an operator set. The spec is served rather than duplicated in
+    the frontend so a gate added or re-ranged in debug3 cannot end up
+    with a stale slider in front of it.
+    """
+    from ..services import debug3 as _d3
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    over, key, why = _gate_tuning_for(db, row)
+    course, hole, _vm = _view_map_for(db, row)
+    return {
+        "key": key, "key_reason": why, "hole": hole,
+        "course_id": getattr(course, "id", None),
+        "course_name": getattr(course, "name", None),
+        "spec": {k: {"default": v[0], "lo": v[1], "hi": v[2], "int": v[3],
+                     "verdict": _d3.GATE_VERDICT.get(k)}
+                 for k, v in _d3.GATE_SPEC.items()},
+        "defaults": dict(_d3.GATE_DEFAULTS),
+        "values": _d3.resolve_gates(over),
+        "tuned": _d3.gates_diff(over),
+    }
+
+
+@router.post("/long-uploads/{upload_id}/gate-tuning")
+def set_gate_tuning(
+    upload_id: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """Tune this hole's gates. Body: {"gates": {key: number, ...}}.
+
+    A key set to null is cleared back to the default; `{"gates": {}}`
+    clears the hole entirely. Only values that DIFFER from the current
+    defaults are stored, so raising a default later lifts every untuned
+    hole with it rather than leaving them pinned to a copy of today's
+    number.
+
+    ONE HOLE ONLY. That is the whole point of the feature: the key is
+    this pair-and-hole's, and writing it cannot reach another. A course
+    with no key for this upload -- no cameras and no known hole -- is
+    refused rather than filed under `upload:N`, where it would tune one
+    clip and nothing else and look like it had done more.
+    """
+    from ..services import debug3 as _d3
+
+    row = db.get(LongVideoUpload, upload_id)
+    if not row:
+        raise HTTPException(404, "long upload not found")
+    course, hole, _vm = _view_map_for(db, row)
+    if course is None:
+        raise HTTPException(409, "this upload is not attached to a course")
+    key, _legacy, why = _view_map_key(db, row)
+    if key.startswith("upload:"):
+        raise HTTPException(
+            409,
+            "neither the cameras nor the hole could be determined for this "
+            "upload, so there is nothing to tune AGAINST -- a tuning filed "
+            "here would apply to this one clip and no other. Set the hole, "
+            "or produce from a camera event.")
+    _in = (payload or {}).get("gates")
+    if not isinstance(_in, dict):
+        raise HTTPException(400, "gates must be an object of {name: number}")
+    _unknown = [k for k in _in if k not in _d3.GATE_SPEC]
+    if _unknown:
+        raise HTTPException(400, f"unknown gate(s): {', '.join(sorted(_unknown))}")
+    # A null clears that gate back to the default; everything else goes
+    # through the same resolver the detector uses, so what is stored is
+    # exactly what will be run -- clamped, typed and never NaN.
+    _keep = {k: v for k, v in _in.items() if v is not None}
+    _clean = _d3.gates_diff(_keep)
+
+    store = dict(course.gate_tuning or {})
+    if _clean:
+        store[key] = _clean
+    else:
+        store.pop(key, None)
+    # A fresh dict so SQLAlchemy sees the assignment as dirty.
+    course.gate_tuning = store or None
+    db.add(course)
+    db.add(AuditLog(
+        actor="admin", action="gate_tuning",
+        target=f"course:{course.id}:{key}",
+        detail=(", ".join(f"{k}={v}" for k, v in sorted(_clean.items()))
+                or "cleared"),
+    ))
+    db.commit()
+    log.info("gate tuning: %s on course %s hole %s -> %s",
+             key, course.id, hole, _clean or "cleared")
+    return {"key": key, "key_reason": why, "hole": hole,
+            "tuned": _clean, "values": _d3.resolve_gates(_clean)}
 
 
 @router.post("/long-uploads/{upload_id}/hole-pin")
@@ -18593,7 +18721,9 @@ def _ball_scan_run(row, src_path, db, progress=None) -> dict:
     # of the run.
     _t = time.perf_counter()
     try:
-        _sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi")) or {}
+        _sweep = _d3.sweep_ascents(
+            src_path, fps, roi=_roi.get("roi"),
+            gates=_gate_tuning_for(db, row)[0]) or {}
     except Exception as exc:  # noqa: BLE001
         log.warning("ball scan: ascent sweep failed on %s: %s", row.id, exc)
         _sweep = {"ok": False, "reason": f"failed: {exc}"}
@@ -18815,8 +18945,11 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
     """
     from ..services import debug3 as _d3
 
+    # THE UPLOAD IT CAME FROM. Carried because the report is handed to a
+    # modal that has no other way back to the row -- and the gate editor
+    # in it is addressed by upload.
     rep: dict = {"ok": False, "stages": [], "ascents": [], "clips": [],
-                 "n_produced": 0, "reason": None}
+                 "n_produced": 0, "reason": None, "upload_id": row.id}
 
     def _stage(n, title, detail, count=None, units=None, secs=None):
         rep["stages"].append({
@@ -18837,7 +18970,14 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
     if progress:
         progress("Sweeping the whole clip for balls leaving the tee", 0, 0)
     _t = time.perf_counter()
-    sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi")) or {}
+    # THIS HOLE'S GATES. Empty for a hole nobody has tuned, which is what
+    # resolve_gates wants in order to hand back the module defaults --
+    # so an untuned hole runs exactly as it did before any of this.
+    _gt, _gt_key, _gt_why = _gate_tuning_for(db, row, hole_hint=hole_number)
+    rep["gate_key"] = _gt_key
+    rep["gate_key_reason"] = _gt_why
+    sweep = _d3.sweep_ascents(src_path, fps, roi=_roi.get("roi"),
+                              gates=_gt) or {}
     _ball_scan_sweep_image(row, src_path, sweep)
     _ball_scan_considered_image(row, src_path, sweep)
     # AND ONE PER SWING. The whole-clip pictures answer "did the sweep
@@ -19163,6 +19303,12 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
     """
     from ..services import debug3 as _d3
 
+    # THE SAME GATES THE ASCENT SWEEP RAN UNDER. Resolved once here
+    # rather than per window: the descent search runs several times
+    # over one clip and a hole cannot be tuned differently between
+    # two windows of the same swing.
+    _gates = _gate_tuning_for(db, row)[0]
+
     out: dict = {"ok": False, "n_matched": 0, "events": [], "reason": None,
                  "delta_sec": None, "delta_source": None}
     _clips = rep.get("clips") or []
@@ -19273,7 +19419,8 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
             # The plate detector is left out -- it is the one that costs
             # minutes rather than seconds.
             _full = _d3.find_descents(_gp, fps=_gfps,
-                                      detectors=("mog2", "diff"))
+                                      detectors=("mog2", "diff"),
+                                      gates=_gates)
             _ev_all = list(_full.get("events") or [])
             _d, _n_agree, _pairs_all = _ascent_derive_delta(
                 _clips, _ev_all, fps, _gfps)
@@ -19360,7 +19507,8 @@ def _ascent_descents(row, db, rep, fps, progress=None) -> dict:
             progress(f"Looking for the ball coming down, window {i + 1} "
                      f"of {len(_wins)}", i, len(_wins))
         try:
-            _gd = _d3.find_descents(_gp, fps=_gfps, window=(_flo, _fhi))
+            _gd = _d3.find_descents(_gp, fps=_gfps, window=(_flo, _fhi),
+                                    gates=_gates)
         except Exception as exc:  # noqa: BLE001
             log.warning("ascent descents: window %s-%s failed on %s: %s",
                         _flo, _fhi, row.id, exc)
