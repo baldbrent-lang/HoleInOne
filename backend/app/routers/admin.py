@@ -18985,15 +18985,49 @@ def _ascent_run(row, src_path, db, progress=None, produce=True,
             # nothing there" rather than "this run had nothing to say".
             # Without it a stale landing from an earlier run survives
             # forever and the clip is cut to it -- see `_d3_save_swing`.
-            _d3_save_swing(db, row.id, _idx,
-                           {"idx": _idx,
-                            "landing_searched": True,
-                            "green_track": c.get("green_track") or None,
-                            "landing_frame": c.get("landing_frame"),
-                            "landing_spot": (
-                                {"x": c["landing_spot"][0],
-                                 "y": c["landing_spot"][1]}
-                                if c.get("landing_spot") else None)},
+            # AND THE TEE SIDE WITH IT.
+            #
+            # This wrote only the landing, so click-to-plot opened on an
+            # auto-produced swing showing a landing spot and a landing
+            # frame with "not set" against the tee spot and the impact
+            # frame, and no dots -- as though the run had found where the
+            # ball came down without knowing where it was hit from. It
+            # knew: `ball` and `impact_frame` are handed to the renderer
+            # on the very next call, and `_apts` is the chain stage 1
+            # measured. They were arguments and never became record.
+            #
+            # NOT `ball_manual`. That flag means a person placed it, and
+            # `_d3_save_swing` refuses to overwrite one -- so setting it
+            # from an automatic run would freeze an estimated spot
+            # against every later produce. This is an estimate that says
+            # so.
+            _rec = {"idx": _idx,
+                    "landing_searched": True,
+                    "green_track": c.get("green_track") or None,
+                    "landing_frame": c.get("landing_frame"),
+                    "landing_spot": (
+                        {"x": c["landing_spot"][0],
+                         "y": c["landing_spot"][1]}
+                        if c.get("landing_spot") else None),
+                    "ball": {"x": int(round(float(c["ball"][0]))),
+                             "y": int(round(float(c["ball"][1])))},
+                    "ball_auto": True}
+            if c.get("impact_frame") is not None:
+                _rec["impact_frame"] = int(c["impact_frame"])
+            # THE FLIGHT, AS BOTH LAYERS. `timed_points` is what the map
+            # makes clickable; `ball_track_frames` is what it shows as
+            # already plotted. The sweep's chain is both -- it is the
+            # line this run drew. In SOURCE pixel space, like everything
+            # else here, so no dimension stamp is needed: the map falls
+            # back to the upload's own tee width, which is the space
+            # these were measured in.
+            if len(_apts) >= 2:
+                _rec["timed_points"] = _apts
+                _rec["ball_track_frames"] = [
+                    {"frame": q["frame"], "found": True,
+                     "x": q["x"], "y": q["y"]} for q in _apts
+                ]
+            _d3_save_swing(db, row.id, _idx, _rec,
                            float((rep.get("descents") or {})
                                  .get("delta_sec") or 0.0))
             _out = run_wizard_produce_job(
