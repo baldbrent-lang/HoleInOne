@@ -2543,6 +2543,19 @@ def find_descents(
     DESCENT_MAX_TILT_DEG = _G["descent_max_tilt_deg"]
     DESCENT_MAX_STEP_BACK = _G["descent_max_step_back"]
     DESCENT_MIN_DENSITY = _G["descent_min_density"]
+    # THE POINTS VERDICT IS NOT THE SEARCH WIDTH, and this is where the
+    # two were being confused. The `points` gate below read the module
+    # constant while `min_points` -- the parameter callers widen -- read
+    # the tuning, so tuning a hole's floor UP appeared to work (the
+    # search stopped building shorter chains) and tuning it DOWN did
+    # nothing at all: the search admitted 3-point chains and this gate
+    # refused them at 4, silently, one layer later.
+    #
+    # Bound here so the verdict, the rhythm floor and the printed limit
+    # are one number. `min_points` stays the caller's search width --
+    # the ball scan passes 3 on purpose -- and the two no longer have to
+    # agree.
+    MIN_DESCENT_POINTS = _G["descent_min_points"]
     # The four that are already parameters keep the caller's value when
     # one was passed. The ball scan widens min_points and max_bend_px on
     # purpose -- that is a SEARCH width, not a verdict -- and a hole's
@@ -3191,7 +3204,7 @@ def find_descents(
     # constant it describes and then quietly lies.
     _px = int(round(float(min_drop_frac) * frame_h))
     out["gates"] = [
-        {"key": "points", "limit": f"{min_points}+",
+        {"key": "points", "limit": f"{MIN_DESCENT_POINTS}+",
          "what": "how many linked points the chain has. Fewer than this "
                  "and the shape gates below mean nothing — three points "
                  "sit on a line by construction."},
