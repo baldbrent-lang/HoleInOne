@@ -3393,7 +3393,45 @@ ASCENT_MAX_BEND_PX = 14.0        # straighter than a full flight: this is
 # 5 and 7 points over 198px and 187px, while five pieces of junk carried
 # exactly 3 each over 225-289px, every one of them a dead-straight line
 # drawn between specks a long way apart.
-ASCENT_MIN_DENSITY = 0.5
+#
+# LOOSENED 0.5 -> 0.35 by the operator, who named the chains that should
+# pass: four points over ten frames, five over twelve, seven over
+# sixteen. Those are ratios of 0.40, 0.42 and 0.44 -- but "over ten
+# frames" is ambiguous by one, since `_span_all` counts inclusively and
+# a chain whose ends are ten frames apart spans eleven. Under the
+# stricter reading the same three cases are 0.36, 0.38 and 0.41, so a
+# bar of 0.40 would refuse the first of them on a counting convention.
+# 0.35 admits all three either way, with margin.
+#
+# THE STRICTNESS MOVED RATHER THAN LEFT. What made 0.5 defensible was
+# that it refused specks joined across frames the ball was not in, and
+# a ratio is a poor way to ask that: it is blind to WHERE the holes are,
+# so four points bunched at one end of a long span score the same as
+# four spread evenly. ASCENT_MAX_STEP_FRAMES asks the question directly
+# -- how long is the longest hole -- and does the work this bar was
+# carrying. Density is now the coarse filter and the step limit is the
+# discriminating one.
+ASCENT_MIN_DENSITY = 0.35
+
+# HOW LONG A BREAK IN AN ASCENT MAY BE, in frames between one sighting
+# and the next.
+#
+# Five, meaning up to four consecutive frames with no detection. A ball
+# crossing the band is visible on nearly every frame it is there; a
+# tracker that loses it does so for a frame or two while it passes a
+# bright cloud edge or the smear thins. A hole longer than that is not
+# a ball briefly lost, it is two things being joined.
+#
+# NOTE WHAT THIS SITS BEHIND. `build_tracks` links this sweep with
+# DESCENT_MAX_GAP -- fifteen frames -- a number chosen for descents,
+# where a falling ball's near-constant rate makes the prediction across
+# a hole trustworthy. Nothing that generous is true of a ball leaving a
+# tee. So the linker will still BUILD a chain across a twelve-frame
+# hole and this gate will then refuse the whole thing, including the
+# real half. If that starts happening, the fix is to link the sweep
+# with a tighter gap so the chain splits in two and the good half is
+# judged on its own -- not to raise this bar.
+ASCENT_MAX_STEP_FRAMES = 5
 # WHAT A THREE-POINT ASCENT HAS TO BE INSTEAD, in pixels of bend.
 #
 # The descent side already reasons this way -- see `_descent_accepted`,
@@ -3692,6 +3730,8 @@ ASCENT_WHY_COLORS = {
     "outside": "#c0392b",
     # Mostly gaps -- specks joined across frames the ball was not in.
     "sparse": "#8fa03a",
+    # One long hole in the middle, however dense the rest of it is.
+    "gap": "#5b8def",
 }
 ASCENT_WHY_ORDER = list(ASCENT_WHY_COLORS)
 
@@ -4262,6 +4302,15 @@ def sweep_ascents(
             _density = len(pts) / float(max(1, _span_all))
             if _density < ASCENT_MIN_DENSITY:
                 _why.append("sparse")
+            # AND NO ONE LONG HOLE, which density cannot see: four
+            # points bunched at one end of a long span and four spread
+            # evenly score the same ratio and are not the same object.
+            # See ASCENT_MAX_STEP_FRAMES.
+            _max_step = max(
+                (int(b["frame"]) - int(a["frame"])
+                 for a, b in zip(pts, pts[1:])), default=0)
+            if _max_step > ASCENT_MAX_STEP_FRAMES:
+                _why.append("gap")
             # WHERE IT CAME FROM. Run the chain back along its own
             # heading to the height of the tee box: on a real ascent that
             # is the ball's resting spot, and it is the number that would
@@ -4332,7 +4381,13 @@ def sweep_ascents(
                 "bend_limit_px": _bend_bar,
                 "straightness": round(straight, 3),
                 "density": round(_density, 2),
+                "density_limit": ASCENT_MIN_DENSITY,
                 "span_frames": _span_all,
+                # The longest hole, and the bar it was held to -- so a
+                # `gap` verdict can be read without counting frames off
+                # the point list.
+                "max_step_frames": _max_step,
+                "max_step_limit": ASCENT_MAX_STEP_FRAMES,
                 "from_x": _from_x,
                 # THE TEE LINE'S OWN HEIGHT, carried so that a caller
                 # who finds no ball sitting there still has somewhere to

@@ -8527,6 +8527,8 @@ const ASCENT_WHY_TEXT = {
   backrun: "left the tee line too long ago to have been a tee shot",
   outside: "points back outside the hitting area",
   sparse: "mostly gaps — specks joined across frames the ball was not in",
+  gap: "one long break in the middle — a ball is lost for a frame or "
+    + "two, not for a fifth of a second",
   trimmed: "cut below three points by the trims before any gate saw it",
 };
 
