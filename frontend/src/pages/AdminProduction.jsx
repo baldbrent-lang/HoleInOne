@@ -8709,6 +8709,17 @@ function AscentProduceModal({ state, adminPassword, onClose }) {
   // lands; either is enough, so the heading is right from the first
   // frame rather than only after the run finishes.
   const findOnly = state?.findOnly || rep?.produced === false;
+  // WHICH UPLOAD THE GATE EDITOR IS FOR, taken from the STATE rather
+  // than the report. Both openers set `uploadId` the moment the button
+  // is pressed, and the poller carries it; the report may never arrive,
+  // and when it does it may be a run that found nothing.
+  //
+  // Reading it off the report made the editor available in exactly the
+  // case it was least needed and unavailable in the one it was FOR: a
+  // run that detected no swings is the run whose gates you want to
+  // loosen, and "no swings detected" was the one screen with no way to
+  // do it. Find ascents was locked out for the same reason.
+  const tuneUploadId = state?.uploadId ?? rep?.upload_id ?? null;
   return (
     <div role="dialog" className="modal-back" onClick={onClose}
          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
@@ -9155,13 +9166,25 @@ function AscentProduceModal({ state, adminPassword, onClose }) {
             lands. Reading `.upload_id` off undefined threw during
             render, React unmounted the tree, and the whole admin page
             went white the moment Produce ascents was pressed. */}
-        {rep?.upload_id && adminPassword && (
-          <details style={{ margin: "10px 0" }}>
+        {tuneUploadId && adminPassword && (
+          <details style={{ margin: "10px 0" }}
+                   open={!!rep && asc.length === 0}>
             <summary className="small" style={{ cursor: "pointer" }}>
               Tune these gates for this hole only
+              {/* OPEN, AND SAYING WHY, when the run found nothing. That
+                  is the screen an operator reaches with a shot they can
+                  see in the video and no chain to show for it, and the
+                  gates are the usual answer. Collapsed the rest of the
+                  time, where it is a reference rather than a next
+                  step. */}
+              {!!rep && asc.length === 0 && (
+                <span className="muted">
+                  {" "}— nothing was accepted; the gates are the usual reason
+                </span>
+              )}
             </summary>
             <GateTuning adminPassword={adminPassword}
-                        uploadId={rep.upload_id} />
+                        uploadId={tuneUploadId} />
           </details>
         )}
 
