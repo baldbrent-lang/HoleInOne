@@ -9149,7 +9149,13 @@ function AscentProduceModal({ state, adminPassword, onClose }) {
             frame-heights per second of one shooting down a long par 5.
             Keyed per camera pair and hole, so nothing here reaches
             another hole. */}
-        {rep.upload_id && adminPassword && (
+        {/* rep?.  -- NOT rep.  This block sits at the top level of the
+            modal, outside every `rep &&` guard, and `rep` is
+            `state?.report`, which does not exist until the first report
+            lands. Reading `.upload_id` off undefined threw during
+            render, React unmounted the tree, and the whole admin page
+            went white the moment Produce ascents was pressed. */}
+        {rep?.upload_id && adminPassword && (
           <details style={{ margin: "10px 0" }}>
             <summary className="small" style={{ cursor: "pointer" }}>
               Tune these gates for this hole only
