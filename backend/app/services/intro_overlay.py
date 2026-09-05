@@ -626,6 +626,13 @@ def apply_intro_overlay_inplace(
 # the end should find it there rather than watch it leave.
 DIST_DROP_SEC = 0.45
 DIST_LEAD_SEC = 2.6          # how far before the end it starts dropping
+# A BALL IS NOT AT REST THE INSTANT IT STOPS FALLING. The landing is
+# where the descent ends; the ball then bounces and rolls, and a number
+# that appears over a ball still moving reads as a guess. So the plate
+# waits, and the clip grows a tail of held frame so the answer has time
+# to be read instead of arriving as the video ends.
+DIST_REST_LEAD_SEC = 2.0     # after the ball comes to rest
+DIST_TAIL_SEC = 2.5          # still frame appended so the plate can be read
 
 
 def render_distance_panel(
@@ -720,10 +727,14 @@ def apply_distance_plate(
     # still in the air on a clip whose green angle ran long -- the
     # answer arriving before the thing it answers, which reads as a
     # spoiler and invites the obvious "how does it know yet?".
+    # The tail is part of the timeline the plate is scheduled against,
+    # so a late drop still has somewhere to land.
+    out_dur = dur + DIST_TAIL_SEC
     if rest_at_sec is not None and 0 <= rest_at_sec < dur:
-        start_t = min(rest_at_sec + 0.25, max(0.0, dur - DIST_DROP_SEC))
+        start_t = min(rest_at_sec + DIST_REST_LEAD_SEC,
+                      max(0.0, out_dur - DIST_DROP_SEC - 0.4))
     else:
-        start_t = max(0.0, dur - DIST_LEAD_SEC)
+        start_t = max(0.0, out_dur - DIST_LEAD_SEC)
 
     with tempfile.TemporaryDirectory() as td:
         png = Path(td) / "distance_plate.png"
@@ -735,7 +746,9 @@ def apply_distance_plate(
             "ffmpeg", "-y", "-loglevel", "error",
             "-i", str(input_video), "-i", str(png),
             "-filter_complex",
-            f"[0:v][1:v]overlay=x=(W-w)/2:y='{y_expr}':eval=frame",
+            (f"[0:v]tpad=stop_mode=clone:"
+             f"stop_duration={DIST_TAIL_SEC}[vv];"
+             f"[vv][1:v]overlay=x=(W-w)/2:y='{y_expr}':eval=frame"),
             "-c:v", "libx264", "-preset", "veryfast",
             "-c:a", "copy", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",

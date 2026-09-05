@@ -16789,17 +16789,30 @@ export default function AdminProduction() {
                     <span
                       key={c.id}
                       className="small"
+                      // A PRODUCED CLIP WITH NO NUMBER IS A FAILURE,
+                      // not a neutral state. Produce measures on its own
+                      // now, so reaching here means it could not -- and
+                      // a grey pill let that sit unnoticed among the
+                      // ones that worked. Red is the queue telling you
+                      // which shots still need a person.
                       style={{
                         padding: "3px 10px",
                         borderRadius: 999,
                         border: "1px solid "
                           + (c.distance_from_pin_feet != null
                             ? "rgba(40,168,92,0.55)"
-                            : "rgba(120,120,120,0.45)"),
+                            : "rgba(214,69,69,0.6)"),
                         background: c.distance_from_pin_feet != null
                           ? "rgba(40,168,92,0.14)"
-                          : "transparent",
+                          : "rgba(214,69,69,0.12)",
+                        color: c.distance_from_pin_feet != null
+                          ? undefined : "#b3261e",
+                        fontWeight: c.distance_from_pin_feet != null
+                          ? undefined : 600,
                       }}
+                      title={c.distance_from_pin_feet != null
+                        ? "Measured automatically when this clip was produced."
+                        : "Produce could not measure this one — open Measure / adjust and mark the pin and ball by hand."}
                     >
                       {(row.produced_clips || []).length > 1
                         ? `clip ${i + 1}: ` : ""}

@@ -8466,6 +8466,43 @@ def _apply_distance_plate(db, row, clip, final, slot, rep=None,
         if cam is None:
             return f"green camera {_rest['camera_id']} not found"
         _cal = cam.green_homography or {}
+
+        # THE HOLE'S OWN FLAGSTICK, AHEAD OF THE CALIBRATION'S. The pin
+        # marked on this hole -- set by hand, or carried forward from the
+        # last clip somebody marked -- describes where the flag stood for
+        # THIS shot. The calibration's pin is where it stood on the day
+        # the camera was fitted, and pins move daily. Preferring the
+        # hole's pin is what lets produce stamp a distance on its own,
+        # instead of waiting for someone to open the picker and press a
+        # button for a measurement it could already make.
+        _pin_e, _ = _pin_for_row(db, row)
+        _pin_g = (_pin_e or {}).get("green")
+        if _pin_g:
+            _pos_p = _ctp.measure_pair(_cal, _pin_g, _rest["xy"])
+            if _pos_p:
+                _text_p = _ctp.plate_text(_pos_p)
+                if _text_p and _stamp_distance_plate(
+                        final, _text_p,
+                        rest_at_sec=(float(rest_at_sec)
+                                     if rest_at_sec is not None else None)):
+                    try:
+                        clip.distance_from_pin_feet = int(round(
+                            float(_pos_p["distance_from_pin_ft"])))
+                        db.add(clip)
+                    except (TypeError, ValueError, KeyError):
+                        pass
+                    log.info("d3 produce: swing %s measured %s from the "
+                             "hole's flagstick", slot, _text_p)
+                    if rep is not None:
+                        rep.setdefault("distances", []).append({
+                            "swing": int(slot), "text": _text_p,
+                            "feet": _pos_p.get("distance_from_pin_ft"),
+                            "source": "hole-pin",
+                            "green_xy": [round(_rest["xy"][0], 1),
+                                         round(_rest["xy"][1], 1)],
+                        })
+                    return None
+
         pos = _ctp.measure_rest(_cal, _rest["xy"])
         if pos is None:
             if not _cal.get("homography"):
